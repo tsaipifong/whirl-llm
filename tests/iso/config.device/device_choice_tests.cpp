@@ -1,7 +1,7 @@
 // whirl-iso-config-device-tests: the header-only module config.device (src/config/device_choice.h, the GPU choice of both front ends) built with its
 // declared dependencies (config.settings: run_settings.cpp, platform env, the gpu_select types) and the link double of the model layer's
 // restrictDevice / pickDevice (tests/iso/config.device/fake_device_pick.cpp) (ARCH-1 8.5 isolation, arch025-iso4). No test of chooseDevice
-// existed. The checks pin the order (restrict, then pick), the shown index, the restriction note and the WHIRL_HIP_DEVICE override.
+// existed. The checks pin the order (restrict, the note, then pick), the shown index, the restriction note and the WHIRL_HIP_DEVICE override.
 // SPDX-License-Identifier: Apache-2.0
 #include "iso/iso_test.h"
 #include "config/device_choice.h"
@@ -27,16 +27,23 @@ void testRestrictThenPick() {
     setHipDevice(nullptr);
     iso_fake::DevicePick& f = iso_fake::devicePick();
     f = {};
-    f.restriction.active = true;  // the runtime now sees only the chosen GPU: device 0, listed as index 1
-    f.restriction.all = {rec(0), rec(1)};
+    f.restriction.active = true;  // the runtime now sees only the chosen GPU: device 0, listed as index 7
+    // arch025-iso4-fix (REVIEW 5d): a record's index differs from its position, so shown must be all[selected[0]].index
+    // (device_choice.h:40), not the position selected[0] (= 1) and not the picked device (= 0)
+    f.restriction.all = {rec(5), rec(7)};
     f.restriction.selected = {1};
     f.restriction.note = "device: using the 8060S only";
     f.picked = 0;
     std::vector<std::string> notes;
-    const st::DeviceChoice c = st::chooseDevice("8060s", {}, [&](const std::string& n) { notes.push_back(n); });
-    ISO_CHECK(c.dev == 0 && c.shown == 1);  // shown = the list index before the restriction
+    const st::DeviceChoice c = st::chooseDevice("8060s", {}, [&](const std::string& n) {
+        notes.push_back(n);
+        f.calls.push_back("note:" + n);  // one order for the note and the two model calls (device_choice.h:6-7)
+    });
+    ISO_CHECK(c.dev == 0 && c.shown == 7);  // shown = the list index before the restriction
     ISO_CHECK(c.note == "device: using the 8060S only" && notes.size() == 1 && notes[0] == c.note);
-    ISO_CHECK(f.calls.size() == 2 && f.calls[0] == "restrict:8060s" && f.calls[1] == "pick:8060s");  // the server's order
+    // the server's order: restrict, the restriction's note, then pick
+    ISO_CHECK(f.calls.size() == 3 && f.calls[0] == "restrict:8060s" && f.calls[1] == "note:device: using the 8060S only" &&
+              f.calls[2] == "pick:8060s");
 }
 
 void testNoRestriction() {

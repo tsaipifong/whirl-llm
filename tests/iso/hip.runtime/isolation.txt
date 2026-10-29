@@ -1,6 +1,7 @@
 # ARCH-1 8.5 isolation check of hip.runtime (arch025-iso4): the HIP runtime layer (hip_runtime.cpp, the alloc / launch logs, the runtime DLL loader)
 # built with its own unit tests (tests/unit/hip_runtime_tests.cpp).
-# The HIP SDK headers are the platform (sdkinc hip: put after the staged tree, so it only supplies hip/hip_runtime_api.h; define
+# The HIP SDK headers are the platform (sdkinc hip: a copy of the SDK's include/hip ALONE, put after the staged tree, so no other ROCm
+# library header (hipblas, hipblaslt, rocblas, ...) is reachable and only hip/*.h such as hip/hip_runtime_api.h is supplied; define
 # __HIP_PLATFORM_AMD__ as the product build does); no GPU call is made: the loader loads the DLL only when a test asks it to. hip.mem and
 # hip.runtime are one link unit (hip_api.h; memInfo / getDevice / describeDevice in hip_runtime.cpp, umaCheckOn / localMemSnap in
 # uma_mem.cpp / device_mem.cpp), so each manifest lists the other's sources as declared dependencies. The build-generated code-object table

@@ -9,6 +9,12 @@ mutinc    end
 mutsym    hip
 mutsym    log
 mutsym    engine
+# decl-link baseline (arch025-iso4-fix): declared dependency headers whose OWN inline bodies reach code that is not linked here (the Model / Context
+# members of model.core, spec.policy's CycleCost::reset); arch_open.h and every other header may add no unresolved reference to theirs
+# (docs/dev/isolation_blockers.md row model.arch_open)
+declbase  include/whirl/model.h
+declbase  src/model/qwen35/context.h
+declbase  src/spec/policy.h
 # declared dependency sources
 src       src/model/arch_registry.cpp
 src       src/gguf/gguf.cpp

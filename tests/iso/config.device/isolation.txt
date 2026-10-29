@@ -1,7 +1,9 @@
 # ARCH-1 8.5 isolation check of config.device (arch025-iso4): the header-only GPU choice of both front ends (src/config/device_choice.h) built with its own test
-# (tests/iso/config.device/device_choice_tests.cpp; no test existed). declared dependencies: config.settings (run_settings.cpp, platform env) and the gpu_select types;
-# the model layer's restrictDevice / pickDevice (include/whirl/device_pick.h) are the link double tests/iso/config.device/fake_device_pick.cpp (the real ones
-# probe the GPUs through the HIP runtime). Header-only module with source dependencies: mutate names the header (tests/iso/model.types/isolation.txt).
+# (tests/iso/config.device/device_choice_tests.cpp; no test existed). declared dependencies: config.settings (run_settings.cpp, platform env) and the gpu_select types.
+# Link edge config.device -> model.core (arch025-iso4-fix, REVIEW 5a): include/whirl/device_pick.h (a file of this module) declares qwen35::restrictDevice /
+# pickDevice, which are DEFINED in src/model/device.cpp (model.core). Here they are the test-side link double tests/iso/config.device/fake_device_pick.cpp
+# (testsrc; the real ones probe the GPUs through the HIP runtime), so every other model.core symbol (mutsym model) is still LNK2019; the edge is listed in
+# docs/dev/isolation_blockers.md. Header-only module with source dependencies: mutate names the header (tests/iso/model.types/isolation.txt).
 module    config.device
 exe       whirl-iso-config-device-tests
 mutate    src/config/device_choice.h
@@ -14,7 +16,6 @@ mutsym    model
 # module sources
 src       src/config/run_settings.cpp
 src       src/platform/env_win.cpp
-src       tests/iso/config.device/fake_device_pick.cpp
 # headers (include closure of the files above)
 hdr       include/whirl/device_pick.h
 hdr       include/whirl/gpu_select.h
@@ -23,6 +24,7 @@ hdr       src/config/run_settings.h
 hdr       src/platform/env.h
 # test program
 testsrc   tests/iso/config.device/device_choice_tests.cpp
-hdr       tests/iso/config.device/fake_device_pick.h
+testsrc   tests/iso/config.device/fake_device_pick.cpp
+testhdr   tests/iso/config.device/fake_device_pick.h
 testhdr   tests/iso/iso_test.h
 testhdr   tests/test_check.h
