@@ -20,6 +20,7 @@ src       src/platform/env_win.cpp
 hdr       include/whirl/device_pick.h
 hdr       include/whirl/gpu_select.h
 hdr       src/config/device_choice.h
+hdr       src/config/env_get.h
 hdr       src/config/run_settings.h
 hdr       src/platform/env.h
 # test program
