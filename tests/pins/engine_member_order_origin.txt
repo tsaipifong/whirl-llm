@@ -1,0 +1,122 @@
+# arch025-engine S0b: origin of the member-order pin (name <TAB> whole declaration), written at a17493b (d6e83ed + S0 + C1) by
+# member_order_check.py --write-origin; never edited (its sha256 is fixed in member_order_check.py ORIGIN_SHA).
+m_	ServerModel& m_
+ops_	device::Backend& ops_
+tok_	const Tokenizer& tok_
+ct_	chat::ChatTokens ct_
+opt_	EngineOptions opt_
+ctx_	std::uint32_t ctx_
+owner_	EngineThread owner_
+ck_	CkptStore ck_
+spec_.timing	std::array<qwen35::DraftTiming, gdn_max_seg + 1> timing{}
+spec_.ccost	std::array<qwen35::CycleCost, gdn_max_seg + 1> ccost{}
+spec_.ccost_primed	std::array<bool, gdn_max_seg + 1> ccost_primed{}
+spec_.dpool	qwen35::DraftAccept dpool{}
+spec_.dtiming	std::array<qwen35::DraftTiming, gdn_max_seg + 1> dtiming{}
+spec_.prof	std::unique_ptr<CycleProf> prof
+spec_.n_cycles	std::uint32_t n_cycles = 0
+spec_.vrows	std::uint32_t vrows = max_small_batch
+spec_.prev_nd	std::uint32_t prev_nd = 0
+spec_.policy_cycles	std::uint32_t policy_cycles = 0
+fl_.floor	DecodeFloor floor
+fl_.epoch	TimePoint epoch{}
+fl_.log_t	TimePoint log_t{}
+fl_.waits	std::uint64_t waits = 0, periods = 0
+fl_.periods	std::uint64_t waits = 0, periods = 0
+sb_.m_	ServerModel& m_
+sb_.ops_	device::Backend& ops_
+sb_.samp_dev_	device::DevBuf samp_dev_, big_dev_
+sb_.big_dev_	device::DevBuf samp_dev_, big_dev_
+sb_.relax_dev_	device::DevBuf relax_dev_
+sb_.relax_host_	std::vector<std::uint8_t> relax_host_
+sb_.samp_host_	std::vector<std::uint8_t> samp_host_, big_host_
+sb_.big_host_	std::vector<std::uint8_t> samp_host_, big_host_
+sb_.row_host_	std::vector<float> row_host_
+sb_.in_cands_	std::vector<std::uint8_t> in_cands_
+sb_.cands_scratch_	std::vector<sampling::Cand> cands_scratch_
+sb_.ctl_host_	std::vector<std::int32_t> ctl_host_
+spec_on_	bool spec_on_ = false
+conv_bytes_	std::uint64_t conv_bytes_ = 0, ssm_bytes_ = 0
+ssm_bytes_	std::uint64_t conv_bytes_ = 0, ssm_bytes_ = 0
+slots_	std::vector<Slot> slots_
+q_mutex_	whirl::Mutex q_mutex_
+q_cond_	std::condition_variable q_cond_
+queue_	std::deque<Job*> queue_ WH_GUARDED_BY(q_mutex_)
+n_active_	std::uint32_t n_active_ WH_GUARDED_BY(q_mutex_) = 0
+n_building_	std::atomic<std::uint32_t> n_building_{0}
+next_id_	std::atomic<std::uint64_t> next_id_{1}
+ids_	IdGen ids_
+rcx_	ResponseCtx rcx_
+stop_	bool stop_ WH_GUARDED_BY(q_mutex_) = false
+loop_calls_	std::vector<std::function<void()>> loop_calls_ WH_GUARDED_BY(q_mutex_)
+bst_.t0	TimePoint t0{}
+bst_.tokens	std::uint64_t tokens = 0, cycles = 0, rows = 0, slots = 0, drafts = 0, lit_drafts = 0, prefill_tok = 0, seg_batches = 0, seg_chunks = 0
+bst_.cycles	std::uint64_t tokens = 0, cycles = 0, rows = 0, slots = 0, drafts = 0, lit_drafts = 0, prefill_tok = 0, seg_batches = 0, seg_chunks = 0
+bst_.rows	std::uint64_t tokens = 0, cycles = 0, rows = 0, slots = 0, drafts = 0, lit_drafts = 0, prefill_tok = 0, seg_batches = 0, seg_chunks = 0
+bst_.slots	std::uint64_t tokens = 0, cycles = 0, rows = 0, slots = 0, drafts = 0, lit_drafts = 0, prefill_tok = 0, seg_batches = 0, seg_chunks = 0
+bst_.drafts	std::uint64_t tokens = 0, cycles = 0, rows = 0, slots = 0, drafts = 0, lit_drafts = 0, prefill_tok = 0, seg_batches = 0, seg_chunks = 0
+bst_.lit_drafts	std::uint64_t tokens = 0, cycles = 0, rows = 0, slots = 0, drafts = 0, lit_drafts = 0, prefill_tok = 0, seg_batches = 0, seg_chunks = 0
+bst_.prefill_tok	std::uint64_t tokens = 0, cycles = 0, rows = 0, slots = 0, drafts = 0, lit_drafts = 0, prefill_tok = 0, seg_batches = 0, seg_chunks = 0
+bst_.seg_batches	std::uint64_t tokens = 0, cycles = 0, rows = 0, slots = 0, drafts = 0, lit_drafts = 0, prefill_tok = 0, seg_batches = 0, seg_chunks = 0
+bst_.seg_chunks	std::uint64_t tokens = 0, cycles = 0, rows = 0, slots = 0, drafts = 0, lit_drafts = 0, prefill_tok = 0, seg_batches = 0, seg_chunks = 0
+bst_.dfl_cycles	std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0
+bst_.dfl_drafted	std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0
+bst_.dfl_accepted	std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0
+bst_.dfl_cold	std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0
+bst_.dfl_gap	std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0
+vram_probe_	std::function<wddmwatch::Sample()> vram_probe_
+vram_others_	std::function<std::optional<wddmwatch::Others>()> vram_others_
+vram_watch_	wddmwatch::Watch vram_watch_
+vram_idle_next_	TimePoint vram_idle_next_{}
+vram_idle_s_	double vram_idle_s_ = 60.0
+prefill_tok_cum_	std::uint64_t prefill_tok_cum_ = 0
+vram_warn_	bool vram_warn_ = false
+vram_mu_	whirl::Mutex vram_mu_
+vram_last_	wddmwatch::Sample vram_last_ WH_GUARDED_BY(vram_mu_)
+vram_spill_	bool vram_spill_ WH_GUARDED_BY(vram_mu_) = false
+crlf_norm_	std::vector<std::uint32_t> crlf_norm_
+vram_last_t_	TimePoint vram_last_t_{}
+gov_	std::optional<memgov::Governor> gov_
+gov_margin_	std::function<std::uint64_t(std::uint64_t)> gov_margin_
+gov_plan_	memgov::Plan gov_plan_
+gov_pending_	bool gov_pending_ = false
+gov_hold_	bool gov_hold_ = false
+spe_parked_	bool spe_parked_ = false
+gov_parked_	std::uint64_t gov_parked_ = 0
+gov_ram_mb_	std::uint64_t gov_ram_mb_ = 0
+gov_vram_total_	std::uint64_t gov_vram_total_ = 0
+gov_grow_denied_logged_	bool gov_grow_denied_logged_ = false
+gov_restored_	std::uint64_t gov_restored_ = 0
+gov_resize_before_	std::uint64_t gov_resize_before_ = 0
+gov_resize_delta_	std::int64_t gov_resize_delta_ = 0
+ctx_new_	std::uint32_t ctx_new_ = 0xffffffffu
+gov_warn_	std::string gov_warn_
+gov_last_	std::string gov_last_
+gov_json_	std::string gov_json_ WH_GUARDED_BY(vram_mu_)
+ctx_pub_	std::atomic<std::uint32_t> ctx_pub_{0}
+kv_arrays_	std::vector<KvArr> kv_arrays_
+tier_wake_	bool tier_wake_ WH_GUARDED_BY(q_mutex_) = false
+wake_seq_	std::uint64_t wake_seq_ WH_GUARDED_BY(q_mutex_) = 0
+pool_	PagePool pool_
+last_tick_	TimePoint last_tick_{}
+last_reap_	TimePoint last_reap_{}
+ps_	PrefixStore ps_
+tb_	TierBridge tb_
+stat_spe_new_	std::uint64_t stat_spe_new_ = 0, stat_spe_hits_ = 0, stat_spe_tok_ = 0, stat_spe_evict_ = 0, stat_unshare_ = 0
+stat_spe_hits_	std::uint64_t stat_spe_new_ = 0, stat_spe_hits_ = 0, stat_spe_tok_ = 0, stat_spe_evict_ = 0, stat_unshare_ = 0
+stat_spe_tok_	std::uint64_t stat_spe_new_ = 0, stat_spe_hits_ = 0, stat_spe_tok_ = 0, stat_spe_evict_ = 0, stat_unshare_ = 0
+stat_spe_evict_	std::uint64_t stat_spe_new_ = 0, stat_spe_hits_ = 0, stat_spe_tok_ = 0, stat_spe_evict_ = 0, stat_unshare_ = 0
+stat_unshare_	std::uint64_t stat_spe_new_ = 0, stat_spe_hits_ = 0, stat_spe_tok_ = 0, stat_spe_evict_ = 0, stat_unshare_ = 0
+stat_evictions_	std::uint64_t stat_evictions_ = 0
+vis_.m_	ServerModel& m_
+vis_.ops_	device::Backend& ops_
+vis_.cfg_	VisionConfig cfg_
+vis_.cache_	std::vector<std::unique_ptr<EmbEntry>> cache_
+vis_.bytes_	std::uint64_t bytes_ = 0
+vis_.seq_	std::uint64_t seq_ = 0
+vis_.n_enc_	std::uint64_t n_enc_ = 0, n_hit_ = 0
+vis_.n_hit_	std::uint64_t n_enc_ = 0, n_hit_ = 0
+vis_.lend_raw_	std::array<std::array<std::uint64_t, 2>, 16> lend_raw_{}
+vis_.lend_	std::vector<vision::Region> lend_
+vis_.snap0_	hip::LocalMemSnap snap0_
+vis_.rel_pending_	bool rel_pending_ = false

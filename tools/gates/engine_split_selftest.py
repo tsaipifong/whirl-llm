@@ -21,6 +21,7 @@ PY = sys.executable
 CUT = os.path.join(HERE, "engine_cut.json")
 INL = os.path.join(HERE, "engine_split_inline_c1ca7ce.tsv")
 PIN = os.path.join(REPO, "tests", "pins", "engine_cut_arch.sha256")
+REVIEWS = os.path.join(REPO, "tests", "pins", "engine_cut_reviews.tsv")
 
 
 def arg(name, default=None):
@@ -64,6 +65,7 @@ def fnd(t):
     return r"^   " + re.escape(t)
 
 
+ENG = "server.engine"
 SO, SE, SC, GV, SS, JQ = "server.slot_output", "server.slot_end", "server.slot_cache", "server.governor", "server.slot_start", "server.job_queue"
 # (id, what, edits [(rel, old|None|"APPEND", new)], cut_edit(dict)->None or None, extra graph args, expected regex, base index)
 MUT = [
@@ -151,6 +153,49 @@ MUT = [
     ("P1", "cut edit: slot_output moved up to layer 9 (would allow emit -> finishJob)", [], lambda c: c["modules"][SO].update({"layer": 9}), [], r"^engine cut pin: MISMATCH section modules\.server\.slot_output"),
     ("P2", "cut edit: outside_writers.now widened", [], lambda c: c["outside_writers"]["now"].append("runLoop:gov_json_"), [], r"^engine cut pin: MISMATCH section outside_writers"),
     ("P3", "cut edit: a holder added", [], lambda c: c["holders"].update({"zz_": "SlotPages"}), [], r"^engine cut pin: MISMATCH section holders"),
+    # --- S0 review (progress/arch025-engine.S0.REVIEW.md; reviewer mutants scratch/a25_engine/s0review/s0r_mut.py), S0b ---
+    # act-on 2: calls through receivers the census does not resolve must not be dropped
+    ("U1", "(*this).finishJob(sl) in emit", [(EC, EMIT, EMIT + "    if (t == 1u) (*this).finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("U2", "two-level auto alias: auto& me = *this; auto& me2 = me; me2.stats() in emit",
+     [(EC, EMIT, EMIT + "    { auto& me = *this; auto& me2 = me; (void)me2.stats(); }\n")], None, [], viol(SO, ENG, "call", "emit->stats")),
+    ("U3", "control: auto& me = *this; me.stats() in emit", [(EC, EMIT, EMIT + "    { auto& me = *this; (void)me.stats(); }\n")], None, [], viol(SO, ENG, "call", "emit->stats")),
+    ("U4", "a new unresolved call (unknown receiver, name also an untracked method) is a finding, not only unresolved.txt",
+     [(EC, EMIT, EMIT + "    if (t == 7u && sl.job) (void)sl.job->stats();\n")], None, [], fnd("unresolved call not in the cut's unresolved_ok: emit: ")),
+    # act-on 1: write shapes the census missed (W1-W10), the accessor returning a reference (W11)
+    ("W1", "auto&& q = stop_; q = true in dropCache", [(EP, DROPC, DROPC + "    { auto&& q = stop_; q = true; }\n")], None, [], ow("dropCache:stop_")),
+    ("W2", "for (auto&& j : queue_) j = nullptr in dropCache", [(EP, DROPC, DROPC + "    for (auto&& j : queue_) j = nullptr;\n")], None, [], ow("dropCache:queue_")),
+    ("W3", "structured binding auto& [a, b] = fl_; a = {} in dropCache", [(EP, DROPC, DROPC + "    { auto& [fa, fb] = fl_; fa = {}; (void)fb; }\n")], None, [], ow("dropCache:fl_")),
+    ("W3b", "W3 from a higher layer (runLoop, may read prefill data): only the write rule can catch it",
+     [(EC, RUNL, RUNL + "    { auto& [fa, fb] = fl_; fa = {}; (void)fb; }\n")], None, [], ow("runLoop:fl_")),
+    ("W4", "parenthesized lvalue (stop_) = true in dropCache", [(EP, DROPC, DROPC + "    (stop_) = true;\n")], None, [], ow("dropCache:stop_")),
+    ("W5", "static_cast<bool&>(stop_) = true in dropCache", [(EP, DROPC, DROPC + "    static_cast<bool&>(stop_) = true;\n")], None, [], ow("dropCache:stop_")),
+    ("W6", "auto it = queue_.begin(); *it = nullptr in dropCache", [(EP, DROPC, DROPC + "    if (!queue_.empty()) { auto it = queue_.begin(); *it = nullptr; }\n")], None, [], ow("dropCache:queue_")),
+    ("W7", "auto* p = gov_json_.data(); p[0] = 'x' in runLoop", [(EC, RUNL, RUNL + "    if (!gov_json_.empty()) { auto* p = gov_json_.data(); p[0] = 'x'; }\n")], None, [], ow("runLoop:gov_json_")),
+    ("W8", "auto s = std::span(gov_json_); s[0] = 'x' in runLoop", [(EC, RUNL, RUNL + "    if (!gov_json_.empty()) { auto s = std::span(gov_json_); s[0] = 'x'; }\n")], None, [], ow("runLoop:gov_json_")),
+    ("W9", "data member pointer: auto pm = &Engine::stop_; this->*pm = true in dropCache",
+     [(EP, DROPC, DROPC + "    { auto pm = &Engine::stop_; this->*pm = true; }\n")], None, [], ow("dropCache:stop_")),
+    ("W10", "(*queue_.begin()) = nullptr in dropCache", [(EP, DROPC, DROPC + "    if (!queue_.empty()) (*queue_.begin()) = nullptr;\n")], None, [], ow("dropCache:queue_")),
+    ("W11", "bool& holdRef() { return gov_hold_; } in Engine (new_funcs -> governor, pin unchanged); runLoop holdRef() = true",
+     [(EH, HOLD, HOLD + "\n    bool& holdRef() { return gov_hold_; }"), (EC, RUNL, RUNL + "    holdRef() = true;\n")],
+     lambda c: c["new_funcs"].update({"holdRef": GV}), [], ow("runLoop:gov_hold_")),
+    ("W11b", "W11 with the pin skipped (as after a reviewed cut change): the write through the accessor still fails",
+     [(EH, HOLD, HOLD + "\n    bool& holdRef() { return gov_hold_; }"), (EC, RUNL, RUNL + "    holdRef() = true;\n")],
+     lambda c: c["new_funcs"].update({"holdRef": GV}), ["--no-pin"], ow("runLoop:gov_hold_")),
+    ("W11c", "the accessor's result bound to auto& and written: auto& h = holdRef(); h = true in runLoop",
+     [(EH, HOLD, HOLD + "\n    bool& holdRef() { return gov_hold_; }"), (EC, RUNL, RUNL + "    { auto& h = holdRef(); h = true; }\n")],
+     lambda c: c["new_funcs"].update({"holdRef": GV}), ["--no-pin"], ow("runLoop:gov_hold_")),
+    # act-on 3: the cut pin covers new_funcs / new_data (rows may only be deleted), the tools, and needs a review row
+    ("P4", "planned function govActive moved from governor to slot_output via new_funcs", [],
+     lambda c: c["new_funcs"].update({"govActive": SO}), [], r"^engine cut pin: MISMATCH new_funcs govActive"),
+    ("P4b", "a new planned function added to new_funcs", [], lambda c: c["new_funcs"].update({"zzPlanned": SO}), [], r"^engine cut pin: MISMATCH new_funcs zzPlanned"),
+    ("P4c", "a new planned member added to new_data", [], lambda c: c["new_data"].update({"zz_": SO}), [], r"^engine cut pin: MISMATCH new_data zz_"),
+    ("P5", "new function peekHold() (slot_output via new_funcs) reads governor data; emit calls it",
+     [(EH, HOLD, HOLD + "\n    bool peekHold() const;"), (EC, EMIT, "bool Engine::peekHold() const { return gov_hold_; }\n" + EMIT + "    if (peekHold()) t = 0;\n")],
+     lambda c: c["new_funcs"].update({"peekHold": SO}), ["--no-pin"], viol(SO, GV, "data", "peekHold:gov_hold_")),
+    ("P6", "a checker tool edited (census copy): the tools hash in the pin differs",
+     [("TOOL:engine_split_census.py", "APPEND", "\n# a harmless-looking edit\n")], None, [], r"^engine cut pin: MISMATCH tools engine_split_census\.py"),
+    ("P7", "the pin rewritten with --pin-write for a cut edit (same commit), no review row: UNREVIEWED",
+     [], lambda c: c["holders"].update({"zz_": "SlotPages"}), ["@PINWRITE"], r"^engine cut pin: UNREVIEWED"),
 ]
 
 
@@ -171,7 +216,16 @@ def one(item):
     for sub in ("src", "include"):
         if os.path.isdir(os.path.join(base, sub)):
             shutil.copytree(os.path.join(base, sub), os.path.join(d, sub))
+    tools = HERE
+    if any(rel.startswith("TOOL:") for rel, _, _ in edits):   # S0b: a copy of the checker tools, one of them edited
+        tools = os.path.join(d, "tools", "gates")
+        os.makedirs(tools)
+        for f in os.listdir(HERE):
+            if f.startswith(("engine_split_", "engine_cut", "member_order")):
+                shutil.copy2(os.path.join(HERE, f), tools)
     for rel, old, new in edits:
+        if rel.startswith("TOOL:"):
+            open(os.path.join(tools, rel[5:]), "a", encoding="utf-8").write(new); continue
         p = os.path.join(d, "src", rel)
         if old is None:
             open(p, "w", encoding="utf-8").write(new); continue
@@ -185,8 +239,13 @@ def one(item):
     if cut_edit:
         cj = json.load(open(CUT, encoding="utf-8")); cut_edit(cj)
         cutp = os.path.join(d, "engine_cut.json"); json.dump(cj, open(cutp, "w", encoding="utf-8"), indent=1)
-    cmd = [PY, "-I", os.path.join(HERE, "engine_split_check.py"), "--root", d, "--cut", cutp, "--work", os.path.join(d, "w"),
-           "--pin", PIN, "--inline", INL] + gargs
+    pin = PIN
+    if "@PINWRITE" in gargs:   # S0b: the step rewrites the pin in the same commit (no review row added)
+        gargs = [g for g in gargs if g != "@PINWRITE"]
+        pin = os.path.join(d, "engine_cut_arch.sha256")
+        run([PY, "-I", os.path.join(tools, "engine_split_check.py"), "--pin-write", "--cut", cutp, "--pin", pin])
+    cmd = [PY, "-I", os.path.join(tools, "engine_split_check.py"), "--root", d, "--cut", cutp, "--work", os.path.join(d, "w"),
+           "--pin", pin, "--reviews", REVIEWS, "--inline", INL] + gargs
     rc, out = run(cmd)
     rep = ""
     for f in ("graph_engine_cut.txt",):

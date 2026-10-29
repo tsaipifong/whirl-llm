@@ -139,6 +139,7 @@ for dp, dn, fn in os.walk(os.path.join(ROOT, "include")):
             decl_texts["include:" + os.path.relpath(p, ROOT).replace("\\", "/")] = (None, strip(open(p, encoding="utf-8", errors="replace").read()))
 
 data, funcs, types, statics = [], [], [], []   # data: (name, line, access, decl, class, file)
+decls = []   # S0b: (class, member, file, line, start, end) of every data member declaration (revtext compares them)
 bodies = {}  # key -> (file, line, text, def)
 class_files = {}
 inits = {}   # class -> [(file, line, initializer text)]  (A2: in-class member initializers)
@@ -179,7 +180,9 @@ def parse_class(cname, rel, hs, a):
             i = j + 1; continue
         if c == ";":
             s = re.sub(r"\s+", " ", hs[stmt0:i]).strip()
-            ln = lineno(hs, stmt0 + (len(hs[stmt0:i]) - len(hs[stmt0:i].lstrip())))
+            a0 = stmt0 + (len(hs[stmt0:i]) - len(hs[stmt0:i].lstrip()))
+            ln = lineno(hs, a0)
+            span = (a0, i + 1)   # S0b: the declaration statement's offsets (strip() keeps offsets: raw[a0:a1] is the source)
             stmt0 = i + 1; i += 1
             for acc in ("public:", "private:", "protected:"):
                 while s.startswith(acc):
@@ -211,6 +214,7 @@ def parse_class(cname, rel, hs, a):
                 w = re.findall(r"\w+", p.split("=")[0])
                 if w:
                     data.append((w[-1], ln, access, s[:90], cname, rel))
+                    decls.append((cname, w[-1], rel, ln, span[0], span[1]))
             # A2: in-class initializers (`= expr` or `{...}` after the declarator) belong to the constructor entry
             ini, d2, cur2, parts2 = [], 0, "", []
             for ch in s2:                     # declarators at depth 0 (commas inside (), [], {} , <> do not split)
@@ -463,10 +467,12 @@ CONST_OK = STD_CONST | (_decl_const - _decl_mut)
 PAIRS = _decl_const & _decl_mut
 # A1 (d): callees that only read their arguments (by value or const reference) - measured on c1ca7ce by hand, each
 # checked at its declaration; anything else that receives a member as an argument is a write.
+# S0b (S0 review act-on 1): span and move_if_noexcept left the list (a span is a writable view, a move writes the source);
+# static_cast stays for value casts only - a cast to a non-const reference / pointer is unwrapped by _outer (write if written).
 READ_CALLEES = {"min", "max", "clamp", "static_cast", "size_t", "uint32_t", "uint64_t", "int", "double", "float",
-                "bool", "to_string", "duration_cast", "duration", "move_if_noexcept", "logf", "log", "snprintf",
+                "bool", "to_string", "duration_cast", "duration", "logf", "log", "snprintf",
                 "printf", "fprintf", "strlen", "memcmp", "abs", "llabs", "ceil", "floor", "round", "sqrt", "pow", "exp",
-                "isfinite", "isnan", "string", "string_view", "span", "hash", "equal", "distance",
+                "isfinite", "isnan", "string", "string_view", "hash", "equal", "distance",
                 "logI", "logW", "logE", "logD",   # log*: printf-style varargs (by value)
                 "WH_REQUIRES", "WH_REQUIRES_SHARED", "WH_GUARDED_BY", "WH_PT_GUARDED_BY", "WH_EXCLUDES",
                 "WH_RETURN_CAPABILITY", "WH_ACQUIRED_AFTER", "WH_ACQUIRED_BEFORE"}   # TSA annotations, not operations
@@ -504,18 +510,72 @@ def _callee(txt, k):
     return m.group(1)
 
 
+CASTS = {"static_cast", "const_cast", "reinterpret_cast"}
+# S0b: std accessors that hand out a writable handle (iterator / pointer / reference) in a non-const context
+HANDLE = {"begin", "end", "rbegin", "rend", "data", "front", "back", "at"}
+
+
+def _outer(txt, h0, end):
+    """S0b (S0 review W4 / W5 / W10): one step outwards over `( ... )` around the expression txt[h0:end], with an optional
+    unary `*` inside: `(x_)`, `(*x_.begin())`, `static_cast<T&>(x_)` (T& / T* not const). Returns (h0, end) unchanged when
+    the parentheses belong to a call, a keyword (if / while / return ...), a value cast or there are none."""
+    q = h0
+    while q > 0 and txt[q - 1].isspace(): q -= 1
+    if q > 0 and txt[q - 1] == "*":
+        r = q - 1
+        while r > 0 and txt[r - 1].isspace(): r -= 1
+        if r == 0 or txt[r - 1] in "(=,;{}!?:&|[": q = r      # unary * (dereference)
+    while q > 0 and txt[q - 1].isspace(): q -= 1
+    m = re.match(r"\s*\)", txt[end:])
+    if q == 0 or txt[q - 1] != "(" or not m:
+        return h0, end
+    k = q - 1
+    mc = re.search(r"(static_cast|const_cast|reinterpret_cast)\s*<([^<>;(){}]*(?:<[^<>;(){}]*>[^<>;(){}]*)*)>\s*$", txt[:k])
+    if mc:
+        if not re.search(r"[&*]", mc.group(2)) or re.search(r"\bconst\b", mc.group(2)): return h0, end
+        k = mc.start()
+        mm = re.search(r"std\s*::\s*$", txt[:k])
+        if mm: k = mm.start()
+    elif re.search(r"\)\s*$", txt[:k]):
+        # `if (...) (x_) = ..`: the ) closes a statement header -> syntax, unwrap; else `f(..)(x_)` is a call
+        j, d = len(txt[:k].rstrip()) - 1, 0
+        while j >= 0:
+            d += txt[j] == ")"; d -= txt[j] == "("
+            if d == 0: break
+            j -= 1
+        if j < 0 or not re.search(r"\b(?:if|while|for|switch)\s*$", txt[:j]): return h0, end
+    elif re.search(r"[\w>\]]\s*$", txt[:k]):
+        return h0, end                                          # a call, a keyword, a subscript or a function cast
+    return k, end + m.end()
+
+
 def write_kind(txt, h0, h1):
     """A1: why the member hit txt[h0:h1] is a write, or None for a read."""
     ch, end = _chain(txt, h1)
+    # S0b: unwrap parentheses / dereference / reference casts around the hit, continuing the access chain after them
+    for _ in range(8):
+        n0, n1 = _outer(txt, h0, end)
+        if (n0, n1) == (h0, end): break
+        h0 = n0
+        ch2, end = _chain(txt, n1)
+        ch += ch2
     pre = txt[:h0]
     for nm, called in ch:
         if called and nm not in CONST_OK and nm not in PAIRS: return f"method {nm}()"
     if _ASSIGN.match(txt[end:]): return "assignment"
     if re.search(r"(\+\+|--)\s*(?:\(\s*)*$", pre): return "prefix ++/--"
     seg = re.split(r"[;{}]", pre)[-1]
-    if re.search(r"(?<![&])&\s*[A-Za-z_]\w*\s*(?:=|:)\s*$|\*\s*[A-Za-z_]\w*\s*=\s*&\s*$", seg) and not re.search(r"\bconst\b", seg):
+    # S0b (W1 / W2 / W3): `auto&&`, range-for `auto&& j :`, structured bindings `auto& [a, b] =`
+    if re.search(r"(?:&&|&)\s*(?:\[[^\]]*\]|[A-Za-z_]\w*)\s*(?:=|:)\s*$|\*\s*[A-Za-z_]\w*\s*=\s*&\s*$", seg) and not re.search(r"\bconst\b", seg):
         return "bound to a non-const reference / pointer"
+    # S0b (W9): a pointer to a data member (&Engine::x_ / &C::x_) can write through ->* / .*
+    if re.search(r"&\s*(?:" + QUAL + r")\s*::\s*$", pre): return "data member pointer taken"
     if re.search(r"(?<![&\w)\]])&\s*$", pre) and not re.search(r"\bconst\b", seg): return "address taken"
+    # S0b (W6 / W7): a writable handle (iterator / pointer) of a std accessor kept in a variable (`auto it = x_.begin()`,
+    # `auto* p = x_.data()`, `it = x_.end()`); a const declaration or a c-accessor (cbegin ...) stays a read
+    if ch and ch[-1][1] and ch[-1][0] in HANDLE and not re.search(r"\bconst\b", seg) \
+            and re.search(r"(?:[\w\]>)]\s*(?<![=!<>])=(?!=)|[A-Za-z_]\w*\s*\{)\s*$", pre):
+        return f"handle {ch[-1][0]}() kept"
     # argument of a call: the hit (with its chain) is a whole argument
     if re.search(r"[(,]\s*(?:std::move\s*\(\s*)?$", pre) and re.match(r"\s*[,)]", txt[end:]):
         d, k = 0, len(pre) - 1
@@ -553,6 +613,21 @@ for _rel, (_raw, _s) in decl_texts.items():
 unresolved = []
 wlog = []   # entry, member, why it is a write, context (writes.tsv)
 
+# S0b (S0 review W11): tracked functions that return a non-const reference / pointer hand out write access to the members
+# their return statements name: the function itself counts as writing them, and a caller that writes through the
+# result (`holdRef() = true`, `auto& h = holdRef(); h = ..`, `holdRef().clear()`) writes them too.
+REFACC = {}
+for _nm, _ln, _acc, _decl, _cname in funcs:
+    _ret = _decl.split("(")[0]
+    _ret = _ret[:_ret.rfind(_nm)] if _nm in _ret else _ret
+    _ret = re.sub(r"\b(static|inline|virtual|constexpr|explicit|\[\[[^\]]*\]\])\b", "", _ret)
+    if re.search(r"[&*]\s*$", _ret.strip()) and not re.search(r"\bconst\b", _ret) and "&&" not in _ret:
+        _k = resolve(_cname, _nm)
+        for _bk, (_f, _l, _t, _d) in bodies.items():
+            if _bk.split("#")[0] != _k: continue
+            for _r in re.finditer(r"\breturn\b([^;]*);", _t):
+                REFACC.setdefault(_k, set()).update(n for n in re.findall(r"[A-Za-z_]\w*", _r.group(1)) if n in dset)
+
 
 def uses(key, txt):
     ud, uw = [], []
@@ -567,21 +642,41 @@ def uses(key, txt):
                     wlog.append(f"{key}\t{n}\t{why}\t{' '.join(txt[max(0, h.start() - 40):h.end() + 40].split())}")
                     break
     me = key.split("#")[0]
+    # S0b: a non-const reference / pointer accessor writes what it returns
+    for n in sorted(REFACC.get(me, ())):
+        if n not in uw:
+            uw.append(n); wlog.append(f"{key}\t{n}\treturned by a non-const reference / pointer\t-")
     # A3: local aliases of *this / of a tracked object are known receivers
+    # S0b (S0 review U2): `auto&&` too, and an alias of an alias inherits its class (`auto& me2 = me`)
     alias = {}
-    for m in re.finditer(r"(?<![\w:])(" + QUAL + r"|auto)\s*(?:const\s*)?[&*]\s*(\w+)\s*=\s*(\*?\s*this|[\w.>-]+)", txt):
+    for m in re.finditer(r"(?<![\w:])(" + QUAL + r"|auto)\s*(?:const\s*)?(?:&&|[&*])\s*(\w+)\s*=\s*(\*?\s*this|[\w.>*-]+)", txt):
         tgt = m.group(3).replace(" ", "")
         if m.group(1) == "auto":
             if tgt in ("*this", "this"): alias[m.group(2)] = "Engine"
             elif tgt.lstrip("*") in HOLDERS: alias[m.group(2)] = HOLDERS[tgt.lstrip("*")]
+            elif tgt.lstrip("*") in alias: alias[m.group(2)] = alias[tgt.lstrip("*")]
         else:
             alias[m.group(2)] = m.group(1)
     called = set()
     for h in re.finditer(r"(?<![\w])(~?\w+)\s*\(", txt):
         n = h.group(1)
         pre = txt[:h.start()]
+        if n in REFACC:   # S0b (W11): a write through the returned reference / pointer is a write of what it returns
+            try:
+                k1 = match_close(txt, h.end() - 1, "(", ")") + 1
+                mrc = re.search(r"(?:(?:\(\s*\*\s*)?\w+\s*\)?\s*(?:\.|->)\s*)+$", pre)
+                why = write_kind(txt, mrc.start() if mrc else h.start(), k1)
+            except ValueError:
+                why = "unparsed call"
+            if why:
+                for d0 in sorted(REFACC[n]):
+                    if d0 not in uw:
+                        uw.append(d0)
+                        wlog.append(f"{key}\t{d0}\tthrough {n}(): {why}\t{' '.join(txt[max(0, h.start() - 40):h.end() + 40].split())}")
         mr = re.search(r"(\w+)\s*(?:\.|->|::)\s*$", pre)
         recv = mr.group(1) if mr else None
+        mt = re.search(r"\(\s*\*\s*(\w+)\s*\)\s*(?:\.|->)\s*$", pre)   # S0b (U1): (*this).f( / (*me).f(
+        if mt: recv = mt.group(1)
         if recv in alias:
             rc = alias[recv]
             if rc == "Engine":
@@ -615,6 +710,13 @@ def uses(key, txt):
 rows = {}
 for key, (f, ln, txt, dfn) in bodies.items():
     rows[key] = (f, ln) + uses(key, txt)
+# S0b (S0 review act-on 2): an unresolved call is a finding unless the cut lists it exactly (cut "unresolved_ok", which is
+# inside the cut pin); a listed entry that no longer occurs is a finding too (the list stays exact).
+_uok = [x for x in cut.get("unresolved_ok", []) if not x.startswith("_")]
+for u in sorted(set(unresolved)):
+    if u not in _uok: findings.append(f"unresolved call not in the cut's unresolved_ok: {u}")
+for u in _uok:
+    if u not in set(unresolved): findings.append(f"cut unresolved_ok entry no longer occurs (remove it): {u}")
 
 with open(os.path.join(OUT, "funcs.tsv"), "w", encoding="utf-8") as o:
     o.write("entry\tfile\tline\tlines\tdata_used\tdata_written\tfuncs_called\ttypes_used\tdef\n")
@@ -635,6 +737,10 @@ with open(os.path.join(OUT, "members.tsv"), "w", encoding="utf-8") as o:
         o.write(f"type\t{nm}\t{ln}\t\t\t\t\t{cname}\t\n")
     for nm, ln, acc, s, cname in funcs:
         o.write(f"func\t{nm}\t{ln}\t{acc}\t\t\t{s}\t{cname}\t\n")
+with open(os.path.join(OUT, "member_decls.tsv"), "w", encoding="utf-8") as o:   # S0b: for revtext (S0 review act-on 4)
+    o.write("class\tmember\tfile\tline\tstart\tend\n")
+    for cname, nm, rel, ln, a0, a1 in decls:
+        o.write(f"{cname}\t{nm}\t{rel}\t{ln}\t{a0}\t{a1}\n")
 with open(os.path.join(OUT, "files.txt"), "w", encoding="utf-8") as o:
     for f in sorted(files_with_defs):
         o.write(f"{f}\t{len(files_with_defs[f])}\n")
@@ -646,7 +752,7 @@ for n in missing:
 open(os.path.join(OUT, "findings.txt"), "w", encoding="utf-8").write("\n".join(findings) + ("\n" if findings else ""))
 open(os.path.join(OUT, "writes.tsv"), "w", encoding="utf-8").write("entry\tmember\twhy\tcontext\n" + "\n".join(wlog) + "\n")
 open(os.path.join(OUT, "unresolved.txt"), "w", encoding="utf-8").write("\n".join(sorted(set(unresolved))) + "\n")
-print(f"unresolved calls (reported in unresolved.txt, not edges): {len(set(unresolved))}")
+print(f"unresolved calls (unresolved.txt; each must be in the cut's unresolved_ok): {len(set(unresolved))}")
 print(f"census3: {len(set(d[0] for d in data))} data members ({len(data)} declarations), {len(statics)} static, "
       f"{len(types)} nested types, {len(funcs)} declared functions, {len(bodies)} bodies; classes found: "
       + ", ".join(f"{c}@{'/'.join(v)}" for c, v in sorted(class_files.items())))

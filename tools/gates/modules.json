@@ -146,6 +146,8 @@
    "accept_policy": {"metrics": ["host.sched.round_us_per_cycle"], "proof": {"refactor": ["exit_rule", "golden_exact", "host_work"]}},
    "env_snapshot": {"metrics": [], "metrics_none": "read once per load, no bench key",
                     "proof": {"refactor": ["exit_rule", "golden_exact"]}},
+   "server.engine_split_tools": {"metrics": [], "metrics_none": "checker tools and pins, no product code: no bench key",
+                                 "proof": {"refactor": ["exit_rule", "move_equal"]}},
    "handles": {"metrics": ["host.handles.devbuf_alloc_free", "host.handles.pinned_alloc_free", "host.handles.event_create_destroy"],
                "proof": {"refactor": ["exit_rule", "host_work", "host_time"]}},
    "ckpt_store": {"metrics": ["host.ckpt.init_release", "host.ckpt.save", "host.ckpt.load", "tier.copy.d2d_gbps"],
@@ -773,6 +775,16 @@
    "callers": "rdeps",
    "manual": ["whirl-server-tests (all: the end-to-end engine tests on MockModel / NullBackend) and whirl-pins (engine memory / copy sequence)",
               "V-srv: server golden + srv_* == the parent exe on both GPUs with every WHIRL_* unset (work_equal of the launch logs)"]
+  },
+  "server.engine_split_tools": {
+   "id": "N4-S0b", "desc": "the class Engine split checkers (arch025-engine S0 / S0b): the cut (tools/gates/engine_cut.json), its pin and review ledger, the census / graph / check / self-test, the c1ca7ce inline table, the member-order pin with its origin list and checker, the reverse text proof and the E8 judge. Not product code: a change here re-runs the checkers' own self-tests and the checks (the pin also holds the tools' sha256, so a tool change needs a pin rewrite and a review row)",
+   "paths": ["tools/gates/engine_cut.json", "tools/gates/engine_split_*", "tools/gates/member_order_check.py",
+             "tests/pins/engine_cut_arch.sha256", "tests/pins/engine_cut_reviews.tsv", "tests/pins/engine_member_order.txt",
+             "tests/pins/engine_member_order_origin.txt", "tools/impact/revtext.py", "tools/bench/e8_judge.py"],
+   "lands_on": "arch025-engine-s0b (S0b)",
+   "steps": ["cpu_engine_split", "cpu_member_order"],
+   "gpus": {},
+   "manual": ["python -I tools/bench/e8_judge.py --selftest (the E8 judge has no gate step; run it when e8_judge.py changes)"]
   },
   "server.slot": {
    "id": "N4-S1",

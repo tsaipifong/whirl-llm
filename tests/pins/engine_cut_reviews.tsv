@@ -1,0 +1,7 @@
+# arch025-engine S0b: review ledger of tests/pins/engine_cut_arch.sha256 (engine_split_check.py: the pin file's sha256
+# must have a row here, else 'engine cut pin: UNREVIEWED'). One row per reviewed pin version, never edited afterwards:
+# sha256 of the pin file (CRLF -> LF) <TAB> review (report path / reviewer) <TAB> what changed in the cut / tools.
+# A step that rewrites the pin (--pin-write) adds its row in the same commit, so the cut change is visible in the diff
+# and the reviewer of that step checks the row against the cut diff.
+f8f9ffada2a6862535d4874980f6881cec7682392cc78871d71044ac0a20baac	progress/arch025-engine.S0.REVIEW.md (s0review, 2026-10-29)	S0 pin at a17493b (architecture sections only); superseded by the S0b pin
+99d47f48416cd0f10efd85884af6581b87dc2fed5e5008af6b34313f9d4c3bf2	progress/arch025-engine.S0b.REVIEW.md (s0b-review, 2026-10-29; commit allowed, act-on 1-3 open -> S0c before S4)	S0b: pin adds new_funcs / new_data rows (delete-only) and the six checker tools; cut adds unresolved_ok (4 calls) and shared_writers m_ += model, slots_ += startAdmitted (S0 review act-on 1-3)
