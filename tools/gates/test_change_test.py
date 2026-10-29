@@ -314,5 +314,122 @@ check("NO_GPU_MODULES member stays CPU", p["level"].startswith("cpu"), (p["level
 lone = [k for k, d in RMODS.items() if not d.get("full") and not d.get("callers") and k not in tc.NO_GPU_MODULES
         and not any(not s.startswith(("cpu_", "kl_")) for s in d.get("steps") or [])]
 check("every non-full module has a GPU step, callers, or a NO_GPU_MODULES reason", not lone, lone)
+# 20. arch025-modsel3 (PLAN 3.7): a changed source of a test executable selects the GPU steps that run that executable
+# (release_gate.ps1: AddStep text, the variables / functions it uses, the gate scripts it calls); headers under tests/
+# through the map's includers; whirl-kernel-test on both GPUs (each GPU's own kernels), the others on --one-gpu; a test
+# source no GPU step's executable is built from selects none (CPU all runs it)
+PS2 = "\n".join([
+    '$ktArgs = @($exe["whirl-kernel-test"], "--device", $Device)',
+    'function GateCmd([string]$m) {',
+    '    $a = @($exe["whirl-server-gate"], "--exe", $exe["whirl-server"], "--model", $m)',
+    '    $a',
+    '}',
+    'AddStep "kt_full" $true $ktArgs { param($o, $c) $c -eq 0 }',
+    'AddStep "srv_balance" $true (GateCmd $SW) $gateRule',
+    'AddStep "golden_swift" $true @($pwsh, "-File", (Join-Path $repo "tools\\golden\\golden.ps1"))',
+    'AddStep "st_swift_precise" $true @($exe["whirl"], "selftest")',
+    'AddStep "cpu_server" $false @($exe["whirl-server-tests"])'])
+gm2 = tc.gate_script_map(PS2, {"golden.ps1": "$g = Join-Path $Bin 'whirl-server-gate.exe'\n& $g --suite golden"})
+ex = gm2.get("exes", {})
+check("exe map: variable", ex.get("whirl-kernel-test") == {"kt_full"}, ex)
+check("exe map: function + script", ex.get("whirl-server-gate") == {"srv_balance", "golden_swift"}, ex)
+check("exe map: direct", ex.get("whirl") == {"st_swift_precise"} and ex.get("whirl-server-tests") == {"cpu_server"}, ex)
+M7 = {"includers": {"tests/server/http_client.h": ["tests/server/http_client.cpp"], "tests/server/deep.h": ["tests/server/http_client.h"]},
+      "executables": {"whirl-kernel-test": ["tests/kernels/test_gemv.cpp"], "whirl-server-gate": ["tests/server/server_gate.cpp", "tests/server/http_client.cpp"],
+                      "whirl-server-tests": ["tests/server/http_client.cpp", "tests/server/server_tests.cpp"]}}
+check("test source exes", tc.test_source_exes(["tests/server/deep.h"], M7) == {"tests/server/deep.h": ["whirl-server-gate", "whirl-server-tests"]},
+      tc.test_source_exes(["tests/server/deep.h"], M7))
+
+
+def tplan(files, **kw):
+    return tc.make_plan("t", "x", {f: {} for f in files}, rep(gate="none (no product code)"), MODS, M7, GATES, TIMES, gate_map=gm2, **kw)
+
+
+p = tplan(["tests/kernels/test_gemv.cpp"])
+check("kernel test source -> kt_full on both GPUs", p["level"] == "module" and p["gpu_steps"]["r9700"] == ["kt_full"] and p["gpu_steps"]["8060s"] == ["kt_full"], (p["level"], p["gpu_steps"]))
+p = tplan(["tests/server/server_gate.cpp"])
+check("server gate source -> its GPU steps, one GPU", p["gpu_steps"]["r9700"] == ["golden_swift", "srv_balance"] and p["gpu_steps"]["8060s"] == [], p["gpu_steps"])
+check("why names the exe", "whirl-server-gate" in p["gpu_why"].get("r9700:srv_balance", ""), p["gpu_why"])
+p = tplan(["tests/server/deep.h"], one_gpu="8060s")
+check("test header -> includer's exe, --one-gpu 8060s", p["gpu_steps"]["8060s"] == ["golden_swift", "srv_balance"] and p["gpu_steps"]["r9700"] == [], p["gpu_steps"])
+p = tplan(["tests/server/server_tests.cpp"])
+check("CPU test exe source -> no GPU step", p["level"] == "cpu" and not any(p["gpu_steps"].values()), (p["level"], p["gpu_steps"]))
+p = tplan(["tests/nowhere/x.cpp"])
+check("test source in no exe -> no GPU step", p["level"] == "cpu", p["level"])
+p = tplan(["tests/golden/swift_gfx1201.json"])
+check("golden refs are not a test exe source", not any(p["gpu_steps"].values()), p["gpu_steps"])
+# pins on THIS tree: the gate's exe map and the impact map's executables (a renamed exe / step breaks it here)
+RGM = tc.load_gate_map(tc.REPO)
+check("tree: whirl-kernel-test runs in kt_full", "kt_full" in RGM["exes"].get("whirl-kernel-test", set()), RGM["exes"].get("whirl-kernel-test"))
+check("tree: whirl-server-gate runs in srv_* and golden_*", {"srv_balance", "golden_*"} <= RGM["exes"].get("whirl-server-gate", set()), RGM["exes"].get("whirl-server-gate"))
+RMAP = json.load(open(os.path.join(tc.REPO, "tools", "impact_map.json"), encoding="utf-8"))
+check("tree: test_gemv.cpp is a whirl-kernel-test source", tc.test_source_exes(["tests/kernels/test_gemv.cpp"], RMAP).get("tests/kernels/test_gemv.cpp") == ["whirl-kernel-test"],
+      tc.test_source_exes(["tests/kernels/test_gemv.cpp"], RMAP))
+ARTS = {tc.ARTIFACT.get(t, t) for t in RMAP["executables"]}
+check("tree: every exe a gate step runs is an impact-map executable", not (set(RGM["exes"]) - ARTS), sorted(set(RGM["exes"]) - ARTS))
+# 20b. the gate map reads a multi-line AddStep (an argument list still open at the line end: golden_<m>) and a ${m}
+# braced variable in a step name (st_${m}_$mode -> st_*_*)
+PS3 = "\n".join([
+    'foreach ($m in "swift") {',
+    '    AddStep "golden_$m" $true @($pwsh, "-File", "golden.ps1", "-Exe", $exe["whirl"],',
+    '                         "-GateExe", $exe["whirl-server-gate"]) `',
+    '        { param($o, $c) $c -eq 0 }',
+    '    AddStep "st_${m}_$mode" $true @($exe["whirl"], "selftest")',
+    '}'])
+gm3 = tc.gate_script_map(PS3, {})
+check("multi-line AddStep: exe on the 2nd line", gm3["exes"].get("whirl-server-gate") == {"golden_*"}, gm3["exes"])
+check("multi-line AddStep: lines 2-4 are one statement", tc.gate_line_steps(gm3, [3]) == {"golden_*"}, tc.gate_line_steps(gm3, [3]))
+check("braced variable in a step name", "st_*_*" in gm3["exes"].get("whirl", set()), gm3["exes"])
+# 21. arch025-modsel3 (PLAN 3.8): a non-list CMake edit is attributed through the CMake build graph (tools/impact/
+# cmake_graph.py): the sources it builds differently count as changed (module / core rules), a GPU test exe it relinks
+# selects that exe's steps, anything the graph cannot attribute (or a failed configure) stays the full matrix
+CM = "cmake/server.cmake"
+
+
+def cgplan(graph, r=None, files=(CM,), **kw):
+    return tc.make_plan("t", "x", {f: {} for f in files}, r or rep(gate="none (no product code)"), MODS, M7, GATES, TIMES, gate_map=gm2,
+                        cmake_graph=graph, **kw)
+
+
+G0 = {"ok": True, "full": [], "sources": {}, "exe_changes": {}, "notes": []}
+p = cgplan(dict(G0, sources={"whirl": ["src/server/stream.cpp"]}), rep({"protocol": ["src/server/stream.cpp"]}, "release_gate.ps1 -Module protocol"))
+check("graph source -> its module, not full", p["level"] == "module" and p["gpu_steps"]["r9700"] == ["golden_swift", "srv_balance"], (p["level"], p["full_reasons"], p["gpu_steps"]))
+check("graph shown in the plan", p.get("cmake_graph", {}).get("sources") == {"whirl": ["src/server/stream.cpp"]}, p.get("cmake_graph"))
+p = cgplan(dict(G0, sources={"whirl": ["src/model/qwen35/forward/attn.cpp"]}), rep({"forward.attn": ["x"]}, "release_gate.ps1 -Module forward.attn"))
+check("graph source on a core path -> full", p["level"] == "full" and any("CMake graph" in x for x in p["full_reasons"]), p["full_reasons"])
+p = cgplan(dict(G0, full=["product executable whirl: link rule / flags / external libraries changed"]))
+check("graph full reason -> full", p["level"] == "full" and any("link rule" in x for x in p["full_reasons"]), p["full_reasons"])
+p = cgplan({"ok": False, "why": "configure failed", "full": [], "sources": {}, "exe_changes": {}, "notes": []})
+check("graph not ok -> full", p["level"] == "full" and any("configure failed" in x for x in p["full_reasons"]), p["full_reasons"])
+p = cgplan(dict(G0, exe_changes={"whirl-server-gate": ["link"]}, sources={"whirl-server-gate": ["tests/server/server_gate.cpp"]}))
+check("graph relinks a GPU test exe -> its steps", p["level"] == "module" and p["gpu_steps"]["r9700"] == ["golden_swift", "srv_balance"], (p["level"], p["gpu_steps"]))
+p = cgplan(G0)
+check("graph: nothing for the GPU -> CPU only", p["level"] == "cpu" and not p["full_reasons"], (p["level"], p["full_reasons"]))
+# graph_rep: when it runs and what it hands to impact.analyze
+calls = []
+
+
+def fake_runner(root, old, new, work, gpu_exes):
+    calls.append((old, new, sorted(gpu_exes)))
+    return dict(G0, sources={"whirl": ["src/server/stream.cpp"], "whirl-server-gate": ["tests/server/server_gate.cpp"]})
+
+
+def fake_analyze(ch, m, new, old):
+    return {"modules": {}, "module_gate": "seen " + ",".join(sorted(ch)), "release_gate_steps": [], "gpus": [], "seen": ch}
+
+
+BW = {"modules": {}, "module_gate": "full gate or the release steps above: 1 file(s) in no module (cmake/server.cmake); cmake/server.cmake is build-wide"}
+r2, g2 = tc.graph_rep({CM: {"new": [3], "old": [3]}}, BW, {}, "R", "a1", "b2", "W", gm2, runner=fake_runner, analyze_fn=fake_analyze, lines_fn=lambda rev, f: 7)
+check("graph_rep runs the graph with the revisions and the GPU exes", calls and calls[0][:2] == ("a1", "b2") and "whirl-kernel-test" in calls[0][2], calls)
+check("graph_rep: CMake file replaced by whole-file changes of the graph's sources",
+      r2 is not None and CM not in r2["seen"] and r2["seen"].get("src/server/stream.cpp", {}).get("new") == list(range(1, 8))
+      and "tests/server/server_gate.cpp" in r2["seen"], r2 and r2.get("seen"))
+calls.clear()
+r2, g2 = tc.graph_rep({CM: {}}, dict(BW, cmake_lists={CM: ["src/a.cpp"]}), {}, "R", "a1", "b2", "W", gm2, runner=fake_runner, analyze_fn=fake_analyze)
+check("graph_rep: list-only CMake edit -> no graph", r2 is None and not calls, calls)
+r2, g2 = tc.graph_rep({CM: {}, "build.bat": {}}, BW, {}, "R", "a1", "b2", "W", gm2, runner=fake_runner, analyze_fn=fake_analyze)
+check("graph_rep: build.bat changed too -> no graph (full anyway)", r2 is None and not calls, calls)
+r2, g2 = tc.graph_rep({"src/a.cpp": {}}, BW, {}, "R", "a1", "b2", "W", gm2, runner=fake_runner, analyze_fn=fake_analyze)
+check("graph_rep: no CMake file -> no graph", r2 is None and not calls, calls)
 print(f"test_change_test: {n - fails}/{n} passed")
 sys.exit(1 if fails else 0)

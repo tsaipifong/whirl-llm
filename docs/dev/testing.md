@@ -228,17 +228,66 @@ python tools/gates/test_change.py --commit SHA [--json]      # plan for one comm
 python tools/gates/test_change.py --worktree --run           # run the plan: R9700, then 8060S, one GPU at a time
 python tools/gates/test_change.py --refresh-times            # step durations from stored gate summaries (estimates)
 python tools/gates/test_change_test.py                       # unit tests (CPU)
+python tools/impact/cmake_graph_test.py                       # build-graph diff unit tests (CPU, no CMake)
+python tools/impact/cmake_graph.py --old A --new B --work DIR # the build-graph diff of two revisions (JSON)
 ```
+
+`cpu_modules_check` runs `impact_cmake_test.py`, `cmake_graph_test.py` and `test_change_test.py`, so a change to
+these selection rules is tested by the release gate as well.
 
 How the plan is built, from the impact map (`impact.py`) and `modules.json`:
 
 1. **CPU:** every CPU step of `release_gate.ps1 -List` runs once. `cpu_golden_xcheck` and `kl_guard` check one
-   GPU's references, so they run with each GPU. Nothing on the CPU side is selected.
+   GPU's references, so they run with each GPU. Nothing on the CPU side is selected, with one exception (PLAN 3.5):
+   the C++ safety steps (`cpu_safety_selftest`, `cpu_asan`, `cpu_analyze`, `cpu_tsa`) are left out only when
+   **every** changed file is on the `NO_SAFETY_INPUT` allow-list of `test_change.py` (docs, `*.md`, the python gate /
+   impact tools, `tools/impact_map.json`, golden references): those files are not inputs of the safety builds, so
+   the result would be the parent's again. Any C / C++ / HIP / CMake / build / `.ps1` / safety-tool / isolation
+   manifest change runs them; `--all-cpu` keeps them; the release gate always runs them.
 2. **GPU, module level:** the module's `steps` from `modules.json`, including its callers (`rdeps`, named callers)
    and its `when` steps, plus the GPU steps the impact map selects for the diff. A step that `modules.json` marks
    `gpus: 2` runs on both GPUs. Other module steps run on one GPU (`--one-gpu`, default R9700: testing rule "8060S
    at merge time"). Map steps run on the GPUs the map lists. A change in **two or more non-core modules runs the
    union** of their steps. The full gate that `impact.py` suggests for a cross-module change is not used here.
+   Changes that are not product code select GPU steps too:
+   - **CMake source lists** (PLAN 3.3): a `CMakeLists.txt` / `cmake/*.cmake` edit whose changed lines are only
+     source entries (plus blank / `#` comment lines, the count of closing parentheses kept) counts as the modules of
+     the sources it names (a moved source follows its rename); a named source on a core path is a core change. Test
+     and tool sources add no module.
+   - **CMake targets, link libraries, compile definitions, `include()`** (PLAN 3.8): any other CMake edit is
+     attributed through the **build graph** (`tools/impact/cmake_graph.py`). Both revisions are configured (CMake,
+     Ninja, configure only, about 40 s each and about 3 min for a `--commit` plan with the two `git archive` exports, in `<workspace>/scratch/test_change/cmake_graph`; nothing is compiled;
+     `--no-cmake-graph` skips it and keeps the full matrix) and their Ninja action graphs are compared. Every action
+     is fingerprinted from its command and variables (source root and build directory normalized) and from the
+     fingerprints of the actions that make its inputs; configure-time files (generated headers, the iso copies)
+     count by content for the actions that read them. Per executable the tool compares the objects it links and the
+     rest of the link line. An object that is new, gone or compiled differently makes its **source** a changed
+     file: the plan is then made as for a whole-file edit of that source (module, core and map rules). A **GPU test
+     executable** whose objects or link line changed selects its GPU steps (next item). The graph runs only when the
+     plan without it is full **only** because of the CMake file. It stays the **full matrix** when either configure
+     fails; when a generated source of an executable that a GPU step runs changed (a custom command such as the
+     device code objects); when the link rule, flags or external libraries of a product executable (`whirl`,
+     `whirl-server`) changed; when an executable that a GPU step runs is no longer built; when a DLL, or a build
+     output that no executable links, changed; or when a configure-time file that no action reads changed.
+     `build.bat`, `redist/*` and `tools/package_release.ps1` are not in the graph and always plan the full matrix.
+     The same objects linked in another order (moving sources into a new library) count as a change: on MSVC the
+     static-initialization order between object files follows the link order, and nothing proves WHIRL has no
+     initializer that depends on another file's, so a product executable gets the full matrix and a test executable
+     its GPU steps. The same system libraries in another order are accepted as unchanged and printed as a note.
+   - **Test sources** (PLAN 3.7): a changed `tests/` source selects the GPU steps that run the executable(s) built
+     from it. The impact map's `executables` (CMake target to sources) names the executables; a header under
+     `tests/` counts for the executables of every file that includes it. Which step runs which executable is read
+     from `release_gate.ps1` itself: the `$exe["..."]` names in each `AddStep`, in the variables and functions it
+     uses (`$ktArgs`, `GateCmd`, `EnvCmd`) and in the gate scripts it calls (`golden.ps1`, `env_matrix.ps1`, ...).
+     `whirl-kernel-test` sources select `kt_full` on **both** GPUs (each GPU's own kernels are tested). Other
+     executables (`whirl-server-gate`: `srv_*`, `golden_*`, `srv_env_*`) use `--one-gpu`. A test source that only CPU
+     test programs are built from selects no GPU step, because CPU all runs them. Golden references
+     (`tests/golden/*`) follow the impact map instead.
+   - **Gate scripts** (PLAN 3.6, X12 Finding K8-3): a changed script that a GPU step runs (directly, through a
+     variable, or through another gate script) selects that step on `--one-gpu`. A script that `release_gate.ps1`
+     uses outside every `AddStep` (the runner loop, a helper function), or a `release_gate.ps1` line outside every
+     `AddStep`, is common code and selects every GPU step on one GPU. A multi-line `AddStep` (backtick, or an
+     argument list still open at the line end) is one statement. `impact.py` is selection-only and selects no step.
 3. **Full matrix, both GPUs** (every GPU step `-List` has on that GPU) when the change touches any of these:
    - **a core module.** The `CORE` table in `test_change.py` gives the reason for each: `forward.*`, `model.kv`,
      `model.weights`, `model.scratch`, `model.tune`, `handles`, `contract.abi`, `contract.device`, `contract.server`. A core module counts as touched when
@@ -246,7 +295,13 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
    - **a core path:** `kernels/*`, `*.hip`, `src/kernels_host/*`, `kernels_abi.h`, numerics, `src/ops/*`,
      `src/hip/*`, `src/device/*`, forward / kv files, also under their older paths.
    - **a contract, a build-wide file** (`cmake/*`, `CMakeLists.txt`, `build.bat`, `redist/*`) **or product code in
-     no module.** These are `impact.py`'s fail-closed cases.
+     no module.** These are `impact.py`'s fail-closed cases. A CMake edit leaves this case through the source-list
+     rule or the build graph above.
+   - **product code whose modules select no GPU step** (PLAN 3.6, K8-7), unless every such module is in
+     `NO_GPU_MODULES` (modules that generate no GPU-visible code, each with its reason). `test_change_test.py` fails
+     when a non-full module without a GPU step, without `callers` and outside `NO_GPU_MODULES` appears in
+     `modules.json`. It also pins `src/model/loader.cpp`, `include/whirl/model.h` (K8-2) and
+     `include/whirl/kernels_abi.h` (K8-5) to the full matrix.
    - **a change whose work equivalence cannot be shown.** With `--base-build DIR`, the code objects of both builds
      are compared (`work_equal.py`, CPU). If they differ although no kernel source changed, the full matrix runs.
    - **Exception:** when every changed product file is a kernel for one architecture (the map lists one GPU), the

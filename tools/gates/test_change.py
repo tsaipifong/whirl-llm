@@ -329,15 +329,49 @@ def code_text(txt):
     return "\n".join(out)
 
 
+EXE_RX = (re.compile(r'\$exe\[\s*"(whirl[\w-]*)"\s*\]'), re.compile(r"(?<![\w-])(whirl(?:-[a-z0-9]+)*)\.exe(?![\w-])", re.I))
+
+
+def paren_open(txt):
+    """True while txt (PowerShell, quoted strings ignored) opens more parentheses than it closes"""
+    t = re.sub(r'"[^"\n]*"|\'[^\'\n]*\'', "", txt)
+    return t.count("(") > t.count(")")
+
+
+def exe_names(txt):
+    """WHIRL executables a piece of gate text starts: $exe["name"] (release_gate.ps1's table) or name.exe"""
+    return {x.lower() for rx in EXE_RX for x in rx.findall(txt)}
+
+
 def gate_script_map(ps_text, others=None):
     """release_gate.ps1 text (+ {basename: text} of the other gate scripts) -> {"refs": {script: {step name globs}},
-    "common": {script}, "stmts": [(first line, last line, name glob)], "neutral": {blank / comment line numbers}}"""
+    "common": {script}, "stmts": [(first line, last line, name glob)], "neutral": {blank / comment line numbers},
+    "exes": {executable: {step name globs that start it}}}"""
     lines = ps_text.splitlines()
-    var = {}
+    var, evar, fexe = {}, {}, {}
     for l in lines:
         m = re.match(r"^\s*\$(\w+)\s*=(.*)$", l)
         if m and SCRIPT_RX.search(m.group(2)):
             var[m.group(1)] = set(SCRIPT_RX.findall(m.group(2)))
+        if m and exe_names(m.group(2)):
+            evar[m.group(1)] = exe_names(m.group(2))
+    # arch025-modsel3 (PLAN 3.7): the executables a function of the gate starts (GateCmd, EnvCmd): its body's $exe["..."]
+    k = 0
+    while k < len(lines):
+        m = re.match(r"^\s*function\s+(\w+)", lines[k])
+        if not m:
+            k += 1
+            continue
+        depth, j, body = 0, k, []
+        while j < len(lines):
+            body.append(lines[j])
+            depth += lines[j].count("{") - lines[j].count("}")
+            if depth <= 0 and "{" in "".join(body):
+                break
+            j += 1
+        btxt = " ".join(body)
+        fexe[m.group(1)] = (exe_names(btxt), set(SCRIPT_RX.findall(btxt)) - {"release_gate.ps1"})  # (exes, scripts)
+        k = j + 1
     stmts, in_stmt, used_vars = [], set(), set()
     i = 0
     while i < len(lines):
@@ -346,20 +380,30 @@ def gate_script_map(ps_text, others=None):
             i += 1
             continue
         j = i
-        while lines[j].rstrip().endswith("`") and j + 1 < len(lines):
+        # a statement continues on the next line after a trailing backtick or while a "(" is still open (golden_<m>:
+        # its argument list spans two lines)
+        while j + 1 < len(lines) and (lines[j].rstrip().endswith("`") or paren_open("\n".join(lines[i:j + 1]))):
             j += 1
         text = "\n".join(lines[i:j + 1])
-        name = re.sub(r"\$\((?:[^()]|\([^()]*\))*\)|\$\w+", "*", m.group(1))
+        name = re.sub(r"\$\((?:[^()]|\([^()]*\))*\)|\$\{\w+\}|\$\w+", "*", m.group(1))
         refs = set(SCRIPT_RX.findall(text))
         for v in re.findall(r"\$(\w+)", text):
             if v in var:
                 refs |= var[v]
                 used_vars.add(v)
-        stmts.append((i + 1, j + 1, name, refs))
+        exes = exe_names(text)
+        for v in re.findall(r"\$(\w+)", text):
+            exes |= evar.get(v, set())
+        fsc = set()  # scripts the functions this step calls start (EnvCmd -> env_matrix.ps1): their exes count below
+        for f, (es, sc) in fexe.items():
+            if re.search(r"(?<![\w-])" + re.escape(f) + r"(?![\w-])", text):
+                exes |= es
+                fsc |= sc
+        stmts.append((i + 1, j + 1, name, refs, (exes, fsc)))
         in_stmt.update(range(i + 1, j + 2))
         i = j + 1
     refs = {}
-    for _, _, name, rs in stmts:
+    for _, _, name, rs, _ in stmts:
         for b in rs:
             refs.setdefault(b, set()).add(name)
     common, neutral = set(), set()
@@ -386,7 +430,18 @@ def gate_script_map(ps_text, others=None):
                     refs.setdefault(c, set()).update(refs[b])
                 if b in common:
                     common.add(c)
-    return {"refs": refs, "common": common, "stmts": [(a, b, n) for a, b, n, _ in stmts], "neutral": neutral}
+    # executables started by a gate script a step calls (golden.ps1 -> whirl-server-gate.exe, env_matrix.ps1 -> ...),
+    # through other gate scripts too (two levels, as refs above)
+    sexe = {b: exe_names(code_text(t)) for b, t in (others or {}).items()}
+    for _ in range(2):
+        for b, t in (others or {}).items():
+            for c in set(SCRIPT_RX.findall(code_text(t))) - {b}:
+                sexe[b] = sexe[b] | sexe.get(c, set())
+    exes = {}
+    for _, _, name, rs, (es, fsc) in stmts:
+        for e in es | {x for b in rs | fsc for x in sexe.get(b, set())}:
+            exes.setdefault(e, set()).add(name)
+    return {"refs": refs, "common": common, "stmts": [(a, b, n) for a, b, n, _, _ in stmts], "neutral": neutral, "exes": exes}
 
 
 def gate_line_steps(gm, line_nos):
@@ -438,6 +493,106 @@ def gate_script_steps(files, changes, gm):
         elif b in gm["refs"]:
             out[f] = set(gm["refs"][b])
     return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# arch025-modsel3 (PLAN 3.7): a changed tests/ source selects the GPU steps that run the executable(s) built from it. The
+# impact map's `executables` (CMake target -> its sources) names the executables; a header under tests/ counts for the
+# executables of every file that includes it (map includers, transitively). Same class as K8-3 (gate scripts).
+ARTIFACT = {"whirl-cli": "whirl"}  # CMake target -> the exe name release_gate.ps1 uses (OUTPUT_NAME, cmake/model.cmake)
+# executables whose GPU steps run on both GPUs when only a test source changed: the kernel test checks each GPU's own
+# kernels (gfx1151-only kernels such as attn_ws4 have their tests in the same sources), so one GPU would leave the other
+# GPU's kernels untested; every other test executable (whirl-server-gate suites) runs on --one-gpu (impact FILE_RULES
+# "the changed suite on one GPU")
+EXE_BOTH_GPUS = {"whirl-kernel-test": "kernel tests check each GPU's own kernels"}
+TEST_SRC_SKIP = ["tests/golden/*"]  # golden references: impact FILE_RULES (golden on both GPUs via the map)
+
+
+def test_source_exes(files, m):
+    """{changed tests/ file: [exe names (release_gate.ps1 names) built from it]} (headers through includers)"""
+    exes = (m or {}).get("executables") or {}
+    inc = (m or {}).get("includers") or {}
+    out = {}
+    for f in files:
+        if not f.startswith("tests/") or matches(f, TEST_SRC_SKIP):
+            continue
+        seen, todo, srcs = {f}, [f], set()
+        while todo:
+            x = todo.pop()
+            srcs.add(x)
+            for y in inc.get(x, []):
+                if y not in seen:
+                    seen.add(y)
+                    todo.append(y)
+        es = sorted({ARTIFACT.get(t, t) for t, fl in exes.items() if srcs & set(fl)})
+        if es:
+            out[f] = es
+    return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# arch025-modsel3 (PLAN 3.8): a non-list CMake edit (impact.py: build-wide) is attributed through the CMake build graph
+# of both revisions (tools/impact/cmake_graph.py: configure each, diff the Ninja action graphs). The graph's changed
+# sources replace the CMake file as whole-file changes for impact.analyze (module / core / map rules as for an edit of
+# that source); the GPU test executables it relinks select their steps; whatever the graph cannot attribute is full.
+GRAPH_FILES = ["CMakeLists.txt", "cmake/*.cmake"]
+NOT_GRAPHED = ["build.bat", "redist/*", "tools/package_release.ps1"]  # build-wide files the CMake graph does not cover
+
+
+def file_lines(root, rev, path):
+    """line count of path at rev (None = the working tree of root); 0 when it does not exist there"""
+    if rev is None:
+        try:
+            return sum(1 for _ in open(os.path.join(root, path), "rb"))
+        except OSError:
+            return 0
+    t = impact.show(rev, path)
+    return 0 if t is None else len(t.splitlines())
+
+
+def graph_rep(changes, rep, m, root, old_rev, new_rev, work, gm, runner=None, analyze_fn=None, lines_fn=None):
+    """(new impact report or None, graph result or None): None, None when no non-list CMake file changed or a build-wide
+    file the graph does not cover changed too (full anyway); the report is recomputed only when the graph is ok"""
+    lists = rep.get("cmake_lists") or {}
+    cm = [f for f in changes if matches(f, GRAPH_FILES) and f not in lists]
+    if not cm or any(matches(f, NOT_GRAPHED) for f in changes):
+        return None, None
+    if runner is None:
+        import cmake_graph
+        runner = cmake_graph.analyze_revs
+    g = runner(root, old_rev, new_rev, work, sorted(gm.get("exes") or {}))
+    if not g.get("ok"):
+        return None, g
+    lines_fn = lines_fn or (lambda rev, f: file_lines(root, rev, f))
+    ch2 = {k: v for k, v in changes.items() if k not in cm}
+    for srcs in g.get("sources", {}).values():
+        for f in srcs:
+            if f not in ch2:
+                ch2[f] = {"new": list(range(1, lines_fn(new_rev, f) + 1)), "old": list(range(1, lines_fn(old_rev, f) + 1)),
+                          "old_path": f, "cmake_graph": True}
+    r2 = (analyze_fn or impact.analyze)(ch2, m, new_rev, old_rev)
+    r2["cmake_graph_files"] = cm
+    return r2, g
+
+
+def graph_needed(p):
+    """a first plan (without the CMake graph) is full ONLY because of a build-wide CMake file: the graph can narrow it.
+    Full for any other reason too (core / contract / product file in no module): the graph would not change the plan."""
+    rs = p["full_reasons"]
+    return bool(rs) and all(reason_class(x) == "impact: build-wide file" for x in rs)
+
+
+def plan_with_graph(title, cid, changes, rep, mods, m, gates, times, root, old_rev, new_rev, work, use_graph=True, **kw):
+    """make_plan, and when the plan is full only because of a non-list CMake edit, again with the CMake build graph
+    (graph_rep); the second plan replaces the first (its full reasons say what the graph could not attribute)"""
+    p = make_plan(title, cid, changes, rep, mods, m, gates, times, **kw)
+    if not use_graph or not graph_needed(p):
+        return p
+    gm = kw.get("gate_map") if kw.get("gate_map") is not None else load_gate_map(root)
+    r2, g = graph_rep(changes, rep, m, root, old_rev, new_rev, work, gm)
+    if g is None:
+        return p
+    return make_plan(title, cid, changes, r2 if r2 is not None else rep, mods, m, gates, times, cmake_graph=g, **kw)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -511,8 +666,10 @@ def compare_code_objects(base, build, out_json):
 
 
 def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", build=None, base_build=None, proofs=None,
-              scratch=None, all_cpu=False, gate_map=None):
+              scratch=None, all_cpu=False, gate_map=None, cmake_graph=None):
     files = sorted(changes)
+    gm = gate_map if gate_map is not None else load_gate_map()
+    graph_src = sorted({f for v in ((cmake_graph or {}).get("sources") or {}).values() for f in v})
     product = [f for f in files if f.startswith(("src/", "include/", "kernels/"))]
     modules = dict(rep.get("modules") or {})
     callers = {k: list(v) for k, v in (rep.get("module_callers") or {}).items()}
@@ -538,6 +695,16 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
             for g, why in CORE_GLOBS:
                 if fnmatch.fnmatch(f, g):
                     full.append(f"core file {f} listed in {cf}: {why}")
+                    break
+    if cmake_graph is not None:
+        if not cmake_graph.get("ok"):
+            full.append(f"CMake graph: cannot attribute the CMake edit ({cmake_graph.get('why', '?')})")
+        for x in cmake_graph.get("full") or []:
+            full.append(f"CMake graph: {x}")
+        for f in graph_src:
+            for g, why in CORE_GLOBS:
+                if fnmatch.fnmatch(f, g):
+                    full.append(f"core file {f} built differently (CMake graph): {why}")
                     break
     if gate_txt.startswith("full gate") and "cross-module" not in gate_txt:
         full.append(f"impact.py: {gate_txt}")  # contract / build-wide / product file in no module / includer in no module
@@ -599,8 +766,23 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
                 if st not in gpu[dv]:
                     gpu[dv].append(st)
                     why[(dv, st)] = "impact map"
-        gm = gate_map if gate_map is not None else load_gate_map()
         ok1 = [s["name"] for s in gates[one_gpu] if s["gpu"] and not s["na"]]
+        # arch025-modsel3 (PLAN 3.7 / 3.8): test sources -> the GPU steps of the executables built from them; GPU test
+        # executables the CMake graph relinks -> their GPU steps
+        exe_sel = {}
+        for f, es in sorted(test_source_exes(files + [x for x in graph_src if x.startswith("tests/")], m).items()):
+            for e in es:
+                exe_sel.setdefault(e, f"test source {f} of {e}")
+        for e, ws in sorted(((cmake_graph or {}).get("exe_changes") or {}).items()):
+            exe_sel.setdefault(e, f"{e} relinked (CMake graph: {'; '.join(ws)[:60]})")
+        for e, w in sorted(exe_sel.items()):
+            globs = (gm.get("exes") or {}).get(e) or set()
+            for dv in (DEVICES if e in EXE_BOTH_GPUS else (one_gpu,)):
+                okd = [s["name"] for s in gates[dv] if s["gpu"] and not s["na"]]
+                for st in okd:
+                    if any(fnmatch.fnmatch(st, g) for g in globs) and st not in gpu[dv]:
+                        gpu[dv].append(st)
+                        why[(dv, st)] = w
         for f, sel in sorted(gate_script_steps(files, changes, gm).items()):
             for st in ok1:
                 if (sel == "ALL" or any(fnmatch.fnmatch(st, g) for g in sel)) and st not in gpu[one_gpu]:
@@ -661,7 +843,7 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
         "skipped_by_proof": skipped, "proofs": proof_notes, "work_equivalence": weq,
         "est_cpu_min": round(cpu_s / 60, 1), "est_gpu_min": {d: round(v / 60, 1) for d, v in est.items()},
         "est_full_gpu_min": {d: round(v / 60, 1) for d, v in full_s.items()}, "est_unknown": unknown,
-        "one_gpu": one_gpu,
+        "one_gpu": one_gpu, "cmake_graph": cmake_graph,
     }
 
 
@@ -683,6 +865,16 @@ def print_plan(p):
     for d, n in p["proofs"].items():
         print(f"   proof    {d}: {n}")
     print(f"   work-eq  {p['work_equivalence']['static']}; code objects: {p['work_equivalence']['code_objects']}")
+    g = p.get("cmake_graph")
+    if g:
+        srcs = sorted({f for v in (g.get("sources") or {}).values() for f in v})
+        print(f"   cmake    build graph ({' vs '.join(map(str, g.get('configured', [])))}): " + (
+            f"cannot attribute ({g.get('why')})" if not g.get("ok") else
+            f"{len(srcs)} source(s) built differently{': ' + ', '.join(srcs[:6]) if srcs else ''}"
+            f"{'; relinked ' + ', '.join(sorted(g.get('exe_changes') or {})) if g.get('exe_changes') else ''}"
+            f"{'; ' + str(len(g.get('full') or [])) + ' unattributable' if g.get('full') else ''}"))
+        for x in (g.get("notes") or [])[:3]:
+            print(f"            note: {x}")
     if p["est_unknown"]:
         print(f"   note     no stored duration for: {', '.join(p['est_unknown'][:8])} (counted 0; --refresh-times)")
     print("   note     dev-time only: releases / rc merges / bug-fix releases run the full release gate on both GPUs")
@@ -811,7 +1003,8 @@ def backtest(a):
             continue
         rep = impact.analyze(changes, m, s, f"{s}^")
         title = g("log", "-1", "--format=%h %s", s).strip()
-        p = make_plan(f"commit {title}", s, changes, rep, mods, m, gates, times, one_gpu=a.one_gpu)
+        p = plan_with_graph(f"commit {title}", s, changes, rep, mods, m, gates, times, root, f"{s}^", s,
+                            os.path.join(out, "cmake_graph"), use_graph=a.cmake_graph_backtest, one_gpu=a.one_gpu)
         rows.append(p)
         print(f"{s} {p['level']:<6} r97 {len(p['gpu_steps']['r9700']):>2} ({p['est_gpu_min']['r9700']:>5} min) "
               f"s8 {len(p['gpu_steps']['8060s']):>2} ({p['est_gpu_min']['8060s']:>5} min)  {title[8:70]}", flush=True)
@@ -862,6 +1055,8 @@ def main():
     ap.add_argument("--one-gpu", choices=DEVICES, default="r9700", help="GPU of a step modules.json runs on one GPU (testing.md: R9700; 8060S at merge)")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--all-cpu", action="store_true", help="keep the C++ safety steps even when no changed file is their input")
+    ap.add_argument("--no-cmake-graph", action="store_true", help="do not configure the two revisions for a non-list CMake edit (full matrix)")
+    ap.add_argument("--cmake-graph-backtest", action="store_true", help="--backtest: configure both sides of each commit whose plan is full only because of a CMake edit")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--work")
     ap.add_argument("--force", action="store_true")
@@ -902,8 +1097,9 @@ def main():
     scratch = a.work or os.path.join(root, "..", "scratch", "test_change")
     if a.base_build:
         os.makedirs(scratch, exist_ok=True)
-    p = make_plan(title, cid, changes, rep, load_mods(root), m, gates, times, one_gpu=a.one_gpu, build=a.build,
-                  base_build=a.base_build, proofs=proofs, scratch=scratch, all_cpu=a.all_cpu)
+    p = plan_with_graph(title, cid, changes, rep, load_mods(root), m, gates, times, root, old_rev, new_rev,
+                        os.path.join(scratch, "cmake_graph"), use_graph=not a.no_cmake_graph, one_gpu=a.one_gpu, build=a.build,
+                        base_build=a.base_build, proofs=proofs, scratch=scratch, all_cpu=a.all_cpu)
     if a.json:
         print(json.dumps(p, indent=1))
     else:
