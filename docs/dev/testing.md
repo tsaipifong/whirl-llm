@@ -305,6 +305,18 @@ compile), and the product-flags compile of a mutant compiles the mutated header 
 (`<root>/_iso_mut_<module>_<case>/`, removed right after). `iso_check.py --mutants` first runs the script's own
 pure-Python selftest (`--selftest` alone runs only it; line `iso check selftest: N/N as expected`).
 
+Two more manifest kinds (arch025-iso4): `define NAME[=VALUE]` is a `/D` for the module's sources and test program (release:
+its only unit case is compiled under `WHIRL_TEST_DLL_DEPS=1`; also `WHIRL_ISO_NO_SOURCE_TREE` / `WHIRL_ISO_NO_SERVER`, which compile
+out the one test half that needs a source tree or an Engine, and `__HIP_PLATFORM_AMD__` as the product build defines it), and
+`sdkinc hip` puts the HIP SDK's `include/` (`WHIRL_HIP_ROOT` / `HIP_PATH`, default `C:\Program Files\AMD\ROCm.2`) AFTER the
+staged tree, so the SDK can only supply what the tree does not have (`hip/hip_runtime_api.h`, which `src/hip/hip_api.h` includes
+for its types): the SDK is the platform, like the Windows headers. A module that needs it is not configured by cmake when
+`WHIRL_WITH_HIP=OFF`. A header outside `src/ include/ tests/` (kernels/gemm_small_addr.h) is staged next to `mod/` and may be a
+header-only module's `mutate` line. A test program that runs longer than 600 s fails its case (a hung socket test would otherwise
+hang the gate step). Link doubles of a layer the module may not link: `tests/iso/fake_hip.cpp` (the HIP layer, every GPU call
+throws), `fake_embedded_objects.cpp` (the build-generated kernel code objects), and per module under `tests/iso/<module>/`
+(config.device: the model layer's device choice; vision: the HIP backend factory and the vision code objects).
+
 To declare a new dependency of a module, add its header (and, if it is not header-only, its source) to the
 module's list. The change is then visible in review. Which modules are not isolated yet, and the include / call that
 blocks each one with the smallest fix: [isolation_blockers.md](isolation_blockers.md).
