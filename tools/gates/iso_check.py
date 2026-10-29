@@ -31,6 +31,13 @@ AND compile with the product flags (/I src /I include), which is what makes the 
        model  whirl::qwen35::loadOrTune     (src/model/tune.cpp, whirl_model: the model core, class Model)
        tier   whirl::tier::blockHash        (src/tier/kv_tier.cpp, whirl_tier_core: the KV host tier)
        archtable whirl::model::builtinArchs (src/model/qwen35/module.cpp, model.qwen35: the product architecture table)
+  inline_<sym>         (header-only modules, arch025-iso4-fix) an uncalled inline function at the end of the header calls
+                       the symbol                                                      -> isolated decl-link LNK2019
+Header-only modules also get the decl-link (arch025-iso4-fix): each hdr line is compiled alone by the ROCm clang-cl
+/Od -Xclang -femit-all-decls (cl never emits an uncalled inline function) and linked with the module and test objects
+(/OPT:NOREF); `declbase PATH` names a dependency header whose own inline bodies reach outside the tree (its unresolved
+references are the baseline the other headers may not add to). `sdkinc hip` stages the SDK's include/hip ALONE into
+<work>/_sdk; a `define` that a product file of a src / hdr line reads is refused unless DEFINE_ALLOW has it.
 gen PATH (arch025-lane2 leg 5): a header the build generates (<build>/generated/PATH, e.g. whirl/version.h from
 src/release/version.h.in), staged as mod/PATH; --build names the build tree (default <root>/build/Release).
 Header-only module (arch025-lane2 leg 6, model.types): `mutate` may name one of its hdr lines, and then src lines are
@@ -55,6 +62,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 VCVARS = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 # the compile options of the top-level CMakeLists.txt (MSVC branch) + Release
@@ -87,20 +95,61 @@ SYMS = {
                   "(void)whirl::model::builtinArchs().size();"),
 }
 ENGINE_H = "server/engine.h"
-# sdkinc NAME -> (environment variables that name the SDK root, default root, include sub folder)
-SDK_DIRS = {"hip": (("WHIRL_HIP_ROOT", "HIP_PATH"), r"C:\Program Files\AMD\ROCm\7.2", "include")}
+# sdkinc NAME -> (environment variables that name the SDK root, default root, include sub folder, the ONE folder of it that
+# is staged). arch025-iso4-fix (REVIEW 2): the whole ROCm include/ also holds hipblas, hipblaslt, rocblas, rocprim, hipcub,
+# thrust, rocwmma, ...; only include/hip is copied into <work>/_sdk/hip/include (once per run) and that copy is the /I, so
+# an undeclared ROCm library header is C1083 like an undeclared WHIRL header. The product compile of a mutant keeps the
+# full include/ (the product flags).
+HIP_ENVS = ("WHIRL_HIP_ROOT", "HIP_PATH")
+HIP_DEFAULT = r"C:\Program Files\AMD\ROCm\7.2"
+SDK_DIRS = {"hip": (HIP_ENVS, HIP_DEFAULT, "include", "hip")}
+SDK_STAGE = None  # <work>/_sdk (main)
+# define names a product file may read: the product build defines them the same way (CMakeLists.txt:159,174: __HIP_PLATFORM_AMD__
+# for the HIP sources; cmake/vision.cmake:51 WHIRL_VISION_DEFS: WHIRL_VISION_GFX1201 / WHIRL_VISION_GFX1151 for src/vision/kernel_image.cpp)
+DEFINE_ALLOW = frozenset({"__HIP_PLATFORM_AMD__", "WHIRL_VISION_GFX1201", "WHIRL_VISION_GFX1151"})
+_sdk_lock = threading.Lock()
 
 
-def sdk_dirs(man):
+def sdk_root(envs, default):
+    return next((os.environ[e] for e in envs if os.environ.get(e)), default)
+
+
+def sdk_dirs(man, product=False):
     out = []
     for n in man.sdkinc:
-        envs, default, sub = SDK_DIRS[n]
-        root = next((os.environ[e] for e in envs if os.environ.get(e)), default)
-        d = os.path.join(root, sub)
-        if not os.path.isdir(d):
-            raise SetupError(f"{man.rel}: sdkinc {n}: no {d} (set {envs[0]})")
-        out.append(d)
+        envs, default, sub, only = SDK_DIRS[n]
+        d = os.path.join(sdk_root(envs, default), sub)
+        if not os.path.isdir(os.path.join(d, only)):
+            raise SetupError(f"{man.rel}: sdkinc {n}: no {os.path.join(d, only)} (set {envs[0]})")
+        if product:
+            out.append(d)
+            continue
+        if SDK_STAGE is None:
+            raise SetupError("sdkinc needs the staged SDK folder (main sets SDK_STAGE)")
+        dst = os.path.join(SDK_STAGE, n, sub)
+        with _sdk_lock:
+            done = os.path.join(SDK_STAGE, n, "STAGED")
+            want = os.path.join(d, only)
+            if not os.path.isfile(done) or open(done, encoding="utf-8").read() != want:
+                shutil.rmtree(os.path.join(SDK_STAGE, n), ignore_errors=True)
+                shutil.copytree(os.path.join(d, only), os.path.join(dst, only))
+                with open(done, "w", encoding="utf-8") as f:
+                    f.write(want)
+        out.append(dst)
     return out
+
+
+def clang_cl():
+    # arch025-iso4-fix (REVIEW 1): the ROCm clang-cl (the compiler of the kernels; MSVC-ABI COFF objects that link.exe links)
+    p = os.path.join(sdk_root(HIP_ENVS, HIP_DEFAULT), "bin", "clang-cl.exe")
+    if not os.path.isfile(p):
+        raise SetupError(f"header-only module: no {p} (the inline-reference check needs the ROCm clang-cl; set {HIP_ENVS[0]})")
+    return p
+
+
+# the header TUs of a header-only module: CL_FLAGS without /O2 (/O2 drops the unreferenced bodies again) and /W4, plus the
+# cc1 option that emits every definition (clang/test/CodeGen/emit-all-decls.c)
+DECL_FLAGS = [f for f in CL_FLAGS if f not in ("/O2", "/W4")] + ["/Od", "/w", "-Xclang", "-femit-all-decls"]
 
 
 def def_flags(man):
@@ -121,6 +170,7 @@ class Manifest:
         self.gens = []
         self.defines = []
         self.sdkinc = []
+        self.declbase = []
         for line in open(path, encoding="utf-8"):
             m = re.match(r"([a-z]+)\s+([^\s#]+)", line)
             if not m:
@@ -153,12 +203,18 @@ class Manifest:
                     raise SetupError(f"{self.rel}: define {p} (NAME or NAME=VALUE)")
                 self.defines.append(p)
             elif kind == "sdkinc":
-                # arch025-iso4: a system SDK include directory (the platform, like the MSVC / Windows headers): hip = the
-                # HIP SDK's include/ (hip/hip_runtime_api.h, which src/hip/hip_api.h includes for its types). It is put
-                # AFTER the staged tree, so it can only supply what the tree does not have and never shadows a module header.
+                # arch025-iso4: a system SDK include directory (the platform, like the MSVC / Windows headers): hip = a copy
+                # of the HIP SDK's include/hip alone (hip/hip_runtime_api.h, which src/hip/hip_api.h includes for its types;
+                # arch025-iso4-fix: no other ROCm library header). It is put AFTER the staged tree, so it can only supply what
+                # the tree does not have and never shadows a module header.
                 if p not in SDK_DIRS:
                     raise SetupError(f"{self.rel}: unknown sdkinc {p} (known: {', '.join(SDK_DIRS)})")
                 self.sdkinc.append(p)
+            elif kind == "declbase":
+                # arch025-iso4-fix: a declared dependency header of a header-only module whose OWN inline bodies reach code
+                # outside the tree (model.arch_open: whirl/model.h's Model / Context members); its unresolved references are
+                # the decl-link baseline (see build_iso); must also be a hdr line
+                self.declbase.append(p)
             elif kind in KINDS:
                 if not os.path.isfile(os.path.join(root, p)):
                     raise SetupError(f"{self.rel}: no such file {p}")
@@ -172,8 +228,23 @@ class Manifest:
         if not self.module or not self.exe or not (self.header_only or any(k == "src" for k, _ in self.items)) or \
                 not any(k == "testsrc" for k, _ in self.items):
             raise SetupError(f"{self.rel}: needs module, exe, src (or a mutate hdr line) and testsrc lines")
+        for p in self.declbase:
+            if ("hdr", p) not in self.items or p == self.mutate or not self.header_only:
+                raise SetupError(f"{self.rel}: declbase {p} must be a hdr line of a header-only module, not its mutate header")
         if self.mutate and (("src", self.mutate) not in self.items) and not self.header_only:
             raise SetupError(f"{self.rel}: mutate {self.mutate} is not one of its src or hdr lines")
+        # arch025-iso4-fix (REVIEW 7): a define reaches the module's product sources too; one that a product file (not under
+        # tests/) of a src / hdr line reads could hide a crossing from the iso build (#ifndef WHIRL_ISO_X), so it is refused
+        # unless the product build defines it the same way (DEFINE_ALLOW)
+        for dname in (x.split("=", 1)[0] for x in self.defines):
+            if dname in DEFINE_ALLOW:
+                continue
+            rx = re.compile(r"\b" + re.escape(dname) + r"\b")
+            for kind, p in self.items:
+                if kind in ("src", "hdr") and not p.startswith("tests/"):
+                    if rx.search(open(os.path.join(root, p), encoding="utf-8", errors="replace").read()):
+                        raise SetupError(f"{self.rel}: define {dname} is read by the product file {p} (only test files may read an "
+                                         f"iso define; allowed product macros: {', '.join(sorted(DEFINE_ALLOW))})")
 
 
 class SetupError(Exception):
@@ -209,6 +280,13 @@ def vc_env(bat):
 RUN_TIMEOUT_S = 600  # arch025-iso4: a test program that hangs (a socket test) fails the case instead of the gate step
 
 
+def out_text(x):
+    # arch025-iso4-fix (REVIEW 14): TimeoutExpired.stdout / .stderr are bytes even with text=True
+    if isinstance(x, bytes):
+        return x.decode("utf-8", errors="replace")
+    return x or ""
+
+
 def run(cmd, env, cwd, timeout=None):
     # CreateProcess looks a bare name up in THIS process's PATH, not in env= (CPython subprocess docs, Windows), so
     # cl / link from the vcvars env are resolved to full paths first (arch025-X3fix)
@@ -220,7 +298,7 @@ def run(cmd, env, cwd, timeout=None):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=cwd, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired as ex:
-        return 124, f"timed out after {timeout} s: {cmd[0]}\n" + str(ex.stdout or "")
+        return 124, f"timed out after {timeout} s: {cmd[0]}\n" + out_text(ex.stdout) + out_text(ex.stderr)
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
@@ -233,7 +311,7 @@ GEN_ROOT = None  # <build>/generated (main: --build)
 
 def stage(root, man, d):
     shutil.rmtree(d, ignore_errors=True)
-    out = {"src": [], "testsrc": []}
+    out = {"src": [], "testsrc": [], "hdr": []}
     for p in man.gens:
         g = os.path.join(GEN_ROOT or os.path.join(root, "build", "Release", "generated"), *p.split("/"))
         if not os.path.isfile(g):
@@ -272,6 +350,13 @@ def mutate(text, case, src_rel, inc_at="top"):
         m = re.search(r'^#include "[^"]+"[^\n]*\n', text, re.M)
         assert m, f"{src_rel}: no quoted include to anchor the include mutant"
         return text[:m.end()] + f'#include "{inc}"  // iso mutant\n' + text[m.end():]
+    if case.startswith("inline_"):
+        # arch025-iso4-fix (REVIEW 1): the crossing inside an inline function nobody calls, the form a header-only module's
+        # real code has (inline / constexpr / in-class); only the emitted-definitions objects of the header TUs give it a body
+        decl, call = SYMS[case[len("inline_"):]]
+        return text + ("" if text.endswith("\n") else "\n") + \
+            "// iso mutant: an inline function nobody calls; the -femit-all-decls header objects give it a body\n" + decl + \
+            f"inline void whirl_iso_mutant_inline_probe() {{ {call} }}\n"
     decl, call = SYMS[case[len("call_"):]]
     return text + "\n// iso mutant: a function nobody calls; /OPT:NOREF keeps it, so its reference must resolve\n" + decl + \
         f"void whirl_iso_mutant_probe() {{ {call} }}\n"
@@ -281,9 +366,10 @@ def compile_obj(src, incs, obj, env, d, defs=()):
     return run(["cl", *CL_FLAGS, *defs, "/c", *[f"/I{i}" for i in incs], src, f"/Fo{obj}"], env, d)
 
 
-def build_iso(man, d, files, env, objs_from=None, only_src=None):
+def build_iso(man, d, files, env, objs_from=None, only_src=None, decl_from=None):
     """-> (stage, rc, output) of the first failing stage, or ('run', rc, output) of the test program.
-    objs_from: reuse the control's objects for every source except only_src (mutants)."""
+    objs_from: reuse the control's objects for every source except only_src (mutants); decl_from: the same for the header
+    TUs of a header-only module (every one but the mutated header's)."""
     mod, test = os.path.join(d, "mod"), os.path.join(d, "test")
     objs = []
     for i, (rel, s) in enumerate(files["src"]):
@@ -304,12 +390,100 @@ def build_iso(man, d, files, env, objs_from=None, only_src=None):
         if rc:
             return "test-compile", rc, out
         objs.append(o)
+    decl_objs, base_objs = [], []
+    if man.header_only:
+        # arch025-iso4-fix (REVIEW 1): cl never emits an inline function nobody calls (not with /Zc:inline- either,
+        # scratch/a25_iso4fix/exp1), so the test program alone proves only the paths the test walks. Every hdr line gets a
+        # TU of its own (#include of the staged copy), compiled by clang-cl /Od -Xclang -femit-all-decls with mod/ as the only
+        # include path: every non-template inline / constexpr / in-class function then has a body in an object, and the
+        # decl-link (/OPT:NOREF) makes its references resolve inside the listed sources (LNK2019 otherwise). Mutants reuse the
+        # control's objects for every header but the mutated one.
+        for i, (rel, s) in enumerate(files["hdr"]):
+            o = os.path.join(d, f"h{i}.obj")
+            if decl_from and rel != man.mutate:
+                o = os.path.join(decl_from, f"h{i}.obj")
+            else:
+                tu = os.path.join(d, f"h{i}.cpp")
+                with open(tu, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(f'#include "{s.replace(chr(92), "/")}"  // iso: {rel}\n')
+                rc, out = run([clang_cl(), *DECL_FLAGS, *def_flags(man), "/c", f"/I{mod}", *[f"/I{x}" for x in sdk_dirs(man)], tu,
+                               f"/Fo{o}"], env, d)
+                if rc:
+                    return "decl-compile", rc, out
+            decl_objs.append(o)
+            if rel in man.declbase:
+                base_objs.append(o)
     exe = os.path.join(d, man.exe + ".exe")
     rc, out = run(["link", "/nologo", "/OPT:NOREF", f"/OUT:{exe}", *objs, *man.syslibs], env, d)
     if rc:
         return "link", rc, out
+    if decl_objs:
+        dexe = os.path.join(d, man.exe + "-decls.exe")
+        rc, out = run(["link", "/nologo", "/OPT:NOREF", f"/OUT:{dexe}", *objs, *decl_objs, *man.syslibs], env, d)
+        if rc and man.declbase:
+            # a `declbase` header (a declared dependency whose own inline bodies reach code outside the tree, reviewed and
+            # listed in docs/dev/isolation_blockers.md): its unresolved references are the baseline; the module's other
+            # headers may not add any reference to it
+            got = unresolved(out)
+            brc, bout = run(["link", "/nologo", "/OPT:NOREF", f"/OUT:{os.path.join(d, man.exe + '-base.exe')}", *objs, *base_objs,
+                             *man.syslibs], env, d)
+            base = unresolved(bout) if brc else set()
+            extra = sorted(got - base)
+            if got and not extra:
+                rc = 0
+            else:
+                out += "\niso: references beyond the declbase baseline: " + ", ".join(extra[:8]) + "\n" + \
+                    "\n".join(l for l in out.splitlines() if any(x in l for x in extra[:8]))
+        if rc:
+            return "decl-link", rc, out
     rc, out = run([exe], env, d, RUN_TIMEOUT_S)
     return "run", rc, out
+
+
+def unresolved(link_out):
+    """The unresolved symbols of a failed link (LNK2019 / LNK2001 lines): the decorated name (the first (?...) of the line),
+    else the line after the error code (a C name). -> set"""
+    out = set()
+    for line in link_out.splitlines():
+        m = re.search(r"\bLNK20(?:19|01)\b:?(.*)$", line)
+        if not m:
+            continue
+        dec = re.search(r"\((\?[^()\s]+)\)", m.group(1))
+        out.add(dec.group(1) if dec else m.group(1).split('"')[0].strip())
+    return out
+
+
+def engine_includes(root):
+    """The repo files src/server/engine.h includes, transitively (quoted includes; resolved next to the including file,
+    then under src/, then include/). -> set of repo-relative paths."""
+    seen, todo = set(), ["src/" + ENGINE_H]
+    while todo:
+        rel = todo.pop()
+        if rel in seen:
+            continue
+        seen.add(rel)
+        try:
+            text = open(os.path.join(root, *rel.split("/")), encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        for inc in re.findall(r'^\s*#\s*include\s*"([^"]+)"', text, re.M):
+            for base in (os.path.dirname(rel), "src", "include"):
+                cand = os.path.normpath(os.path.join(base, inc)).replace("\\", "/")
+                if os.path.isfile(os.path.join(root, *cand.split("/"))):
+                    todo.append(cand)
+                    break
+    return seen
+
+
+def probe_plan(rel_hdr, case, engine_back):
+    """How the product compile of a src/ or out-of-tree header mutant is done: "copy" = the mutated text as a copy next to
+    the real header (what is compiled is the mutant); "engine_first" = #include of the added engine include, then the real
+    header (same text order) - only for an include mutant of a header that server/engine.h includes back, where a second
+    copy would define its classes twice (arch025-iso4)."""
+    # arch025-iso4-fix (REVIEW 6): every other header gets its mutated copy, so the product compile checks the mutant's text
+    if case in ("include_engine", "include_relative") and rel_hdr in engine_back:
+        return "engine_first"
+    return "copy"
 
 
 def product_compile_header(root, rel_hdr, text, tag, env, d, man, case=""):
@@ -329,7 +503,7 @@ def product_compile_header(root, rel_hdr, text, tag, env, d, man, case=""):
         src = os.path.join(base, f"_iso_mut_{tag}_probe.cpp")
         probe = f'#include "_iso_mut_{tag}.h"\n'
         write_copy = True
-        if case in ("include_engine", "include_relative"):
+        if probe_plan(rel_hdr, case, engine_includes(root)) == "engine_first":
             inc = ENGINE_H if case == "include_engine" else relative_engine(rel_hdr)
             probe = f'#include "{inc}"\n#include "{os.path.basename(rel_hdr)}"\n'
             write_copy = False
@@ -339,7 +513,7 @@ def product_compile_header(root, rel_hdr, text, tag, env, d, man, case=""):
                     f.write(text)
             with open(src, "w", encoding="utf-8", newline="\n") as f:
                 f.write(probe)
-            return compile_obj(src, [os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man)],
+            return compile_obj(src, [os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man, product=True)],
                                os.path.join(d, "prod.obj"), env, d, def_flags(man))
         finally:
             for x in (hdr, src):
@@ -356,7 +530,7 @@ def product_compile_header(root, rel_hdr, text, tag, env, d, man, case=""):
             f.write(text)
         with open(src, "w", encoding="utf-8", newline="\n") as f:
             f.write(f'#include "{staged(rel_hdr)}"\n')
-        rc, out = compile_obj(src, [top, os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man)],
+        rc, out = compile_obj(src, [top, os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man, product=True)],
                               os.path.join(d, "prod.obj"), env, d, def_flags(man))
     finally:
         shutil.rmtree(top, ignore_errors=True)
@@ -371,7 +545,7 @@ def product_compile(root, rel_src, text, tag, env, d, man, case=""):
     try:
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-        rc, out = compile_obj(tmp, [os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man)],
+        rc, out = compile_obj(tmp, [os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man, product=True)],
                               os.path.join(d, "prod.obj"), env, d, def_flags(man))
     finally:
         try:
@@ -394,6 +568,9 @@ def cases_of(man, mutants):
         inc_stage = "test-compile" if man.header_only else "compile"
         cs += [("include_engine", inc_stage, "C1083"), ("include_relative", inc_stage, "C1083")]
         cs += [(f"call_{s}", "link", "LNK2019") for s in (man.mutsyms or ["now", "log"])]
+        if man.header_only:
+            # arch025-iso4-fix (REVIEW 1): the same symbols reached from an uncalled inline function of the header
+            cs += [(f"inline_{s}", "decl-link", "LNK2019") for s in (man.mutsyms or ["now", "log"])]
     return cs
 
 
@@ -449,10 +626,50 @@ def selftest():
         case("define with a bad name refused", man(head + "src src/a/t.cpp\nmutate src/a/t.cpp\ndefine 1bad\n") is None)
         case("unknown sdkinc refused", man(head + "src src/a/t.cpp\nmutate src/a/t.cpp\nsdkinc zz\n") is None)
         case("a module with neither has no flags and no sdk dirs", m2 is not None and def_flags(m2) == [] and sdk_dirs(m2) == [])
+        # arch025-iso4-fix (REVIEW 7): a define that a product file of the module reads would let the iso build differ from
+        # the product build unseen (a crossing wrapped in #ifndef WHIRL_ISO_X)
+        with open(os.path.join(root, "src", "a", "d.cpp"), "w", encoding="utf-8") as f:
+            f.write("#ifndef WHIRL_ISO_X\nint crossing();\n#endif\n#if __HIP_PLATFORM_AMD__\n#endif\n")
+        os.makedirs(os.path.join(root, "tests", "iso", "t", "f"), exist_ok=True)
+        with open(os.path.join(root, "tests", "iso", "t", "f", "fake.cpp"), "w", encoding="utf-8") as f:
+            f.write("#ifdef WHIRL_ISO_X\n#endif\n")
+        dsrc = head + "src src/a/d.cpp\nmutate src/a/d.cpp\n"
+        case("define read by a product src file refused", man(dsrc + "define WHIRL_ISO_X\n") is None)
+        case("define on the product allow list accepted", man(dsrc + "define __HIP_PLATFORM_AMD__\n") is not None)
+        case("define read only by a tests/ src file accepted",
+             man(head + "src src/a/t.cpp\nsrc tests/iso/t/f/fake.cpp\nmutate src/a/t.cpp\ndefine WHIRL_ISO_X\n") is not None)
+        case("define read by a product hdr file refused",
+             man(head + "src src/a/t.cpp\nhdr src/a/d.cpp\nmutate src/a/t.cpp\ndefine WHIRL_ISO_X=1\n") is None)
+        case("declbase naming a hdr line of a header-only module accepted",
+             man(head + "hdr kernels/k.h\nmutate include/whirl/t.h\ndeclbase kernels/k.h\n") is not None)
+        case("declbase naming no hdr line refused", man(head + "mutate include/whirl/t.h\ndeclbase kernels/k.h\n") is None)
+        case("declbase naming the mutate header refused", man(head + "mutate include/whirl/t.h\ndeclbase include/whirl/t.h\n") is None)
         mk = man("module t\nexe t-tests\ntestsrc tests/iso/t/t_tests.cpp\nhdr kernels/k.h\nmutate kernels/k.h\n")
         case("header outside src/ include/ tests/ is staged next to mod/",
              mk is not None and mk.header_only and mutate_target(mk, "D", {"src": []}).replace(chr(92), "/") == "D/kernels/k.h")
-    case("relative include from include/whirl", relative_engine("include/whirl/model_types.h") == "../../src/server/engine.h")
+    # arch025-iso4-fix (REVIEW 6): only a header engine.h includes back takes the engine-first product compile
+    back = {"src/server/engine.h", "src/server/backend.h", "src/cache/cache_model.h"}
+    case("include mutant of a header engine.h includes back: engine first",
+         probe_plan("src/server/backend.h", "include_engine", back) == "engine_first")
+    case("include mutant of any other src/ header: the mutated copy is compiled",
+         probe_plan("src/tier/ram_size.h", "include_engine", back) == "copy"
+         and probe_plan("src/config/device_choice.h", "include_relative", back) == "copy")
+    case("include mutant of an out-of-tree header: the mutated copy is compiled",
+         probe_plan("kernels/gemm_small_addr.h", "include_relative", back) == "copy")
+    case("call / inline mutants: always the mutated copy",
+         probe_plan("src/server/backend.h", "call_hip", back) == "copy" and probe_plan("src/server/backend.h", "inline_hip", back) == "copy")
+    # REVIEW 1: the inline mutant kind
+    case("header-only modules get inline_<sym> mutants at link",
+         m is not None and ("inline_now", "decl-link", "LNK2019") in cases_of(m, True))
+    case("src modules get no inline mutants", m2 is not None and not any(c[0].startswith("inline_") for c in cases_of(m2, True)))
+    case("inline mutant appends an uncalled inline function",
+         "inline void whirl_iso_mutant_inline_probe() { (void)whirl::nowSeconds(); }" in mutate("x", "inline_now", "include/whirl/t.h"))
+    case("unresolved: decorated names of LNK2019 / LNK2001 lines",
+         unresolved('h9.obj : error LNK2019: x "int f(void)" (?f@@YAHXZ) y "void g(void)" (?g@@YAXXZ)\n'
+                    'h2.obj : error LNK2001: x "int f(void)" (?f@@YAHXZ)\nother line\n') == {"?f@@YAHXZ"})
+    # REVIEW 14: a timed-out run's bytes are decoded, not printed as b'...'
+    case("timeout output decoded", out_text(b"abc\xff") == "abc�" and out_text(None) == "" and out_text("s") == "s")
+    case("relative include from include/whirl",relative_engine("include/whirl/model_types.h") == "../../src/server/engine.h")
     case("relative include from src/sampling unchanged", relative_engine("src/sampling/x.cpp") == "../server/engine.h")
     case("relative include from src/server unchanged", relative_engine("src/server/x.cpp") == "../server/engine.h")
     lines.append(f"iso check selftest: {sum(res)}/{len(res)} as expected")
@@ -486,7 +703,7 @@ def check_module(root, man, work, env, mutants, keep):
             # the control's objects are reused for the unchanged sources (only when the control built them; never for
             # a header-only module, whose header is compiled into the test program)
             st, rc, out = build_iso(man, d, files, env, objs_from=ctl if ctl_ok and not man.header_only else None,
-                                    only_src=man.mutate)
+                                    only_src=man.mutate, decl_from=ctl if ctl_ok and man.header_only else None)
             caught = st == want_stage and rc != 0 and want_code in out
             prc, pout = product_compile(root, man.mutate, mut, f"{man.module}_{name}", env, d, man, name)
             ok = caught and prc == 0
@@ -531,6 +748,8 @@ def main(argv):
             return 0
     global GEN_ROOT
     GEN_ROOT = os.path.join(a.build or os.path.join(a.root, "build", "Release"), "generated")
+    global SDK_STAGE
+    SDK_STAGE = os.path.join(os.path.abspath(a.work), "_sdk")
     # python -I ignores PYTHONIOENCODING; a cp950 console cannot print U+FFFD from a decoded cl line (arch025-X3fix)
     sys.stdout.reconfigure(errors="replace")
     try:
