@@ -1,0 +1,84 @@
+# ARCH-1 8.5 isolation check of server.slot_output (arch025-engine S5, DESIGN v3 section 4 S5 row): the module's source,
+# its DECLARED dependencies and the ONLY headers they may see. Format: tests/sampling/isolation.txt; read by
+# cmake/iso.cmake and tools/gates/iso_check.py.
+# module: src/server/engine_output.{h,cpp} (free functions emit / flushOut / writeError, moved verbatim out of engine.cpp /
+# engine.h at 6d004b6; emit takes the chat tokens ct_ as a parameter). declared dependencies (DESIGN v3 3.1: core.shared
+# only, ct_ as a parameter): the slot (server.slot: engine_slot.h, headers only), the job and connection (engine_api.h),
+# the chat tokens (include/whirl/chat_tokens.h, header only: the members emit reads), the HTTP protocol's errorResponse
+# (src/server/protocol.cpp with what it links: JSON src/chat/json.cpp, lib whirl's util, the platform layer), the server
+# log (src/server/log.cpp) and the headers' own inline bodies (engine_thread.h's owner check ->
+# src/server/engine_thread.cpp; the device handles of the slot's members -> the host-memory NullBackend
+# src/device/null_backend.cpp). The response writer StreamState::push (module protocol, src/server/stream.cpp, needs a
+# GGUF tokenizer) is NOT linked: the test program defines it as a recording double (link seam). No engine, no
+# ServerModel, no HIP runtime, no tokenizer object.
+module    server.slot_output
+exe       whirl-iso-server-slot-output-tests
+mutate    src/server/engine_output.cpp
+mutsym    hip
+mutsym    engine
+mutsym    model
+mutsym    tier
+syslib    winmm.lib
+# module sources
+src       src/server/engine_output.cpp
+# declared dependency sources
+src       src/server/protocol.cpp
+src       src/chat/json.cpp
+src       src/server/log.cpp
+src       src/server/engine_thread.cpp
+src       src/device/null_backend.cpp
+src       src/common/util.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/proc_win.cpp
+src       src/platform/time_win.cpp
+src       src/platform/env_win.cpp
+# headers (include closure of the sources above and of the test: scratch/a25_engine/closure.py)
+hdr       include/whirl/chat.h
+hdr       include/whirl/chat_tokens.h
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/json.h
+hdr       include/whirl/json_fields.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/prefill_schedule.h
+hdr       include/whirl/thread_annotations.h
+hdr       include/whirl/tokenizer.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/vismap.h
+hdr       include/whirl/wddm_watch.h
+hdr       src/cache/cache_model.h
+hdr       src/cache/ckpt_store.h
+hdr       src/cache/prefix_cache.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/model/qwen35/kv.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/platform/time.h
+hdr       src/sampling/sampler.h
+hdr       src/server/engine_api.h
+hdr       src/server/engine_output.h
+hdr       src/server/engine_slot.h
+hdr       src/server/engine_thread.h
+hdr       src/server/log.h
+hdr       src/server/prefix_store.h
+hdr       src/server/protocol.h
+hdr       src/server/stream.h
+hdr       src/server/tier_bridge.h
+hdr       src/server/vision_iface.h
+hdr       src/spec/policy.h
+hdr       src/tier/evict_policy.h
+hdr       src/tier/idle_flush.h
+hdr       src/tier/kv_tier.h
+# test program
+testsrc   tests/iso/server.slot_output/slot_output_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
