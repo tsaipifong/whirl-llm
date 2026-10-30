@@ -1171,5 +1171,221 @@
    "text_why": "address taken",
    "reason": "engine_prefill.cpp:289 sl.st.cx = &rcx_; StreamState::cx is const ResponseCtx* (stream.h:60)"
   }
+ },
+ "emut_read_ok": {
+  "_doc": "arch025-emut2 (PLAN N4-emut2): rows clang's ExprMutationAnalyzer (tools/gates/emut) calls a write and the Python analyzer a read; the census counts every such (entry, member) pair as a write (writes = clang UNION Python) unless it is pinned here. Key entry:member; clang_why = the WHOLE set of clang reasons of the pair (positions dropped, engine_split_emut.norm_why); a pin with another set does not apply, a pin that no longer occurs is a finding. Initial set = the cross-check's class (d) (analyzer conservative / false positive, the Python analyzer proves the read from types or a measured list; progress/arch025-emut.HANDOFF.md), each class checked at the source.",
+  "Engine:tok_": {
+   "clang_why": [
+    "write: InitListExpr `{opt_.model_name, tok_, ids_}`"
+   ],
+   "class": "d init-list into const references",
+   "reason": "engine.cpp:57 rcx_{opt_.model_name, tok_, ids_}: ResponseCtx binds const references (Python: 'const use (InitListExpr)')"
+  },
+  "allocState:opt_": {
+   "clang_why": [
+    "write: CallExpr `logI(\"decode: relaxed draft acceptance (relaxacc, fast): greedy top-{} with p >= {:.2f} p_max; sampl...`"
+   ],
+   "class": "d log.h formatter",
+   "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
+  },
+  "attachTier:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "draftCap:opt_": {
+   "clang_why": [
+    "write: CXXOperatorCallExpr `opt_.batch_drafts[std::min(A, gdn_max_seg)]`"
+   ],
+   "class": "d non-const operator[] overload, result only read",
+   "reason": "std::array / vector operator[] on a non-const object picks the non-const overload; the result is bound to a const& or passed by value / const& (Python: 'const object bound to / passed', 'read (value)'), engine_decode.cpp:85-292, 655"
+  },
+  "endBuilding:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "facts:tok_": {
+   "clang_why": [
+    "write: UnaryOperator `&tok_`"
+   ],
+   "class": "d address into a const pointer",
+   "reason": "&owner_ compared with const EngineThread* (engine.h:244-245) / f.tok = &tok_ where EngineFacts::tok is const Tokenizer* (engine.cpp:151; text_write_ok facts:tok_); the analyzer counts any & as a write unless a const NoOp cast follows"
+  },
+  "govPublish:gov_": {
+   "clang_why": [
+    "write: CXXOperatorCallExpr `gov_->`"
+   ],
+   "class": "d non-const operator-> overload, const methods called",
+   "reason": "gov_ (std::optional / unique_ptr of MemGovernor): operator-> on a non-const object, then only const methods (reduced(), config(), shrinks(), grows(), ctxNew()) (Python: 'handle to const'); engine_gov.cpp:58-69, 337-365, engine_vram.cpp:86"
+  },
+  "govPublish:vram_mu_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(vram_mu_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "govTick:gov_ram_mb_": {
+   "clang_why": [
+    "write: CallExpr `logI(\"memory governor: RAM tier kept at {} MiB (untouched: it is pinned system RAM, not VRAM, and do...`"
+   ],
+   "class": "d log.h formatter",
+   "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
+  },
+  "governorJson:vram_mu_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(vram_mu_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "health:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "health:vram_mu_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(vram_mu_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "modulesOwned:owner_": {
+   "clang_why": [
+    "write: UnaryOperator `&owner_`"
+   ],
+   "class": "d address into a const pointer",
+   "reason": "&owner_ compared with const EngineThread* (engine.h:244-245) / f.tok = &tok_ where EngineFacts::tok is const Tokenizer* (engine.cpp:151; text_write_ok facts:tok_); the analyzer counts any & as a write unless a const NoOp cast follows"
+  },
+  "ngramDrafts:spec_": {
+   "clang_why": [
+    "write: CXXOperatorCallExpr `spec_.dtiming[std::min<std::size_t>(cy.A, gdn_max_seg)]`",
+    "write: CXXOperatorCallExpr `spec_.timing[std::min<std::size_t>(cy.A, gdn_max_seg)]`"
+   ],
+   "class": "d non-const operator[] overload, result only read",
+   "reason": "std::array / vector operator[] on a non-const object picks the non-const overload; the result is bound to a const& or passed by value / const& (Python: 'const object bound to / passed', 'read (value)'), engine_decode.cpp:85-292, 655"
+  },
+  "options:opt_": {
+   "clang_why": [
+    "write: ReturnStmt `return opt_`; returned by options"
+   ],
+   "class": "d const accessor return (analyzer false positive)",
+   "reason": "a const method returning const T& of the member (engine.h: owner() const / options() const / tokenizer() const): AsNonConstRefReturn assumes a NoOp cast to const that a const method's member does not have (ExprMutationAnalyzer.cpp:483-489; emut selftest e13_)"
+  },
+  "owner:owner_": {
+   "clang_why": [
+    "write: ReturnStmt `return owner_`; returned by owner"
+   ],
+   "class": "d const accessor return (analyzer false positive)",
+   "reason": "a const method returning const T& of the member (engine.h: owner() const / options() const / tokenizer() const): AsNonConstRefReturn assumes a NoOp cast to const that a const method's member does not have (ExprMutationAnalyzer.cpp:483-489; emut selftest e13_)"
+  },
+  "reapDisconnected:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "releaseSlot:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "runLoop:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`",
+    "write: CXXConstructExpr `lw(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "runOnLoop:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "setVramProbe:vram_mu_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(vram_mu_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "startAdmitted:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `g(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "startJob:ctx_": {
+   "clang_why": [
+    "write: CallExpr `logW(\"req {} | prompt of {} tokens does not fit the context per request of {} tokens (lowered from {...`",
+    "write: CallExpr `logW(\"req {} | prompt of {} tokens does not fit the context per request of {} tokens ({})\", job.id, ...`"
+   ],
+   "class": "d log.h formatter",
+   "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
+  },
+  "startJob:opt_": {
+   "clang_why": [
+    "write: CallExpr `logW(\"req {} | prompt of {} tokens does not fit the context per request of {} tokens ({})\", job.id, ...`"
+   ],
+   "class": "d log.h formatter",
+   "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
+  },
+  "stop:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "submitAndWait:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "tokenizer:tok_": {
+   "clang_why": [
+    "write: ReturnStmt `return tok_`; returned by tokenizer"
+   ],
+   "class": "d const accessor return (analyzer false positive)",
+   "reason": "a const method returning const T& of the member (engine.h: owner() const / options() const / tokenizer() const): AsNonConstRefReturn assumes a NoOp cast to const that a const method's member does not have (ExprMutationAnalyzer.cpp:483-489; emut selftest e13_)"
+  },
+  "vramIdleTick:vram_idle_next_": {
+   "clang_why": [
+    "write: CXXConstructExpr `vram_idle_next_`; returned by vramIdleTick"
+   ],
+   "class": "d copied into std::optional",
+   "reason": "engine_vram.cpp:95 return vram_idle_next_; the return type is std::optional<time_point> by value (Python: 'copied into std::optional'); the analyzer counts the converting constructor's const& as a non-const reference"
+  },
+  "vramNote:gov_": {
+   "clang_why": [
+    "write: CXXOperatorCallExpr `gov_->`"
+   ],
+   "class": "d non-const operator-> overload, const methods called",
+   "reason": "gov_ (std::optional / unique_ptr of MemGovernor): operator-> on a non-const object, then only const methods (reduced(), config(), shrinks(), grows(), ctxNew()) (Python: 'handle to const'); engine_gov.cpp:58-69, 337-365, engine_vram.cpp:86"
+  },
+  "vramNote:vram_mu_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(vram_mu_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  }
  }
 }

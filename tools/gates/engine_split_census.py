@@ -418,6 +418,50 @@ for nm, ln, acc, s, cname in funcs:
 for q, e in ALIASES.items():
     meth.setdefault(q.split("::")[-1], set()).add(e)
 
+# arch025-emut2 (S4 requirement, progress/arch025-engine.HANDOFF.md S4 "cut 改動"): a non-const call on a cut holder
+# member (`dc_.dflReset(..)`, cut "holders" name -> class) is a CALL EDGE to the holder class's method (the call graph
+# above records it: OKRECV / HOLDERS), not a data write of the holder; the writes inside the callee are judged in the
+# callee's own body. Only when (1) every declaration of the holder has one shape: the class by value / reference (call
+# with `.`) or a raw / unique_ptr pointer to it (call with `->`), (2) the callee is a method the class declares (not an
+# operator, not a destructor), (3) every census body of that method is free of `this` other than `this->` (a callee
+# that assigns / swaps / hands out *this writes the holder as a whole, which no member use inside it shows). Everything
+# else stays a write: assigning / resetting the holder, binding it to a non-const reference, passing it to a function,
+# writing h.x, calling through an alias.
+_cls_meth = {}
+for nm, ln, acc, s, cname in funcs:
+    if "::" not in nm and not nm.startswith(("operator", "~")): _cls_meth.setdefault(cname, set()).add(nm)
+_hold_op = {}
+for nm in HOLDERS:
+    c = re.escape(HOLDERS[nm])
+    kinds = set()
+    for dn, ln, acc, s, cname, rel in data:
+        if dn != nm: continue
+        pre = s.split("=")[0].split("{")[0]
+        pre = pre[:pre.rfind(nm)] if nm in pre else pre
+        if re.search(r"(?<![\w:])(?:\w+::)*" + c + r"\s*&?\s*$", pre): kinds.add(".")
+        elif re.search(r"(?<![\w:])(?:\w+::)*" + c + r"\s*\*\s*(?:const\s*)?$|unique_ptr\s*<\s*(?:\w+::)*" + c + r"\s*>\s*$", pre): kinds.add("->")
+        else: kinds.add("?")
+    if len(kinds) == 1 and "?" not in kinds: _hold_op[nm] = kinds.pop()
+_THIS_RX = re.compile(r"(?<![\w])this\b(?!\s*->)")
+_self_free = {}
+for _c, _ms in _cls_meth.items():
+    for _f in _ms:
+        _e = resolve(_c, _f)
+        _bt = [t for k, (_fl, _l, t, _d) in bodies.items() if k.split("#")[0] == _e]
+        _self_free[(_c, _f)] = bool(_bt) and not any(_THIS_RX.search(t[t.find("{"):] if "{" in t else t) for t in _bt)
+_HCALL = re.compile(r"\s*(\.|->)\s*(\w+)\s*\(")
+
+
+def holder_call(text, i, mem):
+    """the use of member `mem` at text[i:] is a holder call edge: its reason, else None"""
+    op = _hold_op.get(mem)
+    if not op or text[i:i + len(mem)] != mem: return None
+    m = _HCALL.match(text, i + len(mem))
+    if not m or m.group(1) != op: return None
+    c, f = HOLDERS[mem], m.group(2)
+    if f not in _cls_meth.get(c, ()) or not _self_free.get((c, f)): return None
+    return f"holder call {mem}{op}{f}() (call edge to {c}::{f}, judged in its own body)"
+
 
 # A1: the measured const list. A method name counts as read-only when src/ declares it ONLY as a const member
 # function (some `name(...) const` declaration and no non-const declaration of the same name), or it is a std
@@ -736,6 +780,7 @@ def uses(key, txt):
         if hits:
             ud.append(n)
             for h in hits:
+                if holder_call(txt, h.start(), n): continue   # arch025-emut2: a call edge, not a write of the holder
                 why = write_kind(txt, h.start(), h.end())
                 if why:   # S0f (S0e review consider 2): every text write reason of the member is kept, not only the first
                     if n not in uw: uw.append(n)
@@ -826,85 +871,76 @@ import subprocess
 _cmd = [sys.executable, "-I", os.path.join(HERE, "engine_split_ast.py"), "--root", ROOT, "--out", _astout, "--cache", _cache,
         "--classes", ",".join(sorted(CLASSES)), "--callable-ok", ",".join(_callable), "--jobs", os.environ.get("WHIRL_ENGINE_AST_JOBS", "6")]
 for _t in _tus: _cmd += ["--tu", _t]
+# arch025-emut2 (PLAN N4-emut2): clang's own ExprMutationAnalyzer (tools/gates/emut, emut.exe on the official LLVM release)
+# runs next to the Python analyzer on the same TUs; writes = clang w UNION Python w, every disagreement is classified or a
+# finding (tools/gates/engine_split_emut.py). emut.exe / LLVM missing or stale = crash (exit 1): never one analyzer alone.
+sys.path.insert(0, HERE)
+import engine_split_emut as ESE
+_emut = os.environ.get("WHIRL_EMUT") or os.path.join(os.path.dirname(os.path.dirname(HERE)), "build", "emut", "emut.exe")
+_ecache = os.environ.get("WHIRL_ENGINE_EMUT_CACHE") or os.path.join(os.path.dirname(os.path.dirname(HERE)), "build", "engine_split_emut_cache")
+_emout = os.path.join(OUT, "emut.json")
+_ecmd = [sys.executable, "-I", os.path.join(HERE, "emut", "emut_run.py"), "--root", ROOT, "--out", _emout, "--cache", _ecache,
+         "--emut", _emut, "--classes", ",".join(sorted(CLASSES)), "--jobs", os.environ.get("WHIRL_ENGINE_AST_JOBS", "6")]
+for _t in _tus: _ecmd += ["--tu", _t]
+if os.path.exists(_emout): os.remove(_emout)
+_ep = subprocess.Popen(_ecmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 _r = subprocess.run(_cmd, capture_output=True, text=True)
+_eo = _ep.communicate()[0]
 if _r.returncode != 0 or not os.path.exists(_astout):
     print(_r.stdout + _r.stderr)
     print("census3: AST census failed (engine_split_ast.py rc %d)" % _r.returncode)
     sys.exit(1)
+if _ep.returncode != 0 or not os.path.exists(_emout):
+    print(_eo)
+    print("census3: emut census failed (tools/gates/emut/emut_run.py rc %d; build emut.exe with tools/gates/emut/build_emut.cmd "
+          "<dir> and set WHIRL_EMUT, or into build/emut/; the official LLVM: WHIRL_LLVM) - the census never runs one analyzer alone"
+          % _ep.returncode)
+    sys.exit(1)
 _ast = json.load(open(_astout, encoding="utf-8"))
-_covered, _errfiles = set(), set()
+_east = json.load(open(_emout, encoding="utf-8"))
 for _t in _ast["tus"]:
     if _t["errors"] or _t["rc"]:
         findings.append(f"clang errors in {_t['tu']} ({len(_t['errors'])}; the AST census of its bodies falls back to text OR AST): "
                         + (_t["errors"][0][-160:] if _t["errors"] else f"rc {_t['rc']}"))
-        _errfiles.add(_t["tu"][4:])
-    else:
-        _covered.update(d[4:] for d in _t["deps"] if d.startswith("src/"))
-# per position: strong (non-template-pattern, non-dependent) verdicts win over weak ones
-_pos = {}
-for _t in _ast["tus"]:
-    for rel, idx, mem, cls, v, why, weak, rf in _t["hits"]:
-        e = _pos.setdefault((rel, idx, mem), {"strong": [], "weak": [], "rf": set()})
-        e["weak" if weak else "strong"].append((v, why))
-        if rf: e["rf"].add(rf)
-_calls = {}
-for _t in _ast["tus"]:
-    for rel, idx, callee, v, why, rf, weak in _t["calls"]:
-        e = _calls.setdefault((rel, idx, callee), {"strong": [], "weak": [], "rf": set()})
-        e["weak" if weak else "strong"].append((v, why))
-        if rf: e["rf"].add(rf)
-_fname = {}
-for _t in _ast["tus"]: _fname.update(_t["funcs"])
-
-
-def _verdict(e):
-    lst = e["strong"] or e["weak"]
-    w = [why for v, why in lst if v == "w"]
-    return (w[0] if w else None)
-
-
-# accessors: a function whose return hands out a member writes it; a call that does not only read the result writes
-# what the callee hands out (fixpoint: an accessor returning another accessor's result)
-_leaks = {}
-for (rel, idx, mem), e in _pos.items():
-    if _verdict(e):
-        for rf in e["rf"]: _leaks.setdefault(rf, set()).add(mem)
-for _ in range(20):
-    grew = False
-    for (rel, idx, callee), e in _calls.items():
-        if callee in _leaks and _verdict(e):
-            for rf in e["rf"]:
-                s0 = _leaks.setdefault(rf, set()); n0 = len(s0); s0 |= _leaks[callee]; grew |= len(s0) != n0
-    if not grew: break
-_byfile = {}
-for (rel, idx, mem), e in _pos.items(): _byfile.setdefault(rel, []).append((idx, mem, e))
-_cbyfile = {}
-for (rel, idx, callee), e in _calls.items(): _cbyfile.setdefault(rel, []).append((idx, callee, e))
+for _t in _east["tus"]:
+    if _t["errors"] or _t["rc"]:
+        findings.append(f"emut (clang ExprMutationAnalyzer) errors in {_t['tu']} ({len(_t['errors'])}; its bodies fall back to "
+                        f"text OR Python OR emut): " + (_t["errors"][0][-160:] if _t["errors"] else f"rc {_t['rc']}"))
+_PX, _CX = ESE.index(_ast), ESE.index(_east)
+_pos, _calls, _fname, _leaks = _PX["pos"], _PX["calls"], _PX["fname"], _PX["leaks"]
+_covered, _errfiles = _PX["covered"], _PX["errfiles"]
+findings.extend(ESE.check_tus(_tus, _ast, _east))
+if not _PX["errfiles"] and not _CX["errfiles"]:   # with clang errors the error findings above already fail the check
+    findings.extend(ESE.check_positions(_PX, _CX))
+_eok = {k: v for k, v in cut.get("emut_read_ok", {}).items() if not k.startswith("_")}
+_eused = set()
+_etext = lambda rel: texts.get(rel, ("", ""))[1]
+_skip = lambda rel, idx, mem: holder_call(_etext(rel), idx, mem)
+_erows = []
 _inbody = set()
 xrows = []
 for key in list(rows):
     f, ln, ud, uw_text, uf, ut = rows[key]
-    aw, why_of, rd_of = [], {}, {}
-    for rel, a, b in branges.get(key, []):
-        for idx, mem, e in _byfile.get(rel, []):
-            if a <= idx < b:
-                _inbody.add((rel, idx, mem))
-                w = _verdict(e)
-                if w and mem not in why_of: why_of[mem] = (w, idx, rel)
-                if not w: rd_of.setdefault(mem, []).extend(why for _v, why in (e["strong"] or e["weak"]))
-        for idx, callee, e in _cbyfile.get(rel, []):
-            if a <= idx < b and callee in _leaks and _verdict(e):
-                for mem in sorted(_leaks[callee]):
-                    if mem not in why_of: why_of[mem] = (f"through {_fname.get(callee, callee)}(): {_verdict(e)}", idx, rel)
-    aw = sorted(why_of)
-    files_k = {r for r, _, _ in branges.get(key, [])}
+    rng = branges.get(key, [])
+    p_all, rd_of, inb = ESE.body_writes(_PX, rng, _skip)
+    c_all, _crd, cinb = ESE.body_writes(_CX, rng, _skip)
+    _inbody |= inb | cinb
+    files_k = {r for r, _, _ in rng}
     blind = [r for r in files_k if r in _errfiles or r not in _covered]
-    if blind and (ud or uw_text):
-        if not any(r in _errfiles for r in blind):
+    cblind = [r for r in files_k if r in _CX["errfiles"] or r not in _CX["covered"]]
+    if (blind or cblind) and (ud or uw_text):
+        if not any(r in _errfiles for r in blind) and blind:
             findings.append(f"no AST coverage (no parsed TU reads {', '.join(sorted(blind))}): {key}; text census writes used")
-        aw = sorted(set(aw) | set(uw_text))
+        if not any(r in _CX["errfiles"] for r in cblind) and cblind:
+            findings.append(f"no emut coverage (no emut TU reads {', '.join(sorted(cblind))}): {key}; text OR Python OR emut writes used")
+        why_of = {m: v[0] for m, v in c_all.items()}
+        for m, v in p_all.items(): why_of.setdefault(m, v[0])
         for m in uw_text:
             why_of.setdefault(m, ("text census (no AST)", 0, f))
+    else:
+        why_of, er, ef, eu = ESE.judge(key, p_all, c_all, _eok, _etext)
+        _erows += er; findings.extend(ef); _eused |= eu
+    aw = sorted(why_of)
     for m in sorted(set(aw) | set(uw_text)):
         if (m in aw) != (m in uw_text):
             tw = " | ".join(sorted({l.split("\t")[2] for l in text_wlog if l.split("\t")[0] == key and l.split("\t")[1] == m})) or "-"
@@ -916,10 +952,21 @@ for key in list(rows):
         rawt = texts.get(rel, ("", ""))[1]
         wlog.append(f"{key}\t{m}\t{w}\t{' '.join(rawt[max(0, idx - 40):idx + 60].split()) if rawt else '-'}")
     rows[key] = (f, ln, ud, aw, uf, ut)
+for k2 in sorted(set(_eok) - _eused):
+    findings.append(f"cut emut_read_ok entry no longer occurs (remove it): {k2}")
+open(os.path.join(OUT, "emut_xcheck.tsv"), "w", encoding="utf-8").write(
+    "entry\tmember\tpython\tclang\tfinal\tclass\tpython_why\tclang_why\n" + "".join("\t".join(r) + "\n" for r in _erows))
+_ecnt = {}
+for r in _erows: _ecnt[r[5].split(":")[0].split(" (")[0]] = _ecnt.get(r[5].split(":")[0].split(" (")[0], 0) + 1
+print(f"emut cross-check: {len(_east['tus'])} TUs ({sum(1 for t in _east['tus'] if t['errors'] or t['rc'])} with clang errors), "
+      f"{len(_CX['pos'])} member uses (Python {len(_PX['pos'])}); (entry, member) pairs where they disagree: {len(_erows)} "
+      + (", ".join(f"{k} {v}" for k, v in sorted(_ecnt.items())) or "-") + " (emut_xcheck.tsv)")
 # a write the AST sees outside every census entry (a body the text census did not find) is a finding
-for (rel, idx, mem), e in sorted(_pos.items()):
-    if (rel, idx, mem) not in _inbody and _verdict(e) and not rel.startswith("include:"):
-        findings.append(f"AST write outside every census entry: {rel}:{texts.get(rel, ('', ''))[1].count(chr(10), 0, idx) + 1} {mem} ({_verdict(e)})")
+for _ix, _nm in ((_PX, "AST"), (_CX, "emut")):
+    for (rel, idx, mem), e in sorted(_ix["pos"].items()):
+        if (rel, idx, mem) not in _inbody and ESE.verdict(e) and not rel.startswith("include:"):
+            findings.append(f"{_nm} write outside every census entry: {rel}:{texts.get(rel, ('', ''))[1].count(chr(10), 0, idx) + 1} {mem} ({ESE.verdict(e)})")
+
 # S0e (S0d review act-on 2): the cross-check bites - a row the text rules call a write and the AST a read is a FINDING
 # unless the cut pins it (cut "text_write_ok": "entry:member" -> {"text_why": the text rule's reason, "reason": why the
 # text rule is wrong there}); a pinned row that no longer occurs is a finding too (the list stays exact)

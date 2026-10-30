@@ -17,6 +17,7 @@ Runs, on a source tree (default: this repo):
   python -I tools/gates/engine_split_check.py --pin-write          # rewrite the pin (then add the review row)
   --reviews F: the review ledger (default tests/pins/engine_cut_reviews.tsv); --no-pin: skip the pin (self-test only)
   python -I tools/gates/engine_split_check.py --selftest [--work W] [--base R2 ...]   (engine_split_selftest.py)
+  python -I tools/gates/engine_split_check.py --ensure-emut   (arch025-emut2: find / build emut.exe, see ensure_emut)
 
 Exit 0 = "engine split check: ok", 1 = a finding (the report lines name it), 3 = the tools crashed.
 """
@@ -35,7 +36,11 @@ TOOLS = {"engine_split_census.py": "gates/engine_split_census.py", "engine_split
          "revtext.py": "impact/revtext.py", "e8_judge.py": "bench/e8_judge.py", "abjudge.py": "bench/abjudge.py",
          # S0d: the AST census (the member writes) and the P4 judges of srv_mt_* (S0c review consider 5)
          "engine_split_ast.py": "gates/engine_split_ast.py", "mt_equiv_compare.py": "gates/mt_equiv_compare.py",
-         "mt_equiv_rules.py": "gates/mt_equiv_rules.py", "mt_equiv_ignore_server.txt": "gates/mt_equiv_ignore_server.txt"}
+         "mt_equiv_rules.py": "gates/mt_equiv_rules.py", "mt_equiv_ignore_server.txt": "gates/mt_equiv_ignore_server.txt",
+         # arch025-emut2: clang's ExprMutationAnalyzer side of the census (the comparison module, the tool and its driver)
+         "engine_split_emut.py": "gates/engine_split_emut.py", "emut/emut.cpp": "gates/emut/emut.cpp",
+         "emut/emut_run.py": "gates/emut/emut_run.py", "emut/CMakeLists.txt": "gates/emut/CMakeLists.txt",
+         "emut/build_emut.cmd": "gates/emut/build_emut.cmd", "emut/emut_selftest.py": "gates/emut/emut_selftest.py"}
 BASE_BRANCHES = ["arch025-engine", "origin/arch025-engine"]   # S0c: the range is merge-base(HEAD, first that exists)..
 REL_PIN, REL_CUT, REL_REV = "tests/pins/engine_cut_arch.sha256", "tools/gates/engine_cut.json", "tests/pins/engine_cut_reviews.tsv"
 
@@ -253,7 +258,35 @@ def pin_check(cutp, pinp, reviews=REVIEWS, base="auto"):
     return bad
 
 
+EMUT_DIR = os.path.join(HERE, "emut")
+
+
+def ensure_emut():
+    """arch025-emut2: the census needs emut.exe (clang's ExprMutationAnalyzer on the official LLVM release). WHIRL_EMUT
+    names it; else build/emut/emut.exe of this repo, built once with tools/gates/emut/build_emut.cmd (about 1 min) and
+    rebuilt when emut.cpp / CMakeLists.txt change (stamp build/emut/emut.src.sha256). emut_run.py still refuses an exe
+    whose embedded source sha256 is not today's emut.cpp. Returns (path, None) or (None, why)."""
+    if os.environ.get("WHIRL_EMUT"):
+        return os.environ["WHIRL_EMUT"], None
+    bd = os.path.join(REPO, "build", "emut")
+    exe, stamp = os.path.join(bd, "emut.exe"), os.path.join(bd, "emut.src.sha256")
+    want = " ".join(sha_text(os.path.join(EMUT_DIR, f)) for f in ("emut.cpp", "CMakeLists.txt"))
+    if os.path.exists(exe) and os.path.exists(stamp) and open(stamp, encoding="utf-8").read().strip() == want:
+        return exe, None
+    print(f"engine split check: building emut.exe into {bd} (tools/gates/emut/build_emut.cmd, about 1 min)", flush=True)
+    r = subprocess.run(["cmd", "/c", os.path.join(EMUT_DIR, "build_emut.cmd"), bd], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    if r.returncode != 0 or not os.path.exists(exe):
+        return None, f"build_emut.cmd rc {r.returncode}: {(r.stdout + r.stderr)[-400:]}"
+    open(stamp, "w", encoding="utf-8").write(want + "\n")
+    return exe, None
+
+
 def main():
+    if "--ensure-emut" in sys.argv:
+        exe, why = ensure_emut()
+        print(f"emut: {exe}" if exe else f"emut: NONE ({why})")
+        return 0 if exe else 3
     if "--selftest" in sys.argv:
         r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "engine_split_selftest.py")] + sys.argv[1:])
         return r.returncode
@@ -275,6 +308,10 @@ def main():
     os.makedirs(work, exist_ok=True)
     lines = [] if "--no-pin" in sys.argv else pin_check(cutp, pinp, arg("--reviews", REVIEWS))
     for l in lines: print(l)
+    exe, why = ensure_emut()   # arch025-emut2: never one analyzer alone
+    if not exe:
+        print(f"census3: emut census failed (no emut.exe: {why})"); print("engine split check: CRASH (census)"); return 3
+    os.environ["WHIRL_EMUT"] = exe
     c = os.path.join(work, "census")
     r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "engine_split_census.py"), root, c, "--cut", cutp],
                        capture_output=True, text=True)
