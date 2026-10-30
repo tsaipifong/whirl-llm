@@ -1,0 +1,5 @@
+# alloc_seq pins for gfx1151 (tools/gates/alloc_seq_check.py; arch025-allocseq). One line per model:
+# <key> <mode> ctx<ctx> <model file> <bytes> events <N> seqhash <H>. Recorded 2026-10-30T10:12:15 on --device 8060s by C:\ClaudeWorkspace\whirl-work\scratch\a25_int6\exe_int6\whirl.exe.
+# Re-record (run ... --record) only when an allocation change is intended or the model file changed, and say why in the commit.
+moe precise ctx4096 Ornith-1.5-35B-A3B-MXFP4.gguf 19819767584 events 1233 seqhash 3f66e9179fb808cf
+swift precise ctx4096 Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf 15815469376 events 1386 seqhash 73292d682d84e161

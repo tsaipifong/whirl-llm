@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Written for WHIRL.
-//   whirl-hiprt-tests            fake / absent DLLs only (never loads the driver's runtime)
+//   whirl-hiprt-tests            fake / absent DLLs only (never loads the driver's runtime: checked, "fakes only: ... loaded=0")
 //   WHIRL_TEST_REAL_HIPRT=1      also loads this machine's real runtime through load() and checks
 //                                that a runtime which does not import rocm_kpack.dll never loads it
 
@@ -248,7 +248,15 @@ void testReal() {
 int main() {
     testTable();
     testFakes(rt::exeDir() + L"\\hiprt_fakes");
-    if (const char* e = std::getenv("WHIRL_TEST_REAL_HIPRT"); e && std::strcmp(e, "1") == 0) testReal();
+    if (const char* e = std::getenv("WHIRL_TEST_REAL_HIPRT"); e && std::strcmp(e, "1") == 0) {
+        testReal();
+    } else {
+        // arch025-allocseq (gate step cpu_hiprt_fakes): the fake-DLL part never loads the driver's runtime, so it
+        // touches no GPU; the step's rule reads this line
+        const bool drv = GetModuleHandleW(rt::k_dll) != nullptr;
+        std::printf("fakes only: %s loaded=%d\n", rt::k_dll_name, drv ? 1 : 0);
+        CHECK(!drv);
+    }
     std::printf("hiprt tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

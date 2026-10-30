@@ -165,8 +165,17 @@ foreach ($uf in @(Get-ChildItem -Path (Join-Path $repo "tests\unit") -Filter "*_
 # HIP runtime loader (ARCH-1 D-1): fake / absent runtimes, then this machine's runtime through load()
 # (a runtime that does not import rocm_kpack.dll must never load it)
 AddStep "cpu_hiprt" $false @($exe["whirl-hiprt-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "hiprt tests: [1-9]\d* passed, 0 failed") -and ($o -match "^real runtime: ok=1") } @{ WHIRL_TEST_REAL_HIPRT = "1" }
+# arch025-allocseq (PLAN 9.16): the fake-DLL part of whirl-hiprt-tests alone (testTable + testFakes: fake runtimes in
+# temporary folders), WHIRL_TEST_REAL_HIPRT removed, so it touches no driver and no GPU: CPU-only verifies skip cpu_hiprt
+# (it loads this machine's runtime) and then nothing killed the hiprt-* loader mutants (arch025:gpumut-a-survivors).
+# The rule needs the test's own proof that the driver runtime was never loaded ("fakes only: amdhip64_7.dll loaded=0")
+# and no "real runtime:" line.
+AddStep "cpu_hiprt_fakes" $false @($exe["whirl-hiprt-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "hiprt tests: [1-9]\d* passed, 0 failed") -and ($o -match "^fakes only: amdhip64_7\.dll loaded=0$") -and -not ($o -match "^real runtime:") } @{ WHIRL_TEST_REAL_HIPRT = $null }
 # arch6b: without hiprt_fakes\ next to the exe the test must fail with a message, not crash (0xC0000005 in gate M_r97)
 AddStep "cpu_hiprt_nofakes" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\hiprt_nofakes_check.ps1"), "-Build", $Build, "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^hiprt nofakes check: ok") }
+# arch025-allocseq: the GPU step alloc_seq's checker on planted logs (a fake whirl.exe: pin match, m1-state-order reorder,
+# missing pin, wrong GPU, probe-child log, cold tune, non-deterministic record, stray WHIRL_* variable ...), CPU only
+AddStep "cpu_alloc_seq_selftest" $false @($py, "-I", (Join-Path $repo "tools\gates\alloc_seq_check.py"), "--selftest") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^alloc seq selftest: ([1-9]\d*)/\1 as expected") }
 # REVIEW-ARCH3 P3-3: a new hip::Arch enumerator without a device::Profile row must not compile (MSVC)
 AddStep "cpu_profile_switch" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\impact\profile_switch_check.ps1"), "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^profile switch check: ok") }
 # arch024-S11c (F-3): the CPU pins (tests/pins/check.ps1: prompt token hash of tests/pins/requests.jsonl for Swift and
@@ -320,6 +329,15 @@ foreach ($m in @($denseKeys) + @("moe")) {
 # Both cards; no memory hog; a loading run is stopped at "numerics at load" (6-10 s per run on the 8060S).
 AddStep "st_ctx_refuse" $true @($pwsh, "-NoProfile", "-Command", "& '$pwsh' -NoProfile -File '$(Join-Path $repo "tools\gates\ctx_refuse_check.ps1")' -SelfTest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$pwsh' -NoProfile -File '$(Join-Path $repo "tools\gates\ctx_refuse_check.ps1")' -Exe '$($exe["whirl"])' -Model '$SW' -Device $Device -Work '@WORK@'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^ctx refuse check selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^ctx refuse check: PASS limit=\d+ room=\d+") }
+# arch025-allocseq (PLAN N11-alloc): invariant I2 (the Model's device / pinned allocations keep their sizes and order)
+# on the GPU. tools/gates/alloc_seq_check.py: its selftest, then per model (Swift, Ornith) `whirl chat <gguf> x --precise
+# --ctx 4096 --max-tokens 1 --device <card> --dump-only` with WHIRL_ALLOC_LOG; the chat process's seqhash must equal the
+# card's pin in tests/pins/alloc_seq/<arch>.txt (recorded on that GPU with `run ... --record`; a missing pin fails).
+# Outputs cannot show an order change: mutant m1-state-order (DeltaNet state before the layer's weights) survived every
+# golden / selftest step (arch025:gpumut-a-survivors). Explicit --ctx and --dump-only keep VRAM-budget-sized allocations
+# out of the sequence (progress/arch025-allocseq.PRIOR_ART.md). The output must name this card's arch.
+AddStep "alloc_seq" $true @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\alloc_seq_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\alloc_seq_check.py")' run --exe '$($exe["whirl"])' --device $Device --arch $arch --model 'swift=$SW' --model 'moe=$MX' --pins '$(Join-Path $repo "tests\pins\alloc_seq")' --work '@WORK@'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^alloc seq selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^alloc seq check: ok \(2/2 cells, $arch\)$") }
 foreach ($m in @($denseKeys) + @("moe")) {
     AddStep "golden_$m" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden.ps1"), "check", "-Arch", $arch, "-Models", $m, "-Exe", $exe["whirl"], "-GoldenRoot", "@GOLDEN@",
                          "-ServerExe", $exe["whirl-server"], "-GateExe", $exe["whirl-server-gate"], "-Port", "$($port + 4)") `
