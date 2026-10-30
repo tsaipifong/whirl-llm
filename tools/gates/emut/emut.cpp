@@ -71,7 +71,7 @@ struct Collector : public MatchFinder::MatchCallback {
   std::map<const Stmt*, std::unique_ptr<ExprMutationAnalyzer>> emas;
   std::unique_ptr<ASTNameGenerator> namer;
   ASTContext* ctx = nullptr;
-  int nopos = 0, outside = 0;
+  int nopos = 0, outside = 0, implicit = 0;
 
   bool tracked(const FieldDecl* F, std::string* cls) {
     const RecordDecl* R = F->getParent();
@@ -189,6 +189,9 @@ struct Collector : public MatchFinder::MatchCallback {
     files.insert(file);
     const FunctionDecl* fn = nullptr;
     const Stmt* S = scopeOf(DynTypedNode::create(*E), &fn);
+    // arch025-emut2: compiler-generated (implicit / defaulted) members have no written body; the Python analyzer and the
+    // census see their effect at the use (an assignment / construction of the whole object), not inside them
+    if (fn && (fn->isImplicit() || fn->isDefaulted())) { ++implicit; return; }
     bool weak = E->isTypeDependent() || E->isValueDependent() || (fn && fn->isDependentContext());
     std::string v = "r", why = "read (findMutation and findPointeeMutation null)", rf;
     if (S) {
@@ -226,6 +229,7 @@ struct Collector : public MatchFinder::MatchCallback {
     if (!ref && !ptr) return;
     const FunctionDecl* fn = nullptr;
     const Stmt* S = scopeOf(DynTypedNode::create(*C), &fn);
+    if (fn && (fn->isImplicit() || fn->isDefaulted())) return;   // arch025-emut2: as judge()
     bool weak = C->isTypeDependent() || (fn && fn->isDependentContext());
     std::string v = "r", why = ref ? "reference result read" : "pointer result: pointee read", rf;
     if (S && !ExprMutationAnalyzer::isUnevaluated(C, *ctx)) {
@@ -276,6 +280,12 @@ struct Collector : public MatchFinder::MatchCallback {
 
 }  // namespace
 
+// arch025-emut2: the sha256 of this file (CRLF -> LF) at configure time (CMakeLists.txt); emut_run.py refuses an exe
+// whose source is not today's emut.cpp (a stale build must not judge silently)
+#ifndef EMUT_SRC_SHA256
+#define EMUT_SRC_SHA256 "unknown"
+#endif
+
 int main(int argc, const char** argv) {
   auto P = tooling::CommonOptionsParser::create(argc, argv, Cat);
   if (!P) { llvm::errs() << P.takeError(); return 2; }
@@ -305,8 +315,10 @@ int main(int argc, const char** argv) {
                          {"deps", std::move(deps)},
                          {"odd", std::move(C.odd)},
                          {"nopos", C.nopos},
+                         {"implicit", C.implicit},
                          {"outside", C.outside},
-                         {"analyzer", "clang ExprMutationAnalyzer (LLVM " LLVM_VERSION_STRING ")"}};
+                         {"analyzer", "clang ExprMutationAnalyzer (LLVM " LLVM_VERSION_STRING ")"},
+                         {"src_sha256", EMUT_SRC_SHA256}};
   std::error_code ec;
   llvm::raw_fd_ostream os(OptOut, ec);
   if (ec) { llvm::errs() << "emut: cannot write " << OptOut << ": " << ec.message() << "\n"; return 2; }

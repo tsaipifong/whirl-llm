@@ -25,6 +25,13 @@ set_target_properties(LLVMDebugInfoPDB PROPERTIES INTERFACE_LINK_LIBRARIES "${_p
 message(STATUS "DIA SDK: ${_dia}")
 message(STATUS "LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_INSTALL_PREFIX}; RTTI ${LLVM_ENABLE_RTTI}; EH ${LLVM_ENABLE_EH}")
 add_executable(emut emut.cpp)
+# arch025-emut2: embed the sha256 of emut.cpp (CRLF -> LF); a source change re-runs configure, emut_run.py compares it
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/emut.cpp")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/emut.cpp" _emut_src)
+string(REPLACE "\r\n" "\n" _emut_src "${_emut_src}")
+string(SHA256 _emut_sha "${_emut_src}")
+target_compile_definitions(emut PRIVATE EMUT_SRC_SHA256="${_emut_sha}")
+message(STATUS "emut.cpp sha256 ${_emut_sha}")
 set_target_properties(emut PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 target_include_directories(emut SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 separate_arguments(_llvm_defs NATIVE_COMMAND "${LLVM_DEFINITIONS}")

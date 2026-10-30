@@ -16,13 +16,17 @@ Output: {"clang": emut path, "analyzer": "...", "tus": [{"tu", "errors", "rc", "
   hits  [rel, index, member, class, "w"|"r", why, weak, returned_from]   (why starts with "write: " / "pointee-write: "
         / "read"; index = character offset in the file read as text, as engine_split_ast.py)
   calls [rel, index, callee_mangled, "w"|"r", why, returned_from, weak]
-Exit 0 ok, 3 tool / LLVM missing.
+Exit 0 ok, 3 tool / LLVM missing, or emut.exe stale (arch025-emut2: the exe embeds the sha256 of the emut.cpp it was
+built from, CRLF -> LF; it must be this folder's emut.cpp).
+arch025-emut2: --cache DIR keeps each TU's result keyed by the content of every tree file the TU read (the tool's deps),
+the exe, this script, emut.cpp, the classes, the TU and the LLVM / MSVC identity (as engine_split_ast.py does), so a
+self-test mutant re-runs only the TUs whose files it edits.
 """
 import hashlib, json, os, re, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VERSION = "emut-1"
+VERSION = "emut-2"
 DEFINES = ["-DNOMINMAX", "-DWHIRL_WITH_HIP=1", "-DWIN32_LEAN_AND_MEAN", "-D_CRT_SECURE_NO_WARNINGS"]
 STDFLAGS = ["--target=x86_64-pc-windows-msvc", "-std=c++20", "-fsyntax-only", "-Wno-everything"]
 VERSION_H = ('#pragma once\n#define WHIRL_VERSION_MAJOR 0\n#define WHIRL_VERSION_MINOR 0\n#define WHIRL_VERSION_PATCH 0\n'
@@ -43,6 +47,35 @@ def resource_dir(llvm):
     if not os.path.isdir(base): return None
     vs = sorted(os.listdir(base))
     return os.path.join(base, vs[-1]) if vs else None
+
+
+def sha_text(p):
+    return hashlib.sha256(open(p, "rb").read().replace(b"\r\n", b"\n")).hexdigest()
+
+
+_ID = {}
+
+
+def llvm_identity(llvm):
+    """the LLVM folder + its clang version + the system include list its driver picks (MSVC STL / Windows SDK versions)"""
+    if llvm in _ID: return _ID[llvm]
+    cl = os.path.join(llvm, "bin", "clang++.exe")
+    v, inc = [], []
+    if os.path.exists(cl):
+        v = subprocess.run([cl, "--version"], capture_output=True, text=True).stdout.splitlines()[:1]
+        r = subprocess.run([cl] + STDFLAGS[:2] + ["-xc++", "-E", "-v", "-"], input="", capture_output=True, text=True)
+        inc = [x for x in re.findall(r"^ (\S.*)$", r.stderr, re.M) if not x.startswith(('"', "(")) and "-cc1" not in x]
+    _ID[llvm] = hashlib.sha256("\n".join([os.path.abspath(llvm)] + v + inc).encode()).hexdigest()[:16]
+    return _ID[llvm]
+
+
+def deps_hash(root, deps, extra):
+    h = hashlib.sha256(extra.encode())
+    for d in deps:
+        h.update(d.encode() + b"|")
+        try: h.update(hashlib.sha256(open(os.path.join(root, d), "rb").read().replace(b"\r\n", b"\n")).digest())
+        except OSError: h.update(b"<missing>")
+    return h.hexdigest()
 
 
 class PosMap:
@@ -92,7 +125,33 @@ def real_case(root, rel):
     return ("include:" if sub == "include" else "") + "/".join(out)
 
 
-def run_tu(emut, llvm, root, tu_rel, classes, gen, work):
+def run_tu(emut, llvm, root, tu_rel, classes, gen, work, extra, cache):
+    """one TU, cached by the content of every tree file it read (arch025-emut2)"""
+    cdir = os.path.join(cache, re.sub(r"[^\w.]+", "_", tu_rel)) if cache else None
+    if cdir and os.path.isdir(cdir):
+        for f in sorted(os.listdir(cdir)):
+            if not f.endswith(".deps"): continue
+            deps = [d for d in open(os.path.join(cdir, f), encoding="utf-8").read().split("\n") if d]
+            rp = os.path.join(cdir, deps_hash(root, deps, extra) + ".json")
+            if os.path.exists(rp):
+                try: return json.load(open(rp, encoding="utf-8"))
+                except ValueError: pass
+    res = _run_tu(emut, llvm, root, tu_rel, classes, gen, work)
+    if cdir and not res["errors"] and res["rc"] == 0 and res.get("src_sha256"):
+        os.makedirs(cdir, exist_ok=True)
+        h = deps_hash(root, res["deps"], extra)
+        tmp = os.path.join(cdir, f"{h}.json.{os.getpid()}.tmp")
+        json.dump(res, open(tmp, "w", encoding="utf-8"))
+        os.replace(tmp, os.path.join(cdir, h + ".json"))
+        dp = os.path.join(cdir, hashlib.sha256("\n".join(res["deps"]).encode()).hexdigest()[:16] + ".deps")
+        if not os.path.exists(dp):
+            tmp = dp + f".{os.getpid()}.tmp"
+            open(tmp, "w", encoding="utf-8").write("\n".join(res["deps"]) + "\n")
+            os.replace(tmp, dp)
+    return res
+
+
+def _run_tu(emut, llvm, root, tu_rel, classes, gen, work):
     src = os.path.join(root, tu_rel)
     out = os.path.join(work, re.sub(r"[^\w.]+", "_", tu_rel) + f".{os.getpid()}.json")
     flags = STDFLAGS + DEFINES + ["-I" + os.path.join(root, "src"), "-I" + os.path.join(root, "include"), "-I" + gen]
@@ -141,6 +200,7 @@ def run_tu(emut, llvm, root, tu_rel, classes, gen, work):
         if q: res["calls"].append(q + [callee, v, why, rf, weak])
     res["funcs"] = d.get("funcs", {})
     res["analyzer"] = d.get("analyzer")
+    res["src_sha256"] = d.get("src_sha256")
     return res
 
 
@@ -155,16 +215,22 @@ def main():
     emut = arg("--emut") or os.environ.get("WHIRL_EMUT")
     if not emut or not os.path.exists(emut) or not os.path.isdir(llvm):
         print(f"emut_run: NO TOOL (emut {emut}, llvm {llvm}; set WHIRL_EMUT / WHIRL_LLVM)"); return 3
+    want = sha_text(os.path.join(HERE, "emut.cpp"))
+    esha = hashlib.sha256(open(emut, "rb").read()).hexdigest()
+    extra = "|".join([VERSION, sha_text(os.path.abspath(__file__)), want, esha, ",".join(sorted(classes)), llvm_identity(llvm)])
     work = cache or os.path.join(os.path.dirname(os.path.abspath(out)), "emut_work")
     gen = os.path.join(work, "_generated")
     os.makedirs(os.path.join(gen, "whirl"), exist_ok=True)
     vh = os.path.join(gen, "whirl", "version.h")
     if not os.path.exists(vh): open(vh, "w").write(VERSION_H)
     with ThreadPoolExecutor(max(1, jobs)) as ex:
-        res = list(ex.map(lambda t: run_tu(emut, llvm, root, t, classes, gen, work), tus))
+        res = list(ex.map(lambda t: run_tu(emut, llvm, root, t, classes, gen, work, extra + "|" + t, cache), tus))
+    stale = sorted({r.get("src_sha256") or "none" for r in res if not r["errors"]} - {want})
+    if stale:
+        print(f"emut_run: NO TOOL (stale emut.exe {emut}: built from emut.cpp sha256 {', '.join(s[:16] for s in stale)}, "
+              f"this folder's emut.cpp is {want[:16]}; rebuild with build_emut.cmd)"); return 3
     an = next((r.get("analyzer") for r in res if r.get("analyzer")), None)
-    json.dump({"clang": emut, "analyzer": an, "version": VERSION,
-               "emut_sha256": hashlib.sha256(open(emut, "rb").read()).hexdigest(), "tus": res},
+    json.dump({"clang": emut, "analyzer": an, "version": VERSION, "emut_sha256": esha, "src_sha256": want, "tus": res},
               open(out, "w", encoding="utf-8"))
     return 0
 
