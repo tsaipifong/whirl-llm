@@ -7,7 +7,7 @@ must pass. Mutants come from design v2 (M1-M5), review2 (N1-N8), design v3 (X1-X
 write of DESIGN 1.5 (AW1), and S0's own "fix the cut the obvious way" variants (*b: the deeper rule must still
 catch it) and cut-pin mutants (P1-P3, review3 C2).
 
-  python -I tools/gates/engine_split_selftest.py [--work W] [--base R ...] [--jobs N]
+  python -I tools/gates/engine_split_selftest.py [--work W] [--base R ...] [--jobs N] [--only ID,ID,...]
   --base: source trees with src/ (and include/); default = this repo. Mutants run on the FIRST base; every base
   runs as a baseline (B0, B1, ...). X13 (the leg-1 tree) runs on the second base when one is given.
 Exit 0 = "engine split selftest: N/N as expected".
@@ -32,6 +32,8 @@ def arg(name, default=None):
 bases = [sys.argv[i + 1] for i, x in enumerate(sys.argv) if x == "--base"] or [REPO]
 WORK = arg("--work", os.path.join(REPO, "build", "engine_split_selftest"))
 JOBS = int(arg("--jobs", "8"))
+# arch025-engine-mfix: --only id,id,... runs the baselines and only those cases (git cases G*, A1, A2 by id too)
+ONLY = set(x for x in (arg("--only", "") or "").split(",") if x)
 LEDGER = os.path.join(WORK, "ledger", "engine_cut_reviews.tsv")   # S0c: synthetic ledger (setup_ledger)
 # S0d: every mutant's census shares one AST cache (keyed by the content of each TU's files; a mutant re-parses only the
 # TUs whose files it edits)
@@ -149,17 +151,38 @@ def fnd(t):
     return r"^   " + re.escape(t)
 
 
-# arch025-emut2 helpers: a holder class DrafterCtx (cut holders dc_ -> DrafterCtx, module server.drafter_ctx) with its own
-# data gap_, a writing method, a method that assigns *this and a const method; Engine holds DrafterCtx dc_
-ENGCLS = "class Engine final : public EngineApi {\n"
+# arch025-engine-mfix: S5 made emit a free function of server.slot_output (no `this`, no Engine). A slot_output mutant
+# that reaches Engine has to be handed one: emit gains a defaulted Engine* parameter (the 3 call sites stay as they are),
+# engine_output.cpp includes engine.h and Engine names emit a friend (finishJob / gov_hold_ / ... are private). The census
+# must still see the edge from emit through eng->. The `this` receiver shapes these cases had in Engine::emit before S5
+# keep a twin on dropCache (ids *t: a slot_cache member function still has `this`).
+EMIT_E = "bool emit(const chat::ChatTokens& ct_, Slot& sl, std::uint32_t t, Engine* eng) {\n"
+_EO_INC = '#include "server/engine_output.h"\n'
+
+
+def _E(code, pre=""):
+    return [(EOH, EMIT_DECL, "class Engine;\nbool emit(const chat::ChatTokens& ct_, Slot& sl, std::uint32_t t, Engine* eng = nullptr);\n"),
+            (EO, _EO_INC, _EO_INC + '#include "server/engine.h"\n'),
+            (EH, HOLD, HOLD + "\n    friend bool emit(const chat::ChatTokens& ct_, Slot& sl, std::uint32_t t, Engine* eng);"),
+            (EO, EMIT, pre + EMIT_E + "    " + code + "\n")]
+
+
+# arch025-emut2 holder cases, arch025-engine-mfix: on the real DrafterCtx of S4 (server/engine_drafter.h, Engine member
+# dc_{bst_, m_, opt_}, cut holders dc_ -> DrafterCtx, module server.drafter_ctx); the cases add only what they need to
+# it: its own data gap_, a writing method, a method that assigns *this, a const method, and (its reference members delete
+# the implicit one) a copy assignment, so the holder itself can be assigned as with the synthetic DrafterCtx before. The
+# copy assignment writes nothing: an operator member is not a census entry, so a write in its body is (rightly, fail
+# closed) an 'AST / emut write outside every census entry' finding, which would hide H1 / H7
+ED = "server/engine_drafter.h"
 STARTJ = "bool Engine::startJob(Slot& sl, Job& job) {\n"
-_DCX = ("struct DrafterCtx {\n    int gap_ = 0;\n    void dflTouch(int n) { gap_ += n; }\n"
-        "    void dflClear() { *this = DrafterCtx{}; }\n    int dflGap() const { return gap_; }\n};\n\n")
+_DCA = "    const EngineOptions& opt_;\n"
+_DCX = ("    int gap_ = 0;\n    void dflTouch(int n) { gap_ += n; }\n    void dflClear() { DrafterCtx c{*this}; c.gap_ = 0; *this = c; }\n"
+        "    int dflGap() const { return gap_; }\n    DrafterCtx& operator=(const DrafterCtx& o) { (void)o; return *this; }\n")
 
 
 def _H(code, where=None):
     rel, anchor = where or (EP, DROPC)
-    return [(EH, ENGCLS, _DCX + ENGCLS), (EH, HOLD, HOLD + "\n    DrafterCtx dc_;"), (rel, anchor, anchor + "    " + code + "\n")]
+    return [(ED, _DCA, _DCA + _DCX), (rel, anchor, anchor + "    " + code + "\n")]
 
 
 def _HC(c):
@@ -190,15 +213,18 @@ MUT = [
      None, [], ow("Engine:gov_pending_")),
     ("M3", "a definition in a file not named engine_*", [("server/vram_watch.cpp", None, '#include "engine.h"\nnamespace whirl::server {\nvoid Engine::vramNote2() { gov_warn_.clear(); }\n}\n')],
      None, [], unas("vramNote2")),
-    ("M4", "emit -> finishJob (slot_output calls up)", [(EO, EMIT, EMIT + "    if (t == 0xffffffffu) finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("M4", "emit -> finishJob (slot_output calls up; S5 free emit: through a defaulted Engine* parameter)", _E("if (eng && t == 0xffffffffu) eng->finishJob(sl);"), None, [], viol(SO, SE, "call", "emit->finishJob")),
     ("M5", "dropCache -> startJob", [(EP, DROPC, DROPC + "    if (sl.job && sl.pos == 0xffffffffu) (void)startJob(sl, *sl.job);\n")], None, [], viol(SC, SS, "call", "dropCache->startJob")),
-    ("N1", "this->gov_hold_ read in emit", [(EO, EMIT, EMIT + "    if (this->gov_hold_) t = 0;\n")], None, [], viol(SO, GV, "data", "emit:gov_hold_")),
-    ("N2", "this->finishJob(sl) in emit", [(EO, EMIT, EMIT + "    if (t == 1u) this->finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
-    ("N3", "Engine::finishJob(sl) in emit", [(EO, EMIT, EMIT + "    if (t == 1u) Engine::finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
-    ("N4", "emit writes spec_on_ (spec_cycle's)", [(EO, EMIT, EMIT + "    spec_on_ = false;\n")], None, [], ow("emit:spec_on_")),
-    ("N5", "emit writes fl_ (prefill's)", [(EO, EMIT, EMIT + "    fl_.epoch = Clock::now();\n")], None, [], ow("emit:fl_")),
+    ("N1", "eng->gov_hold_ read in emit (pre-S5 this->gov_hold_; that shape: N1t)", _E("if (eng && eng->gov_hold_) t = 0;"), None, [], viol(SO, GV, "data", "emit:gov_hold_")),
+    ("N1t", "this->gov_hold_ read in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    if (this->gov_hold_) return;\n")], None, [], viol(SC, GV, "data", "dropCache:gov_hold_")),
+    ("N2", "Engine& e = *eng; e.finishJob(sl) in emit (pre-S5 this->finishJob; that shape: N2t)", _E("if (eng && t == 1u) { Engine& e = *eng; e.finishJob(sl); }"), None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("N2t", "this->finishJob(sl) in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    if (sl.pos == 0xffffffffu) this->finishJob(sl);\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
+    ("N3", "eng->Engine::finishJob(sl) in emit (qualified; pre-S5 Engine::finishJob(sl); that shape: N3t)", _E("if (eng && t == 1u) eng->Engine::finishJob(sl);"), None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("N3t", "Engine::finishJob(sl) in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    if (sl.pos == 0xffffffffu) Engine::finishJob(sl);\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
+    ("N4", "emit writes spec_on_ (spec_cycle's) through eng", _E("if (eng) eng->spec_on_ = false;"), None, [], ow("emit:spec_on_")),
+    ("N5", "emit writes fl_ (prefill's) through eng", _E("if (eng) eng->fl_.epoch = Clock::now();"), None, [], ow("emit:fl_")),
     ("N6", "macro alias of a member in an engine file", [(EC, RUNL, "#define WHX_HOLD gov_hold_\n" + RUNL + "    if (WHX_HOLD) {}\n")], None, [], fnd("#define in an engine file server/engine.cpp")),
-    ("N6b", "S5: the same macro alias in slot_output's file (listed in the cut's files)", [(EO, EMIT, "#define WHX_HOLD gov_hold_\n" + EMIT + "    if (WHX_HOLD) t = 0;\n")], None, [], fnd("#define in an engine file server/engine_output.cpp")),
+    ("N6b", "S5: the same macro alias in slot_output's file (listed in the cut's files)", _E("if (eng && eng->WHX_HOLD) t = 0;", "#define WHX_HOLD gov_hold_\n"), None, [], fnd("#define in an engine file server/engine_output.cpp")),
     ("N7", "emit becomes SlotOutput::emit and calls finishJob", [(EO, EMIT, "bool SlotOutput::emit(Slot& sl, std::uint32_t t) {\n    if (t == 1u) finishJob(sl);\n"), (EOH, EMIT_DECL, "")],
      None, [], unas("SlotOutput::emit")),
     ("N7b", "N7 with the cut 'fixed': SlotOutput::emit added to slot_output (alias -> emit): the upward call still fails",
@@ -224,7 +250,7 @@ MUT = [
      [("server/slot_output.cpp", None, '#include "engine.h"\nnamespace whirl::server {\nbool flushOutFree(Slot& sl, const GovState& gst_) { return gst_.gov_hold_; }\n}\n')],
      lambda c: (c["modules"][SO].setdefault("files", []).append("server/slot_output.cpp"), c["modules"][SO]["funcs"].append("flushOutFree")),
      ["--no-pin"], viol(SO, GV, "data", "flushOutFree:gov_hold_")),
-    ("X10", "emit reads vis_ (not in slot_output's refs)", [(EO, EMIT, EMIT + "    if (vis_.encoded() == 7u) t = 0;\n")], None, [], r"^== reference lists \(R4\): uses outside the list: .*server\.slot_output uses vis_"),
+    ("X10", "emit reads vis_ (not in slot_output's refs) through eng", _E("if (eng && eng->vis_.encoded() == 7u) t = 0;"), None, [], r"^== reference lists \(R4\): uses outside the list: .*server\.slot_output uses vis_"),
     ("X11", "cut puts stats in two core categories", [], lambda c: c["core_categories"]["accessor"].append("stats"), ["--no-pin"], r"^== core categories overlap \(R6\): stats in "),
     ("X12", "--core on today's tree (core still schedules) must fail", [], None, ["--core"], r"^== --core \(leg-end shape of server\.engine, R5 / R6\): [1-9]\d* problems"),
     ("X13", "leg-1 tree (second base): emit -> finishJob", [(EC, EMIT_OLD, EMIT_OLD + "    if (t == 0xffffffffu) finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob"), 1),
@@ -270,10 +296,15 @@ MUT = [
     ("P3", "cut edit: a holder added", [], lambda c: c["holders"].update({"zz_": "SlotPages"}), [], r"^engine cut pin: MISMATCH section holders"),
     # --- S0 review (progress/arch025-engine.S0.REVIEW.md; reviewer mutants scratch/a25_engine/s0review/s0r_mut.py), S0b ---
     # act-on 2: calls through receivers the census does not resolve must not be dropped
-    ("U1", "(*this).finishJob(sl) in emit", [(EO, EMIT, EMIT + "    if (t == 1u) (*this).finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
-    ("U2", "two-level auto alias: auto& me = *this; auto& me2 = me; me2.stats() in emit",
-     [(EO, EMIT, EMIT + "    { auto& me = *this; auto& me2 = me; (void)me2.stats(); }\n")], None, [], viol(SO, ENG, "call", "emit->stats")),
-    ("U3", "control: auto& me = *this; me.stats() in emit", [(EO, EMIT, EMIT + "    { auto& me = *this; (void)me.stats(); }\n")], None, [], viol(SO, ENG, "call", "emit->stats")),
+    ("U1", "(*eng).finishJob(sl) in emit (pre-S5 (*this); that shape: U1t)", _E("if (eng && t == 1u) (*eng).finishJob(sl);"), None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("U1t", "(*this).finishJob(sl) in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    if (sl.pos == 0xffffffffu) (*this).finishJob(sl);\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
+    ("U2", "two-level auto alias: auto& me = *eng; auto& me2 = me; me2.stats() in emit (pre-S5 *this, an edge; that shape: U2t). From a "
+     "parameter the census does not type the alias and stats is also an untracked class's method: not dropped, an unresolved-call finding",
+     _E("if (eng) { auto& me = *eng; auto& me2 = me; (void)me2.stats(); }"), None, [], fnd("unresolved call not in the cut's unresolved_ok: emit: me2.stats(")),
+    ("U2t", "two-level auto alias: auto& me = *this; auto& me2 = me; me2.stats() in dropCache (dropCache twin of the pre-S5 `this` shape)",
+     [(EP, DROPC, DROPC + "    { auto& me = *this; auto& me2 = me; (void)me2.stats(); }\n")], None, [], viol(SC, ENG, "call", "dropCache->stats")),
+    ("U3", "control: Engine& me = *eng; me.stats() in emit (a typed alias is an edge; pre-S5 auto& me = *this, that shape: U3t)", _E("if (eng) { Engine& me = *eng; (void)me.stats(); }"), None, [], viol(SO, ENG, "call", "emit->stats")),
+    ("U3t", "control: auto& me = *this; me.stats() in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    { auto& me = *this; (void)me.stats(); }\n")], None, [], viol(SC, ENG, "call", "dropCache->stats")),
     ("U4", "a new unresolved call (unknown receiver, name also an untracked method) is a finding, not only unresolved.txt",
      [(EO, EMIT, EMIT + "    if (t == 7u && sl.job) (void)sl.job->stats();\n")], None, [], fnd("unresolved call not in the cut's unresolved_ok: emit: ")),
     # act-on 1: write shapes the census missed (W1-W10), the accessor returning a reference (W11)
@@ -304,8 +335,8 @@ MUT = [
      lambda c: c["new_funcs"].update({"govActive": SO}), [], r"^engine cut pin: MISMATCH new_funcs govActive"),
     ("P4b", "a new planned function added to new_funcs", [], lambda c: c["new_funcs"].update({"zzPlanned": SO}), [], r"^engine cut pin: MISMATCH new_funcs zzPlanned"),
     ("P4c", "a new planned member added to new_data", [], lambda c: c["new_data"].update({"zz_": SO}), [], r"^engine cut pin: MISMATCH new_data zz_"),
-    ("P5", "new function peekHold() (slot_output via new_funcs) reads governor data; emit calls it",
-     [(EH, HOLD, HOLD + "\n    bool peekHold() const;"), (EO, EMIT, "bool Engine::peekHold() const { return gov_hold_; }\n" + EMIT + "    if (peekHold()) t = 0;\n")],
+    ("P5", "new function peekHold() (slot_output via new_funcs) reads governor data; emit calls it (through eng)",
+     [(EH, HOLD, HOLD + "\n    bool peekHold() const;"), *_E("if (eng && eng->peekHold()) t = 0;", "bool Engine::peekHold() const { return gov_hold_; }\n")],
      lambda c: c["new_funcs"].update({"peekHold": SO}), ["--no-pin"], viol(SO, GV, "data", "peekHold:gov_hold_")),
     ("P6", "a checker tool edited (census copy): the tools hash in the pin differs",
      [("TOOL:engine_split_census.py", "APPEND", "\n# a harmless-looking edit\n")], None, [], r"^engine cut pin: MISMATCH tools engine_split_census\.py"),
@@ -337,8 +368,10 @@ MUT = [
     ("C1", "control: init capture by reference [&q = stop_]{ q = true; }() (dropCache)", [(EP, DROPC, DROPC + "    [&q = stop_] { q = true; }();\n")], None, [], ow("dropCache:stop_")),
     ("C2", "control: std::exchange(stop_, true) (dropCache)", [(EP, DROPC, DROPC + "    (void)std::exchange(stop_, true);\n")], None, [], ow("dropCache:stop_")),
     ("C3", "control: *queue_.begin() = nullptr (dropCache)", [(EP, DROPC, DROPC + "    if (!queue_.empty()) *queue_.begin() = nullptr;\n")], None, [], ow("dropCache:queue_")),
-    ("C4", "control: auto p = this; p->finishJob(sl) in emit (unknown pointer alias)", [(EC, EMIT, EMIT + "    if (t == 1u) { auto p = this; p->finishJob(sl); }\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
-    ("C5", "control: std::invoke(&Engine::finishJob, this, sl) in emit", [(EC, EMIT, EMIT + "    if (t == 1u) std::invoke(&Engine::finishJob, this, sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("C4", "control: auto p = eng; p->finishJob(sl) in emit (pointer alias; pre-S5 auto p = this, that shape: C4t)", _E("if (eng && t == 1u) { auto p = eng; p->finishJob(sl); }"), None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("C4t", "control: auto p = this; p->finishJob(sl) in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    if (sl.pos == 0xffffffffu) { auto p = this; p->finishJob(sl); }\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
+    ("C5", "control: std::invoke(&Engine::finishJob, eng, sl) in emit (pre-S5 this; that shape: C5t)", _E("if (eng && t == 1u) std::invoke(&Engine::finishJob, eng, sl);"), None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("C5t", "control: std::invoke(&Engine::finishJob, this, sl) in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    if (sl.pos == 0xffffffffu) std::invoke(&Engine::finishJob, this, sl);\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
     # S0c's own probes of the inverted rule (shapes no earlier list enumerated) and read controls that must stay reads
     ("Z1", "std::ref(stop_).get() = true (dropCache)", [(EP, DROPC, DROPC + "    std::ref(stop_).get() = true;\n")], None, [], ow("dropCache:stop_")),
     ("Z2", "bool* p = std::addressof(stop_); *p = true (dropCache)", [(EP, DROPC, DROPC + "    { bool* p = std::addressof(stop_); *p = true; }\n")], None, [], ow("dropCache:stop_")),
@@ -493,13 +526,13 @@ MUT = [
      _H("dc_.dflTouch(1);"), _HC, ["--no-pin"], r"(?#OK)^engine split check: ok"),
     ("H1b", "emut2: the same call in startJob (one of the S4 agent's 7 rows, startJob:dc_)",
      _H("dc_.dflTouch(1);", (EC, STARTJ)), _HC, ["--no-pin"], r"(?#OK)^engine split check: ok"),
-    ("H2", "emut2: dc_ = DrafterCtx{} (assigning the holder itself) stays a write of dc_", _H("dc_ = DrafterCtx{};"), _HC, ["--no-pin"], ow("dropCache:dc_")),
+    ("H2", "emut2: dc_ = c (assigning the holder itself, from a copy) stays a write of dc_", _H("{ const DrafterCtx c = dc_; dc_ = c; }"), _HC, ["--no-pin"], ow("dropCache:dc_")),
     ("H3", "emut2: dc_.gap_ = 3 (a data write through the holder) stays a write of dc_", _H("dc_.gap_ = 3;"), _HC, ["--no-pin"], ow("dropCache:dc_")),
     ("H4", "emut2: auto& d = dc_; d.dflTouch(1) (bound to a non-const reference) stays a write of dc_",
      _H("{ auto& d = dc_; d.dflTouch(1); }"), _HC, ["--no-pin"], ow("dropCache:dc_")),
     ("H5", "emut2: dc_.dflClear() whose body assigns *this (no member use shows it) stays a write of dc_", _H("dc_.dflClear();"), _HC, ["--no-pin"], ow("dropCache:dc_")),
-    ("H6", "emut2: (void)std::exchange(dc_, DrafterCtx{}) (passed by non-const reference) stays a write of dc_",
-     _H("(void)std::exchange(dc_, DrafterCtx{});"), _HC, ["--no-pin"], ow("dropCache:dc_")),
+    ("H6", "emut2: (void)std::exchange(dc_, DrafterCtx{dc_}) (passed by non-const reference) stays a write of dc_",
+     _H("(void)std::exchange(dc_, DrafterCtx{dc_});"), _HC, ["--no-pin"], ow("dropCache:dc_")),
     ("H7", "emut2 control: (void)dc_.dflGap() (const method) is a read", _H("(void)dc_.dflGap();"), _HC, ["--no-pin"], r"(?#OK)^engine split check: ok"),
     # --- arch025-emut2 requirement 1: clang's ExprMutationAnalyzer next to the Python analyzer, writes = the union ---
     ("K1", "emut2 (a): clang write / Python read not pinned in emut_read_ok (the F2 shape, std::format(\"{}\", gov_last_)) counts as a write",
@@ -711,24 +744,24 @@ def main():
         ok = rc == 0 and "engine split check: ok" in out
         res.append((f"B{i}", "PASS" if ok else "FAIL", f"B{i} baseline {b}\n   rc={rc}: {out.strip().splitlines()[-1] if out.strip() else ''} -> {'PASS' if ok else 'FAIL (false positive)'}"))
     with ThreadPoolExecutor(JOBS) as ex:
-        res += list(ex.map(one, MUT))
-    res += git_cases(sha)
+        res += list(ex.map(one, [m for m in MUT if not ONLY or m[0] in ONLY]))
+    res += [g for g in git_cases(sha) if not ONLY or g[0] in ONLY]
     # S0e: the AST rules' unit self-test (S0d review probes on a synthetic TU: act-on 1, 3, 4, consider 1, 2, 5)
-    rc, out = run([PY, "-I", os.path.join(HERE, "engine_split_ast.py"), "--selftest"])
+    rc, out = (0, "") if ONLY and "A1" not in ONLY else run([PY, "-I", os.path.join(HERE, "engine_split_ast.py"), "--selftest"])
     last = out.strip().splitlines()[-1] if out.strip() else "(no output)"
     v = "PASS" if rc == 0 and re.search(r"^engine split ast selftest: (\d+)/\1 as expected", out, re.M) else "FAIL"
     bad = [l.strip() for l in out.splitlines() if l.startswith(("  MISS", "  FP"))]
-    res.append(("A1", v, f"A1 engine_split_ast.py --selftest (synthetic TU)\n   rc={rc}: {last}" + "".join("\n   " + b for b in bad[:12]) + f" -> {v}"))
+    if not ONLY or "A1" in ONLY: res.append(("A1", v, f"A1 engine_split_ast.py --selftest (synthetic TU)\n   rc={rc}: {last}" + "".join("\n   " + b for b in bad[:12]) + f" -> {v}"))
     # arch025-emut2: the two-analyzer comparison's unit self-test ((a) / (b) / (c) rules, holder skip, on synthetic results)
-    rc, out = run([PY, "-I", os.path.join(HERE, "engine_split_emut.py"), "--selftest"])
+    rc, out = (0, "") if ONLY and "A2" not in ONLY else run([PY, "-I", os.path.join(HERE, "engine_split_emut.py"), "--selftest"])
     last = out.strip().splitlines()[-1] if out.strip() else "(no output)"
     v = "PASS" if rc == 0 and re.search(r"^engine split emut selftest: (\d+)/\1 as expected", out, re.M) else "FAIL"
     bad = [l.strip() for l in out.splitlines() if l.startswith("  FAIL")]
-    res.append(("A2", v, f"A2 engine_split_emut.py --selftest (synthetic analyzer results)\n   rc={rc}: {last}" + "".join("\n   " + b for b in bad[:12]) + f" -> {v}"))
+    if not ONLY or "A2" in ONLY: res.append(("A2", v, f"A2 engine_split_emut.py --selftest (synthetic analyzer results)\n   rc={rc}: {last}" + "".join("\n   " + b for b in bad[:12]) + f" -> {v}"))
     good = sum(1 for _, v, _ in res if v in ("PASS", "CAUGHT"))
     counted = sum(1 for _, v, _ in res if v != "SKIP")
     txt = "\n".join(r[2] for r in res)
-    txt += f"\nengine split selftest: {good}/{counted} as expected" + ("" if good == counted else " - FAIL")
+    txt += f"\nengine split selftest: {good}/{counted} as expected" + ("" if good == counted else " - FAIL") + (f" (--only: {len(ONLY)} ids)" if ONLY else "")
     open(os.path.join(WORK, "engine_split_selftest.txt"), "w", encoding="utf-8").write(txt + "\n")
     print(txt)
     return 0 if good == counted else 1
