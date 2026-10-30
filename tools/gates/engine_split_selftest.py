@@ -36,6 +36,8 @@ LEDGER = os.path.join(WORK, "ledger", "engine_cut_reviews.tsv")   # S0c: synthet
 # S0d: every mutant's census shares one AST cache (keyed by the content of each TU's files; a mutant re-parses only the
 # TUs whose files it edits)
 os.environ.setdefault("WHIRL_ENGINE_AST_CACHE", os.path.join(REPO, "build", "engine_split_ast_cache"))
+# arch025-emut2: the clang ExprMutationAnalyzer side (tools/gates/emut/emut_run.py) has the same content cache
+os.environ.setdefault("WHIRL_ENGINE_EMUT_CACHE", os.path.join(REPO, "build", "engine_split_emut_cache"))
 BASESNAP = os.path.join(WORK, "ledger", "base")                     # S0c: base snapshot for --base-dir
 
 EMIT = "bool Engine::emit(Slot& sl, std::uint32_t t) {\n"
@@ -75,6 +77,19 @@ def _acc(decl, use, mod="server.governor", name="holdRef", m="gov_hold_"):
             lambda c: c["new_funcs"].update({name: mod}), ["--no-pin"], ow("runLoop:" + m))
 
 
+# arch025-emut2: clang reason sets of the read controls (emut_read_ok pins; class d of the arch025-emut cross-check)
+_E_BE = lambda m: [f"write: CXXMemberCallExpr `{m}.begin()`", f"write: CXXMemberCallExpr `{m}.end()`"]
+_E_F2 = ["write: CallExpr `std::format(\"{}\", gov_last_)`"]
+_E_Z6 = {"runLoop:gov_json_": ["write: CXXOperatorCallExpr `gov_json_[0]`"], "runLoop:queue_": ["write: CXXMemberCallExpr `queue_.front()`"]}
+
+
+def _epin(d, then=None):
+    def f(c):
+        c.setdefault("emut_read_ok", {}).update({k: {"clang_why": v, "class": "d (selftest read control)", "reason": "selftest"} for k, v in d.items()})
+        if then: then(c)
+    return f
+
+
 _KVT = "    std::uint64_t kvTokBytes() const {\n"   # S0f E1: the const slot_cache method in engine.h
 _T1_WHY = ["writable handle begin() used (, gov_json_.)", "writable handle end() used (, ' ');)"]   # S0f: T1's whole text reason set
 
@@ -101,6 +116,7 @@ def _addm(*ms):
 # rule, or the fail-closed fallback itself); any other mutant with clang errors is INVALID (a false green otherwise)
 CLANG_ERR_OK = {
     "F1x": "the S0c review's F1 as written: std::lock_guard<std::mutex> on whirl::Mutex (tests the fail-closed fallback)",
+    "K6": "arch025-emut2: F1x again, the emut side of the fail-closed fallback (emut errors in the TU are a finding)",
     "M3": "Engine::vramNote2 defined, not declared (tests unassigned entries / engine files)",
     "N7": "SlotOutput::emit of an undeclared class (tests unassigned entries, text census)",
     "N7b": "SlotOutput::emit of an undeclared class (tests aliases / unassigned)",
@@ -127,6 +143,36 @@ def unas(e):
 def fnd(t):
     return r"^   " + re.escape(t)
 
+
+# arch025-emut2 helpers: a holder class DrafterCtx (cut holders dc_ -> DrafterCtx, module server.drafter_ctx) with its own
+# data gap_, a writing method, a method that assigns *this and a const method; Engine holds DrafterCtx dc_
+ENGCLS = "class Engine final : public EngineApi {\n"
+STARTJ = "bool Engine::startJob(Slot& sl, Job& job) {\n"
+_DCX = ("struct DrafterCtx {\n    int gap_ = 0;\n    void dflTouch(int n) { gap_ += n; }\n"
+        "    void dflClear() { *this = DrafterCtx{}; }\n    int dflGap() const { return gap_; }\n};\n\n")
+
+
+def _H(code, where=None):
+    rel, anchor = where or (EP, DROPC)
+    return [(EH, ENGCLS, _DCX + ENGCLS), (EH, HOLD, HOLD + "\n    DrafterCtx dc_;"), (rel, anchor, anchor + "    " + code + "\n")]
+
+
+def _HC(c):
+    c["modules"]["server.drafter_ctx"]["funcs"] += ["dflTouch", "dflClear", "dflGap"]
+    c["modules"]["server.drafter_ctx"]["data"].append("gap_")
+
+
+def _pin(d):
+    def f(c):
+        c.setdefault("emut_read_ok", {}).update({k: {"clang_why": v, "class": "selftest", "reason": "selftest"} for k, v in d.items()})
+    return f
+
+
+def _OWSW(fd):
+    return r"^   not in the expected list '\w+': .*\b" + re.escape(fd) + r"\b|^== writes to core\.shared not in shared_writers '\w+' \(\d+\): .*\b" + re.escape(fd) + r"\b"
+
+
+_F2 = "{ const std::string s = std::format(\"{}\", gov_last_); (void)s; }"
 
 ENG = "server.engine"
 SO, SE, SC, GV, SS, JQ = "server.slot_output", "server.slot_end", "server.slot_cache", "server.governor", "server.slot_start", "server.job_queue"
@@ -295,7 +341,7 @@ MUT = [
     ("Z5", "std::tie(stop_) = std::make_tuple(true) (dropCache)", [(EP, DROPC, DROPC + "    std::tie(stop_) = std::make_tuple(true);\n")], None, [], ow("dropCache:stop_")),
     ("Z6", "control: reads in runLoop (compare a handle, size arithmetic, ==, !, subscript read) stay reads",
      [(EC, RUNL, RUNL + "    if (!queue_.empty() && queue_.front() != nullptr && gov_json_.size() + 1 > 2 && gov_json_[0] == 'x' && !stop_) {}\n")],
-     None, [], r"(?#OK)^engine split check: ok"),
+     _epin(_E_Z6), ["--no-pin"], r"(?#OK)^engine split check: ok"),
     # act-on 2: the ledger against the base of the range (base = the selftest's snapshot of today's cut / pin / ledger)
     ("P8", "reviewer's bypass (s0b_review/bypass): cut edit + --pin-write + ledger row '<sha> x x' in the same change",
      [], lambda c: c["outside_writers"]["now"].append("runLoop:gov_json_"), ["@PINWRITE", "@ROW:xx"], r"^engine cut pin: REVIEW ROW INVALID .*needs 4 non-empty columns"),
@@ -339,11 +385,13 @@ MUT = [
     ("R20", "std::function member: vram_probe_.swap(f)", [(EC, RUNL, RUNL + "    { std::function<wddmwatch::Sample()> f; vram_probe_.swap(f); }\n")], None, [], sw("runLoop:vram_probe_")),
     # read controls (S0c review consider 2): a write finding here is a FALSE POSITIVE
     ("F1", "read: std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end() (the review's F1 with whirl::MutexLock; as written it does not compile, F1x)",
-     *_okc("{ whirl::MutexLock lk(q_mutex_); (void)(std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end()); }")),
+     *_okc("{ whirl::MutexLock lk(q_mutex_); (void)(std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end()); }")[:1],
+     _epin({"runLoop:queue_": _E_BE("queue_")}), ["--no-pin"], r"(?#OK)^engine split check: ok"),
     ("F1x", "the review's F1 as written (std::lock_guard<std::mutex> on a whirl::Mutex) does not compile: the AST census fails closed",
      [(EC, RUNL, RUNL + "    { std::lock_guard<std::mutex> lk(q_mutex_); (void)(std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end()); }\n")],
      None, [], fnd("clang errors in src/server/engine.cpp")),
-    ("F2", "read: std::format(\"{}\", gov_last_) into a local", *_okc("{ const std::string s = std::format(\"{}\", gov_last_); (void)s; }")),
+    ("F2", "read: std::format(\"{}\", gov_last_) into a local", *_okc("{ const std::string s = std::format(\"{}\", gov_last_); (void)s; }")[:1],
+     _epin({"runLoop:gov_last_": _E_F2}), ["--no-pin"], r"(?#OK)^engine split check: ok"),
     ("F3", "read: std::size(gov_last_)", *_okc("{ const auto n = std::size(gov_last_); (void)n; }")),
     ("F4", "read: throw std::runtime_error(gov_last_) under a false condition", *_okc("if (gov_last_ == \"never\") throw std::runtime_error(gov_last_);")),
     ("F5", "read: std::any_of over slots_.begin()/end()", *_okc("(void)std::any_of(slots_.begin(), slots_.end(), [](const Slot& s) { return s.job != nullptr; });")),
@@ -380,15 +428,15 @@ MUT = [
     # (S0e, coordinator 08:5x: a read the AST proves from types / the call target is no finding; a read that rests on a
     # measured name list - here std::count, a value algorithm - needs the pin)
     ("T1", "S0e: text write / AST read through a name list (std::count over gov_json_.begin()/end()), not pinned: a finding",
-     [(EC, RUNL, RUNL + "    (void)std::count(gov_json_.begin(), gov_json_.end(), 'x');\n")], None, [],
+     [(EC, RUNL, RUNL + "    (void)std::count(gov_json_.begin(), gov_json_.end(), 'x');\n")], _epin({"runLoop:gov_json_": _E_BE("gov_json_")}), ["--no-pin"],
      fnd("text census write the AST calls a read, not pinned in the cut's text_write_ok: runLoop:gov_json_")),
     ("T1b", "S0e control: the same row pinned in text_write_ok with the text rule's exact reason passes",
      [(EC, RUNL, RUNL + "    (void)std::count(gov_json_.begin(), gov_json_.end(), 'x');\n")],
-     lambda c: c["text_write_ok"].update({"runLoop:gov_json_": {"text_why": _T1_WHY, "reason": "selftest"}}), ["--no-pin"],
+     _epin({"runLoop:gov_json_": _E_BE("gov_json_")}, lambda c: c["text_write_ok"].update({"runLoop:gov_json_": {"text_why": _T1_WHY, "reason": "selftest"}})), ["--no-pin"],
      r"(?#OK)^engine split check: ok"),
     ("T2", "S0e: a text_write_ok pin whose text reason differs does not cover the row",
      [(EC, RUNL, RUNL + "    (void)std::count(gov_json_.begin(), gov_json_.end(), 'x');\n")],
-     lambda c: c["text_write_ok"].update({"runLoop:gov_json_": {"text_why": "other", "reason": "selftest"}}), ["--no-pin"],
+     _epin({"runLoop:gov_json_": _E_BE("gov_json_")}, lambda c: c["text_write_ok"].update({"runLoop:gov_json_": {"text_why": "other", "reason": "selftest"}})), ["--no-pin"],
      fnd("text census write the AST calls a read, not pinned in the cut's text_write_ok: runLoop:gov_json_")),
     ("T3", "S0e: a stale text_write_ok entry is a finding", [], lambda c: c["text_write_ok"].update({"runLoop:stop_": {"text_why": "x", "reason": "x"}}),
      ["--no-pin"], fnd("cut text_write_ok entry no longer occurs (remove it): runLoop:stop_")),
@@ -431,6 +479,37 @@ MUT = [
      "entry for it): the AST write outside every entry is a finding",
      [(EH, HOLD, HOLD + "\n    struct Hd { bool& r; } hd_{stop_};")], lambda c: c["modules"][GV]["data"].append("hd_"), ["--no-pin"],
      fnd("AST write outside every census entry: server/engine.h:")),
+    # --- arch025-emut2 (PLAN N4-emut2) requirement 2 (S4): a non-const call on a cut holder member (cut holders dc_ ->
+    # DrafterCtx) is a call edge to the holder class's method, not a data write of the holder; the callee's writes are
+    # judged in its own body. A real write of the holder (assign / reset / bind / pass / h.x = / a callee that writes
+    # *this) stays a write. ---
+    ("H1", "emut2: dc_.dflTouch(1) in dropCache (the S4 shape: a non-const DrafterCtx method; gap_ is drafter_ctx data) is a call edge",
+     _H("dc_.dflTouch(1);"), _HC, ["--no-pin"], r"(?#OK)^engine split check: ok"),
+    ("H1b", "emut2: the same call in startJob (one of the S4 agent's 7 rows, startJob:dc_)",
+     _H("dc_.dflTouch(1);", (EC, STARTJ)), _HC, ["--no-pin"], r"(?#OK)^engine split check: ok"),
+    ("H2", "emut2: dc_ = DrafterCtx{} (assigning the holder itself) stays a write of dc_", _H("dc_ = DrafterCtx{};"), _HC, ["--no-pin"], ow("dropCache:dc_")),
+    ("H3", "emut2: dc_.gap_ = 3 (a data write through the holder) stays a write of dc_", _H("dc_.gap_ = 3;"), _HC, ["--no-pin"], ow("dropCache:dc_")),
+    ("H4", "emut2: auto& d = dc_; d.dflTouch(1) (bound to a non-const reference) stays a write of dc_",
+     _H("{ auto& d = dc_; d.dflTouch(1); }"), _HC, ["--no-pin"], ow("dropCache:dc_")),
+    ("H5", "emut2: dc_.dflClear() whose body assigns *this (no member use shows it) stays a write of dc_", _H("dc_.dflClear();"), _HC, ["--no-pin"], ow("dropCache:dc_")),
+    ("H6", "emut2: (void)std::exchange(dc_, DrafterCtx{}) (passed by non-const reference) stays a write of dc_",
+     _H("(void)std::exchange(dc_, DrafterCtx{});"), _HC, ["--no-pin"], ow("dropCache:dc_")),
+    ("H7", "emut2 control: (void)dc_.dflGap() (const method) is a read", _H("(void)dc_.dflGap();"), _HC, ["--no-pin"], r"(?#OK)^engine split check: ok"),
+    # --- arch025-emut2 requirement 1: clang's ExprMutationAnalyzer next to the Python analyzer, writes = the union ---
+    ("K1", "emut2 (a): clang write / Python read not pinned in emut_read_ok (the F2 shape, std::format(\"{}\", gov_last_)) counts as a write",
+     *_okc(_F2)[:3], _OWSW("runLoop:gov_last_")),
+    ("K2", "emut2 (a): an emut_read_ok pin whose clang reason set differs does not apply (and is a stale pin)",
+     *_okc(_F2)[:1], _pin({"runLoop:gov_last_": ["write: CallExpr `std::format(other)`"]}), ["--no-pin"],
+     fnd("cut emut_read_ok entry no longer occurs (remove it): runLoop:gov_last_")),
+    ("K3", "emut2: a stale emut_read_ok entry is a finding", [], _pin({"runLoop:stop_": ["write: x"]}), ["--no-pin"],
+     fnd("cut emut_read_ok entry no longer occurs (remove it): runLoop:stop_")),
+    ("K4", "emut2 (c): emut.exe missing - the census never runs one analyzer alone (crash)", [], None,
+     ["@ENV:WHIRL_EMUT=" + os.path.join(REPO, "build", "no_such_emut", "emut.exe")], r"(?#CRASH)^census3: emut census failed"),
+    ("K5", "emut2 (c): a stale emut.exe (built from another emut.cpp) is refused (crash)", [("TOOL:emut/emut.cpp", None, "// stale\n")], None,
+     ["--no-pin"], r"(?#CRASH)NO TOOL \(stale emut\.exe"),
+    ("K6", "emut2 (c): clang errors in a TU on the emut side are a finding (F1x shape)",
+     [(EC, RUNL, RUNL + "    { std::lock_guard<std::mutex> lk(q_mutex_); (void)(std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end()); }\n")],
+     None, [], fnd("emut (clang ExprMutationAnalyzer) errors in src/server/engine.cpp")),
 ]
 # S0c: tools a TOOL: edit may name -> path under tools/ (a copy of tools/gates, bench, impact is made for the mutant)
 TOOL_PATHS = {"e8_judge.py": "bench/e8_judge.py", "abjudge.py": "bench/abjudge.py", "revtext.py": "impact/revtext.py"}
@@ -460,6 +539,8 @@ def one(item):
         for f in os.listdir(HERE):
             if f.startswith(("engine_split_", "engine_cut", "member_order", "mt_equiv_")):
                 shutil.copy2(os.path.join(HERE, f), tools)
+        # arch025-emut2: the clang ExprMutationAnalyzer driver and its sources (the census runs tools/gates/emut/emut_run.py)
+        shutil.copytree(os.path.join(HERE, "emut"), os.path.join(tools, "emut"), ignore=shutil.ignore_patterns("__pycache__", "build*"))
         for rp in TOOL_PATHS.values():   # S0c: bench / impact tools are hashed too
             src = os.path.join(os.path.dirname(HERE), rp)
             if os.path.exists(src):
@@ -506,10 +587,15 @@ def one(item):
                     kind, f"{sha}\t{rp} (rev-agent)\tcut edit\tstep-agent")
                 txt = txt.rstrip("\n") + "\n" + row + "\n"
             open(ledger, "w", encoding="utf-8").write(txt)
+    env = dict(os.environ)   # arch025-emut2: @ENV:K=V sets an environment variable for the check
+    for g in gargs:
+        if g.startswith("@ENV:"):
+            k, v = g[5:].split("=", 1); env[k] = v
     gargs = [g for g in gargs if not g.startswith("@")]
     cmd = [PY, "-I", os.path.join(tools, "engine_split_check.py"), "--root", d, "--cut", cutp, "--work", os.path.join(d, "w"),
            "--pin", pin, "--reviews", ledger, "--base-dir", BASESNAP, "--inline", INL] + gargs
-    rc, out = run(cmd)
+    r_ = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    rc, out = r_.returncode, r_.stdout + r_.stderr
     rep = ""
     for f in ("graph_engine_cut.txt",):
         p = os.path.join(d, "w", "census", f)
@@ -519,10 +605,13 @@ def one(item):
     if os.path.exists(fp):
         allt += "\n" + "".join("   " + l for l in open(fp, encoding="utf-8"))
     hit = re.search(expect, allt, re.M) is not None
-    if "clang errors in " in allt and mid not in CLANG_ERR_OK:   # S0g: the AST census fell back to text = no evidence
+    if ("clang errors in " in allt or "emut (clang ExprMutationAnalyzer) errors in " in allt) and mid not in CLANG_ERR_OK:
+        # S0g: the AST census fell back to text = no evidence (arch025-emut2: either analyzer)
         return mid, "INVALID", f"{mid} {what}\n   rc={rc}; the mutant does not compile (clang errors; not in CLANG_ERR_OK) -> INVALID"
     if expect.startswith("(?#OK)"):   # S0c: a control that must pass
         v = "PASS" if rc == 0 and hit else "FALSE POSITIVE"
+    elif expect.startswith("(?#CRASH)"):   # arch025-emut2: the tools must refuse to run (exit 3), with that line
+        v = "CAUGHT" if rc == 3 and hit else ("CAUGHT BY ANOTHER RULE" if rc == 3 else "NOT CAUGHT")
     elif rc == 3: v = "CRASH"
     elif rc == 1 and hit: v = "CAUGHT"
     elif rc == 1: v = "CAUGHT BY ANOTHER RULE"
@@ -604,6 +693,11 @@ def main():
     os.makedirs(WORK, exist_ok=True)
     os.makedirs(BASESNAP, exist_ok=True)
     sha = setup_ledger()
+    # arch025-emut2: one emut.exe for every mutant (a mutant's own tool copy must not build one from an edited emut.cpp)
+    rc, out = run([PY, "-I", os.path.join(HERE, "engine_split_check.py"), "--ensure-emut"])
+    if rc != 0:
+        print(out.strip()); print("engine split selftest: CRASH (no emut.exe)"); return 3
+    os.environ["WHIRL_EMUT"] = out.strip().splitlines()[-1][len("emut: "):]
     res = []
     for i, b in enumerate(bases):   # baselines
         rc, out = run([PY, "-I", os.path.join(HERE, "engine_split_check.py"), "--root", b, "--work", os.path.join(WORK, f"B{i}"), "--pin", PIN,
@@ -619,6 +713,12 @@ def main():
     v = "PASS" if rc == 0 and re.search(r"^engine split ast selftest: (\d+)/\1 as expected", out, re.M) else "FAIL"
     bad = [l.strip() for l in out.splitlines() if l.startswith(("  MISS", "  FP"))]
     res.append(("A1", v, f"A1 engine_split_ast.py --selftest (synthetic TU)\n   rc={rc}: {last}" + "".join("\n   " + b for b in bad[:12]) + f" -> {v}"))
+    # arch025-emut2: the two-analyzer comparison's unit self-test ((a) / (b) / (c) rules, holder skip, on synthetic results)
+    rc, out = run([PY, "-I", os.path.join(HERE, "engine_split_emut.py"), "--selftest"])
+    last = out.strip().splitlines()[-1] if out.strip() else "(no output)"
+    v = "PASS" if rc == 0 and re.search(r"^engine split emut selftest: (\d+)/\1 as expected", out, re.M) else "FAIL"
+    bad = [l.strip() for l in out.splitlines() if l.startswith("  FAIL")]
+    res.append(("A2", v, f"A2 engine_split_emut.py --selftest (synthetic analyzer results)\n   rc={rc}: {last}" + "".join("\n   " + b for b in bad[:12]) + f" -> {v}"))
     good = sum(1 for _, v, _ in res if v in ("PASS", "CAUGHT"))
     counted = sum(1 for _, v, _ in res if v != "SKIP")
     txt = "\n".join(r[2] for r in res)
