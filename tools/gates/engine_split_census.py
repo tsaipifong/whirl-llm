@@ -737,10 +737,9 @@ def uses(key, txt):
             ud.append(n)
             for h in hits:
                 why = write_kind(txt, h.start(), h.end())
-                if why:
-                    uw.append(n)
+                if why:   # S0f (S0e review consider 2): every text write reason of the member is kept, not only the first
+                    if n not in uw: uw.append(n)
                     wlog.append(f"{key}\t{n}\t{why}\t{' '.join(txt[max(0, h.start() - 40):h.end() + 40].split())}")
-                    break
     me = key.split("#")[0]
     # S0b: a non-const reference / pointer accessor writes what it returns
     for n in sorted(REFACC.get(me, ())):
@@ -908,7 +907,7 @@ for key in list(rows):
             why_of.setdefault(m, ("text census (no AST)", 0, f))
     for m in sorted(set(aw) | set(uw_text)):
         if (m in aw) != (m in uw_text):
-            tw = next((l.split("\t")[2] for l in text_wlog if l.split("\t")[0] == key and l.split("\t")[1] == m), "-")
+            tw = " | ".join(sorted({l.split("\t")[2] for l in text_wlog if l.split("\t")[0] == key and l.split("\t")[1] == m})) or "-"
             # S0e: for a text-write / AST-read row, the AST read reasons (proof kind decided below)
             ar = "; ".join(sorted(set(rd_of.get(m, [])))) if m not in aw else why_of.get(m, ('-',))[0]
             xrows.append(f"{key}\t{m}\t{'w' if m in uw_text else 'r'}\t{'w' if m in aw else 'r'}\t{ar or 'NO AST HIT'}\t{tw}")
@@ -929,6 +928,7 @@ for (rel, idx, mem), e in sorted(_pos.items()):
 # const& parameter, a value read, a compared / discarded handle, a std::format target by its basic_format_string
 # parameter). Reads that rest on a measured NAME list (value algorithms, lock guards, value wrappers, copy types,
 # callable_reads, non-const accessor value results) and bodies without any AST hit still need the pin.
+_DIRECT = {"assignment", "prefix ++/--"}
 _LISTED = ("handle read by std::", "locked by", "copied into", "std::function call (cut callable_reads)", "returns a value")
 _two = {k: v for k, v in cut.get("text_write_ok", {}).items() if not k.startswith("_")}
 _seen_two = set()
@@ -936,8 +936,15 @@ for x in xrows:
     q = x.split("\t")
     if q[2] == "w" and q[3] == "r":
         k2 = f"{q[0]}:{q[1]}"
-        if k2 in _two and _two[k2].get("text_why") == q[5]:
+        pw = _two.get(k2, {}).get("text_why")
+        pw = set(pw) if isinstance(pw, list) else ({pw} if pw else set())
+        if k2 in _two and pw == set(q[5].split(" | ")):   # S0f: the pin names the row's WHOLE set of text reasons
             _seen_two.add(k2); continue
+        # S0f (S0e review act-on 2): a direct write in the text census (assignment / compound assignment / ++ / --, the
+        # text rules that do not guess) is never excused by an AST read - the walker itself may be wrong there (E1)
+        if any(r.split(" (")[0] in _DIRECT for r in q[5].split(" | ")):
+            findings.append(f"text census DIRECT write the AST calls a read: {k2} (text: {q[5]}; AST: {q[4]}) - an AST rule gap, or pin it")
+            continue
         if q[4] != "NO AST HIT" and not any(t in q[4] for t in _LISTED):
             continue   # the AST proves the read (ast_xcheck.tsv column ast_why lists the proof)
         mt = re.match(r"through (~?\w+)\(\)", q[5])

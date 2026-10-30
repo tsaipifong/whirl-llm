@@ -75,7 +75,8 @@ def _acc(decl, use, mod="server.governor", name="holdRef", m="gov_hold_"):
             lambda c: c["new_funcs"].update({name: mod}), ["--no-pin"], ow("runLoop:" + m))
 
 
-_T1_WHY = "writable handle begin() used (, gov_json_.)"   # S0e T1b: the text rule's reason for the T1 row
+_KVT = "    std::uint64_t kvTokBytes() const {\n"   # S0f E1: the const slot_cache method in engine.h
+_T1_WHY = ["writable handle begin() used (, gov_json_.)", "writable handle end() used (, ' ');)"]   # S0f: T1's whole text reason set
 
 
 def _okc(code):   # a read control in runLoop: the check must pass
@@ -354,6 +355,22 @@ MUT = [
      fnd("text census write the AST calls a read, not pinned in the cut's text_write_ok: runLoop:gov_json_")),
     ("T3", "S0e: a stale text_write_ok entry is a finding", [], lambda c: c["text_write_ok"].update({"runLoop:stop_": {"text_why": "x", "reason": "x"}}),
      ["--no-pin"], fnd("cut text_write_ok entry no longer occurs (remove it): runLoop:stop_")),
+    # --- S0e review (progress/arch025-engine.S0e.REVIEW.md act-on 1, consider 1 / 3; reviewer runner
+    # scratch/a25_engine/s0e_review/runner/r_mut.py): pointee writes through a pointer member in a const method ---
+    ("E1", "pointer member rp_ (job_queue data), pointee written in the const method kvTokBytes (slot_cache)",
+     [(EH, HOLD, HOLD + "\n    int* rp_ = nullptr;"), (EH, _KVT, _KVT + "        *rp_ = 1;\n")],
+     lambda c: c["modules"][JQ]["data"].append("rp_"), ["--no-pin"], ow("kvTokBytes:rp_")),
+    ("E1c", "control: the same pointee write in the non-const dropCache",
+     [(EH, HOLD, HOLD + "\n    int* rp_ = nullptr;"), (EP, DROPC, DROPC + "    *rp_ = 1;\n")],
+     lambda c: c["modules"][JQ]["data"].append("rp_"), ["--no-pin"], ow("dropCache:rp_")),
+    ("E2", "global ::next(size_t*) (writes *p; a std algorithm's name) on &opt_.n_ck in dropCache (core.shared)",
+     [(EH, "#pragma once\n", "#pragma once\n#include <cstdint>\ninline std::size_t* next(std::size_t* p) { *p = 1; return p; }\n"),
+      (EP, DROPC, DROPC + "    (void)::next(&opt_.n_ck);\n")], None, [], sw("dropCache:opt_")),
+    ("E2c", "control: opt_.n_ck = 1 in dropCache", [(EP, DROPC, DROPC + "    opt_.n_ck = 1;\n")], None, [], sw("dropCache:opt_")),
+    ("L1", "S0f (S0e review consider 3): an accessor returning a lambda that writes gov_hold_; runLoop runs it",
+     *_acc("auto holdSetter() { return [this] { gov_hold_ = true; }; }", "holdSetter()();", name="holdSetter")),
+    ("L1b", "S0f: an accessor returning a lambda capturing gov_hold_ by reference; runLoop runs it",
+     *_acc("auto holdSetter() { return [&h = gov_hold_] { h = true; }; }", "holdSetter()();", name="holdSetter")),
     ("D4b", "S0d: the same binding in a declarator after a nested struct body (struct Hd { bool& r; } hd_{stop_}; the text census has no "
      "entry for it): the AST write outside every entry is a finding",
      [(EH, HOLD, HOLD + "\n    struct Hd { bool& r; } hd_{stop_};")], lambda c: c["modules"][GV]["data"].append("hd_"), ["--no-pin"],

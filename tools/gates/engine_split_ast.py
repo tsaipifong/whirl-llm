@@ -5,7 +5,7 @@ Three review rounds (S0 / S0b / S0c, progress/arch025-engine.S0c.REVIEW.md act-o
 rule cannot see, because only the declared types decide them (a typedef to a reference, reference_wrapper, span,
 decltype((x)), aggregate reference members, unresolved callees). This tool asks clang:
 
-  clang++ -fsyntax-only -Xclang -ast-dump=json -Xclang -ast-dump-filter=whirl::server <TU>   (product defines / -std)
+  clang++ -fsyntax-only -Xclang -ast-dump=json -Xclang -ast-dump-filter=whirl <TU>   (product defines / -std; S0e: every whirl:: namespace, so a whirl callee is never taken for a std one)
 
 and decides, for every MemberExpr (and DeclRefExpr) that names a data member of a tracked class, whether the evaluated
 expression can modify it - the rules of clang's ExprMutationAnalyzer (clang/lib/Analysis/ExprMutationAnalyzer.cpp,
@@ -19,10 +19,16 @@ the base of clang-tidy misc-const-correctness), conservative: what cannot be pro
           member access, subscripts, ?: branches, the right side of ',', derived-to-base casts.
   handle  (a pointer / iterator / view INTO the member's storage: &x_, x_.data(), x_.begin(), array decay, a returned
           handle): a read only when it is compared, discarded, or passed to a measured std read-only algorithm
-          (STD_READ_ALGOS, callee not declared in whirl::server); a dereference / subscript / arrow writes through it
+          (STD_VALUE_ALGOS, callee outside whirl:: AND std types in its signature; an iterator-returning std algorithm
+          (STD_HANDLE_ALGOS) keeps the handle alive); a dereference / subscript / arrow writes through it
           when the result is written; kept in a variable, stored, returned, passed anywhere else = write.
   loaded pointer (a pointer VALUE read out of the member, e.g. queue_.front()->id): a write when the pointee is written
-          through the expression itself (as the text census A1 (a)); copying the pointer is a read.
+          through the expression itself (as the text census A1 (a)); a copy kept in a pointer variable is followed
+          (S0f, findPointeeMutation); other copies / compares / unknown parents are reads (the A1 design exception).
+          S0f: the pointer itself and its pointee are judged separately - a `T *const` member (a pointer member in a
+          const method) is a const pointer, its pointee is followed; a const span / iterator object still hands out
+          non-const elements.
+  self-test: python -I engine_split_ast.py --selftest (synthetic TU, the review probes; engine_split_selftest A1).
 
 Accessors (S0b W11, S0c N10-N15, R16 / R17): a function whose return statement hands out a member as a non-const
 reference / handle writes it, and every call site that does not provably only read the result writes it too
@@ -292,6 +298,13 @@ class Walk:
         # followed through its uses; one that flows into a return hands the member out (S0b review N12)
         var = getattr(self, "_var", None)
         self._var = None
+        if v == "r" and var is not None and depth < 3 and why.startswith("pointer copied into"):
+            # S0f (S0e review act-on 1, findPointeeMutation): a copy of a member pointer keeps the pointee; follow it
+            for ref in self.tu.refs.get(var.get("id"), []):
+                v2, why2, rf2 = self.run(ref, "lptr", member, depth + 1)
+                if v2 == "w":
+                    return "w", f"{why}; {why2}", rf2
+            return v, why, rf
         if v == "w" and var is not None and rf is None and depth < 3:
             m2 = "obj" if "reference" in why else "ptr"
             for ref in self.tu.refs.get(var.get("id"), []):
@@ -324,7 +337,9 @@ class Walk:
     # ---------------- object mode ----------------
     def m_obj(self, cur, P, k, i, member):
         tu = self.tu
-        if cur.get("valueCategory") in ("lvalue", "xvalue") and is_const(T(cur)):
+        # S0f (S0e review act-on 1): a const POINTER (`T *const`, e.g. a pointer member in a const method) is const
+        # itself, its pointee is not: the pointer is read (LValueToRValue below) and its pointee is followed (lptr)
+        if cur.get("valueCategory") in ("lvalue", "xvalue") and is_const(T(cur)) and not is_pointer(T(cur)):
             return self._const_obj(cur, cur, member)
         if k.endswith("Attr"): return ("r", f"attribute {k}", None)
         if k == "ImplicitCastExpr":
@@ -455,6 +470,14 @@ class Walk:
                 return ("w", "std::function member called (not in the cut's callable_reads)", None)
             if name in ("operator->", "operator*") and re.search(r"std::(?:unique_ptr|shared_ptr)", TQ(P)):
                 return self._result(GP, f"smart pointer {name}", pointee=True)
+        # S0f (S0e review act-on 1, p7): a const span / non-const iterator object still hands out NON-const elements
+        if re.search(r"std::span<(?!const)|(?<!const_)iterator\b|_Vector_iterator<|_Deque_iterator<|_String_iterator<", TQ(cur))                 and not re.search(r"span<const|const_iterator", TQ(cur)):
+            if GP is not None and GP.get("kind") == "CXXOperatorCallExpr" and tu.index_in(GP, G) == 1:
+                name, _, _ = tu.callee_decl(GP)
+                if name in ("operator[]", "operator*", "operator->"): return self._result(GP, f"element of a const view ({name})")
+            if GP is not None and GP.get("kind") == "MemberExpr" and GP.get("name") in ("front", "back", "data", "begin", "end", "rbegin", "rend"):
+                call = tu.par(GP)
+                if call is not None and call.get("kind") == "CXXMemberCallExpr": return self._result(call, f"element of a const view ({GP.get('name')})")
         if GP is not None and GP.get("kind") == "MemberExpr" and GP.get("name") == "get" and re.search(r"std::(?:unique_ptr|shared_ptr)", TQ(P)):
             call = tu.par(GP)
             if call is not None: return ("go", call, "lptr")
@@ -604,8 +627,11 @@ class Walk:
             if i == 0: return ("w", "handle called", None)
             # S0e (act-on 1): an algorithm returning a handle into the range keeps the handle alive (judge its uses);
             # only value-returning algorithms end the walk as reads
-            if d is None and name in STD_HANDLE_ALGOS: return ("go", P, "ptr")
-            if d is None and name in STD_VALUE_ALGOS and not is_pointer(T(P)) and not re.search(r"iterator|span<", T(P)):
+            # S0f (S0e review consider 1): the std lists apply only when the call target's own type is a std one
+            # (MSVC STL iterator / std:: types in its signature); a global / other-namespace function of that name is a write
+            stdt = "std::" in self._callee_type(P)
+            if d is None and stdt and name in STD_HANDLE_ALGOS: return ("go", P, "ptr")
+            if d is None and stdt and name in STD_VALUE_ALGOS and not is_pointer(T(P)) and not re.search(r"iterator|span<", T(P)):
                 return ("r", f"handle read by std::{name}", None)
             return ("w", f"handle passed to {name or '<unknown callee>'}()", None)
         if k == "CXXMemberCallExpr":
@@ -649,11 +675,14 @@ class Walk:
         if k in ("ConditionalOperator", "BinaryConditionalOperator") and i > 0: return ("go", P, "lptr")
         if k == "BinaryOperator" and P.get("opcode") == "," and i == 1: return ("go", P, "lptr")
         if k == "BinaryOperator" and P.get("opcode") in ("+", "-") and is_pointer(T(P)): return ("go", P, "lptr")
+        if k in ("VarDecl",) and is_pointer(T(P)) and not pointee_const(T(P)):
+            self._var = P   # S0f: followed by run() (a write through the copy is a write of the member's pointee)
+            return ("r", f"pointer copied into {P.get('name') or ''}", None)
         return ("r", "pointer value copied / compared", None)
 
 
 def tracked_fields(tu, classes):
-    """clang id -> (class, field name) for the data members of the tracked classes (definitions in whirl::server)"""
+    """clang id -> (class, field name) for the data members of the tracked classes (namespace-level definitions; S0e: class templates / nested classes are reported)"""
     out, odd = {}, []
     for d in list(tu.decls.values()):
         if d.get("kind") == "ClassTemplateDecl" and d.get("name") in classes:   # S0e (consider 7)
@@ -701,6 +730,14 @@ def analyze(objs, root, classes, callable_ok):
                         v, why, rf = W.run(n, "obj", mem)
                 else:
                     v, why, rf = W.run(n, "obj", mem)
+                if v == "w" and rf is None:
+                    # S0f (S0e review consider 3): a write inside a lambda (or a by-reference capture) that a named
+                    # function returns: the function hands the member out, its callers that run the lambda write it
+                    L = tu.par(n)
+                    while L is not None and L.get("kind") != "LambdaExpr" and L.get("kind") not in FUNC_KINDS: L = tu.par(L)
+                    if L is not None and L.get("kind") == "LambdaExpr":
+                        rf = W._leak_ret(L)
+                        if rf is not None: why += "; the lambda is returned"
                 weak = id(n) in tu.pattern or "(weak)" in why
                 hits.append([pos, mem, cls, v, why, weak, mangled(rf)])
         if k in ("CXXMemberCallExpr", "CallExpr"):
@@ -890,6 +927,10 @@ inline void count(int* p) { *p = 1; }
 inline void format(int& x) { x = 1; }
 template <class... A> void logI(A&... a) { ((a = 0), ...); }
 }
+inline int* next(int* p) { *p = 1; return p; }
+inline bool find(int* p, int* e) { *p = 1; return p == e; }
+namespace other { inline int* prev(int* p) { *p = 2; return p; } }
+struct GS { int x = 0; };
 """
 _ST_CASES = [
     ("const char* c1_ = nullptr;", "c1_ = nullptr;", "w", "pointer-to-const member assigned (act-on 4)"),
@@ -932,6 +973,18 @@ _ST_CASES = [
     ("int c47_ = 0;", "whirl::util::logI(c47_);", "w", "whirl::util::logI (not log.h) writes its args (consider 2)"),
     ("int c48_ = 0;", "whirl::util::format(c48_);", "w", "whirl::util::format (not std::format) takes int& (consider 2)"),
     ("std::string c49_;", "auto s = std::format(\"{}\", c49_); (void)s;", "r", "control: std::format reads"),
+    # S0f (S0e review act-on 1, consider 1; probes scratch/a25_engine/s0e_review/runner/probe.py p1-p7, p17)
+    ("int* p1_ = nullptr;", "CONST:*p1_ = 1;", "w", "pointer member, pointee written in a const method (S0e act-on 1)"),
+    ("int* const p2_ = nullptr;", "*p2_ = 1;", "w", "T *const member, pointee written (S0e act-on 1)"),
+    ("GS* p3_ = nullptr;", "CONST:p3_->x = 1;", "w", "pointer member ->x written in a const method (S0e act-on 1)"),
+    ("int* p3b_ = nullptr;", "*p3b_ = 1;", "w", "control: pointee write in a non-const method"),
+    ("int p4_ = 0;", "(void)::next(&p4_);", "w", "global ::next(int*) writes *p (not std; S0e consider 1)"),
+    ("int p5_ = 0;", "int e = 0; if (::find(&p5_, &e)) {}", "w", "global ::find(int*, int*) writes *p (not std)"),
+    ("int p6_ = 0;", "(void)other::prev(&p6_);", "w", "other::prev(int*) writes *p (not std)"),
+    ("std::span<int> p7_;", "CONST:p7_[0] = 1;", "w", "span member element written in a const method (S0e act-on 1)"),
+    ("int* p17_ = nullptr;", "CONST:int* q = p17_; *q = 1;", "w", "pointer member copied, then written through the copy"),
+    ("int* p19_ = nullptr;", "CONST:int v = *p19_; (void)v;", "r", "control: pointee read in a const method"),
+    ("const int* p20_ = nullptr;", "CONST:const int* q = p20_; (void)q;", "r", "control: pointer-to-const member copied"),
 ]
 
 
@@ -944,7 +997,8 @@ def selftest():
     src += ["  " + d for d, _b, _e, _w in _ST_CASES]
     src.append("  void m3() const { const_cast<int&>(c3_) = 1; }")
     src.append("  template <class T> void m7(T v) { c7_ = v; }")
-    src += [f"  void m{i}x() {{ {b} }}" for i, (_d, b, _e, _w) in enumerate(_ST_CASES) if b]
+    src += [f"  void m{i}x() const {{ {b[6:]} }}" if b.startswith("CONST:") else f"  void m{i}x() {{ {b} }}"
+            for i, (_d, b, _e, _w) in enumerate(_ST_CASES) if b]
     src += ["};", "}"]
     open(os.path.join(root, "src", "server", "p.cpp"), "w", encoding="utf-8").write("\n".join(src) + "\n")
     clang = find_clang()

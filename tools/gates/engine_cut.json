@@ -1124,7 +1124,7 @@
   "gov_margin_": "server_main.cpp:1684 [&] lambda calling lm.budgetMargin; assigned only in setGovernor"
  },
  "text_write_ok": {
-  "_doc": "S0e (S0d review act-on 2): rows the text census calls a write and the AST census a read; every other such row is a finding (the cross-check fails closed when an AST rule misses a write). Key entry:member, text_why = the text rule's reason exactly; each checked at the source (c1ca7ce / abe3512 / 38c6ffc / 7ad196c trees: the same 8 rows).",
+  "_doc": "S0e (S0d review act-on 2): rows the text census calls a write and the AST census a read; every other such row is a finding (the cross-check fails closed when an AST rule misses a write). Key entry:member, text_why = the text rule's reason exactly; each checked at the source (c1ca7ce / abe3512 / 38c6ffc / 7ad196c trees: the same 8 rows). S0f: text_why is the row's WHOLE set of text reasons (a string, or a list when the text census gives several).",
   "Engine:owner_": {
    "text_why": "address taken",
    "reason": "engine.cpp:90-93 ck_/pool_/ps_/tb_.setOwner(&owner_): setOwner(const EngineThread*) (ckpt_store.h:51, page_pool.h:53, prefix_store.h:123, tier_bridge.h:85)"
@@ -1142,8 +1142,11 @@
    "reason": "engine.cpp:89 ctx_pub_.store(ctx_, ...): std::atomic<uint32_t>::store takes the value"
   },
   "allocState:opt_": {
-   "text_why": "argument 0 of resize()",
-   "reason": "engine.cpp:110-119 slots_.resize(opt_.parallel) / ckpts.resize(opt_.n_ck) / spes().resize(opt_.n_spe): size by value"
+   "text_why": [
+    "argument 0 of alloc()",
+    "argument 0 of resize()"
+   ],
+   "reason": "engine.cpp:110-122 slots_.resize(opt_.parallel) / ckpts.resize(opt_.n_ck) / spes().resize(opt_.n_spe) and sb_.alloc(opt_.parallel, opt_.relax.on, ...): sizes / flags by value"
   },
   "govRestoreCache:opt_": {
    "text_why": "argument 0 of resize()",
