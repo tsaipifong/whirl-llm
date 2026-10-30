@@ -486,6 +486,16 @@ def probe_plan(rel_hdr, case, engine_back):
     return "copy"
 
 
+def product_incs(root, man):
+    """The include path of the product compile of a mutant: src/, include/, the SDK of the sdkinc lines, and <build>/generated
+    when the manifest stages a generated header (gen lines; arch025-n8b2: release.cpp includes whirl/version.h, which the
+    product build finds there)."""
+    out = [os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man, product=True)]
+    if man.gens:
+        out.append(GEN_ROOT or os.path.join(root, "build", "Release", "generated"))
+    return out
+
+
 def product_compile_header(root, rel_hdr, text, tag, env, d, man, case=""):
     # arch025-lane2 leg 6 (header-only module): the mutated header shadows the real one. It is written to
     # <root>/_iso_mut_<tag>/<path without include/ or src/> (same depth as the real file, so a relative include resolves
@@ -513,7 +523,7 @@ def product_compile_header(root, rel_hdr, text, tag, env, d, man, case=""):
                     f.write(text)
             with open(src, "w", encoding="utf-8", newline="\n") as f:
                 f.write(probe)
-            return compile_obj(src, [os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man, product=True)],
+            return compile_obj(src, product_incs(root, man),
                                os.path.join(d, "prod.obj"), env, d, def_flags(man))
         finally:
             for x in (hdr, src):
@@ -530,7 +540,7 @@ def product_compile_header(root, rel_hdr, text, tag, env, d, man, case=""):
             f.write(text)
         with open(src, "w", encoding="utf-8", newline="\n") as f:
             f.write(f'#include "{staged(rel_hdr)}"\n')
-        rc, out = compile_obj(src, [top, os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man, product=True)],
+        rc, out = compile_obj(src, [top, *product_incs(root, man)],
                               os.path.join(d, "prod.obj"), env, d, def_flags(man))
     finally:
         shutil.rmtree(top, ignore_errors=True)
@@ -545,7 +555,7 @@ def product_compile(root, rel_src, text, tag, env, d, man, case=""):
     try:
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-        rc, out = compile_obj(tmp, [os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man, product=True)],
+        rc, out = compile_obj(tmp, product_incs(root, man),
                               os.path.join(d, "prod.obj"), env, d, def_flags(man))
     finally:
         try:
@@ -626,6 +636,14 @@ def selftest():
         case("define with a bad name refused", man(head + "src src/a/t.cpp\nmutate src/a/t.cpp\ndefine 1bad\n") is None)
         case("unknown sdkinc refused", man(head + "src src/a/t.cpp\nmutate src/a/t.cpp\nsdkinc zz\n") is None)
         case("a module with neither has no flags and no sdk dirs", m2 is not None and def_flags(m2) == [] and sdk_dirs(m2) == [])
+        # arch025-n8b2: the product compile of a mutant sees the build's generated headers when the manifest stages one (gen
+        # whirl/version.h: release.cpp includes it, as the product build does from <build>/generated)
+        mg = man(head + "src src/a/t.cpp\nmutate src/a/t.cpp\ngen whirl/version.h\n")
+        gen_root = os.path.join(root, "build", "Release", "generated")
+        case("gen line: <build>/generated on the product include path",
+             mg is not None and product_incs(root, mg) == [os.path.join(root, "src"), os.path.join(root, "include"), gen_root])
+        case("no gen line: product include path is src/ include/ only",
+             m2 is not None and product_incs(root, m2) == [os.path.join(root, "src"), os.path.join(root, "include")])
         # arch025-iso4-fix (REVIEW 7): a define that a product file of the module reads would let the iso build differ from
         # the product build unseen (a crossing wrapped in #ifndef WHIRL_ISO_X)
         with open(os.path.join(root, "src", "a", "d.cpp"), "w", encoding="utf-8") as f:
