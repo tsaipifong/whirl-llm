@@ -1122,5 +1122,40 @@
   "vram_probe_": "server_main.cpp:1653-1672 copy-capture lambda (wddmMemInfo); assigned only in setVramProbe",
   "vram_others_": "server_main.cpp:1653-1672 copy-capture lambda (gpuOthers); assigned only in setVramProbe",
   "gov_margin_": "server_main.cpp:1684 [&] lambda calling lm.budgetMargin; assigned only in setGovernor"
+ },
+ "text_write_ok": {
+  "_doc": "S0e (S0d review act-on 2): rows the text census calls a write and the AST census a read; every other such row is a finding (the cross-check fails closed when an AST rule misses a write). Key entry:member, text_why = the text rule's reason exactly; each checked at the source (c1ca7ce / abe3512 / 38c6ffc / 7ad196c trees: the same 8 rows).",
+  "Engine:owner_": {
+   "text_why": "address taken",
+   "reason": "engine.cpp:90-93 ck_/pool_/ps_/tb_.setOwner(&owner_): setOwner(const EngineThread*) (ckpt_store.h:51, page_pool.h:53, prefix_store.h:123, tier_bridge.h:85)"
+  },
+  "modulesOwned:owner_": {
+   "text_why": "address taken",
+   "reason": "engine.h:244-245 compares ownerThread() == &owner_ (a const method; pointer compared)"
+  },
+  "Engine:ct_": {
+   "text_why": "argument 0 of ps_()",
+   "reason": "engine.cpp:57 ps_(ct_, ...): PrefixStore(const chat::ChatTokens&, const Config&) (prefix_store.h:121)"
+  },
+  "Engine:ctx_": {
+   "text_why": "argument 0 of store()",
+   "reason": "engine.cpp:89 ctx_pub_.store(ctx_, ...): std::atomic<uint32_t>::store takes the value"
+  },
+  "allocState:opt_": {
+   "text_why": "argument 0 of resize()",
+   "reason": "engine.cpp:110-119 slots_.resize(opt_.parallel) / ckpts.resize(opt_.n_ck) / spes().resize(opt_.n_spe): size by value"
+  },
+  "govRestoreCache:opt_": {
+   "text_why": "argument 0 of resize()",
+   "reason": "engine_gov.cpp:206 sl.ckpts.resize(opt_.n_ck): size by value"
+  },
+  "facts:tok_": {
+   "text_why": "address taken",
+   "reason": "engine.cpp:151 f.tok = &tok_ in a const method; EngineFacts::tok is const Tokenizer* (engine_api.h:68)"
+  },
+  "finishPrefill:rcx_": {
+   "text_why": "address taken",
+   "reason": "engine_prefill.cpp:289 sl.st.cx = &rcx_; StreamState::cx is const ResponseCtx* (stream.h:60)"
+  }
  }
 }

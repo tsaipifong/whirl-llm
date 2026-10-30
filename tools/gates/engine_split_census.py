@@ -885,13 +885,14 @@ _inbody = set()
 xrows = []
 for key in list(rows):
     f, ln, ud, uw_text, uf, ut = rows[key]
-    aw, why_of = [], {}
+    aw, why_of, rd_of = [], {}, {}
     for rel, a, b in branges.get(key, []):
         for idx, mem, e in _byfile.get(rel, []):
             if a <= idx < b:
                 _inbody.add((rel, idx, mem))
                 w = _verdict(e)
                 if w and mem not in why_of: why_of[mem] = (w, idx, rel)
+                if not w: rd_of.setdefault(mem, []).extend(why for _v, why in (e["strong"] or e["weak"]))
         for idx, callee, e in _cbyfile.get(rel, []):
             if a <= idx < b and callee in _leaks and _verdict(e):
                 for mem in sorted(_leaks[callee]):
@@ -908,7 +909,9 @@ for key in list(rows):
     for m in sorted(set(aw) | set(uw_text)):
         if (m in aw) != (m in uw_text):
             tw = next((l.split("\t")[2] for l in text_wlog if l.split("\t")[0] == key and l.split("\t")[1] == m), "-")
-            xrows.append(f"{key}\t{m}\t{'w' if m in uw_text else 'r'}\t{'w' if m in aw else 'r'}\t{why_of.get(m, ('-',))[0]}\t{tw}")
+            # S0e: for a text-write / AST-read row, the AST read reasons (proof kind decided below)
+            ar = "; ".join(sorted(set(rd_of.get(m, [])))) if m not in aw else why_of.get(m, ('-',))[0]
+            xrows.append(f"{key}\t{m}\t{'w' if m in uw_text else 'r'}\t{'w' if m in aw else 'r'}\t{ar or 'NO AST HIT'}\t{tw}")
     for m in aw:
         w, idx, rel = why_of[m]
         rawt = texts.get(rel, ("", ""))[1]
@@ -918,6 +921,41 @@ for key in list(rows):
 for (rel, idx, mem), e in sorted(_pos.items()):
     if (rel, idx, mem) not in _inbody and _verdict(e) and not rel.startswith("include:"):
         findings.append(f"AST write outside every census entry: {rel}:{texts.get(rel, ('', ''))[1].count(chr(10), 0, idx) + 1} {mem} ({_verdict(e)})")
+# S0e (S0d review act-on 2): the cross-check bites - a row the text rules call a write and the AST a read is a FINDING
+# unless the cut pins it (cut "text_write_ok": "entry:member" -> {"text_why": the text rule's reason, "reason": why the
+# text rule is wrong there}); a pinned row that no longer occurs is a finding too (the list stays exact)
+# S0e (coordinator 08:5x): a row is NOT a finding when the AST PROVES the read from types / the call target: every AST
+# verdict for that member in that body is a read whose reason comes from the AST itself (a const object / const cast /
+# const& parameter, a value read, a compared / discarded handle, a std::format target by its basic_format_string
+# parameter). Reads that rest on a measured NAME list (value algorithms, lock guards, value wrappers, copy types,
+# callable_reads, non-const accessor value results) and bodies without any AST hit still need the pin.
+_LISTED = ("handle read by std::", "locked by", "copied into", "std::function call (cut callable_reads)", "returns a value")
+_two = {k: v for k, v in cut.get("text_write_ok", {}).items() if not k.startswith("_")}
+_seen_two = set()
+for x in xrows:
+    q = x.split("\t")
+    if q[2] == "w" and q[3] == "r":
+        k2 = f"{q[0]}:{q[1]}"
+        if k2 in _two and _two[k2].get("text_why") == q[5]:
+            _seen_two.add(k2); continue
+        if q[4] != "NO AST HIT" and not any(t in q[4] for t in _LISTED):
+            continue   # the AST proves the read (ast_xcheck.tsv column ast_why lists the proof)
+        mt = re.match(r"through (~?\w+)\(\)", q[5])
+        if q[4] == "NO AST HIT" and mt:
+            # the text rule's accessor write: the AST knows the callee; it proves the read when no definition of that
+            # name hands the member out (no return of a non-const reference / handle to it, S0d leak analysis)
+            mg = [g for g, nm in _fname.items() if nm == mt.group(1)]
+            if mg and not any(q[1] in _leaks.get(g, ()) for g in mg):
+                continue
+        findings.append(f"text census write the AST calls a read, not pinned in the cut's text_write_ok: {k2} (text: {q[5]})")
+for k2 in sorted(set(_two) - _seen_two):
+    findings.append(f"cut text_write_ok entry no longer occurs (remove it): {k2}")
+# S0e (S0d review consider 6 / 7): AST hits without a position, writes in files outside src/ include/, tracked class names
+# that are class templates / nested classes (their fields would not be tracked)
+for _t in _ast["tus"]:
+    if _t.get("nopos"): findings.append(f"AST: {_t['nopos']} tracked member uses without a source position in {_t['tu']}")
+    for u in _t.get("unmapped", []): findings.append(f"AST write outside src/ and include/ ({_t['tu']}): {u}")
+for o_ in sorted({o for _t in _ast["tus"] for o in _t.get("odd", [])}): findings.append(f"AST: {o_}")
 open(os.path.join(OUT, "writes_text.tsv"), "w", encoding="utf-8").write("entry\tmember\twhy\tcontext\n" + "\n".join(text_wlog) + "\n")
 open(os.path.join(OUT, "ast_xcheck.tsv"), "w", encoding="utf-8").write(
     "entry\tmember\ttext\tast\tast_why\ttext_why\n" + "\n".join(xrows) + ("\n" if xrows else ""))

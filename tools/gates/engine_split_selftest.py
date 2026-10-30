@@ -75,6 +75,9 @@ def _acc(decl, use, mod="server.governor", name="holdRef", m="gov_hold_"):
             lambda c: c["new_funcs"].update({name: mod}), ["--no-pin"], ow("runLoop:" + m))
 
 
+_T1_WHY = "writable handle begin() used (, gov_json_.)"   # S0e T1b: the text rule's reason for the T1 row
+
+
 def _okc(code):   # a read control in runLoop: the check must pass
     return [(EC, RUNL, RUNL + "    " + code + "\n")], None, [], r"(?#OK)^engine split check: ok"
 
@@ -322,6 +325,35 @@ MUT = [
      *_acc("bool* holdPtr() { return &gov_hold_; }", "{ auto p = holdPtr(); *p = true; }", name="holdPtr")),
     ("D4", "S0d: a holder in a member initializer (the S4 dc_{bst_, m_, opt_} shape): std::reference_wrapper<bool> hd_{stop_}",
      [(EH, HOLD, HOLD + "\n    std::reference_wrapper<bool> hd_{stop_};")], lambda c: c["modules"][GV]["data"].append("hd_"), ["--no-pin"], ow("Engine:stop_")),
+    # --- S0d review (progress/arch025-engine.S0d.REVIEW.md act-on 1; reviewer runner scratch/a25_engine/s0d_review/runner/r_mut.py):
+    # handles returned by std algorithms are followed (the S0d tools ended the walk at the algorithm: rc 0) ---
+    ("Q1c", "control: queue_.front() = nullptr", *_dc("if (!queue_.empty()) queue_.front() = nullptr;", "queue_")),
+    ("Q1", "std::find result written: *it = nullptr", *_dc("{ auto it = std::find(queue_.begin(), queue_.end(), nullptr); if (it != queue_.end()) *it = nullptr; }", "queue_")),
+    ("Q2", "std::find_if(...)->job = nullptr on slots_ (core.shared)",
+     [(EP, DROPC, DROPC + "    if (!slots_.empty()) std::find_if(slots_.begin(), slots_.end(), [](const Slot& s) { return s.job != nullptr; })->job = nullptr;\n")],
+     None, [], r"^== writes to core\.shared not in shared_writers '\w+' \(\d+\): .*\bdropCache:slots_\b|^   not in the expected list '\w+': .*\bdropCache:slots_\b"),
+    ("Q2c", "control: slots_[0].job = nullptr (core.shared)", [(EP, DROPC, DROPC + "    if (!slots_.empty()) slots_[0].job = nullptr;\n")],
+     None, [], r"^== writes to core\.shared not in shared_writers '\w+' \(\d+\): .*\bdropCache:slots_\b|^   not in the expected list '\w+': .*\bdropCache:slots_\b"),
+    ("Q3", "*std::max_element(crlf_norm_) = 0", *_dc("if (!crlf_norm_.empty()) *std::max_element(crlf_norm_.begin(), crlf_norm_.end()) = 0;", "crlf_norm_")),
+    ("Q4", "*std::next(queue_.begin()) = nullptr", *_dc("if (queue_.size() > 1) *std::next(queue_.begin()) = nullptr;", "queue_")),
+    ("Q5", "*std::lower_bound(crlf_norm_) = 1", *_dc("if (!crlf_norm_.empty()) *std::lower_bound(crlf_norm_.begin(), crlf_norm_.end(), 0u) = 1;", "crlf_norm_")),
+    ("Q6", "std::exchange(*std::find(...), nullptr)", *_dc("{ auto it = std::find(queue_.begin(), queue_.end(), nullptr); if (it != queue_.end()) (void)std::exchange(*it, nullptr); }", "queue_")),
+    # act-on 2: a text-write / AST-read row is a finding unless the cut pins it (and a pinned row must still occur)
+    # (S0e, coordinator 08:5x: a read the AST proves from types / the call target is no finding; a read that rests on a
+    # measured name list - here std::count, a value algorithm - needs the pin)
+    ("T1", "S0e: text write / AST read through a name list (std::count over gov_json_.begin()/end()), not pinned: a finding",
+     [(EC, RUNL, RUNL + "    (void)std::count(gov_json_.begin(), gov_json_.end(), 'x');\n")], None, [],
+     fnd("text census write the AST calls a read, not pinned in the cut's text_write_ok: runLoop:gov_json_")),
+    ("T1b", "S0e control: the same row pinned in text_write_ok with the text rule's exact reason passes",
+     [(EC, RUNL, RUNL + "    (void)std::count(gov_json_.begin(), gov_json_.end(), 'x');\n")],
+     lambda c: c["text_write_ok"].update({"runLoop:gov_json_": {"text_why": _T1_WHY, "reason": "selftest"}}), ["--no-pin"],
+     r"(?#OK)^engine split check: ok"),
+    ("T2", "S0e: a text_write_ok pin whose text reason differs does not cover the row",
+     [(EC, RUNL, RUNL + "    (void)std::count(gov_json_.begin(), gov_json_.end(), 'x');\n")],
+     lambda c: c["text_write_ok"].update({"runLoop:gov_json_": {"text_why": "other", "reason": "selftest"}}), ["--no-pin"],
+     fnd("text census write the AST calls a read, not pinned in the cut's text_write_ok: runLoop:gov_json_")),
+    ("T3", "S0e: a stale text_write_ok entry is a finding", [], lambda c: c["text_write_ok"].update({"runLoop:stop_": {"text_why": "x", "reason": "x"}}),
+     ["--no-pin"], fnd("cut text_write_ok entry no longer occurs (remove it): runLoop:stop_")),
     ("D4b", "S0d: the same binding in a declarator after a nested struct body (struct Hd { bool& r; } hd_{stop_}; the text census has no "
      "entry for it): the AST write outside every entry is a finding",
      [(EH, HOLD, HOLD + "\n    struct Hd { bool& r; } hd_{stop_};")], lambda c: c["modules"][GV]["data"].append("hd_"), ["--no-pin"],
@@ -506,6 +538,12 @@ def main():
     with ThreadPoolExecutor(JOBS) as ex:
         res += list(ex.map(one, MUT))
     res += git_cases(sha)
+    # S0e: the AST rules' unit self-test (S0d review probes on a synthetic TU: act-on 1, 3, 4, consider 1, 2, 5)
+    rc, out = run([PY, "-I", os.path.join(HERE, "engine_split_ast.py"), "--selftest"])
+    last = out.strip().splitlines()[-1] if out.strip() else "(no output)"
+    v = "PASS" if rc == 0 and re.search(r"^engine split ast selftest: (\d+)/\1 as expected", out, re.M) else "FAIL"
+    bad = [l.strip() for l in out.splitlines() if l.startswith(("  MISS", "  FP"))]
+    res.append(("A1", v, f"A1 engine_split_ast.py --selftest (synthetic TU)\n   rc={rc}: {last}" + "".join("\n   " + b for b in bad[:12]) + f" -> {v}"))
     good = sum(1 for _, v, _ in res if v in ("PASS", "CAUGHT"))
     counted = sum(1 for _, v, _ in res if v != "SKIP")
     txt = "\n".join(r[2] for r in res)

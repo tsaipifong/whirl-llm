@@ -40,7 +40,7 @@ import hashlib, json, os, re, shutil, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VERSION = "s0d-1"
+VERSION = "s0e-1"
 
 
 def arg(name, default=None):
@@ -66,17 +66,29 @@ STDFLAGS = ["--target=x86_64-pc-windows-msvc", "-std=c++20", "-fsyntax-only", "-
 VERSION_H = ('#pragma once\n#define WHIRL_VERSION_MAJOR 0\n#define WHIRL_VERSION_MINOR 0\n#define WHIRL_VERSION_PATCH 0\n'
              '#define WHIRL_VERSION_STRING "0.0.0"\n#define WHIRL_GPU_ARCHS_STRING "census"\n')
 
-# ---- measured lists (each name checked against its std declaration; anything else is a write) ----
-# std methods that hand out access to the object (a non-const overload exists next to a const one): the call itself
-# is not a write; what is done with the result decides
-ACCESSORS = {"begin", "end", "rbegin", "rend", "data", "front", "back", "at", "operator[]", "operator*", "operator->",
-             "find", "lower_bound", "upper_bound", "equal_range", "get", "value", "top", "operator std::basic_string_view"}
-# std algorithms / functions that only read through the iterators / pointers they get (callee not declared in whirl::server)
-STD_READ_ALGOS = {"find", "find_if", "find_if_not", "any_of", "all_of", "none_of", "count", "count_if", "distance",
-                  "equal", "mismatch", "search", "lower_bound", "upper_bound", "binary_search", "equal_range",
-                  "accumulate", "min_element", "max_element", "minmax_element", "is_sorted", "adjacent_find",
-                  "includes", "lexicographical_compare", "memcmp", "strlen", "strncmp", "strcmp", "next", "prev",
-                  "advance_copy", "string_view", "basic_string_view"}
+# ---- measured lists (each checked against its std declaration; anything else is a write) ----
+# S0e (S0d review act-on 3): std accessors per container: a non-const overload the AST selected (no const cast on the
+# object) is let through only for (container, method) pairs whose class also declares the const twin and whose
+# non-const one only hands out access. std::map / unordered_map operator[] (inserts, no const twin), vector<bool> /
+# bitset proxies (prvalue class), future::get (consumes) are NOT here -> writes.
+_SEQ = ("std::vector<", "std::deque<", "std::basic_string<", "std::array<", "std::span<", "std::list<",
+        "std::forward_list<", "std::valarray<")
+_ASSOC = ("std::map<", "std::multimap<", "std::set<", "std::multiset<", "std::unordered_map<", "std::unordered_multimap<",
+          "std::unordered_set<", "std::unordered_multiset<")
+ACCESSOR_PAIRS = [
+    (_SEQ, {"begin", "end", "rbegin", "rend", "data", "front", "back", "at", "operator[]"}),
+    (_ASSOC, {"begin", "end", "rbegin", "rend", "find", "lower_bound", "upper_bound", "equal_range", "at"}),
+    (("std::optional<",), {"value", "operator*", "operator->"}),
+    (("std::basic_string<",), {"operator std::basic_string_view", "operator basic_string_view"}),
+]
+# std algorithms that return a VALUE computed from what the handles point to (the handles are only read)
+STD_VALUE_ALGOS = {"count", "count_if", "any_of", "all_of", "none_of", "distance", "equal", "accumulate", "binary_search",
+                   "includes", "lexicographical_compare", "is_sorted", "memcmp", "strlen", "strcmp", "strncmp"}
+# S0e (S0d review act-on 1): std algorithms that return an iterator / pointer INTO the range they get (or a pair of
+# them): the result stays a handle and its uses are judged (ExprMutationAnalyzer: a returned handle is followed)
+STD_HANDLE_ALGOS = {"find", "find_if", "find_if_not", "lower_bound", "upper_bound", "equal_range", "min_element",
+                    "max_element", "minmax_element", "adjacent_find", "mismatch", "search", "search_n", "find_end",
+                    "find_first_of", "partition_point", "is_sorted_until", "next", "prev"}
 # std functions taking forwarding references that only read them (std::format: its arguments are formatted, not changed)
 STD_FWD_READ = {"format", "print", "println", "vformat", "make_format_args", "formatted_size"}
 # whirl functions with forwarding-reference parameters that only format them (src/server/log.h:27-38: std::format(f,
@@ -114,7 +126,18 @@ def TQ(n):
 
 
 def is_const(t):
-    return t.startswith("const ") or t.startswith("volatile const ") or t.startswith("const volatile ")
+    """S0e (S0d review act-on 4): TOP-LEVEL const of an object type. `const T *` is a non-const pointer (to const);
+    `T *const` / `const T *const` are const pointers; `const T` / `const std::vector<..>` are const objects."""
+    t = t.strip()
+    if is_pointer(t) or re.search(r"\*\s*(?:const|volatile|\s)*$", t):
+        tail = t[t.rfind("*") + 1:]
+        return re.search(r"\bconst\b", tail) is not None
+    return re.match(r"(?:volatile\s+)?const\b", t) is not None
+
+
+def pointee_const(t):
+    t = t.strip()
+    return "*" in t and re.match(r"(?:volatile\s+)?const\b", t) is not None
 
 
 def ptr_const_pointee(n):
@@ -123,15 +146,28 @@ def ptr_const_pointee(n):
     for t in q.split(" | "):
         t = t.strip()
         if not t: continue
-        if t.endswith("*") and is_const(t): return True
-        if t.endswith("* const") and is_const(t): return True
+        if is_pointer(t) and pointee_const(t): return True
         if re.search(r"const_iterator|const_reverse_iterator", t): return True
         if re.search(r"\bspan<const\b|string_view|basic_string_view", t): return True
     return False
 
 
 def is_pointer(t):
-    return t.rstrip().endswith("*") or t.rstrip().endswith("* const")
+    return re.search(r"\*\s*(?:const|volatile|\s)*$", t.strip()) is not None
+
+
+def is_scalar(t):
+    t = re.sub(r"^(?:const|volatile)\s+", "", t.strip())
+    return re.fullmatch(r"(?:(?:unsigned|signed|short|long|int|char|bool|float|double|wchar_t|char8_t|char16_t|char32_t|"
+                        r"__int64|void)\s*)+", t) is not None or is_pointer(t)
+
+
+def accessor_ok(objtype, name):
+    """S0e: a non-const std accessor overload that only hands out access (measured per container)"""
+    for pre, names in ACCESSOR_PAIRS:
+        if name in names and any(objtype.startswith(p) or objtype.startswith("const " + p) for p in pre):
+            return True
+    return False
 
 
 class TU:
@@ -345,8 +381,10 @@ class Walk:
             name, d, _ = tu.callee_decl(P)
             if i == 0: return ("r", "callee", None)
             if i == 1:
-                if name in ("operator[]", "operator*", "operator->"):
-                    return self._result(P, f"non-const {name}")
+                # S0e (act-on 3): only a measured non-const accessor overload (std::map::operator[] inserts: a write)
+                if name in ("operator[]", "operator*", "operator->") and (
+                        (d is None and accessor_ok(T(cur), name)) or (d is not None and self._has_const_twin(d, name))):
+                    return self._result(P, f"non-const {name}", strict=True)
                 if name == "operator()":
                     return ("w", "non-const operator() called", None)
                 return ("w", f"{name or 'operator'} on it", None)
@@ -355,8 +393,15 @@ class Walk:
             name, d, _ = tu.callee_decl(P)
             if i == 0: return ("w", "called through", None)
             if name == "<dependent>": return ("w", "argument of a dependent call (weak)", None)
-            if d is None and name in STD_FWD_READ: return ("r", f"formatted by std::{name}", None)
-            if name in WHIRL_FWD_READ: return ("r", f"formatted by {name}", None)
+            if d is None and name in STD_FWD_READ:
+                # S0e: the call target's own type must show the std format signature (a basic_format_string first
+                # parameter; std::format stores its arguments as const references in basic_format_arg)
+                ft = self._callee_type(P)
+                if re.search(r"basic_format_string<|format_string<|basic_format_args<", ft):
+                    return ("r", f"formatted by std::{name} (format_string target)", None)
+                return ("w", f"argument of {name}() (not a std format signature: {ft[:60]})", None)
+            if name in WHIRL_FWD_READ and d is not None and self._decl_in(d, "server/log.h"):
+                return ("r", f"formatted by {name} (log.h)", None)
             return ("w", f"argument of {name or '<unknown callee>'}() bound to a non-const reference", None)
         if k == "CXXMemberCallExpr":
             if i == 0: return ("r", "callee", None)
@@ -365,7 +410,7 @@ class Walk:
         if k in ("CXXConstructExpr", "CXXTemporaryObjectExpr"):
             t = T(P)
             if any(t.startswith(x) for x in LOCK_TYPES): return ("r", f"locked by {t[:40]}", None)
-            if any(t.startswith(x) for x in STD_VALUE_WRAPPERS) and "&" not in t and "reference_wrapper" not in t:
+            if any(t.startswith(x) for x in STD_VALUE_WRAPPERS) and "&" not in t and "reference_wrapper" not in t                     and not re.search(r"span<|iterator|\*|_view<", t):   # S0e (consider 5): a wrapped view is a handle
                 return ("r", f"copied into {t[:40]}", None)
             return ("w", f"bound to a non-const reference parameter of a constructor of {t[:60]}", self._leak_ret(P))
         if k == "InitListExpr":
@@ -400,6 +445,9 @@ class Walk:
         G = P
         while tu.par(G) is not None and tu.par(G).get("kind") in TRANSP | {"ImplicitCastExpr"}: G = tu.par(G)
         GP = tu.par(G)
+        # S0e (S0d review consider 1): const_cast<T&>(x) of the const object hands out a non-const one again
+        if GP is not None and GP.get("kind") == "CXXConstCastExpr" and not is_const(T(GP)):
+            return ("go", GP, "obj") if GP.get("valueCategory") != "prvalue" else ("go", GP, "ptr")
         if GP is not None and GP.get("kind") == "CXXOperatorCallExpr" and tu.index_in(GP, G) == 1:
             name, _, _ = tu.callee_decl(GP)
             if name == "operator()" and re.search(r"std::(?:function|_Func_class|move_only_function)", TQ(P) + TQ(cur)):
@@ -412,14 +460,34 @@ class Walk:
             if call is not None: return ("go", call, "lptr")
         return ("r", "const use", None)
 
-    def _result(self, call, why, pointee=False):
+    def _result(self, call, why, pointee=False, strict=False):
         vc = call.get("valueCategory")
         if vc == "xvalue": return ("w", f"{why} (rvalue)", None)
         if vc == "lvalue": return ("go", call, "obj")
         t = T(call)
         if is_pointer(t) or re.search(r"iterator|span<|reference_wrapper", t):
             return ("go", call, "lptr" if pointee else "ptr")
+        # S0e (act-on 3): a non-const accessor returning a prvalue CLASS (vector<bool> / bitset reference proxy) hands
+        # out write access; only a scalar value is a plain read
+        if strict and not is_scalar(t): return ("w", f"{why} returns a proxy object ({t[:50]})", None)
         return ("r", f"{why} returns a value", None)
+
+    def _has_const_twin(self, d, name):
+        cls = self.tu.par(d)
+        return cls is not None and any(c.get("kind") == "CXXMethodDecl" and c.get("name") == name and
+                                       re.search(r"\)\s*const\b", (c.get("type") or {}).get("qualType", "")) for c in self.tu.kids(cls))
+
+    def _callee_type(self, call):
+        c = self.tu.kids(call)[0] if self.tu.kids(call) else {}
+        for _ in range(6):
+            if c.get("kind") in ("ImplicitCastExpr", "ParenExpr") and self.tu.kids(c): c = self.tu.kids(c)[0]; continue
+            break
+        return TQ(c)
+
+    def _decl_in(self, d, suffix):
+        p = self.tu.pos.get(id(d))
+        f = (p[0] if p else "") or ""
+        return f.replace("\\", "/").endswith(suffix)
 
     def _method(self, cur, ME, member, base_mode):
         tu = self.tu
@@ -435,8 +503,12 @@ class Walk:
                             re.search(r"\)\s*const\b", (c.get("type") or {}).get("qualType", "")) for c in tu.kids(cls))
         if call is None or call.get("kind") != "CXXMemberCallExpr":
             return ("w", f"method {name} referenced", None)
-        if name in ACCESSORS and d is None or pairs or name.startswith("operator std::basic_string_view"):
-            return self._result(call, f"non-const {name}()")
+        base = tu.kids(ME)[0] if tu.kids(ME) else {}
+        objt = T(base)
+        if ME.get("isArrow"): objt = re.sub(r"\s*\*\s*(?:const\s*)?$", "", objt)
+        # S0e (act-on 3): a std accessor only for a measured (container, method) pair; a whirl one only with a const twin
+        if (d is None and accessor_ok(objt, name)) or pairs:
+            return self._result(call, f"non-const {name}()", strict=True)
         return ("w", f"non-const method {name}()", None)
 
     def _range_for(self, rv):
@@ -530,7 +602,11 @@ class Walk:
         if k == "CallExpr":
             name, d, _ = tu.callee_decl(P)
             if i == 0: return ("w", "handle called", None)
-            if d is None and name in STD_READ_ALGOS: return ("r", f"handle read by std::{name}", None)
+            # S0e (act-on 1): an algorithm returning a handle into the range keeps the handle alive (judge its uses);
+            # only value-returning algorithms end the walk as reads
+            if d is None and name in STD_HANDLE_ALGOS: return ("go", P, "ptr")
+            if d is None and name in STD_VALUE_ALGOS and not is_pointer(T(P)) and not re.search(r"iterator|span<", T(P)):
+                return ("r", f"handle read by std::{name}", None)
             return ("w", f"handle passed to {name or '<unknown callee>'}()", None)
         if k == "CXXMemberCallExpr":
             mx = tu.kids(P)[0] if tu.kids(P) else {}
@@ -578,19 +654,25 @@ class Walk:
 
 def tracked_fields(tu, classes):
     """clang id -> (class, field name) for the data members of the tracked classes (definitions in whirl::server)"""
-    out = {}
+    out, odd = {}, []
     for d in list(tu.decls.values()):
+        if d.get("kind") == "ClassTemplateDecl" and d.get("name") in classes:   # S0e (consider 7)
+            odd.append(f"tracked class {d.get('name')} is a class template (its fields are not tracked)")
         if d.get("kind") == "CXXRecordDecl" and d.get("name") in classes and d.get("completeDefinition"):
             p = tu.par(d)
-            if p is not None and p.get("kind") not in ("NamespaceDecl", "TranslationUnitDecl", "LinkageSpecDecl"): continue
+            if p is not None and p.get("kind") not in ("NamespaceDecl", "TranslationUnitDecl", "LinkageSpecDecl"):
+                if p.get("kind") != "ClassTemplateDecl" and not d.get("isImplicit"):
+                    odd.append(f"tracked class {d.get('name')} is nested in a {p.get('kind')} {p.get('name') or ''} (its fields are not tracked)")
+                continue
             for c in tu.kids(d):
                 if c.get("kind") == "FieldDecl": out[c["id"]] = (d["name"], c.get("name"))
-    return out
+    return out, sorted(set(odd))
 
 
 def analyze(objs, root, classes, callable_ok):
     tu = TU(objs, root)
-    fields = tracked_fields(tu, classes)
+    fields, odd = tracked_fields(tu, classes)
+    nopos = 0
     W = Walk(tu, callable_ok)
     hits, calls = [], []
     seen = set()
@@ -608,6 +690,7 @@ def analyze(objs, root, classes, callable_ok):
             fid = n.get("referencedMemberDecl") if k == "MemberExpr" else n["referencedDecl"]["id"]
             cls, mem = fields[fid]
             pos = tu.pos.get(id(n))
+            if not pos: nopos += 1   # S0e (consider 6): counted, never dropped silently
             if pos and (pos, id(n)) not in seen:
                 seen.add((pos, id(n)))
                 if k == "DeclRefExpr":
@@ -634,7 +717,7 @@ def analyze(objs, root, classes, callable_ok):
     for d in tu.decls.values():
         if d.get("kind") in FUNC_KINDS and d.get("mangledName"):
             funcs[d["mangledName"]] = d.get("name")
-    return hits, calls, funcs, tu.files
+    return hits, calls, funcs, tu.files, odd, nopos
 
 
 def mangled(f):
@@ -690,6 +773,20 @@ def tu_flags(root, gen):
     return STDFLAGS + DEFINES + ["-I" + os.path.join(root, "src"), "-I" + os.path.join(root, "include"), "-I" + gen]
 
 
+_CLANG_ID = {}
+
+
+def clang_identity(clang):
+    """S0e (S0d review consider 4): the cache key includes the compiler (path + --version) and its system include
+    search list (the MSVC STL / Windows SDK directories carry their version numbers)"""
+    if clang in _CLANG_ID: return _CLANG_ID[clang]
+    v = subprocess.run([clang, "--version"], capture_output=True, text=True).stdout.splitlines()[:1]
+    r = subprocess.run([clang] + STDFLAGS[:2] + ["-xc++", "-E", "-v", "-"], input="", capture_output=True, text=True)
+    inc = [x for x in re.findall(r"^ (\S.*)$", r.stderr, re.M) if not x.startswith(('"', "(")) and "-cc1" not in x]
+    _CLANG_ID[clang] = hashlib.sha256(chr(10).join([os.path.abspath(clang)] + v + inc).encode()).hexdigest()[:16]
+    return _CLANG_ID[clang]
+
+
 def deps_hash(root, deps, extra):
     h = hashlib.sha256(extra.encode())
     for d in deps:
@@ -703,7 +800,7 @@ def deps_hash(root, deps, extra):
 def run_tu(root, tu_rel, classes, callable_ok, cache, clang, gen):
     """one TU: clang dump + analysis, cached by the content of every user file it reads (clang -MMD)"""
     me = hashlib.sha256(open(os.path.abspath(__file__), "rb").read().replace(b"\r\n", b"\n")).hexdigest()[:16]
-    extra = "|".join([VERSION, me, ",".join(sorted(classes)), ",".join(sorted(callable_ok)), tu_rel])
+    extra = "|".join([VERSION, me, ",".join(sorted(classes)), ",".join(sorted(callable_ok)), tu_rel, clang_identity(clang)])
     cdir = os.path.join(cache, re.sub(r"[^\w.]+", "_", tu_rel)) if cache else None
     if cdir and os.path.isdir(cdir):
         for f in sorted(os.listdir(cdir)):
@@ -718,7 +815,7 @@ def run_tu(root, tu_rel, classes, callable_ok, cache, clang, gen):
     src = os.path.join(root, tu_rel)
     dfile = os.path.join(cache or os.path.dirname(src), f"_dep_{os.getpid()}_{abs(hash(tu_rel))}.d")
     cmd = [clang] + tu_flags(root, gen) + ["-MMD", "-MF", dfile, "-Xclang", "-ast-dump=json",
-                                          "-Xclang", "-ast-dump-filter=whirl::server", src]
+                                          "-Xclang", "-ast-dump-filter=whirl", src]
     r = subprocess.run(cmd, capture_output=True)
     out = r.stdout.decode("utf-8", errors="replace")
     err = r.stderr.decode("utf-8", errors="replace")
@@ -741,7 +838,8 @@ def run_tu(root, tu_rel, classes, callable_ok, cache, clang, gen):
     res = {"tu": tu_rel, "errors": errors, "rc": r.returncode, "deps": deps, "hits": [], "calls": [], "funcs": {}}
     if out.strip():
         objs = read_objs(out)
-        hits, calls, funcs, files = analyze(objs, root, classes, callable_ok)
+        hits, calls, funcs, files, odd, nopos = analyze(objs, root, classes, callable_ok)
+        res["odd"], res["nopos"], res["unmapped"] = odd, nopos, []
         def cpos(p):
             f, off = p
             rel = rel_of(root, f) if f else None
@@ -752,6 +850,7 @@ def run_tu(root, tu_rel, classes, callable_ok, cache, clang, gen):
         for p, mem, cls, v, why, weak, rf in hits:
             q = cpos(p)
             if q: res["hits"].append(q + [mem, cls, v, why, weak, rf])
+            elif v == "w": res["unmapped"].append(f"{p[0]}:{p[1]} {mem} ({why})")   # S0e (consider 6)
         for p, callee, v, why, rf, weak in calls:
             q = cpos(p)
             if q: res["calls"].append(q + [callee, v, why, rf, weak])
@@ -770,7 +869,111 @@ def run_tu(root, tu_rel, classes, callable_ok, cache, clang, gen):
     return res
 
 
+# ---------------- S0e: unit self-test on a synthetic TU (S0d review probes, scratch/a25_engine/s0d_review/runner) ----------------
+# Each case declares its own member cN_ of class Engine and one method using it; expect 'w' (some use is a write) or 'r'.
+_ST_HDR = """#include <algorithm>
+#include <atomic>
+#include <bitset>
+#include <format>
+#include <future>
+#include <map>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+namespace whirl::util {
+inline void count(int* p) { *p = 1; }
+inline void format(int& x) { x = 1; }
+template <class... A> void logI(A&... a) { ((a = 0), ...); }
+}
+"""
+_ST_CASES = [
+    ("const char* c1_ = nullptr;", "c1_ = nullptr;", "w", "pointer-to-const member assigned (act-on 4)"),
+    ("const int* c2_ = nullptr;", "++c2_;", "w", "pointer-to-const member incremented (act-on 4)"),
+    ("int c3_ = 0;", None, "w", "const_cast<int&>(c3_) = 1 in a const method (consider 1)"),
+    ("std::future<int> c4_;", "(void)c4_.get();", "w", "std::future::get() consumes the state (act-on 3)"),
+    ("int c5_ = 0;", "auto f = [](auto& e) { e.c5_ = 1; }; f(*this);", "w", "generic lambda param e.c5_ = 1"),
+    ("int c7_ = 0;", None, "w", "member template never instantiated: c7_ = v (weak)"),
+    ("int c8_ = 0;", "tf(*this);", "w", "function template tf(E& e) { e.c8_ = 1; } instantiated"),
+    ("int c9_ = 0;", "SETONE(c9_);", "w", "macro SETONE(x) x = 1"),
+    ("std::map<int, int> c18_;", "(void)c18_[1];", "w", "std::map::operator[] inserts, result discarded (act-on 3)"),
+    ("std::map<int, int> c19_;", "int v = c19_[1]; (void)v;", "w", "std::map::operator[] inserts, result read (act-on 3)"),
+    ("std::vector<bool> c20_;", "c20_[0] = true;", "w", "vector<bool> proxy reference assigned (act-on 3)"),
+    ("std::bitset<8> c21_;", "c21_[3] = true;", "w", "bitset proxy reference assigned (act-on 3)"),
+    ("std::map<int, int> c22_;", "auto r = c22_.equal_range(1); r.first->second = 5;", "w", "equal_range pair written through"),
+    ("std::vector<char> c23_;", "std::optional<std::span<char>> o{c23_}; (*o)[0] = 'x';", "w", "optional<span> view of the member (consider 5)"),
+    ("std::vector<int> c24_;", "std::sort(c24_.begin(), c24_.end());", "w", "std::sort over begin/end"),
+    ("std::unordered_map<int, int> c25_;", "c25_[2];", "w", "unordered_map::operator[] statement (act-on 3)"),
+    ("int c26_ = 0;", "[this] { c26_ = 1; }();", "w", "lambda capturing this"),
+    ("std::vector<int> c27_;", "for (auto& x : c27_) x = 0;", "w", "range-for by reference"),
+    ("int* c28_ = nullptr;", "*c28_ = 1;", "w", "pointee written through a pointer member (A1)"),
+    ("std::unique_ptr<int> c29_;", "*c29_ = 1;", "w", "unique_ptr pointee written"),
+    ("std::atomic<int> c30_{0};", "c30_.store(1);", "w", "atomic store"),
+    ("std::vector<int> c31_;", "std::fill(c31_.begin(), c31_.end(), 0);", "w", "std::fill"),
+    ("std::vector<int> c32_;", "auto it = std::find(c32_.begin(), c32_.end(), 1); *it = 2;", "w", "std::find result written through (act-on 1)"),
+    ("std::vector<int> c33_;", "auto it = std::max_element(c33_.begin(), c33_.end()); *it = 2;", "w", "max_element result written through (act-on 1)"),
+    ("std::vector<int> c34_;", "std::span<int> s(c34_.data(), c34_.size()); s[0] = 1;", "w", "span from data() + size()"),
+    ("std::string c35_;", "std::string_view v = c35_; (void)v;", "r", "control: string_view of the member"),
+    ("std::vector<int> c36_;", "(void)c36_.size();", "r", "control: size()"),
+    ("std::vector<int> c37_;", "(void)std::count(c37_.begin(), c37_.end(), 1);", "r", "control: std::count"),
+    ("std::map<int, int> c38_;", "auto it = c38_.find(1); if (it != c38_.end()) it->second = 3;", "w", "find + write through an iterator variable"),
+    ("std::vector<int> c39_;", "auto p = std::next(c39_.begin()); *p = 1;", "w", "std::next result written (act-on 1)"),
+    ("std::vector<int> c40_;", "auto* p = &*std::next(c40_.begin()); *p = 1;", "w", "&*std::next(begin) kept (act-on 1)"),
+    ("std::vector<int> c41_;", "*std::find(c41_.begin(), c41_.end(), 1) = 2;", "w", "*std::find(...) = 2 (act-on 1, Q1 shape)"),
+    ("std::vector<int> c42_;", "if (std::find(c42_.begin(), c42_.end(), 1) != c42_.end()) {}", "r", "control: std::find result only compared"),
+    ("std::map<int, int> c43_;", "(void)c43_.at(1);", "r", "control: map::at (non-const twin of a const accessor) read"),
+    ("std::vector<int> c44_;", "int v = c44_[0]; (void)v;", "r", "control: vector::operator[] read"),
+    ("const char* c45_ = nullptr;", "const char* p = c45_; (void)p;", "r", "control: pointer-to-const member copied"),
+    ("int c46_ = 0;", "whirl::util::count(&c46_);", "w", "whirl::util::count (not std::count) writes *p (consider 2)"),
+    ("int c47_ = 0;", "whirl::util::logI(c47_);", "w", "whirl::util::logI (not log.h) writes its args (consider 2)"),
+    ("int c48_ = 0;", "whirl::util::format(c48_);", "w", "whirl::util::format (not std::format) takes int& (consider 2)"),
+    ("std::string c49_;", "auto s = std::format(\"{}\", c49_); (void)s;", "r", "control: std::format reads"),
+]
+
+
+def selftest():
+    import tempfile
+    root = tempfile.mkdtemp(prefix="engine_split_ast_selftest_")
+    os.makedirs(os.path.join(root, "src", "server"))
+    src = [_ST_HDR, "namespace whirl::server {", "#define SETONE(x) x = 1", "template <class E> void tf(E& e) { e.c8_ = 1; }",
+           "struct Engine {"]
+    src += ["  " + d for d, _b, _e, _w in _ST_CASES]
+    src.append("  void m3() const { const_cast<int&>(c3_) = 1; }")
+    src.append("  template <class T> void m7(T v) { c7_ = v; }")
+    src += [f"  void m{i}x() {{ {b} }}" for i, (_d, b, _e, _w) in enumerate(_ST_CASES) if b]
+    src += ["};", "}"]
+    open(os.path.join(root, "src", "server", "p.cpp"), "w", encoding="utf-8").write("\n".join(src) + "\n")
+    clang = find_clang()
+    if not clang:
+        print("engine split ast selftest: NO CLANG"); return 3
+    gen = os.path.join(root, "_generated")
+    os.makedirs(os.path.join(gen, "whirl"), exist_ok=True)
+    res = run_tu(root, "src/server/p.cpp", {"Engine"}, set(), None, clang, gen)
+    if res["errors"] or res["rc"]:
+        print("engine split ast selftest: the synthetic TU does not compile:", res["errors"][:3]); return 1
+    by = {}
+    for rel, idx, mem, cls, v, why, weak, rf in res["hits"]:
+        by.setdefault(mem, []).append((v, why, weak))
+    good = 0
+    for d, _b, exp, what in _ST_CASES:
+        m = d.split("=")[0].split("{")[0].replace(";", "").split()[-1].lstrip("*")
+        hs = by.get(m, [])
+        strong = [h for h in hs if not h[2]] or hs
+        got = "w" if any(h[0] == "w" for h in strong) else ("r" if hs else "NONE")
+        ok = got == exp
+        good += ok
+        why = next((h[1] for h in strong if h[0] == got), "-")
+        print(f"  {'ok  ' if ok else ('MISS' if exp == 'w' else 'FP  ')} {m:5} expect {exp} got {got}: {what}  [{why[:70]}]")
+    print(f"engine split ast selftest: {good}/{len(_ST_CASES)} as expected")
+    return 0 if good == len(_ST_CASES) else 1
+
+
 def main():
+    if "--selftest" in sys.argv: return selftest()
     root = arg("--root")
     out = arg("--out")
     classes = set(x for x in (arg("--classes", "Engine") or "").split(",") if x)

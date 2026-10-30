@@ -36,14 +36,15 @@ Exit 0 every expected GPU cell PASS (or a clean --aa), 1 a cell NOT ACCEPTED / S
 3 EXTEND needed, 2 usage (also: no expected-cell list, a bad expected-cell line), 4 a blank noise column in --aa-noise,
 5 the judge crashed (traceback printed).
 """
-import csv, glob, json, os, re, sys
+import csv, glob, json, math, os, re, sys
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import abjudge  # noqa: E402
 
 MAX_ROUNDS = 10
-MIN_ROUNDS = 6   # S0d (S0c review Q3): C5 starts at 6 rounds; fewer pairs is never accepted
+MIN_ROUNDS = 6
+NOISE_MAX = 10.0   # S0e (S0d review consider 8): an A/A band above 10 % would pass any regression: the owner decides   # S0d (S0c review Q3): C5 starts at 6 rounds; fewer pairs is never accepted
 
 
 def arg(n, d=None):
@@ -88,7 +89,7 @@ def load_gpu(d, base, new, errs=None, bad=None, orphans=None):
                     fv = float(v)
                 except ValueError:
                     fv = None
-                if fv is None or not fv > 0 or re.search(r"TIMEOUT|FAIL", note, re.I):   # S0d (Q4)
+                if fv is None or not math.isfinite(fv) or not fv > 0 or re.search(r"TIMEOUT|FAIL", note, re.I):   # S0d (Q4)
                     pend.append((key, tag, rnd, f"value {v!r} / note {note.strip()!r}")); continue
                 c = cells[key]
                 if rnd in c[tag] or rnd in (bad or {}).get(key, {}).get(tag, {}) or (key, tag, rnd) in dup_seen:   # S0d (Q2)
@@ -126,9 +127,14 @@ def load_noise(p):
             q = l.rstrip("\n").split("\t")
             if len(q) >= 6 and not l.startswith("gpu") and l.strip():
                 try:
-                    out[tuple(q[:6])] = float(q[6])
+                    v = float(q[6])
                 except (IndexError, ValueError):
-                    blank.append(tuple(q[:6]))
+                    v = None
+                # S0e (S0d review act-on 5): inf / nan / negative is no band (blank, exit 4); above NOISE_MAX too
+                if v is None or not math.isfinite(v) or v < 0 or v > NOISE_MAX:
+                    blank.append(tuple(q[:6]) + ((f"value {q[6]!r}",) if len(q) > 6 else ()))
+                else:
+                    out[tuple(q[:6])] = v
     return out, blank
 
 
@@ -227,8 +233,13 @@ def evaluate(d, base, new, noise_p=None, cells_p=None, aa=False, write_noise=Non
         elif noise_p and k in expect and k not in noise and not aa:
             why = f"NOT ACCEPTED (NO A/A NOISE for this expected cell in {os.path.basename(noise_p)})"
         if aa:
-            if why is None and o["noise_pct"] is None:
-                why = "NOT ACCEPTED (no noise estimate)"
+            nz = o["noise_pct"]
+            if why is None and (nz is None or not isinstance(nz, (int, float)) or not math.isfinite(nz)):
+                why = "NOT ACCEPTED (no finite noise estimate)"
+            elif why is None and o["verdict"] in ("EXTEND", "INCONCLUSIVE", "OUT"):   # S0e (act-on 5 X4)
+                why = f"NOT ACCEPTED (A/A verdict {o['verdict']}: the two runs of one exe do not agree)"
+            elif why is None and nz > NOISE_MAX:
+                why = f"NOT ACCEPTED (A/A noise {nz:.2f}% > {NOISE_MAX}%: the owner decides)"
             if why is not None and k in expect:
                 bad += 1
             if why is None:
@@ -379,6 +390,31 @@ def selftest():
             lines, rc = [f"EXCEPTION {type(ex).__name__}: {ex}"], -1
         txt = "\n".join(lines)
         cases.append((nm, rc == want_rc and re.search(want_re, txt, re.M) is not None))
+    # S0e (S0d review act-on 5; reviewer probes scratch/a25_engine/s0d_review/runner/r_e8.py X1-X4): non-finite values
+    def over(rows, fn):
+        return [(e, n, t, g, fn(e, n, v), ti) for (e, n, t, g, v, ti) in rows]
+    x1 = tsv("x1", over(clean, lambda e, n, v: "inf" if (e.endswith("-fin-precise") and n.startswith("r3")) else v))
+    x1b = tsv("x1b", over(clean, lambda e, n, v: "inf" if "-fin-" in e else v))
+    x1c = tsv("x1c", over(clean, lambda e, n, v: "nan" if "-fin-" in e else v))
+    slow = tsv("x3", over(clean, lambda e, n, v: "32.0" if "-fin-" in e else v))
+    for nm, d, want_rc, want_re in (
+            ("X1 one new-build round inf -> NOT ACCEPTED rc 1", x1, 1, r"precise band .*NOT ACCEPTED \(1 ERROR / blank rounds"),
+            ("X1b every new-build round inf -> NOT ACCEPTED rc 1", x1b, 1, r"precise band .*NOT ACCEPTED \(6 ERROR / blank rounds"),
+            ("X1c every new-build round nan -> NOT ACCEPTED rc 1", x1c, 1, r"precise band .*NOT ACCEPTED \(6 ERROR / blank rounds")):
+        lines, rc = evaluate(d, "base", "fin", None, one_p)
+        cases.append((nm, rc == want_rc and re.search(want_re, "\n".join(lines), re.M) is not None))
+    for nz in ("inf", "nan", "-5", "1e9", "abc"):
+        p = os.path.join(work, f"noise_{nz}.tsv")
+        open(p, "w", encoding="utf-8").write(f"gpu\tmodel\ttest\ttarget\tmetric\tmode\tnoise_pct\nr9700\tswift\tchat\t512\ttg\tprecise\t{nz}\n")
+        lines, rc = evaluate(slow, "base", "fin", p, one_p)
+        cases.append((f"X3 noise_pct {nz}, new build 20 % slower -> NOISE TABLE BLANK exit 4 (never PASS)",
+                      rc == 4 and re.search(r"^e8 judge: NOISE TABLE BLANK", "\n".join(lines), re.M) is not None))
+    x4 = tsv("x4", [(e.replace("-fin-", "-aa-"), n, t, g, ("inf" if "-fin-" in e else v), ti) for (e, n, t, g, v, ti) in clean])
+    nz4 = os.path.join(work, "x4_noise.tsv")
+    if os.path.exists(nz4): os.remove(nz4)
+    lines, rc = evaluate(x4, "base", "aa", None, one_p, True, nz4)
+    cases.append(("X4 A/A with every aa round inf -> A/A FAIL rc 1, no noise table", rc == 1 and not os.path.exists(nz4)
+                  and re.search(r"^e8 judge: A/A FAIL", "\n".join(lines), re.M) is not None))
     # a crash of the judge is exit 5, a bad expected-cell line is a usage error 2 (never 1 = "not accepted")
     import subprocess
     badc = os.path.join(work, "cells_bad.tsv"); open(badc, "w", encoding="utf-8").write("r9700\tswift\n")
