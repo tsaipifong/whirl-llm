@@ -265,6 +265,11 @@ std::vector<std::uint32_t> expand(std::span<const std::uint32_t> tokens, std::ui
 // name): standalone encoder test; prints the prototype-style report. Returns the exit code.
 int cliVisEncode(std::span<const std::string> args);
 
+// The whirl-vis executable's main() (src/vision/vis_main.cpp calls it): `--whirl-gpu-probe` (the GPU probe child of
+// gpusel::restrictToSelected), `vis-encode ...` (cliVisEncode), else the usage line and 2; an exception is one
+// "whirl-vis: <what>" line on stderr and 1.
+int visMain(int argc, char** argv);
+
 // The vision code object embedded for `arch` (gfx1201, gfx1151; empty span if that
 // architecture was not built).
 std::span<const std::uint8_t> kernelImage(hip::Arch arch);
