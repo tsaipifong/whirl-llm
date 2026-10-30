@@ -1,0 +1,59 @@
+# ARCH-1 8.5 isolation check of forward.state (arch025-n8b2, PLAN N8 batch 2): class qwen35::Context (src/model/qwen35/context.h)
+# and the members defined in src/model/qwen35/context.cpp (device-memory ledger, recurrent-state sizes / snapshot sets, layerMats,
+# KV arguments, replay offsets, sequence selection, reset, tuneBucket / opClassName, Profile), built WITHOUT the forward sources
+# (src/model/qwen35/forward/*.cpp: forward.dispatch .. forward.vision_rows): context.cpp calls none of their members, so it is the
+# bottom of the forward call graph and the first forward.* module with its own manifest (decision: progress/arch025-n8b2.PRIOR_ART.md
+# section 3; the group manifest tests/iso/forward stays for the nine together). Cases: tests/iso/forward/forward_state_cases.inc
+# (moved verbatim out of forward_tests.cpp) + tests/iso/forward.state/forward_state_tests.cpp. Declared dependencies: the device
+# contract (contract.device: backend_hip.cpp, device::hipBackend / DevBuf), the headers of what Context holds (weights, KV pool,
+# scratch, tune table, op planners, kernel ABI, numerics, the draft policy; no .cpp of them is linked). Link doubles (test program):
+# the HIP layer (tests/iso/fake_hip.cpp, with its allocation recorder) and TuneTable's defaults defaultGemvR / defaultGemvW /
+# defaultGemvWHead (model.core config.cpp; in forward_state_tests.cpp, as tests/iso/forward does). NOT declared: any forward
+# source, class Model (model.core), the server, the engine. Format: tests/sampling/isolation.txt.
+module    forward.state
+exe       whirl-iso-forward-state-tests
+mutate    src/model/qwen35/context.cpp
+mutsym    model
+mutsym    engine
+mutsym    log
+# module sources
+src       src/model/qwen35/context.cpp
+# declared dependency sources
+src       src/device/backend_hip.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/numerics.h
+hdr       include/whirl/ops/act.h
+hdr       include/whirl/ops/attention.h
+hdr       include/whirl/ops/matmul.h
+hdr       include/whirl/ops/moe.h
+hdr       include/whirl/ops/mtp.h
+hdr       include/whirl/relax_accept.h
+hdr       include/whirl/spec_sample.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/value_scope.h
+hdr       include/whirl/vismap.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/model/qwen35/context.h
+hdr       src/model/qwen35/kv.h
+hdr       src/model/qwen35/load_types.h
+hdr       src/model/qwen35/model_error.h
+hdr       src/model/qwen35/scratch.h
+hdr       src/model/qwen35/tune_table.h
+hdr       src/model/qwen35/weights.h
+hdr       src/spec/policy.h
+# test program (fake_hip.cpp: the HIP layer's link double)
+testsrc   tests/iso/forward.state/forward_state_tests.cpp
+testsrc   tests/iso/fake_hip.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
+testhdr   tests/iso/forward/forward_state_cases.inc

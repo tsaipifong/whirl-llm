@@ -270,6 +270,24 @@ static void testKernelImageTable() {
     CHECK(seen[0] && seen[1] && seen[0] != seen[1]);
 }
 
+// arch025-n8b2: the whirl-vis main() (vision::visMain, src/vision/vis_cli.cpp; vis_main.cpp is the one-line main that calls
+// it): the command routing and exit codes that need no GPU. Not run here: `--whirl-gpu-probe` (probes the GPUs) and a
+// vis-encode that reaches the device.
+static int runVisMain(std::vector<std::string> a) {
+    std::vector<char*> argv;
+    for (std::string& s : a) argv.push_back(s.data());
+    argv.push_back(nullptr);
+    return vision::visMain(static_cast<int>(a.size()), argv.data());
+}
+
+static void testVisMain() {
+    CHECK(runVisMain({"whirl-vis"}) == 2);                      // no command: usage
+    CHECK(runVisMain({"whirl-vis", "encode", "m", "i"}) == 2);  // not vis-encode: usage
+    CHECK(runVisMain({"whirl-vis", "vis-encode", "m"}) == 2);   // vis-encode's own usage (needs MMPROJ and IMAGE)
+    // an exception out of vis-encode is one stderr line and exit 1 (here: --device given twice, thrown before any GPU call)
+    CHECK(runVisMain({"whirl-vis", "vis-encode", "m.gguf", "i.png", "--device", "0", "--device", "1"}) == 1);
+}
+
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testKernelImageTable();  // arch025-M6
@@ -280,6 +298,7 @@ int main(int argc, char** argv) {
     testExpandRope();
     testImageKey();
     testPlaceFirstFit();
+    testVisMain();  // arch025-n8b2
     if (argc > 1) testRgbRefs(argv[1]);
     std::printf("vision tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

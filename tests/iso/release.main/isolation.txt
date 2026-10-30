@@ -1,0 +1,75 @@
+# ARCH-1 8.5 isolation check of release.main (arch025-n8b2, PLAN N8 batch 2): src/release/release.cpp, the front-end part of the
+# module release (the --version text, the error explanations / exit codes, the model-file and port pre-checks, the environment
+# help), built with its own program tests/iso/release.main/release_main_tests.cpp (step cpu_iso_release_main; the module's other
+# part, dll_deps.cpp, is tests/iso/release). release.cpp now includes model/qwen35/model_error.h (qwen35::ModelError, all it used of
+# whirl/model.h), so class Model is NOT in the tree. Declared dependencies: release's dll_deps.cpp, the platform console / net /
+# env / fs / proc / args, the GGUF reader's header (gguf::Error), the HIP layer (hip.runtime / hip.mem: the runtime loader, the
+# device list, the UMA hint; the HIP SDK headers are the platform, sdkinc hip) with lib whirl's util / vram_limit / gpu_select it
+# is built with, the generated whirl/version.h (gen) and the code-object table as the link double tests/iso/fake_embedded_objects.cpp.
+# NOT declared: the model, the server, the engine. Format: tests/sampling/isolation.txt.
+module    release.main
+exe       whirl-iso-release-main-tests
+mutate    src/release/release.cpp
+mutsym    log
+mutsym    engine
+mutsym    model
+syslib    pdh.lib
+syslib    dxgi.lib
+syslib    ws2_32.lib
+define    __HIP_PLATFORM_AMD__
+sdkinc    hip
+gen       whirl/version.h
+# module sources
+src       src/release/release.cpp
+# declared dependency sources
+src       src/release/dll_deps.cpp
+src       src/platform/console_win.cpp
+src       src/platform/net_win.cpp
+src       src/hip/gpu_restrict.cpp
+src       src/hip/hip_runtime.cpp
+src       src/hip/alloc_log.cpp
+src       src/hip/launch_log.cpp
+src       src/hip/runtime_loader.cpp
+src       src/hip/device_mem.cpp
+src       src/hip/uma_mem.cpp
+src       src/hip/wddm_mem.cpp
+src       src/hip/leak_count.cpp
+src       src/common/vram_limit.cpp
+src       src/common/util.cpp
+src       src/common/gpu_select.cpp
+src       src/platform/env_win.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/proc_win.cpp
+src       tests/iso/fake_embedded_objects.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/gpu_select.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/hip_runtime_loader.h
+hdr       include/whirl/leak_count.h
+hdr       include/whirl/small_helpers.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/vram_limit.h
+hdr       src/hip/alloc_log.h
+hdr       src/hip/hip_api.h
+hdr       src/hip/launch_log.h
+hdr       src/hip/log_name.h
+hdr       src/hip/win_text.h
+hdr       src/model/qwen35/model_error.h
+hdr       src/platform/args.h
+hdr       src/platform/console.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/net.h
+hdr       src/platform/net_fake.h
+hdr       src/platform/proc.h
+hdr       src/release/dll_deps.h
+hdr       src/release/release.h
+# test program
+testsrc   tests/iso/release.main/release_main_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

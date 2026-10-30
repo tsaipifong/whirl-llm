@@ -1,6 +1,6 @@
 # ARCH-1 8.5 isolation check of vision (arch025-iso4): the vision host side (preprocessing, hashes, placeholder expansion, the M-RoPE map, the encoder's host code,
-# the code-object table, the whirl-vis command's vis_cli.cpp) built with its own unit program (tests/vision/vision_tests.cpp). vis_main.cpp is the whirl-vis
-# executable's main() and stays out. declared dependencies: stb_image (third_party.stb), the GGUF reader, util, platform, gpu_select, the HIP layer
+# the code-object table, the whirl-vis command's vis_cli.cpp) built with its own unit program (tests/vision/vision_tests.cpp). The whirl-vis
+# main() is vision::visMain in vis_cli.cpp (arch025-n8b2, testVisMain); vis_main.cpp is only the one-line main that calls it and stays out. declared dependencies: stb_image (third_party.stb), the GGUF reader, util, platform, gpu_select, the HIP layer
 # (hip.runtime / hip.mem / hip.restrict: the HIP SDK headers are the platform, sdkinc hip), the device interface with the null backend behind the link double
 # tests/iso/vision/fake_hip_backend.cpp (device::hipBackend), and the vision code objects as the link double tests/iso/vision/fake_vision_objects.cpp
 # (the real ones are hipcc output; kernel_image.cpp is compiled with WHIRL_VISION_GFX1201 / WHIRL_VISION_GFX1151 as the product does).
