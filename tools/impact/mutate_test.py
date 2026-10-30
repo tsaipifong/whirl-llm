@@ -41,10 +41,13 @@ def wait_gone(pid, secs=5.0):
 
 tmp = tempfile.mkdtemp(prefix="mutate_test_")
 py = sys.executable
-# a "test" that spawns a grandchild (writes its pid to a file) and then sleeps far past the timeout
+# a "test" that spawns a grandchild and then sleeps far past the timeout. The PARENT writes the grandchild's pid right after
+# Popen (int7 verify 10-30: when the grandchild wrote it itself, a loaded machine killed the tree at the 3 s timeout before the
+# grandchild's interpreter had started, so the pid file was missing; the timeouts below are 15 s for the same reason).
 parent = os.path.join(tmp, "hang.py")
 SPAWN = ["import subprocess, sys, time",
-         "subprocess.Popen([sys.executable, '-c', 'import os,time,sys; open(sys.argv[1],chr(119)).write(str(os.getpid())); time.sleep(300)', PIDFILE])",
+         "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])",
+         "open(PIDFILE, chr(119)).write(str(p.pid))",
          "time.sleep(300)"]
 NL = chr(10)
 
@@ -57,7 +60,7 @@ open(parent, "w").write(spawn(os.path.join(tmp, "child.pid")))
 # 1. sh(): a hang is rc 124 + TIMEOUT text, the tree is gone
 t0 = time.time()
 try:
-    rc, out, sec = mutate.sh(f'"{py}" "{parent}"', timeout=3)
+    rc, out, sec = mutate.sh(f'"{py}" "{parent}"', timeout=15)
     err = None
 except Exception as e:  # before the fix: subprocess.TimeoutExpired
     rc, out, sec, err = None, "", 0, repr(e)
@@ -102,7 +105,7 @@ open(chk, "w").write(NL.join(chk_lines) + NL)
 spec = os.path.join(tmp, "spec.json")
 json.dump({"mutations": [
     {"id": "m-hang", "module": "x", "kind": "replace", "file": "src/a.txt", "find": "good", "replace": "hang", "what": "w",
-     "run": "k", "expect_test": "e:t", "timeout_s": 3},
+     "run": "k", "expect_test": "e:t", "timeout_s": 15},
     {"id": "m-bad", "module": "x", "kind": "replace", "file": "src/b.txt", "find": "good", "replace": "bad", "what": "w",
      "run": "k", "expect_test": "e:t", "timeout_s": 60}]}, open(spec, "w"))
 tsv = os.path.join(tmp, "out.tsv")
