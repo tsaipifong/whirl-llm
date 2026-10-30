@@ -1,0 +1,19 @@
+# ARCH-1 8.5 isolation check of ops.mtp (arch025-n8b1, PLAN N8 batch 1): the MTP draft-head choice (src/ops/mtp.cpp, the constexpr gates of whirl/ops/mtp.h), built alone with its own cases
+# (tests/ops/ops_mtp_cases.inc: moved verbatim out of the one program whirl-ops-tests (tests/ops/ops_tests.cpp), which still runs them in the same
+# order). Declared dependencies: none (not even the kernel ABI). The cross-module cases stay in tests/iso/ops (cpu_iso_ops).
+# Format: tests/sampling/isolation.txt.
+module    ops.mtp
+exe       whirl-iso-ops-mtp-tests
+mutate    src/ops/mtp.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/ops/mtp.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/ops/mtp.h
+# test program
+testsrc   tests/iso/ops.mtp/ops_mtp_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
+testhdr   tests/ops/ops_mtp_cases.inc

@@ -1,0 +1,28 @@
+# ARCH-1 8.5 isolation check of ops.attention (arch025-n8b1, PLAN N8 batch 1): the attention decode / prefill / prep choice (src/ops/attention.cpp), built alone with its own cases
+# (tests/ops/ops_attention_cases.inc: moved verbatim out of the one program whirl-ops-tests (tests/ops/ops_tests.cpp), which still runs them in the same
+# order). Declared dependencies: none: the attn_ws4 split rule header (kernels/gfx1151/attn_ws4_index.h) and the device profile rows (header). The cross-module cases stay in tests/iso/ops (cpu_iso_ops).
+# Format: tests/sampling/isolation.txt.
+module    ops.attention
+exe       whirl-iso-ops-attention-tests
+mutate    src/ops/attention.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/ops/attention.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/ops/attention.h
+hdr       kernels/gfx1151/attn_ws4_index.h
+# test program
+testsrc   tests/iso/ops.attention/ops_attention_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
+testhdr   tests/ops/ops_fakes.h
+testhdr   tests/ops/ops_attention_cases.inc

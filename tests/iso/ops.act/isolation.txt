@@ -1,0 +1,31 @@
+# ARCH-1 8.5 isolation check of ops.act (arch025-n8b1, PLAN N8 batch 1): the activation-input / fused-path choice (src/ops/act.cpp), built alone with its own cases
+# (tests/ops/ops_act_cases.inc: moved verbatim out of the one program whirl-ops-tests (tests/ops/ops_tests.cpp), which still runs them in the same
+# order). Declared dependencies: ops.matmul (matmul.cpp: floatGemvN). The cross-module cases stay in tests/iso/ops (cpu_iso_ops).
+# Format: tests/sampling/isolation.txt.
+module    ops.act
+exe       whirl-iso-ops-act-tests
+mutate    src/ops/act.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/ops/act.cpp
+# declared dependency sources
+src       src/ops/matmul.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/ops/act.h
+hdr       include/whirl/ops/matmul.h
+# test program
+testsrc   tests/iso/ops.act/ops_act_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
+testhdr   tests/ops/ops_fakes.h
+testhdr   tests/ops/ops_mat.h
+testhdr   tests/ops/ops_act_cases.inc

@@ -1,0 +1,27 @@
+# ARCH-1 8.5 isolation check of ops.moe (arch025-n8b1, PLAN N8 batch 1): the MoE expert-path choice (src/ops/moe.cpp), built alone with its own cases
+# (tests/ops/ops_moe_cases.inc: moved verbatim out of the one program whirl-ops-tests (tests/ops/ops_tests.cpp), which still runs them in the same
+# order). Declared dependencies: the constexpr precise-row rule of whirl/ops/matmul.h (header only: matmul.cpp is NOT linked). The cross-module cases stay in tests/iso/ops (cpu_iso_ops).
+# Format: tests/sampling/isolation.txt.
+module    ops.moe
+exe       whirl-iso-ops-moe-tests
+mutate    src/ops/moe.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/ops/moe.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/ops/matmul.h
+hdr       include/whirl/ops/moe.h
+# test program
+testsrc   tests/iso/ops.moe/ops_moe_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
+testhdr   tests/ops/ops_fakes.h
+testhdr   tests/ops/ops_moe_cases.inc
