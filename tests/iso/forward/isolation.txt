@@ -83,3 +83,4 @@ testsrc   tests/iso/forward/forward_tests.cpp
 testsrc   tests/iso/fake_hip.cpp
 testhdr   tests/iso/iso_test.h
 testhdr   tests/test_check.h
+testhdr   tests/iso/forward/forward_state_cases.inc
