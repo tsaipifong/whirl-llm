@@ -24,7 +24,13 @@ the base of clang-tidy misc-const-correctness), conservative: what cannot be pro
           when the result is written; kept in a variable, stored, returned, passed anywhere else = write.
   loaded pointer (a pointer VALUE read out of the member, e.g. queue_.front()->id): a write when the pointee is written
           through the expression itself (as the text census A1 (a)); a copy kept in a pointer variable is followed
-          (S0f, findPointeeMutation); other copies / compares / unknown parents are reads (the A1 design exception).
+          (S0f, findPointeeMutation). S0g (main-session decision, ExprMutationAnalyzer findPointeeToNonConst strictly):
+          passing it to a non-const pointer / reference parameter, assigning it to another pointer that is not a local
+          variable, storing or returning it is a possible pointee write; only compares / tests / discards / const-pointee
+          conversions are reads (the old "A1 design exception" is gone).
+  const object (cobj, S0g): a const class object (a const method's member, a const& binding) that may contain writable
+          pointees (pointer fields, containers of pointers, span / iterator / smart-pointer copies) is followed through
+          member access, subscripts, accessor results and copies until a non-const-pointee pointer appears.
           S0f: the pointer itself and its pointee are judged separately - a `T *const` member (a pointer member in a
           const method) is a const pointer, its pointee is followed; a const span / iterator object still hands out
           non-const elements.
@@ -160,6 +166,22 @@ def ptr_const_pointee(n):
 
 def is_pointer(t):
     return re.search(r"\*\s*(?:const|volatile|\s)*$", t.strip()) is not None
+
+
+_FILE_BYTES = {}
+
+
+def _file_bytes(path):
+    if path not in _FILE_BYTES: _FILE_BYTES[path] = open(path, "rb").read()
+    return _FILE_BYTES[path]
+
+
+def may_reach_pointee(t):
+    """S0g: a (copied / const) object type through which a non-const pointee can be reached: a pointer in its template
+    arguments, a non-const span / iterator, a smart pointer, a reference_wrapper"""
+    if "*" in t and not re.search(r"const [^<>,*]*\*", t): return True
+    return re.search(r"span<(?!const)|(?<!const_)iterator|_Vector_iterator<|_Deque_iterator<|_String_iterator<|"
+                     r"unique_ptr<|shared_ptr<|weak_ptr<|reference_wrapper<", t) is not None
 
 
 def is_scalar(t):
@@ -298,6 +320,11 @@ class Walk:
         # followed through its uses; one that flows into a return hands the member out (S0b review N12)
         var = getattr(self, "_var", None)
         self._var = None
+        if v == "r" and var is not None and depth < 3 and why.startswith("const object bound to"):
+            for ref in self.tu.refs.get(var.get("id"), []):   # S0g: a const reference to a pointer-holding object
+                v2, why2, rf2 = self.run(ref, "cobj", member, depth + 1)
+                if v2 == "w": return "w", f"{why}; {why2}", rf2
+            return v, why, rf
         if v == "r" and var is not None and depth < 3 and why.startswith("pointer copied into"):
             # S0f (S0e review act-on 1, findPointeeMutation): a copy of a member pointer keeps the pointee; follow it
             for ref in self.tu.refs.get(var.get("id"), []):
@@ -481,6 +508,9 @@ class Walk:
         if GP is not None and GP.get("kind") == "MemberExpr" and GP.get("name") == "get" and re.search(r"std::(?:unique_ptr|shared_ptr)", TQ(P)):
             call = tu.par(GP)
             if call is not None: return ("go", call, "lptr")
+        # S0g (S0f review act-on 1): a const CLASS object may still contain writable pointees: follow it (cobj)
+        if not is_scalar(T(cur)) and not is_scalar(T(P)):
+            return ("go", P, "cobj")
         return ("r", "const use", None)
 
     def _result(self, call, why, pointee=False, strict=False):
@@ -551,7 +581,7 @@ class Walk:
             return ("r", "range-for copies pointers", None)
         return ("r", "range-for by value / const reference", None)
 
-    def _leak_ret(self, node):
+    def _leak_ret(self, node, depth=0):
         """a construct / init list made from the member: does it flow into a return statement of a named function"""
         tu = self.tu
         cur = node
@@ -564,6 +594,10 @@ class Walk:
             if k == "ReturnStmt":
                 f = tu.enclosing_func(P)
                 return None if tu.is_lambda_fn(f) else f
+            if k == "VarDecl" and depth < 3:   # S0g (S0f review consider 2): kept in a local, then returned
+                for ref in tu.refs.get(P.get("id"), []):
+                    f = self._leak_ret(ref, depth + 1)
+                    if f is not None: return f
             return None
         return None
 
@@ -629,7 +663,7 @@ class Walk:
             # only value-returning algorithms end the walk as reads
             # S0f (S0e review consider 1): the std lists apply only when the call target's own type is a std one
             # (MSVC STL iterator / std:: types in its signature); a global / other-namespace function of that name is a write
-            stdt = "std::" in self._callee_type(P)
+            stdt = self._std_callee(P)   # S0g: from the callee's qualifier in the AST range, not its signature
             if d is None and stdt and name in STD_HANDLE_ALGOS: return ("go", P, "ptr")
             if d is None and stdt and name in STD_VALUE_ALGOS and not is_pointer(T(P)) and not re.search(r"iterator|span<", T(P)):
                 return ("r", f"handle read by std::{name}", None)
@@ -660,26 +694,170 @@ class Walk:
         return None
 
     # ---------------- loaded pointer: a pointer value read out of the member ----------------
+    # S0g (S0f review consider 1, main-session decision: ExprMutationAnalyzer findPointeeToNonConst strictly): a pointer
+    # value whose pointee is not const is a possible pointee mutation when it is passed to a non-const pointer / reference
+    # parameter, assigned or used to initialise another non-const pointer (the copy is followed too), returned, stored;
+    # only compares, tests, discards, const-pointee conversions and dereferences that only read are reads.
     def m_lptr(self, cur, P, k, i, member):
         tu = self.tu
+        if k.endswith("Attr"): return ("r", f"attribute {k}", None)
         if k == "ImplicitCastExpr" or k in XCASTS:
+            ck = P.get("castKind")
+            if ck in ("PointerToBoolean", "PointerToIntegral", "ToVoid", "IntegralCast"): return ("r", "pointer tested / converted", None)
             if is_pointer(T(P)) and ptr_const_pointee(P): return ("r", "pointer to const", None)
-            if is_pointer(T(P)) or P.get("castKind") == "NoOp": return ("go", P, "lptr")
-            return ("r", "pointer value used", None)
-        if k == "UnaryOperator" and P.get("opcode") == "*": return ("go", P, "obj")
-        if k == "ArraySubscriptExpr" and i == 0: return ("go", P, "obj")
+            if is_pointer(T(P)) or ck in ("NoOp", "LValueToRValue", "BitCast"): return ("go", P, "lptr")
+            return ("w", f"pointer cast {ck}", None)
+        if k == "UnaryOperator":
+            op = P.get("opcode")
+            if op == "*": return ("go", P, "obj")
+            if op == "!": return ("r", "pointer tested", None)
+            if op in ("++", "--"): return ("go", P, "lptr")
+            return ("w", f"pointer operand of {op}", None)
+        if k == "ArraySubscriptExpr": return ("go", P, "obj") if i == 0 else ("r", "subscript index", None)
         if k == "MemberExpr" and P.get("isArrow"):
             if (P.get("type") or {}).get("qualType") == "<bound member function type>":
                 return self._method(cur, P, member, "lptr")
             return ("go", P, "obj")
-        if k in ("ConditionalOperator", "BinaryConditionalOperator") and i > 0: return ("go", P, "lptr")
-        if k == "BinaryOperator" and P.get("opcode") == "," and i == 1: return ("go", P, "lptr")
-        if k == "BinaryOperator" and P.get("opcode") in ("+", "-") and is_pointer(T(P)): return ("go", P, "lptr")
-        if k in ("VarDecl",) and is_pointer(T(P)) and not pointee_const(T(P)):
-            self._var = P   # S0f: followed by run() (a write through the copy is a write of the member's pointee)
-            return ("r", f"pointer copied into {P.get('name') or ''}", None)
-        return ("r", "pointer value copied / compared", None)
+        if k in ("ConditionalOperator", "BinaryConditionalOperator"):
+            return ("r", "condition", None) if i == 0 else ("go", P, "lptr")
+        if k == "BinaryOperator":
+            op = P.get("opcode")
+            if op in CMP_OPS or op in ("&&", "||"): return ("r", "pointer compared / tested", None)
+            if op == "," : return ("go", P, "lptr") if i == 1 else ("r", "discarded", None)
+            if op in ("+", "-") and is_pointer(T(P)): return ("go", P, "lptr")
+            if op == "-": return ("r", "pointer difference", None)
+            if op == "=" and i == 1:
+                lhs = tu.kids(P)[0] if tu.kids(P) else {}
+                d = lhs.get("referencedDecl") if lhs.get("kind") == "DeclRefExpr" else None
+                if isinstance(d, dict) and d.get("kind") == "VarDecl":
+                    self._var = tu.decls.get(d.get("id")) or {"id": d.get("id")}
+                    return ("r", f"pointer copied into {d.get('name') or ''}", None)
+                return ("w", "pointer assigned to another pointer (pointee reachable)", None)
+            if op == "=": return ("r", "pointer variable assigned", None)
+            return ("w", f"pointer operand of {op}", None)
+        if k == "CompoundAssignOperator": return ("r", "pointer arithmetic on a copy", None) if i == 0 else ("w", "pointer operand", None)
+        if k in ("VarDecl",):
+            if is_pointer(T(P)) and not pointee_const(T(P)):
+                self._var = P   # S0f / S0g: the copy is followed (a write through it is a write of the member's pointee)
+                return ("r", f"pointer copied into {P.get('name') or ''}", None)
+            if "&" in T(P) and not is_const(T(P).replace("&", "").strip()):
+                return ("w", f"pointer bound to a non-const reference {P.get('name') or ''}", None)
+            return ("r", "pointer copied into a const-pointee variable", None)
+        if k in ("CallExpr", "CXXMemberCallExpr", "CXXOperatorCallExpr", "CXXConstructExpr", "CXXTemporaryObjectExpr"):
+            if k == "CallExpr":
+                name, d, _ = tu.callee_decl(P)
+                if i == 0: return ("w", "called through a pointer", None)
+                if d is None and self._std_callee(P) and name in STD_VALUE_ALGOS:
+                    return ("r", f"pointer read by std::{name}", None)
+                if d is None and self._std_callee(P) and name in STD_HANDLE_ALGOS: return ("go", P, "lptr")
+                return ("w", f"pointer passed to {name or '<callee>'}() (non-const pointee)", None)
+            if k == "CXXOperatorCallExpr":
+                name, _, _ = tu.callee_decl(P)
+                if (name or "").replace("operator", "") in CMP_OPS: return ("r", "pointer compared", None)
+            return ("w", f"pointer passed to a {k} (non-const pointee)", self._leak_ret(P) if k.startswith("CXXConstruct") else None)
+        if k == "ReturnStmt":
+            f = tu.enclosing_func(P)
+            return ("w", "pointer (non-const pointee) returned", None if tu.is_lambda_fn(f) else f)
+        if k in ("InitListExpr", "LambdaExpr", "CXXStdInitializerListExpr", "CXXNewExpr", "CXXThrowExpr"):
+            return ("w", f"pointer stored ({k})", self._leak_ret(P) if k == "InitListExpr" else None)
+        if k == "CXXDeleteExpr": return ("w", "pointee deleted", None)
+        if k in STMT_KINDS: return ("r", "pointer discarded / tested", None)
+        if k in ("UnaryExprOrTypeTraitExpr", "CXXTypeidExpr", "CXXNoexceptExpr"): return ("r", "unevaluated", None)
+        if k == "CXXRewrittenBinaryOperator": return ("r", "pointer compared", None)
+        return ("w", f"pointer used by {k} (not a known read)", None)
 
+    # ---------------- S0g: a CONST object that may contain non-const pointees (S0f review act-on 1) ----------------
+    # The object itself cannot change, but a pointer / iterator / span / smart pointer inside it can still reach a
+    # writable pointee (ExprMutationAnalyzer ExprPointeeResolve does not stop at an outer const). Follow member access,
+    # subscripts, accessor results and copies until a non-const-pointee pointer / handle appears (-> lptr / ptr).
+    def m_cobj(self, cur, P, k, i, member):
+        tu = self.tu
+        if k.endswith("Attr"): return ("r", f"attribute {k}", None)
+        if k == "ImplicitCastExpr" or k in XCASTS:
+            ck = P.get("castKind")
+            if ck == "ToVoid": return ("r", "discarded", None)
+            if k == "CXXConstCastExpr" and not is_const(T(P)): return ("go", P, "obj")
+            if ck == "LValueToRValue": return self._cobj_val(P)
+            return ("go", P, "cobj")
+        if k == "MemberExpr":
+            if (P.get("type") or {}).get("qualType") == "<bound member function type>":
+                call = tu.par(P)
+                if call is not None and call.get("kind") == "CXXMemberCallExpr": return self._cobj_res(call)
+                return ("r", "const method referenced", None)
+            return ("go", P, "cobj")
+        if k == "ArraySubscriptExpr": return ("go", P, "cobj") if i == 0 else ("r", "subscript index", None)
+        if k == "UnaryOperator" and P.get("opcode") == "*": return ("go", P, "obj")
+        if k == "CXXOperatorCallExpr":
+            name, _, _ = tu.callee_decl(P)
+            if (name or "").replace("operator", "") in CMP_OPS: return ("r", "const object compared", None)
+            if i == 1: return self._cobj_res(P)
+            return self._cobj_arg(cur, f"argument of {name}")
+        if k in ("CXXConstructExpr", "CXXTemporaryObjectExpr"):
+            return self._cobj_res(P)   # a copy (span / shared_ptr / iterator / struct with pointers) keeps the pointees
+        if k in ("CallExpr", "CXXMemberCallExpr"):
+            if k == "CallExpr":
+                name, d, _ = tu.callee_decl(P)
+                if d is None and self._std_callee(P) and name in STD_HANDLE_ALGOS: return self._cobj_res(P)
+            return self._cobj_arg(cur, "argument")
+        if k in ("ConditionalOperator", "BinaryConditionalOperator"):
+            return ("r", "condition", None) if i == 0 else ("go", P, "cobj")
+        if k == "VarDecl" and P.get("isImplicit") and (P.get("name") or "").startswith("__range"):
+            ds = tu.par(P); fr = tu.par(ds) if ds is not None else None
+            if fr is not None and fr.get("kind") == "CXXForRangeStmt":
+                for c in tu.kids(fr):
+                    if c.get("kind") != "DeclStmt": continue
+                    for v in tu.kids(c):
+                        if v.get("kind") == "VarDecl" and not v.get("isImplicit") and is_pointer(T(v)) and not pointee_const(T(v)):
+                            self._var = v   # the loop variable copies each element pointer: followed (lptr)
+                            return ("r", f"pointer copied into {v.get('name') or ''}", None)
+            return ("r", "range-for over a const object", None)
+        if k == "VarDecl":
+            if "&" in T(P):   # a const reference to the object: follow its uses
+                self._var = P
+                return ("r", f"const object bound to {P.get('name') or ''}", None)
+            return ("r", "const object copied", None)
+        if k in STMT_KINDS: return ("r", "discarded / condition", None)
+        if k in ("UnaryExprOrTypeTraitExpr", "CXXTypeidExpr", "CXXNoexceptExpr", "DecltypeType"): return ("r", "unevaluated", None)
+        if k == "ReturnStmt": return ("r", "const object returned by value / const reference", None)
+        if k == "BinaryOperator":
+            if P.get("opcode") == "," and i == 1: return ("go", P, "cobj")
+            return ("r", f"operand of {P.get('opcode')}", None)
+        return ("r", f"const use ({k})", None)
+
+    def _cobj_arg(self, cur, what):
+        t = T(cur)
+        if is_pointer(t) and not pointee_const(t):   # a const pointer (T *const&) handed to a call: pointee reachable
+            return ("w", f"{what}: a pointer with a non-const pointee passed (pointee reachable)", None)
+        return ("r", f"const object passed ({what})", None)
+
+    def _cobj_val(self, P):
+        t = T(P)
+        if is_pointer(t): return ("r", "pointer to const", None) if pointee_const(t) else ("go", P, "lptr")
+        if may_reach_pointee(t): return ("go", P, "ptr")
+        return ("r", "value read", None)
+
+    def _cobj_res(self, call):
+        t = T(call)
+        if call.get("valueCategory") in ("lvalue", "xvalue"): return ("go", call, "cobj")
+        if is_pointer(t): return ("r", "pointer to const", None) if pointee_const(t) else ("go", call, "lptr")
+        if may_reach_pointee(t): return ("go", call, "ptr")
+        return ("r", "value read", None)
+
+    def _std_callee(self, call):
+        """S0g (S0f review act-on 2): the callee is in namespace std - the AST range of the callee's DeclRefExpr starts
+        with its qualifier (std:: / ::std::); an unqualified (ADL / using) or macro-spelled callee is not trusted"""
+        c = self.tu.kids(call)[0] if self.tu.kids(call) else {}
+        for _ in range(6):
+            if c.get("kind") in ("ImplicitCastExpr", "ParenExpr") and self.tu.kids(c): c = self.tu.kids(c)[0]; continue
+            break
+        p = self.tu.pos.get(id(c))
+        if not p or not p[0]: return False
+        try:
+            raw = _file_bytes(p[0])
+        except OSError:
+            return False
+        txt = raw[p[1]:p[1] + 80].decode("utf-8", "replace")
+        return re.match(r"\s*(?:::\s*)?std\s*::", txt) is not None
 
 def tracked_fields(tu, classes):
     """clang id -> (class, field name) for the data members of the tracked classes (namespace-level definitions; S0e: class templates / nested classes are reported)"""
@@ -909,6 +1087,9 @@ def run_tu(root, tu_rel, classes, callable_ok, cache, clang, gen):
 # ---------------- S0e: unit self-test on a synthetic TU (S0d review probes, scratch/a25_engine/s0d_review/runner) ----------------
 # Each case declares its own member cN_ of class Engine and one method using it; expect 'w' (some use is a write) or 'r'.
 _ST_HDR = """#include <algorithm>
+#include <cstddef>
+#include <cstring>
+#include <iterator>
 #include <atomic>
 #include <bitset>
 #include <format>
@@ -931,6 +1112,10 @@ inline int* next(int* p) { *p = 1; return p; }
 inline bool find(int* p, int* e) { *p = 1; return p == e; }
 namespace other { inline int* prev(int* p) { *p = 2; return p; } }
 struct GS { int x = 0; };
+struct H { int* p; GS* g; };
+inline void wr(int* p) { *p = 1; }
+inline std::size_t* next(std::size_t* p) { *p = 1; return p; }
+namespace other { inline std::string* find(std::string* p) { p->clear(); return p; } }
 """
 _ST_CASES = [
     ("const char* c1_ = nullptr;", "c1_ = nullptr;", "w", "pointer-to-const member assigned (act-on 4)"),
@@ -985,6 +1170,40 @@ _ST_CASES = [
     ("int* p17_ = nullptr;", "CONST:int* q = p17_; *q = 1;", "w", "pointer member copied, then written through the copy"),
     ("int* p19_ = nullptr;", "CONST:int v = *p19_; (void)v;", "r", "control: pointee read in a const method"),
     ("const int* p20_ = nullptr;", "CONST:const int* q = p20_; (void)q;", "r", "control: pointer-to-const member copied"),
+    # S0g (S0f review act-on 1 / 2, consider 1; probes scratch/a25_engine/s0f_review/runner/probe.py, controls c1-c3 -> r1-r3)
+    ("int* q1_ = nullptr;", "CONST:int* q = nullptr; q = q1_; *q = 1;", "w", "member pointer copied by ASSIGNMENT, written through the copy (S0f review probe)"),
+    ("int* q2_ = nullptr;", "CONST:int* q{q2_}; *q = 1;", "w", "member pointer copied by list-init, written through the copy (S0f review probe)"),
+    ("int* q3_ = nullptr;", "CONST:std::memset(q3_, 0, 4);", "w", "memset through a pointer member (const method) (S0f review probe)"),
+    ("int* q3n_ = nullptr;", "std::memset(q3n_, 0, 4);", "w", "memset through a pointer member (non-const method) (S0f review probe)"),
+    ("int* q4_ = nullptr;", "CONST:std::fill(q4_, q4_ + 1, 0);", "w", "std::fill through a pointer member (const) (S0f review probe)"),
+    ("int* q5_ = nullptr;", "CONST:wr(q5_);", "w", "global wr(int*) writes *p (const) (S0f review probe)"),
+    ("int* q5n_ = nullptr;", "wr(q5n_);", "w", "global wr(int*) writes *p (non-const) (S0f review probe)"),
+    ("std::span<int> q7_;", "CONST:q7_.subspan(1)[0] = 1;", "w", "const span: subspan()[0] written (S0f review probe)"),
+    ("std::span<int> q8_;", "CONST:auto s = q8_; s[0] = 1;", "w", "const span copied, element written (S0f review probe)"),
+    ("std::span<int> q8n_;", "auto s = q8n_; s[0] = 1;", "w", "span copied (non-const method), element written (S0f review probe)"),
+    ("std::vector<int>::iterator q9_;", "CONST:*(q9_ + 1) = 1;", "w", "const iterator member: *(it + 1) written (S0f review probe)"),
+    ("std::vector<int>::iterator q10_;", "CONST:*std::next(q10_) = 1;", "w", "const iterator member: *std::next(it) written (S0f review probe)"),
+    ("std::size_t q11_ = 0;", "(void)::next(&q11_);", "w", "global ::next(std::size_t*) (std type in signature, not namespace std) (S0f review probe)"),
+    ("std::string q12_;", "(void)other::find(&q12_);", "w", "other::find(std::string*) (std type in signature) (S0f review probe)"),
+    ("std::unique_ptr<GS> q14_;", "CONST:q14_->x = 1;", "w", "unique_ptr -> in const (S0f review probe)"),
+    ("std::unique_ptr<GS> q14b_;", "CONST:GS* g = q14b_.get(); g->x = 1;", "w", "unique_ptr get() copied, written (S0f review probe)"),
+    ("std::shared_ptr<GS> q15_;", "CONST:auto c = q15_; c->x = 1;", "w", "const shared_ptr copied, pointee written (S0f review probe)"),
+    ("int** q16_ = nullptr;", "CONST:**q16_ = 1;", "w", "pointer-to-pointer, pointee of pointee written (S0f review probe)"),
+    ("H q17_{};", "CONST:*q17_.p = 1;", "w", "pointer FIELD of a struct member, pointee written (const) (S0f review probe)"),
+    ("H q17b_{};", "CONST:q17b_.g->x = 1;", "w", "pointer FIELD ->x written (const) (S0f review probe)"),
+    ("H q17n_{};", "*q17n_.p = 1;", "w", "control: pointer field pointee write (non-const) (S0f review probe)"),
+    ("int* q18_[2] = {};", "CONST:*q18_[0] = 1;", "w", "array of pointers member (const) (S0f review probe)"),
+    ("std::vector<int*> q19_;", "CONST:*q19_[0] = 1;", "w", "vector<int*> element pointee written (const) (S0f review probe)"),
+    ("std::vector<int*> q19b_;", "CONST:for (int* p : q19b_) *p = 1;", "w", "vector<int*> range-for pointee written (const) (S0f review probe)"),
+    ("std::vector<int*> q19n_;", "*q19n_[0] = 1;", "w", "control: vector<int*> pointee (non-const) (S0f review probe)"),
+    ("std::map<int, GS*> q20_;", "CONST:q20_.at(0)->x = 1;", "w", "map<int,GS*>::at()->x (const) (S0f review probe)"),
+    ("int* q21_ = nullptr;", "CONST:int* const& r = q21_; *r = 1;", "w", "const reference to the pointer member, written through (S0f review probe)"),
+    ("int* q22_ = nullptr;", "CONST:auto* q = q22_; q[0] = 1;", "w", "copy (auto*) subscript written (S0f review probe)"),
+    ("int* q23_ = nullptr;", "CONST:int* a = q23_; int* b = a; *b = 1;", "w", "two-level copy (S0f review probe)"),
+    ("int* q24_ = nullptr;", "CONST:int* q = q24_ + 1; *q = 1;", "w", "pointer arithmetic copy (S0f review probe)"),
+    ("int* r1_ = nullptr;", "CONST:int v = *r1_; (void)v;", "r", "control: pointee read (S0f review probe)"),
+    ("H r2_{};", "CONST:int v = *r2_.p; (void)v;", "r", "control: pointer field read (S0f review probe)"),
+    ("std::vector<int*> r3_;", "CONST:int v = *r3_[0]; (void)v;", "r", "control: vector<int*> pointee read (S0f review probe)"),
 ]
 
 
@@ -1014,7 +1233,7 @@ def selftest():
         by.setdefault(mem, []).append((v, why, weak))
     good = 0
     for d, _b, exp, what in _ST_CASES:
-        m = d.split("=")[0].split("{")[0].replace(";", "").split()[-1].lstrip("*")
+        m = d.split("=")[0].split("{")[0].split("[")[0].replace(";", "").split()[-1].lstrip("*")
         hs = by.get(m, [])
         strong = [h for h in hs if not h[2]] or hs
         got = "w" if any(h[0] == "w" for h in strong) else ("r" if hs else "NONE")

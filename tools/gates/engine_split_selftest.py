@@ -79,6 +79,43 @@ _KVT = "    std::uint64_t kvTokBytes() const {\n"   # S0f E1: the const slot_cac
 _T1_WHY = ["writable handle begin() used (, gov_json_.)", "writable handle end() used (, ' ');)"]   # S0f: T1's whole text reason set
 
 
+# S0g: helpers of the S0f review mutants (G1-G9)
+_KVT2 = "    std::uint64_t kvTokBytes() const {\n"
+_RP = (EH, HOLD, HOLD + "\n    int* rp_ = nullptr;")
+_RH = [(EH, "#pragma once\n", "#pragma once\nstruct RH { int* p = nullptr; };\n"), (EH, HOLD, HOLD + "\n    RH rh_{};")]
+_VP = (EH, HOLD, HOLD + "\n    std::vector<int*> vp_;")
+_PRE = lambda t: (EH, "#pragma once\n", "#pragma once\n" + t)
+_WRP = _PRE("inline void wrp(int* p) { *p = 1; }\n")
+_MAC = _PRE("#define WSET1(x) x = 1\n")
+_K = lambda code: (EH, _KVT2, _KVT2 + "        " + code + "\n")
+_D = lambda code: (EP, DROPC, DROPC + "    " + code + "\n")
+
+
+def _addm(*ms):
+    def f(c):
+        for m in ms: c["modules"]["server.job_queue"]["data"].append(m)
+    return f
+
+
+# S0g (S0f review act-on 2 / consider 3): mutants that do NOT compile on purpose (the rule they test is a text / cut
+# rule, or the fail-closed fallback itself); any other mutant with clang errors is INVALID (a false green otherwise)
+CLANG_ERR_OK = {
+    "F1x": "the S0c review's F1 as written: std::lock_guard<std::mutex> on whirl::Mutex (tests the fail-closed fallback)",
+    "M3": "Engine::vramNote2 defined, not declared (tests unassigned entries / engine files)",
+    "N7": "SlotOutput::emit of an undeclared class (tests unassigned entries, text census)",
+    "N7b": "SlotOutput::emit of an undeclared class (tests aliases / unassigned)",
+    "N8": "GovernorGlue::tick of an undeclared class (tests the call graph govTick -> startJob, text census)",
+    "U4": "sl.job->stats() - Job has no stats() (tests the unresolved-call finding, a text rule)",
+    "X1": "SlotPages::dropCache of an undeclared class (tests data use by name, text census)",
+    "X2": "GovernorGlue::tick of an undeclared class (tests the call graph, text census)",
+    "X3": "SlotPages::dropCache of an undeclared class (tests jq_.stop_ by name, text census)",
+    "X4": "Helper::emit of an undeclared class (tests unassigned)",
+    "X9": "GovState undeclared in a new file (tests the engine-header user finding)",
+    "X9b": "GovState undeclared in a new file (tests unassigned)",
+    "X9c": "GovState undeclared in a new file (tests data use by name, text census)",
+}
+
+
 def _okc(code):   # a read control in runLoop: the check must pass
     return [(EC, RUNL, RUNL + "    " + code + "\n")], None, [], r"(?#OK)^engine split check: ok"
 
@@ -169,8 +206,8 @@ MUT = [
     ("Y11", "runLoop std::fill(gov_json_.begin(), ...)", [(EC, RUNL, RUNL + "    std::fill(gov_json_.begin(), gov_json_.end(), ' ');\n")], None, [], ow("runLoop:gov_json_")),
     ("Y12", "runLoop queue_.front()->id = 0", [(EC, RUNL, RUNL + "    if (!queue_.empty()) queue_.front()->id = 0;\n")], None, [], ow("runLoop:queue_")),
     ("Y13", "dropCache poke(gov_pending_) through a new header's bool& parameter",
-     [("server/slot_util.h", None, "#pragma once\nnamespace whirl::server {\ninline void poke(bool& b) { b = true; }\n}\n"), (EP, DROPC, DROPC + "    poke(gov_pending_);\n")], None, [], ow("dropCache:gov_pending_")),
-    ("Y14", "runLoop dropAll(queue_) defined in a new .cpp", [("server/sched_util.cpp", None, "#include <deque>\nnamespace whirl::server {\nstruct Job;\nvoid dropAll(std::deque<Job*>& q) { q.clear(); }\n}\n"), (EC, RUNL, RUNL + "    dropAll(queue_);\n")],
+     [("server/slot_util.h", None, "#pragma once\nnamespace whirl::server {\ninline void poke(bool& b) { b = true; }\n}\n"), (EP, '#include "engine_internal.h"\n', '#include "engine_internal.h"\n#include "slot_util.h"\n'), (EP, DROPC, DROPC + "    poke(gov_pending_);\n")], None, [], ow("dropCache:gov_pending_")),
+    ("Y14", "runLoop dropAll(queue_) defined in a new .cpp", [("server/sched_util.cpp", None, "#include <deque>\nnamespace whirl::server {\nstruct Job;\nvoid dropAll(std::deque<Job*>& q) { q.clear(); }\n}\n"), (EC, RUNL, "void dropAll(std::deque<Job*>& q);\n" + RUNL + "    dropAll(queue_);\n")],
      None, [], ow("runLoop:queue_")),
     # --- DESIGN 1.5 alias write ---
     ("AW1", "alias write (DESIGN 1.5): dropCache auto& q = queue_; q.push_back(nullptr)", [(EP, DROPC, DROPC + "    { auto& q = queue_; q.push_back(nullptr); }\n")], None, [], ow("dropCache:queue_")),
@@ -190,9 +227,9 @@ MUT = [
     # act-on 1: write shapes the census missed (W1-W10), the accessor returning a reference (W11)
     ("W1", "auto&& q = stop_; q = true in dropCache", [(EP, DROPC, DROPC + "    { auto&& q = stop_; q = true; }\n")], None, [], ow("dropCache:stop_")),
     ("W2", "for (auto&& j : queue_) j = nullptr in dropCache", [(EP, DROPC, DROPC + "    for (auto&& j : queue_) j = nullptr;\n")], None, [], ow("dropCache:queue_")),
-    ("W3", "structured binding auto& [a, b] = fl_; a = {} in dropCache", [(EP, DROPC, DROPC + "    { auto& [fa, fb] = fl_; fa = {}; (void)fb; }\n")], None, [], ow("dropCache:fl_")),
+    ("W3", "structured binding auto& [a, b] = fl_; a = {} in dropCache", [(EP, DROPC, DROPC + "    { auto& [fa, fb, fc, fd, fe] = fl_; (void)fa; (void)fb; (void)fc; fd = 0; (void)fe; }\n")], None, [], ow("dropCache:fl_")),
     ("W3b", "W3 from a higher layer (runLoop, may read prefill data): only the write rule can catch it",
-     [(EC, RUNL, RUNL + "    { auto& [fa, fb] = fl_; fa = {}; (void)fb; }\n")], None, [], ow("runLoop:fl_")),
+     [(EC, RUNL, RUNL + "    { auto& [fa, fb, fc, fd, fe] = fl_; (void)fa; (void)fb; (void)fc; fd = 0; (void)fe; }\n")], None, [], ow("runLoop:fl_")),
     ("W4", "parenthesized lvalue (stop_) = true in dropCache", [(EP, DROPC, DROPC + "    (stop_) = true;\n")], None, [], ow("dropCache:stop_")),
     ("W5", "static_cast<bool&>(stop_) = true in dropCache", [(EP, DROPC, DROPC + "    static_cast<bool&>(stop_) = true;\n")], None, [], ow("dropCache:stop_")),
     ("W6", "auto it = queue_.begin(); *it = nullptr in dropCache", [(EP, DROPC, DROPC + "    if (!queue_.empty()) { auto it = queue_.begin(); *it = nullptr; }\n")], None, [], ow("dropCache:queue_")),
@@ -364,13 +401,32 @@ MUT = [
      [(EH, HOLD, HOLD + "\n    int* rp_ = nullptr;"), (EP, DROPC, DROPC + "    *rp_ = 1;\n")],
      lambda c: c["modules"][JQ]["data"].append("rp_"), ["--no-pin"], ow("dropCache:rp_")),
     ("E2", "global ::next(size_t*) (writes *p; a std algorithm's name) on &opt_.n_ck in dropCache (core.shared)",
-     [(EH, "#pragma once\n", "#pragma once\n#include <cstdint>\ninline std::size_t* next(std::size_t* p) { *p = 1; return p; }\n"),
+     [(EH, "#pragma once\n", "#pragma once\n#include <cstddef>\ninline std::size_t* next(std::size_t* p) { *p = 1; return p; }\n"),
       (EP, DROPC, DROPC + "    (void)::next(&opt_.n_ck);\n")], None, [], sw("dropCache:opt_")),
     ("E2c", "control: opt_.n_ck = 1 in dropCache", [(EP, DROPC, DROPC + "    opt_.n_ck = 1;\n")], None, [], sw("dropCache:opt_")),
     ("L1", "S0f (S0e review consider 3): an accessor returning a lambda that writes gov_hold_; runLoop runs it",
      *_acc("auto holdSetter() { return [this] { gov_hold_ = true; }; }", "holdSetter()();", name="holdSetter")),
     ("L1b", "S0f: an accessor returning a lambda capturing gov_hold_ by reference; runLoop runs it",
      *_acc("auto holdSetter() { return [&h = gov_hold_] { h = true; }; }", "holdSetter()();", name="holdSetter")),
+    # --- S0f review (progress/arch025-engine.S0f.REVIEW.md act-on 1 / 2, consider 1 / 2; runner
+    # scratch/a25_engine/s0f_review/runner/r_mut.py): pointees reached through const objects, std namespace from the AST ---
+    ("E2y", "control: global ::next(size_t*) without std:: in its signature", [_PRE("#include <cstddef>\ninline size_t* next(size_t* p) { *p = 1; return p; }\n"),
+     (EP, DROPC, DROPC + "    (void)::next(&opt_.n_ck);\n")], None, [], sw("dropCache:opt_")),
+    ("G1", "pointer member rp_, pointee written by a global wrp(int*) in the const kvTokBytes", [_RP, _WRP, _K("wrp(rp_);")], _addm("rp_"), ["--no-pin"], ow("kvTokBytes:rp_")),
+    ("G1c", "same wrp(rp_) in the non-const dropCache", [_RP, _WRP, _D("wrp(rp_);")], _addm("rp_"), ["--no-pin"], ow("dropCache:rp_")),
+    ("G2", "pointer member copied by assignment, written through the copy (kvTokBytes)", [_RP, _K("int* q = nullptr; q = rp_; *q = 1;")], _addm("rp_"), ["--no-pin"], ow("kvTokBytes:rp_")),
+    ("G2c", "same in dropCache", [_RP, _D("int* q = nullptr; q = rp_; *q = 1;")], _addm("rp_"), ["--no-pin"], ow("dropCache:rp_")),
+    ("G3", "pointer field of a struct member, *rh_.p = 1 in kvTokBytes", [*_RH, _K("*rh_.p = 1;")], _addm("rh_"), ["--no-pin"], ow("kvTokBytes:rh_")),
+    ("G4", "macro-wrapped: WSET1(*rh_.p) in kvTokBytes", [*_RH, _MAC, _K("WSET1(*rh_.p);")], _addm("rh_"), ["--no-pin"], ow("kvTokBytes:rh_")),
+    ("G5", "(void)std::exchange(*rh_.p, 1) in kvTokBytes", [*_RH, _K("(void)std::exchange(*rh_.p, 1);")], _addm("rh_"), ["--no-pin"], ow("kvTokBytes:rh_")),
+    ("G6", "vector<int*> member, *vp_[0] = 1 in kvTokBytes", [_VP, _K("*vp_[0] = 1;")], _addm("vp_"), ["--no-pin"], ow("kvTokBytes:vp_")),
+    ("G7", "vector<int*> member, wrp(vp_[0]) in kvTokBytes", [_VP, _WRP, _K("wrp(vp_[0]);")], _addm("vp_"), ["--no-pin"], ow("kvTokBytes:vp_")),
+    ("G8", "pointer member rp_, std::fill(rp_, rp_ + 1, 0) in kvTokBytes", [_RP, _K("std::fill(rp_, rp_ + 1, 0);")], _addm("rp_"), ["--no-pin"], ow("kvTokBytes:rp_")),
+    ("G9", "today's deque<Job*> queue_: (void)std::exchange(queue_.front()->id, 0) in the const kvTokBytes", [_K("(void)std::exchange(queue_.front()->id, 0);")], None, ["--no-pin"], ow("kvTokBytes:queue_")),
+    ("G9c", "control: queue_.front()->id = 0 in kvTokBytes", [_K("queue_.front()->id = 0;")], None, ["--no-pin"], ow("kvTokBytes:queue_")),
+    ("G9n", "control: the same std::exchange in the non-const dropCache", [_D("(void)std::exchange(queue_.front()->id, 0);")], None, ["--no-pin"], ow("dropCache:queue_")),
+    ("L2", "accessor returns a lambda kept in a local first; runLoop runs it",
+     *_acc("auto holdSetter() { auto f = [this] { gov_hold_ = true; }; return f; }", "holdSetter()();", name="holdSetter")),
     ("D4b", "S0d: the same binding in a declarator after a nested struct body (struct Hd { bool& r; } hd_{stop_}; the text census has no "
      "entry for it): the AST write outside every entry is a finding",
      [(EH, HOLD, HOLD + "\n    struct Hd { bool& r; } hd_{stop_};")], lambda c: c["modules"][GV]["data"].append("hd_"), ["--no-pin"],
@@ -463,6 +519,8 @@ def one(item):
     if os.path.exists(fp):
         allt += "\n" + "".join("   " + l for l in open(fp, encoding="utf-8"))
     hit = re.search(expect, allt, re.M) is not None
+    if "clang errors in " in allt and mid not in CLANG_ERR_OK:   # S0g: the AST census fell back to text = no evidence
+        return mid, "INVALID", f"{mid} {what}\n   rc={rc}; the mutant does not compile (clang errors; not in CLANG_ERR_OK) -> INVALID"
     if expect.startswith("(?#OK)"):   # S0c: a control that must pass
         v = "PASS" if rc == 0 and hit else "FALSE POSITIVE"
     elif rc == 3: v = "CRASH"
