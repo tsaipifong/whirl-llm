@@ -539,6 +539,13 @@
    "Engine:ctx_pub_",
    "Engine:fl_",
    "Engine:ssm_bytes_",
+   "acceptSlot:dc_",
+   "attachSpe:dc_",
+   "dropCache:dc_",
+   "prefillGroup:dc_",
+   "prefillStep:dc_",
+   "restoreSteps:dc_",
+   "startJob:dc_",
    "admitQueued:n_active_",
    "admitQueued:queue_",
    "allocState:spec_on_",
@@ -566,10 +573,18 @@
    "Engine:ctx_pub_",
    "Engine:fl_",
    "Engine:ssm_bytes_",
+   "acceptSlot:dc_",
+   "attachSpe:dc_",
+   "dropCache:dc_",
+   "prefillGroup:dc_",
+   "prefillStep:dc_",
+   "restoreSteps:dc_",
+   "startJob:dc_",
    "allocState:spec_on_",
    "setVramProbe:vram_others_"
   ],
-  "_doc_s0": "S0 re-measure (A1): now adds the lock-protocol writes (q_cond_.notify_all / wait_for, q_mutex_ through WH_UNLOCK_HELD) outside job_queue; leg_end is unchanged: they move behind JobQueue methods (review3 C3, leg 3 design)"
+  "_doc_s0": "S0 re-measure (A1): now adds the lock-protocol writes (q_cond_.notify_all / wait_for, q_mutex_ through WH_UNLOCK_HELD) outside job_queue; leg_end is unchanged: they move behind JobQueue methods (review3 C3, leg 3 design)",
+  "_doc_s4": "S4 (arch025-engine-s4, 2026-10-30): the 7 `<entry>:dc_` rows are calls of DrafterCtx's non-const methods (dflReset, dflIngest) on the holder dc_ from other modules: the census counts a non-const method call on a member as a write of that member (rule b). DrafterCtx owns no data (DESIGN 2.3: references bst_ m_ opt_ only), so nothing of drafter_ctx's is written; what the methods write (m_, bst_) is core.shared and listed under shared_writers for dflReset / dflIngest. They stay at leg end (the callers keep calling dc_). The const calls (draftRoom, dflReady: dflashDrafts, dropOutOfRoom, ngramDrafts, pagesFor, tryRestore) are reads. Review pending (tests/pins/engine_cut_reviews.tsv); a checker rule 'a call on a cut holder is a call edge, not a data write' would make these rows unnecessary (follow-up for the S0c-S0g checker series)"
  },
  "engine_members_final": [
   "m_",

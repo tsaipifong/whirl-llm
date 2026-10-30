@@ -1,5 +1,6 @@
 // Server engine, the decode cycle (arch025-N4f, from engine.cpp): draft selection (MTP, n-gram, DFlash2), the batched
-// verify, sampling and acceptance, and the DFlash2 drafter context; decodeCycle's phases (arch025-E2) in call order.
+// verify, sampling and acceptance; decodeCycle's phases (arch025-E2) in call order. The DFlash2 drafter context moved
+// to engine_drafter.h (arch025-engine S4, module server.drafter_ctx).
 // SPDX-License-Identifier: Apache-2.0
 
 #include "engine.h"
@@ -20,42 +21,6 @@
 #include <thread>
 
 namespace whirl::server {
-
-// ---------------------------------------------------------------------------
-// DFlash2 drafter context (--draft dflash). Its rows come from the target features captured by
-// each forward / verify; a slot's context is valid for the slot's own lineage only (same tokens at
-// the same positions). Restores from a shared checkpoint or a host tier bring KV and state but no
-// features: the context starts empty at the restore point and the slot drafts with DFlash2 again
-// once dfl_warm rows were ingested after it (re-running the target over earlier positions would
-// rewrite KV rows the restored state already holds).
-
-std::uint32_t Engine::draftRoom() const {
-    if (opt_.use_mtp) return opt_.n_draft;
-    if (opt_.use_dflash) return m_.dflashMaxDrafts();
-    return 0;
-}
-
-void Engine::dflReset(Slot& sl, std::uint32_t at) {
-    if (!opt_.use_dflash) return;
-    m_.dflashTrim(sl.id, 0);
-    sl.dfl_lo = sl.dfl_hi = at;
-}
-
-// Rows r0 .. r0 + n - 1 of the latest forward / verify of run_rows rows are positions pos0 .. of
-// slot sl: ingest those whose features were captured.
-void Engine::dflIngest(Slot& sl, std::uint32_t run_rows, std::uint32_t r0, std::uint32_t n, std::uint32_t pos0) {
-    if (!opt_.use_dflash || n == 0) return;
-    ::whirl::dflash::Range rg{sl.dfl_lo, sl.dfl_hi};
-    const ::whirl::dflash::Ingest g = ::whirl::dflash::planIngest(rg, m_.captureN(), run_rows, r0, n, pos0);
-    bst_.dfl_gap += g.gap;
-    if (g.any) m_.dflashIngest(sl.id, g.cap_row, g.n, g.pos);
-    sl.dfl_lo = rg.lo;
-    sl.dfl_hi = rg.hi;
-}
-
-bool Engine::dflReady(const Slot& sl) const {
-    return opt_.use_dflash && ::whirl::dflash::ready(::whirl::dflash::Range{sl.dfl_lo, sl.dfl_hi}, sl.pos, opt_.dfl_warm);
-}
 
 // relaxacc repetition guard: would keeping draft dr[acc] (after sl.next and dr[0..acc)) end in
 // an n-gram already in the slot's recent tokens?
@@ -165,7 +130,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
 
 void Engine::dropOutOfRoom(Cycle& cy, std::span<Slot* const> act_in) {
     // slots out of context room end here
-    const std::uint32_t nd_room = draftRoom();
+    const std::uint32_t nd_room = dc_.draftRoom();
     for (Slot* sl : act_in) {
         const bool room_ok = spec::rules::decodeRoom(sl->pos, nd_room, ctx_) && ensurePages(*sl, sl->pos + nd_room + 2);
         if (!room_ok) {
@@ -218,7 +183,7 @@ void Engine::ngramDrafts(Cycle& cy) {
             // count (a slot whose drafter context is not ready verifies one row)
             float alt_score = 0;
             if (opt_.use_dflash) {
-                const std::uint32_t dn = dflReady(sl) ? verifyRoom(sl, std::min(cy.dfl_lim, static_cast<std::uint32_t>(std::lround(sl.dfl_nd)))) : 0;
+                const std::uint32_t dn = dc_.dflReady(sl) ? verifyRoom(sl, std::min(cy.dfl_lim, static_cast<std::uint32_t>(std::lround(sl.dfl_nd)))) : 0;
                 if (auto t = dtm.estimate(dn)) alt_score = sl.dfl_acc.expected(dn) / *t;
             } else if (opt_.slot_drafts == 2 && cy.A >= 2) {
                 // against this slot's own last MTP allocation and its effective acceptance (one slot: as before)
@@ -244,7 +209,7 @@ void Engine::dflashDrafts(Cycle& cy) {
         for (std::size_t k = 0; k < cy.A; ++k) {
             if (cy.dsrc[k] != 0) continue;
             Slot& sl = *cy.act[k];
-            if (!dflReady(sl)) {
+            if (!dc_.dflReady(sl)) {
                 bst_.dfl_cold += 1;
                 continue;
             }
@@ -576,7 +541,7 @@ void Engine::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acce
     if (m_.gdnReplay()) m_.setPending(sl.id, acc + 1);
     else if (acc < nd_k) m_.restoreSeqSnapshot(sl.id, cy.snap_of[k] + acc);
     // DFlash2 context: the kept rows' features (whatever drafted them; rejected rows never enter)
-    dflIngest(sl, cy.rows, row0, acc + 1, sl.pos);
+    dc_.dflIngest(sl, cy.rows, row0, acc + 1, sl.pos);
     // trunk now holds next, dr[0..acc) at pos .. pos + acc
     sl.cache_tokens.push_back(sl.next);
     sl.cache_tokens.insert(sl.cache_tokens.end(), dr.begin(), dr.begin() + acc);

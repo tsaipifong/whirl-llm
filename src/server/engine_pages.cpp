@@ -45,7 +45,7 @@ void Engine::saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::option
 void Engine::dropCache(Slot& sl) {
     for (Ckpt& c : sl.ckpts) c.valid = false;
     sl.cache_tokens.clear();
-    dflReset(sl, 0);
+    dc_.dflReset(sl, 0);
 }
 
 void Engine::freePages(Slot& sl) {
@@ -272,7 +272,7 @@ void Engine::attachSpe(Slot& sl, Spe& s) {
     m_.mapPages(sl.id, 0, sl.pages);
     sl.cache_tokens.insert(sl.cache_tokens.end(), s.tokens.begin(), s.tokens.end());
     // another lineage's KV: no drafter context for it
-    dflReset(sl, s.n);
+    dc_.dflReset(sl, s.n);
     s.last_used = ps_.cache().touch();
     s.uses += 1;
     stat_spe_hits_ += 1;
@@ -304,7 +304,7 @@ bool Engine::waitsForSys(Job& job) {
 }
 
 std::size_t Engine::pagesFor(std::uint64_t n_tok) const {
-    return PagePool::pagesFor(n_tok + draftRoom() + 2);
+    return PagePool::pagesFor(n_tok + dc_.draftRoom() + 2);
 }
 
 std::size_t Engine::poolAvailable() const {

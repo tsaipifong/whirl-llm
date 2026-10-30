@@ -249,7 +249,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     const Params& p = job.params;
     const std::span<const std::uint32_t> toks = job.tokens;
     const std::uint32_t N = static_cast<std::uint32_t>(toks.size());
-    const std::uint32_t nd_max = draftRoom();
+    const std::uint32_t nd_max = dc_.draftRoom();
     const auto& cfg = m_.cfg();
     sl.job = &job;
     sl.last_used = ps_.cache().touch();
@@ -334,13 +334,13 @@ bool Engine::startJob(Slot& sl, Job& job) {
         // the slot's own prefix keeps its drafter rows below reuse (attachSpe reset them for a
         // shared checkpoint); positions >= reuse are rewritten
         if (mt.reuse == 0) {
-            dflReset(sl, 0);
+            dc_.dflReset(sl, 0);
         } else {
             // (FR-DFL P3-3: only rows the context ring still holds count; none left -> cold at reuse)
             const ::whirl::dflash::Trim tr =
                 ::whirl::dflash::trimForReuse(::whirl::dflash::Range{sl.dfl_lo, sl.dfl_hi}, mt.reuse, m_.dflashRing());
             if (tr.reset) {
-                dflReset(sl, mt.reuse);
+                dc_.dflReset(sl, mt.reuse);
             } else {
                 m_.dflashTrim(sl.id, mt.reuse);
                 sl.dfl_lo = tr.r.lo;

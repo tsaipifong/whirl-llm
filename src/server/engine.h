@@ -62,6 +62,7 @@
 #include "server/engine_common.h"   // aliases (kv_page, gdn_max_seg, prefill schedule, Cand, Sampler), KvPoolFull
 #include "server/engine_options.h"  // EngineOptions
 #include "server/engine_state.h"    // BatchStats, SpecState, FloorState
+#include "server/engine_drafter.h"   // DrafterCtx (arch025-engine S4, module server.drafter_ctx)
 
 namespace whirl::server {
 
@@ -220,11 +221,6 @@ private:
     void noteFloor(TimePoint tl2, TimePoint tl3, std::size_t pf_rows, bool floor_pf);
     void splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m);
     std::uint32_t draftCap(std::uint32_t A);
-    // DFlash2 drafter context of a slot
-    std::uint32_t draftRoom() const;
-    void dflReset(Slot& sl, std::uint32_t at);
-    void dflIngest(Slot& sl, std::uint32_t run_rows, std::uint32_t r0, std::uint32_t n, std::uint32_t pos0);
-    bool dflReady(const Slot& sl) const;
     void finishJob(Slot& sl);
     // host tiers (the spill half, the span lists and the idle / shutdown flush: tb_)
     // the scheduler's part of a restore (whether the request fits, the slot's pages and phase, startJob); the tier
@@ -347,6 +343,9 @@ private:
     // vision: image embeddings (cache by content hash), per-slot image maps, idle release; arch025-N4b: the former
     // members vis_cfg_ .. vis_rel_pending_, here (the last members) and in that order
     ImageEmbeddings vis_{m_, ops_};
+    // DFlash2 drafter context of a slot (arch025-engine S4, module server.drafter_ctx): references to bst_, m_, opt_
+    // only; the last member, destroyed first, trivial destructor (DESIGN v3 2.5)
+    DrafterCtx dc_{bst_, m_, opt_};
 };
 
 }  // namespace whirl::server

@@ -12,6 +12,7 @@
 # | prefill_tok_cum_, crlf_norm_ | uint64, vector<uint32> | memory only | out of the vram block, after vst_ (S9) | no destructor reads them |
 # | stat_* (6) | uint64 | trivial | merged into cnt_ at stat_spe_new_ (S6) | trivial |
 # | gov_mu_ (new) | whirl::Mutex | trivial | last member of GovState (S8) | nobody holds it at ~Engine (C3) |
+# | dc_ (new in S4) | DrafterCtx (BatchStats&, ServerModel&, const EngineOptions&) | trivial (references only; static_assert in tests/iso/server.drafter_ctx) | added last, after vis_ (S4) | destroyed first; no destructor reads it, it owns nothing; no member before it moves (offsets unchanged) |
 # Stored callbacks that capture `this` (review3 C4): today they capture Engine; after the split they capture a
 # component (sc_ / dc_ / tg_), which is declared after vis_ and destroyed FIRST, while tb_ / the Tier outlive it.
 # | callback | stored in | captures (today -> after split) | lifetime rule |
@@ -139,3 +140,4 @@ vis_.lend_raw_
 vis_.lend_
 vis_.snap0_
 vis_.rel_pending_
+dc_

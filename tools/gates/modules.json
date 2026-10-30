@@ -258,6 +258,8 @@
                    "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
    "server.engine_types": {"metrics": [], "metrics_none": "types, constants and aliases only (no function of its own): no bench key (whirl-iso-server-engine-types-tests)",
                            "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal"]}},
+   "server.drafter_ctx": {"metrics": [], "metrics_none": "four small functions the decode cycle, prefill and the tier restore call (inline in their callers, as before the move: the speed is the decode cycle's, measured by the engine split's E8 A/B): no bench key (whirl-iso-server-drafter-ctx-tests)",
+                          "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
    "server.cycle_prof": {"metrics": [], "metrics_none": "WHIRL_PROFILE only (off in the product default): no bench key (whirl-iso-server-cycle-prof-tests)",
                          "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "server_log_scan"]}},
    "server.sample_buffers": {"metrics": ["host.sched.round_us_per_cycle"],
@@ -862,6 +864,46 @@
     "whirl-iso-server-engine-types-tests (alias values and types, KvPoolFull type and text, every EngineOptions default, BatchStats / SpecState / FloorState starts == the a17493b text)",
     "V-move: scratch/a25_engine/s3/apply_s3.py --check (the moved blocks equal the a17493b text byte for byte; line multiset: only engine_internal.h's old head comment lost) and s3/hdr_alone.py (each header compiles alone and twice with the product flags)",
     "V-obj: objeq of every product object against the a17493b build (expected all identical: types only)"
+   ]
+  },
+  "server.drafter_ctx": {
+   "id": "N4-S4",
+   "desc": "the DFlash2 drafter context of a slot (src/server/engine_drafter.h; arch025-engine S4, moved verbatim out of engine.h and engine_decode.cpp): struct DrafterCtx with draftRoom (the draft rows a slot keeps room for: MTP n_draft, DFlash2 block - 1, else 0), dflReset (the context restarts at a restore / reuse point), dflIngest (the captured target features of a forward / verify into the slot's context; counts dfl_gap) and dflReady (DFlash2 drafts once the run ends at pos and is warm). Owns nothing: references bst_ / m_ / opt_ (core.shared, same names); Engine holds it as dc_, the last member (destroyed first, trivial destructor). Header-only (inline), layer L1 of the Engine split (progress/arch025-engine.DESIGN.md v3 S4). Isolated: tests/iso/server.drafter_ctx (header-only manifest; test double tests/iso/fake_server_model.h records dflashTrim / dflashIngest)",
+   "paths": [
+    "src/server/engine_drafter.h"
+   ],
+   "lands_on": "arch025-engine (leg 2, S4)",
+   "steps": [
+    "cpu_iso_server_drafter_ctx",
+    "cpu_server",
+    "cpu_pins",
+    "cpu_engine_split",
+    "cpu_member_order",
+    "golden_swift",
+    "golden_moe",
+    "srv_mt_precise",
+    "srv_mt_precise_moe",
+    "srv_balance",
+    "srv_fast",
+    "srv_cache_precise",
+    "srv_cache_balance"
+   ],
+   "gpus": {
+    "golden_swift": 2,
+    "golden_moe": 2,
+    "srv_mt_precise": 2,
+    "srv_mt_precise_moe": 2,
+    "srv_balance": 2,
+    "srv_fast": 2,
+    "srv_cache_precise": 1,
+    "srv_cache_balance": 1
+   },
+   "callers": "rdeps",
+   "manual": [
+    "whirl-iso-server-drafter-ctx-tests (draftRoom's three cases, dflReset's guard / trim / range, dflIngest's guards and captured / partly / not captured plans with dfl_gap counting, dflReady's guard and warm-up; expected values written out) and the 9 s4-dfl-* mutants of tools/impact/mutations.json",
+    "V-move: scratch/a25_engine/s4/apply_s4.py --check (the declarations and bodies equal the 7ad196c text byte for byte, each definition line mapped back; line multiset: every lost / added line explained) and s4/hdr_alone.py",
+    "V-text: tools/impact/revtext.py --rules scratch/a25_engine/s4/revtext_rules_s4.json (DrafterCtx:: -> Engine::, dc_. -> '', inline dropped; 3 allowed member declarations)",
+    "V-obj: objeq against the 7ad196c build: the engine TUs differ (symbol Engine:: -> DrafterCtx::, inline / COMDAT copies, sizeof(Engine) + 24), every other product object identical"
    ]
   },
   "server.cycle_prof": {

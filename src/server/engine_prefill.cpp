@@ -72,7 +72,7 @@ void Engine::prefillStep(Slot& sl) {
     } else {
         m_.forward(toks.subspan(sl.pf_off, n), sl.reuse + static_cast<std::uint32_t>(sl.pf_off));
     }
-    dflIngest(sl, static_cast<std::uint32_t>(n), 0, static_cast<std::uint32_t>(n), sl.reuse + static_cast<std::uint32_t>(sl.pf_off));
+    dc_.dflIngest(sl, static_cast<std::uint32_t>(n), 0, static_cast<std::uint32_t>(n), sl.reuse + static_cast<std::uint32_t>(sl.pf_off));
     sl.pf_off += n;
     bst_.prefill_tok += n;
     prefill_tok_cum_ += n;
@@ -165,7 +165,7 @@ std::size_t Engine::prefillGroup(Slot& first, std::size_t row_budget) {
     std::uint64_t r0 = 0;
     for (std::size_t k = 0; k < grp.size(); ++k) {
         Slot& sl = *grp[k];
-        dflIngest(sl, static_cast<std::uint32_t>(total), static_cast<std::uint32_t>(r0), static_cast<std::uint32_t>(segs[k].n),
+        dc_.dflIngest(sl, static_cast<std::uint32_t>(total), static_cast<std::uint32_t>(r0), static_cast<std::uint32_t>(segs[k].n),
                   sl.reuse + static_cast<std::uint32_t>(sl.pf_off));
         sl.pf_off += segs[k].n;
         r0 += segs[k].n;

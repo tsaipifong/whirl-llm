@@ -980,6 +980,22 @@
    "protocol"
   ],
   [
+   "server.drafter_ctx",
+   "contract.server"
+  ],
+  [
+   "server.drafter_ctx",
+   "model.core"
+  ],
+  [
+   "server.drafter_ctx",
+   "server.engine_types"
+  ],
+  [
+   "server.drafter_ctx",
+   "server.slot"
+  ],
+  [
    "server.engine",
    "accept_policy"
   ],
@@ -1074,6 +1090,10 @@
   [
    "server.engine",
    "server.cycle_prof"
+  ],
+  [
+   "server.engine",
+   "server.drafter_ctx"
   ],
   [
    "server.engine",

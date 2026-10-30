@@ -69,7 +69,7 @@ public:
     // context, a VRAM shared checkpoint made from a restored shared entry)
     struct RestoreSteps {
         std::function<void()> drop_cache;                 // failed: Engine::dropCache
-        std::function<void(std::uint32_t)> drafter_reset;  // restored n_tok tokens: Engine::dflReset
+        std::function<void(std::uint32_t)> drafter_reset;  // restored n_tok tokens: DrafterCtx::dflReset (Engine::dc_)
         std::function<void(Ckpt&, std::uint64_t)> share;   // restored shared entry (its checkpoint, entry id): Engine::createSpe
     };
     enum class Pump { pending, failed, restored };
