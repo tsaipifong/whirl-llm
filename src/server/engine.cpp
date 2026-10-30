@@ -220,31 +220,6 @@ Engine::Stats Engine::statsShared() const {
 // ---------------------------------------------------------------------------
 // request lifecycle
 
-bool Engine::emit(Slot& sl, std::uint32_t t) {
-    if (!sl.ignore_eos && (t == ct_.im_end || t == ct_.endoftext)) {
-        sl.finish = "stop";
-        return true;
-    }
-    sl.batch[sl.n_batch] = t;
-    sl.n_batch += 1;
-    sl.n_gen += 1;
-    if (sl.n_gen >= sl.max_tokens) {
-        sl.finish = "length";
-        return true;
-    }
-    return false;
-}
-
-void Engine::flushOut(Slot& sl) {
-    std::uint32_t n_after = 0;
-    if (sl.st.push(sl.out, std::span<const std::uint32_t>(sl.batch.data(), sl.n_batch), &n_after)) {
-        sl.done = true;
-        sl.stopped_str = true;
-        sl.n_after_stop = n_after;
-    }
-    sl.n_batch = 0;
-}
-
 bool Engine::startJob(Slot& sl, Job& job) {
     const Params& p = job.params;
     const std::span<const std::uint32_t> toks = job.tokens;
@@ -591,15 +566,6 @@ void Engine::failSlot(Slot& sl, const std::string& err) {
     }
     dropCache(sl);
     releaseSlot(sl);
-}
-
-void Engine::writeError(Job& job, int status, const std::string& msg) {
-    logW("req {} | {} {}", job.id, status, msg);
-    const std::string r = errorResponse(status, msg);
-    if (job.w) {
-        job.w->write(r);
-        job.w->flush();
-    }
 }
 
 void Engine::logBatchStats(bool force) {

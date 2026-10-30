@@ -64,6 +64,10 @@
     "flushOut",
     "writeError"
    ],
+   "files": [
+    "server/engine_output.cpp"
+   ],
+   "_doc": "S5 (arch025-engine-s5, 2026-10-30): free functions in server/engine_output.{h,cpp}; emit takes ct_ (core.shared) as its first parameter under the member's name. The .cpp is listed so it is an engine file (every namespace-level definition in it is an entry, a #define in it is a finding: selftest N6b)",
    "refs": [
     "ct_"
    ]

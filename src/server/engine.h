@@ -63,6 +63,7 @@
 #include "server/engine_options.h"  // EngineOptions
 #include "server/engine_state.h"    // BatchStats, SpecState, FloorState
 #include "server/engine_drafter.h"   // DrafterCtx (arch025-engine S4, module server.drafter_ctx)
+#include "server/engine_output.h"    // emit, flushOut, writeError (arch025-engine S5, module server.slot_output)
 
 namespace whirl::server {
 
@@ -183,8 +184,6 @@ private:
     bool waitsForTier(Job& job);
     void prefetchFor(Job& job);
     // request lifecycle
-    bool emit(Slot& sl, std::uint32_t t);
-    void flushOut(Slot& sl);
     bool startJob(Slot& sl, Job& job);
     std::size_t chunkLen(const Slot& sl) const;
     std::vector<DecodeFloor::SlotTok> floorProtected() const;
@@ -239,7 +238,6 @@ private:
     // what the running prefills still need
     std::size_t pagesFor(std::uint64_t n_tok) const;
     std::size_t poolAvailable() const;
-    void writeError(Job& job, int status, const std::string& msg);
     void logBatchStats(bool force);
     // samples the WDDM probe (warns through vram_watch_); "" without a probe
     std::string vramNote();

@@ -84,7 +84,7 @@ PATHS = {
                           "metric": None, "desc": "SSD tier identity: which saved states a new server may reuse"},
     "vision":            {"roots": ["ImageEmbeddings::prepare", "Engine::attachVision", "Qwen35Vision::encode", "Context::visRow",
                                     "Context::injectRows"], "metric": None, "desc": "image encoder and image-token injection"},
-    "http":              {"roots": ["Engine::writeError", "StreamState::send"], "metric": None,
+    "http":              {"roots": ["writeError", "StreamState::send"], "metric": None,  # writeError: free function since arch025-engine S5
                           "desc": "HTTP transport, OpenAI protocol, streaming"},
     "load":              {"roots": ["Model::load", "loadOrTune", "Model::autotuneGemm", "Model::checkPreciseDecode"], "metric": "all",
                           "desc": "model load, kernel table, auto-tune, precise self-checks"},

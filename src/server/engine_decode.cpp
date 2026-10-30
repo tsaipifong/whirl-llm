@@ -547,8 +547,8 @@ void Engine::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acce
     sl.cache_tokens.insert(sl.cache_tokens.end(), dr.begin(), dr.begin() + acc);
     const std::uint32_t n_before = sl.n_gen;
     for (std::uint32_t r = 0; r < acc; ++r)
-        if (!sl.done) sl.done = emit(sl, dr[r]);
-    if (!sl.done) sl.done = emit(sl, chosen);
+        if (!sl.done) sl.done = emit(ct_, sl, dr[r]);
+    if (!sl.done) sl.done = emit(ct_, sl, chosen);
     bst_.tokens += sl.n_gen - n_before;
     if (opt_.use_mtp)
         ops_.copyAsync(m_.seqHid(sl.id), m_.hn() + static_cast<std::uint64_t>(row0) * cy.E * 4, (acc + 1) * cy.E * 4,

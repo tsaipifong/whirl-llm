@@ -300,7 +300,7 @@ void Engine::finishPrefill(Slot& sl) {
     sl.last_log_t = sl.td0;
     sl.last_log_n = 0;
     sl.dec_watch.reset();
-    sl.done = emit(sl, first);
+    sl.done = emit(ct_, sl, first);
     flushOut(sl);
     sl.phase = Phase::decode;
     if (sl.done || sl.st.gone) finishJob(sl);

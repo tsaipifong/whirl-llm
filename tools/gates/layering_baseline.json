@@ -1113,6 +1113,10 @@
   ],
   [
    "server.engine",
+   "server.slot_output"
+  ],
+  [
+   "server.engine",
    "spec.engine"
   ],
   [
@@ -1282,6 +1286,22 @@
   [
    "server.slot",
    "tier_bridge"
+  ],
+  [
+   "server.slot_output",
+   "file:src/server/log.h"
+  ],
+  [
+   "server.slot_output",
+   "prefill.plan"
+  ],
+  [
+   "server.slot_output",
+   "protocol"
+  ],
+  [
+   "server.slot_output",
+   "server.slot"
   ],
   [
    "server.startup",

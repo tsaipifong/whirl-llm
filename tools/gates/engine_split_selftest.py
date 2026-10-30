@@ -33,15 +33,20 @@ bases = [sys.argv[i + 1] for i, x in enumerate(sys.argv) if x == "--base"] or [R
 WORK = arg("--work", os.path.join(REPO, "build", "engine_split_selftest"))
 JOBS = int(arg("--jobs", "8"))
 
-EMIT = "bool Engine::emit(Slot& sl, std::uint32_t t) {\n"
+# arch025-engine S5: emit / flushOut / writeError are free functions of module server.slot_output in
+# server/engine_output.{h,cpp} (EO / EOH); the slot_output mutants edit them there. EMIT_OLD = the Engine member of the
+# trees before S5 (X13 runs on the leg-1 tree given as the second base).
+EMIT = "bool emit(const chat::ChatTokens& ct_, Slot& sl, std::uint32_t t) {\n"
+EMIT_OLD = "bool Engine::emit(Slot& sl, std::uint32_t t) {\n"
 GOVT = "void Engine::govTick(const wddmwatch::Sample& s) {\n"
 GOVT_DECL = "    void govTick(const wddmwatch::Sample& s);   // after each sample: decide (and log the decisions)\n"
-EMIT_DECL = "    bool emit(Slot& sl, std::uint32_t t);\n"
+EMIT_DECL = "bool emit(const chat::ChatTokens& ct_, Slot& sl, std::uint32_t t);\n"
 DROPC = "void Engine::dropCache(Slot& sl) {\n"
 DROP_DECL = "    void dropCache(Slot& sl);\n"
 RUNL = "void Engine::runLoop() {\n"
 HOLD = "    bool gov_hold_ = false;"
 EH, EC, EP, EG = "server/engine.h", "server/engine.cpp", "server/engine_pages.cpp", "server/engine_gov.cpp"
+EO, EOH = "server/engine_output.cpp", "server/engine_output.h"
 V = r"  <-- VIOLATION"
 
 
@@ -76,25 +81,26 @@ MUT = [
      None, [], ow("Engine:gov_pending_")),
     ("M3", "a definition in a file not named engine_*", [("server/vram_watch.cpp", None, '#include "engine.h"\nnamespace whirl::server {\nvoid Engine::vramNote2() { gov_warn_.clear(); }\n}\n')],
      None, [], unas("vramNote2")),
-    ("M4", "emit -> finishJob (slot_output calls up)", [(EC, EMIT, EMIT + "    if (t == 0xffffffffu) finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("M4", "emit -> finishJob (slot_output calls up)", [(EO, EMIT, EMIT + "    if (t == 0xffffffffu) finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
     ("M5", "dropCache -> startJob", [(EP, DROPC, DROPC + "    if (sl.job && sl.pos == 0xffffffffu) (void)startJob(sl, *sl.job);\n")], None, [], viol(SC, SS, "call", "dropCache->startJob")),
-    ("N1", "this->gov_hold_ read in emit", [(EC, EMIT, EMIT + "    if (this->gov_hold_) t = 0;\n")], None, [], viol(SO, GV, "data", "emit:gov_hold_")),
-    ("N2", "this->finishJob(sl) in emit", [(EC, EMIT, EMIT + "    if (t == 1u) this->finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
-    ("N3", "Engine::finishJob(sl) in emit", [(EC, EMIT, EMIT + "    if (t == 1u) Engine::finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
-    ("N4", "emit writes spec_on_ (spec_cycle's)", [(EC, EMIT, EMIT + "    spec_on_ = false;\n")], None, [], ow("emit:spec_on_")),
-    ("N5", "emit writes fl_ (prefill's)", [(EC, EMIT, EMIT + "    fl_.epoch = Clock::now();\n")], None, [], ow("emit:fl_")),
-    ("N6", "macro alias of a member in an engine file", [(EC, EMIT, "#define WHX_HOLD gov_hold_\n" + EMIT + "    if (WHX_HOLD) t = 0;\n")], None, [], fnd("#define in an engine file server/engine.cpp")),
-    ("N7", "emit becomes SlotOutput::emit and calls finishJob", [(EC, EMIT, "bool SlotOutput::emit(Slot& sl, std::uint32_t t) {\n    if (t == 1u) finishJob(sl);\n"), (EH, EMIT_DECL, "")],
+    ("N1", "this->gov_hold_ read in emit", [(EO, EMIT, EMIT + "    if (this->gov_hold_) t = 0;\n")], None, [], viol(SO, GV, "data", "emit:gov_hold_")),
+    ("N2", "this->finishJob(sl) in emit", [(EO, EMIT, EMIT + "    if (t == 1u) this->finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("N3", "Engine::finishJob(sl) in emit", [(EO, EMIT, EMIT + "    if (t == 1u) Engine::finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("N4", "emit writes spec_on_ (spec_cycle's)", [(EO, EMIT, EMIT + "    spec_on_ = false;\n")], None, [], ow("emit:spec_on_")),
+    ("N5", "emit writes fl_ (prefill's)", [(EO, EMIT, EMIT + "    fl_.epoch = Clock::now();\n")], None, [], ow("emit:fl_")),
+    ("N6", "macro alias of a member in an engine file", [(EC, RUNL, "#define WHX_HOLD gov_hold_\n" + RUNL + "    if (WHX_HOLD) {}\n")], None, [], fnd("#define in an engine file server/engine.cpp")),
+    ("N6b", "S5: the same macro alias in slot_output's file (listed in the cut's files)", [(EO, EMIT, "#define WHX_HOLD gov_hold_\n" + EMIT + "    if (WHX_HOLD) t = 0;\n")], None, [], fnd("#define in an engine file server/engine_output.cpp")),
+    ("N7", "emit becomes SlotOutput::emit and calls finishJob", [(EO, EMIT, "bool SlotOutput::emit(Slot& sl, std::uint32_t t) {\n    if (t == 1u) finishJob(sl);\n"), (EOH, EMIT_DECL, "")],
      None, [], unas("SlotOutput::emit")),
     ("N7b", "N7 with the cut 'fixed': SlotOutput::emit added to slot_output (alias -> emit): the upward call still fails",
-     [(EC, EMIT, "bool SlotOutput::emit(Slot& sl, std::uint32_t t) {\n    if (t == 1u) finishJob(sl);\n"), (EH, EMIT_DECL, "")],
+     [(EO, EMIT, "bool SlotOutput::emit(Slot& sl, std::uint32_t t) {\n    if (t == 1u) finishJob(sl);\n"), (EOH, EMIT_DECL, "")],
      lambda c: c["aliases"].update({"SlotOutput::emit": "emit"}), ["--no-pin"], viol(SO, SE, "call", "emit->finishJob")),
     ("N8", "govTick becomes GovernorGlue::tick and calls startJob", [(EG, GOVT, "void GovernorGlue::tick(const wddmwatch::Sample& s) {\n    (void)startJob(*slots_.data(), *slots_[0].job);\n"), (EH, GOVT_DECL, "")],
      None, [], viol(GV, SS, "call", "govTick->startJob")),
     ("X1", "SlotPages::dropCache reads gst_.gov_hold_", [(EP, DROPC, "void SlotPages::dropCache(Slot& sl) {\n    if (gst_.gov_hold_) return;\n"), (EH, DROP_DECL, "")], None, [], viol(SC, GV, "data", "dropCache:gov_hold_")),
     ("X2", "GovernorGlue::tick calls ss_.startJob", [(EG, GOVT, "void GovernorGlue::tick(const wddmwatch::Sample& s) {\n    (void)ss_.startJob(*slots_.data(), *slots_[0].job);\n"), (EH, GOVT_DECL, "")], None, [], viol(GV, SS, "call", "govTick->startJob")),
     ("X3", "SlotPages::dropCache writes jq_.stop_", [(EP, DROPC, "void SlotPages::dropCache(Slot& sl) {\n    jq_.stop_ = true;\n"), (EH, DROP_DECL, "")], None, [], ow("dropCache:stop_")),
-    ("X4", "body moves to an undeclared class Helper::emit", [(EC, EMIT, "bool Helper::emit(Slot& sl, std::uint32_t t) {\n"), (EH, EMIT_DECL, "")], None, [], unas("Helper::emit")),
+    ("X4", "body moves to an undeclared class Helper::emit", [(EO, EMIT, "bool Helper::emit(Slot& sl, std::uint32_t t) {\n"), (EOH, EMIT_DECL, "")], None, [], unas("Helper::emit")),
     ("X5", "dropCache writes bst_ (core.shared)", [(EP, DROPC, DROPC + "    bst_ = BatchStats{};\n")], None, [], sw("dropCache:bst_")),
     ("X6", "new Engine inline function reads queue_", [(EH, "    ServerModel& m_;\n", "    std::size_t queued() { return queue_.size(); }\n    ServerModel& m_;\n")], None, [], unas("queued")),
     ("X7", "log.h #define naming a member", [("server/log.h", "APPEND", "\n#define WHX_STOP_FLAG stop_\n")], None, [], fnd("#define naming tracked names server/log.h")),
@@ -109,10 +115,10 @@ MUT = [
      [("server/slot_output.cpp", None, '#include "engine.h"\nnamespace whirl::server {\nbool flushOutFree(Slot& sl, const GovState& gst_) { return gst_.gov_hold_; }\n}\n')],
      lambda c: (c["modules"][SO].setdefault("files", []).append("server/slot_output.cpp"), c["modules"][SO]["funcs"].append("flushOutFree")),
      ["--no-pin"], viol(SO, GV, "data", "flushOutFree:gov_hold_")),
-    ("X10", "emit reads vis_ (not in slot_output's refs)", [(EC, EMIT, EMIT + "    if (vis_.encoded() == 7u) t = 0;\n")], None, [], r"^== reference lists \(R4\): uses outside the list: .*server\.slot_output uses vis_"),
+    ("X10", "emit reads vis_ (not in slot_output's refs)", [(EO, EMIT, EMIT + "    if (vis_.encoded() == 7u) t = 0;\n")], None, [], r"^== reference lists \(R4\): uses outside the list: .*server\.slot_output uses vis_"),
     ("X11", "cut puts stats in two core categories", [], lambda c: c["core_categories"]["accessor"].append("stats"), ["--no-pin"], r"^== core categories overlap \(R6\): stats in "),
     ("X12", "--core on today's tree (core still schedules) must fail", [], None, ["--core"], r"^== --core \(leg-end shape of server\.engine, R5 / R6\): [1-9]\d* problems"),
-    ("X13", "leg-1 tree (second base): emit -> finishJob", [(EC, EMIT, EMIT + "    if (t == 0xffffffffu) finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob"), 1),
+    ("X13", "leg-1 tree (second base): emit -> finishJob", [(EC, EMIT_OLD, EMIT_OLD + "    if (t == 0xffffffffu) finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob"), 1),
     ("X14", "friend in class Engine", [(EH, "    ServerModel& m_;\n", "    friend struct Peek;\n    ServerModel& m_;\n")], None, [], fnd("friend in tracked class Engine")),
     # --- review3 (Y1-Y14) ---
     ("Y1", "runLoop gov_json_.append (mutator method on governor data)", [(EC, RUNL, RUNL + '    gov_json_.append("x");\n')], None, [], ow("runLoop:gov_json_")),
@@ -155,12 +161,12 @@ MUT = [
     ("P3", "cut edit: a holder added", [], lambda c: c["holders"].update({"zz_": "SlotPages"}), [], r"^engine cut pin: MISMATCH section holders"),
     # --- S0 review (progress/arch025-engine.S0.REVIEW.md; reviewer mutants scratch/a25_engine/s0review/s0r_mut.py), S0b ---
     # act-on 2: calls through receivers the census does not resolve must not be dropped
-    ("U1", "(*this).finishJob(sl) in emit", [(EC, EMIT, EMIT + "    if (t == 1u) (*this).finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("U1", "(*this).finishJob(sl) in emit", [(EO, EMIT, EMIT + "    if (t == 1u) (*this).finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
     ("U2", "two-level auto alias: auto& me = *this; auto& me2 = me; me2.stats() in emit",
-     [(EC, EMIT, EMIT + "    { auto& me = *this; auto& me2 = me; (void)me2.stats(); }\n")], None, [], viol(SO, ENG, "call", "emit->stats")),
-    ("U3", "control: auto& me = *this; me.stats() in emit", [(EC, EMIT, EMIT + "    { auto& me = *this; (void)me.stats(); }\n")], None, [], viol(SO, ENG, "call", "emit->stats")),
+     [(EO, EMIT, EMIT + "    { auto& me = *this; auto& me2 = me; (void)me2.stats(); }\n")], None, [], viol(SO, ENG, "call", "emit->stats")),
+    ("U3", "control: auto& me = *this; me.stats() in emit", [(EO, EMIT, EMIT + "    { auto& me = *this; (void)me.stats(); }\n")], None, [], viol(SO, ENG, "call", "emit->stats")),
     ("U4", "a new unresolved call (unknown receiver, name also an untracked method) is a finding, not only unresolved.txt",
-     [(EC, EMIT, EMIT + "    if (t == 7u && sl.job) (void)sl.job->stats();\n")], None, [], fnd("unresolved call not in the cut's unresolved_ok: emit: ")),
+     [(EO, EMIT, EMIT + "    if (t == 7u && sl.job) (void)sl.job->stats();\n")], None, [], fnd("unresolved call not in the cut's unresolved_ok: emit: ")),
     # act-on 1: write shapes the census missed (W1-W10), the accessor returning a reference (W11)
     ("W1", "auto&& q = stop_; q = true in dropCache", [(EP, DROPC, DROPC + "    { auto&& q = stop_; q = true; }\n")], None, [], ow("dropCache:stop_")),
     ("W2", "for (auto&& j : queue_) j = nullptr in dropCache", [(EP, DROPC, DROPC + "    for (auto&& j : queue_) j = nullptr;\n")], None, [], ow("dropCache:queue_")),
@@ -190,7 +196,7 @@ MUT = [
     ("P4b", "a new planned function added to new_funcs", [], lambda c: c["new_funcs"].update({"zzPlanned": SO}), [], r"^engine cut pin: MISMATCH new_funcs zzPlanned"),
     ("P4c", "a new planned member added to new_data", [], lambda c: c["new_data"].update({"zz_": SO}), [], r"^engine cut pin: MISMATCH new_data zz_"),
     ("P5", "new function peekHold() (slot_output via new_funcs) reads governor data; emit calls it",
-     [(EH, HOLD, HOLD + "\n    bool peekHold() const;"), (EC, EMIT, "bool Engine::peekHold() const { return gov_hold_; }\n" + EMIT + "    if (peekHold()) t = 0;\n")],
+     [(EH, HOLD, HOLD + "\n    bool peekHold() const;"), (EO, EMIT, "bool Engine::peekHold() const { return gov_hold_; }\n" + EMIT + "    if (peekHold()) t = 0;\n")],
      lambda c: c["new_funcs"].update({"peekHold": SO}), ["--no-pin"], viol(SO, GV, "data", "peekHold:gov_hold_")),
     ("P6", "a checker tool edited (census copy): the tools hash in the pin differs",
      [("TOOL:engine_split_census.py", "APPEND", "\n# a harmless-looking edit\n")], None, [], r"^engine cut pin: MISMATCH tools engine_split_census\.py"),

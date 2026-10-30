@@ -260,6 +260,8 @@
                            "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal"]}},
    "server.drafter_ctx": {"metrics": [], "metrics_none": "four small functions the decode cycle, prefill and the tier restore call (inline in their callers, as before the move: the speed is the decode cycle's, measured by the engine split's E8 A/B): no bench key (whirl-iso-server-drafter-ctx-tests)",
                           "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
+   "server.slot_output": {"metrics": [], "metrics_none": "three small functions per decode / prefill step and per error answer (called across TUs, as before the move: the speed is the decode cycle's, measured by the engine split's E8 A/B): no bench key (whirl-iso-server-slot-output-tests)",
+                          "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
    "server.cycle_prof": {"metrics": [], "metrics_none": "WHIRL_PROFILE only (off in the product default): no bench key (whirl-iso-server-cycle-prof-tests)",
                          "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "server_log_scan"]}},
    "server.sample_buffers": {"metrics": ["host.sched.round_us_per_cycle"],
@@ -904,6 +906,47 @@
     "V-move: scratch/a25_engine/s4/apply_s4.py --check (the declarations and bodies equal the 7ad196c text byte for byte, each definition line mapped back; line multiset: every lost / added line explained) and s4/hdr_alone.py",
     "V-text: tools/impact/revtext.py --rules scratch/a25_engine/s4/revtext_rules_s4.json (DrafterCtx:: -> Engine::, dc_. -> '', inline dropped; 3 allowed member declarations)",
     "V-obj: objeq against the 7ad196c build: the engine TUs differ (symbol Engine:: -> DrafterCtx::, inline / COMDAT copies, sizeof(Engine) + 24), every other product object identical"
+   ]
+  },
+  "server.slot_output": {
+   "id": "N4-S5",
+   "desc": "a slot's output (src/server/engine_output.{h,cpp}; arch025-engine S5, moved verbatim out of engine.cpp / engine.h, Engine member functions -> free functions): emit (one token into the slot's batch; the end-of-turn / end-of-text token, unless ignore_eos, or max_tokens ends the request), flushOut (the batch through the slot's response writer StreamState::push; a matched stop string ends the request: done, stopped_str, n_after_stop; the batch is reset) and writeError (logs the error, writes errorResponse to the job's connection and flushes it). The only Engine state used is the chat tokens: emit takes const chat::ChatTokens& ct_ (core.shared, same name) as its first parameter. Not inline (the decode cycle and the prefill called them across TUs before the move, and still do). Layer L1 of the Engine split (progress/arch025-engine.DESIGN.md v3 S5). Isolated: tests/iso/server.slot_output (StreamState::push is a recording double in the test program: link seam)",
+   "paths": [
+    "src/server/engine_output.cpp",
+    "src/server/engine_output.h"
+   ],
+   "lands_on": "arch025-engine (leg 2, S5)",
+   "steps": [
+    "cpu_iso_server_slot_output",
+    "cpu_server",
+    "cpu_pins",
+    "cpu_engine_split",
+    "cpu_member_order",
+    "golden_swift",
+    "golden_moe",
+    "srv_mt_precise",
+    "srv_mt_precise_moe",
+    "srv_balance",
+    "srv_fast",
+    "srv_cache_precise",
+    "srv_cache_balance"
+   ],
+   "gpus": {
+    "golden_swift": 2,
+    "golden_moe": 2,
+    "srv_mt_precise": 2,
+    "srv_mt_precise_moe": 2,
+    "srv_balance": 2,
+    "srv_fast": 2,
+    "srv_cache_precise": 1,
+    "srv_cache_balance": 1
+   },
+   "callers": "rdeps",
+   "manual": [
+    "whirl-iso-server-slot-output-tests (emit: end-of-turn / end-of-text stop, ignore_eos, append, max_tokens; flushOut: the exact batch handed to the response writer, the stop-string end, the reset; writeError: the errorResponse text then one flush, no connection) and the s5-out-* mutants of tools/impact/mutations.json",
+    "V-move: scratch/a25_engine/s5/apply_s5.py --check (the bodies equal the 6d004b6 text byte for byte with the 3 definition lines mapped back; line multiset: every lost / added line explained) and s5/hdr_alone.py",
+    "V-text: tools/impact/revtext.py --rules scratch/a25_engine/s5/revtext_rules_s5.json (the free definition lines mapped back to Engine::f, emit(ct_, -> emit()",
+    "V-obj: objeq against the 6d004b6 build: engine.cpp / engine_decode.cpp / engine_prefill.cpp differ (member -> free symbols, this -> &ct_ / no this), engine_output.cpp is new, every other product object identical (scratch/a25_engine/s5/objeq_prediction.txt)"
    ]
   },
   "server.cycle_prof": {
