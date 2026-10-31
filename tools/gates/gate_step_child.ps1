@@ -7,8 +7,11 @@
 # reads the log and applies the step's rule itself, in -List order, after the section.
 param([Parameter(Mandatory = $true)][string]$Spec)
 $ErrorActionPreference = "Stop"
+function SetEnvOrRemove([string]$k, $v) {
+    if ($null -eq $v) { Remove-Item -LiteralPath "env:$k" -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable($k, "$v") }
+}
 $j = Get-Content -Raw -LiteralPath $Spec | ConvertFrom-Json
-foreach ($p in @($j.env.PSObject.Properties)) { [Environment]::SetEnvironmentVariable($p.Name, "$($p.Value)") }
+foreach ($p in @($j.env.PSObject.Properties)) { SetEnvOrRemove $p.Name "$($p.Value)" }
 $cmd = @($j.cmd | ForEach-Object { "$_" })
 $log = "$($j.log)"
 $c = -1
