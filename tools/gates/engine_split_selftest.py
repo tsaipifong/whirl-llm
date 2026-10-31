@@ -50,13 +50,67 @@ EMIT_OLD = "bool Engine::emit(Slot& sl, std::uint32_t t) {\n"
 GOVT = "void Engine::govTick(const wddmwatch::Sample& s) {\n"
 GOVT_DECL = "    void govTick(const wddmwatch::Sample& s);   // after each sample: decide (and log the decisions)\n"
 EMIT_DECL = "bool emit(const chat::ChatTokens& ct_, Slot& sl, std::uint32_t t);\n"
-DROPC = "void Engine::dropCache(Slot& sl) {\n"
-DROP_DECL = "    void dropCache(Slot& sl);\n"
 RUNL = "void Engine::runLoop() {\n"
 HOLD = "    bool gov_hold_ = false;"
 EH, EC, EP, EG = "server/engine.h", "server/engine.cpp", "server/engine_pages.cpp", "server/engine_gov.cpp"
 EO, EOH = "server/engine_output.cpp", "server/engine_output.h"
 V = r"  <-- VIOLATION"
+SO, SE, SC, GV, SS, JQ = "server.slot_output", "server.slot_end", "server.slot_cache", "server.governor", "server.slot_start", "server.job_queue"
+SPC = "server.spec_cycle"
+
+# arch025-engine-s7st: anchor ROLES. Until S7 about 117 mutants were anchored on the text of `void Engine::dropCache(Slot&
+# sl) {` (engine_pages.cpp) or Engine's kvTokBytes (engine.h); S7 moved both into SlotPages and every one ANCHOR FAILed.
+# A mutant edit now names a role (rel "@LOW" ...); the role is looked up in the tree by its census entry (class::function,
+# any server/ file; the inline role by its in-class head) when the mutant is made, and checked once at start (a role that
+# is gone fails the whole selftest with one line naming the role, not ~100 ANCHOR FAIL lines). A later step that moves a
+# role function changes the one ROLES row (and checks the role's rule below still holds), not the cases.
+#   role: (class, function, module the cut must give it, kind, why this function)
+#   @LOW  rule "a low module's body reaching up" (viol(LM, ..)): a non-const Engine member of the lowest module that still
+#         has Engine members (job_queue, layer 1; every target module of these cases is higher). abortQueued has no Slot
+#         parameter: the edits start with PRE_SL (a local Slot& sl, no member use; control LOWc shows it is neutral).
+#   @WR   rule "a write of another module's data / core.shared" (ow / sw): a non-const Engine member with a Slot& sl
+#         parameter, of a module that owns none of the written members (stop_ / queue_ / n_active_ / rp_ are job_queue's)
+#         and is not their listed outside / shared writer: finishJob (slot_end, layer 5; drafter_ctx (H*) is lower).
+#   @SPD  X1 / X3: the body as SlotPages::dropCache (the class S7 made; the cases test data use by name through an
+#         undeclared gst_ / jq_ in the text census, so they keep that function).
+#   @KC   the header-inline const method (M1 inline data use; E1 / G* pointee writes in a const method): ctxForNew
+#         (governor, layer 3; written members are job_queue's, M1 reads spec_cycle's spec_on_, layer 7).
+ROLES = {"@LOW": ("Engine", "abortQueued", JQ, "def"), "@WR": ("Engine", "finishJob", SE, "def"),
+         "@SPD": ("SlotPages", "dropCache", SC, "def"), "@KC": ("Engine", "ctxForNew", GV, "inline")}
+LOW, WRR, SPD, KC = "@LOW", "@WR", "@SPD", "@KC"
+A = "@A@"   # in an edit's new text: the role's anchor (its definition head line / the inline head up to '{ ')
+LF, WF, KF = ROLES[LOW][1], ROLES[WRR][1], ROLES[KC][1]
+LM = ROLES[LOW][2]
+PRE_SL = "    Slot* sel = nullptr; Slot& sl = *sel; (void)sl;\n"
+
+
+def find_role(srcdir, role):
+    """the anchor of a role in a tree: (rel, anchor text) or (None, why)"""
+    cls, fn, _mod, kind = ROLES[role]
+    sd = os.path.join(srcdir, "server")
+    if kind == "def":
+        rx = re.compile(r"^[^\n;{}]*\b" + re.escape(cls) + "::" + re.escape(fn) + r"\([^\n;]*\)[^\n;]*\{\n", re.M)
+        exts = (".cpp",)
+    else:
+        rx = re.compile(r"^[ \t]+[\w:<>, ]+[ \t]+" + re.escape(fn) + r"\(\)[ \t]*const[ \t]*\{ ", re.M)
+        exts = (".h",)
+    hits = []
+    for f in sorted(os.listdir(sd)) if os.path.isdir(sd) else []:
+        if f.endswith(exts):
+            s = open(os.path.join(sd, f), encoding="utf-8").read()
+            hits += [("server/" + f, m.group(0)) for m in rx.finditer(s)]
+    if len(hits) != 1 or open(os.path.join(srcdir, hits[0][0]), encoding="utf-8").read().count(hits[0][1]) != 1:
+        return None, f"{len(hits)} definitions of {cls}::{fn} ({kind}) in {sd}"
+    return hits[0]
+
+
+def check_roles(srcdir, cut):
+    bad = []
+    for role, (cls, fn, mod, kind) in ROLES.items():
+        rel, a = find_role(srcdir, role)
+        if rel is None: bad.append(f"{role} {cls}::{fn}: {a}")
+        elif fn not in cut["modules"].get(mod, {}).get("funcs", []): bad.append(f"{role} {cls}::{fn}: not in {mod}.funcs of the cut")
+    return bad
 
 
 def viol(a, b, kind, why):
@@ -71,8 +125,8 @@ def sw(fd):   # write to a core.shared member by an unlisted writer
     return r"^== writes to core\.shared not in shared_writers '\w+' \(\d+\): .*\b" + re.escape(fd) + r"\b"
 
 
-def _dc(code, m="stop_"):   # S0d (S0c review runner shapes): a statement in dropCache that must be a write of m
-    return [(EP, DROPC, DROPC + "    " + code + "\n")], None, [], ow("dropCache:" + m)
+def _dc(code, m="stop_"):   # S0d (S0c review runner shapes): a statement in the @WR role (was dropCache) that must be a write of m
+    return [(WRR, None, A + "    " + code + "\n")], None, [], ow(WF + ":" + m)
 
 
 def _rl(code, m="gov_json_"):
@@ -97,20 +151,18 @@ def _epin(d, then=None):
     return f
 
 
-_KVT = "    std::uint64_t kvTokBytes() const {\n"   # S0f E1: the const slot_cache method in engine.h
 _T1_WHY = ["writable handle begin() used (, gov_json_.)", "writable handle end() used (, ' ');)"]   # S0f: T1's whole text reason set
 
 
 # S0g: helpers of the S0f review mutants (G1-G9)
-_KVT2 = "    std::uint64_t kvTokBytes() const {\n"
 _RP = (EH, HOLD, HOLD + "\n    int* rp_ = nullptr;")
 _RH = [(EH, "#pragma once\n", "#pragma once\nstruct RH { int* p = nullptr; };\n"), (EH, HOLD, HOLD + "\n    RH rh_{};")]
 _VP = (EH, HOLD, HOLD + "\n    std::vector<int*> vp_;")
 _PRE = lambda t: (EH, "#pragma once\n", "#pragma once\n" + t)
 _WRP = _PRE("inline void wrp(int* p) { *p = 1; }\n")
 _MAC = _PRE("#define WSET1(x) x = 1\n")
-_K = lambda code: (EH, _KVT2, _KVT2 + "        " + code + "\n")
-_D = lambda code: (EP, DROPC, DROPC + "    " + code + "\n")
+_K = lambda code: (KC, None, A + code + " ")   # s7st: the const inline @KC role (was kvTokBytes)
+_D = lambda code: (WRR, None, A + "    " + code + "\n")   # s7st: the non-const @WR role (was dropCache)
 
 
 def _addm(*ms):
@@ -129,9 +181,9 @@ CLANG_ERR_OK = {
     "N7b": "SlotOutput::emit of an undeclared class (tests aliases / unassigned)",
     "N8": "GovernorGlue::tick of an undeclared class (tests the call graph govTick -> startJob, text census)",
     "U4": "sl.job->stats() - Job has no stats() (tests the unresolved-call finding, a text rule)",
-    "X1": "SlotPages::dropCache of an undeclared class (tests data use by name, text census)",
+    "X1": "SlotPages::dropCache reads an undeclared gst_ (s7st: the real SlotPages of S7; tests data use by name, text census)",
     "X2": "GovernorGlue::tick of an undeclared class (tests the call graph, text census)",
-    "X3": "SlotPages::dropCache of an undeclared class (tests jq_.stop_ by name, text census)",
+    "X3": "SlotPages::dropCache writes an undeclared jq_ (s7st: the real SlotPages of S7; tests jq_.stop_ by name, text census)",
     "X4": "Helper::emit of an undeclared class (tests unassigned)",
     "X9": "GovState undeclared in a new file (tests the engine-header user finding)",
     "X9b": "GovState undeclared in a new file (tests unassigned)",
@@ -155,7 +207,8 @@ def fnd(t):
 # that reaches Engine has to be handed one: emit gains a defaulted Engine* parameter (the 3 call sites stay as they are),
 # engine_output.cpp includes engine.h and Engine names emit a friend (finishJob / gov_hold_ / ... are private). The census
 # must still see the edge from emit through eng->. The `this` receiver shapes these cases had in Engine::emit before S5
-# keep a twin on dropCache (ids *t: a slot_cache member function still has `this`).
+# keep a twin on dropCache (ids *t: a slot_cache member function still has `this`). s7st: S7 made dropCache a SlotPages
+# member; the twins are on the @LOW role (abortQueued, job_queue: an Engine member, so `this` is Engine).
 EMIT_E = "bool emit(const chat::ChatTokens& ct_, Slot& sl, std::uint32_t t, Engine* eng) {\n"
 _EO_INC = '#include "server/engine_output.h"\n'
 
@@ -181,8 +234,8 @@ _DCX = ("    int gap_ = 0;\n    void dflTouch(int n) { gap_ += n; }\n    void df
 
 
 def _H(code, where=None):
-    rel, anchor = where or (EP, DROPC)
-    return [(ED, _DCA, _DCA + _DCX), (rel, anchor, anchor + "    " + code + "\n")]
+    rel, anchor = where or (WRR, None)   # s7st: default the @WR role (was dropCache; slot_end is above drafter_ctx)
+    return [(ED, _DCA, _DCA + _DCX), (rel, anchor, (anchor or A) + "    " + code + "\n")]
 
 
 def _HC(c):
@@ -203,24 +256,23 @@ def _OWSW(fd):
 _F2 = "{ const std::string s = std::format(\"{}\", gov_last_); (void)s; }"
 
 ENG = "server.engine"
-SO, SE, SC, GV, SS, JQ = "server.slot_output", "server.slot_end", "server.slot_cache", "server.governor", "server.slot_start", "server.job_queue"
 # (id, what, edits [(rel, old|None|"APPEND", new)], cut_edit(dict)->None or None, extra graph args, expected regex, base index)
 MUT = [
-    ("M1", "inline body in engine.h (kvTokBytes, slot_cache) reads governor data",
-     [(EH, "        for (const KvArr& a : kv_arrays_) b += a.row;\n", "        for (const KvArr& a : kv_arrays_) b += a.row;\n        if (gov_hold_) b += 0;\n")],
-     None, [], viol(SC, GV, "data", "kvTokBytes:gov_hold_")),
+    ("M1", "inline body in engine.h (s7st: ctxForNew, governor) reads a higher module's data (spec_cycle's spec_on_; was kvTokBytes / gov_hold_)",
+     [(KC, None, A + "if (spec_on_) {} ")],
+     None, [], viol(ROLES[KC][2], SPC, "data", KF + ":spec_on_")),
     ("M2", "constructor body writes governor data", [(EC, "    fl_.epoch = Clock::now();\n", "    fl_.epoch = Clock::now();\n    gov_pending_ = true;\n")],
      None, [], ow("Engine:gov_pending_")),
     ("M3", "a definition in a file not named engine_*", [("server/vram_watch.cpp", None, '#include "engine.h"\nnamespace whirl::server {\nvoid Engine::vramNote2() { gov_warn_.clear(); }\n}\n')],
      None, [], unas("vramNote2")),
     ("M4", "emit -> finishJob (slot_output calls up; S5 free emit: through a defaulted Engine* parameter)", _E("if (eng && t == 0xffffffffu) eng->finishJob(sl);"), None, [], viol(SO, SE, "call", "emit->finishJob")),
-    ("M5", "dropCache -> startJob", [(EP, DROPC, DROPC + "    if (sl.job && sl.pos == 0xffffffffu) (void)startJob(sl, *sl.job);\n")], None, [], viol(SC, SS, "call", "dropCache->startJob")),
+    ("M5", "abortQueued -> startJob", [(LOW, None, A + PRE_SL + "    if (sl.job && sl.pos == 0xffffffffu) (void)startJob(sl, *sl.job);\n")], None, [], viol(LM, SS, "call", LF + "->startJob")),
     ("N1", "eng->gov_hold_ read in emit (pre-S5 this->gov_hold_; that shape: N1t)", _E("if (eng && eng->gov_hold_) t = 0;"), None, [], viol(SO, GV, "data", "emit:gov_hold_")),
-    ("N1t", "this->gov_hold_ read in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    if (this->gov_hold_) return;\n")], None, [], viol(SC, GV, "data", "dropCache:gov_hold_")),
+    ("N1t", "this->gov_hold_ read in abortQueued (abortQueued twin of the pre-S5 `this` shape)", [(LOW, None, A + PRE_SL + "    if (this->gov_hold_) return;\n")], None, [], viol(LM, GV, "data", LF + ":gov_hold_")),
     ("N2", "Engine& e = *eng; e.finishJob(sl) in emit (pre-S5 this->finishJob; that shape: N2t)", _E("if (eng && t == 1u) { Engine& e = *eng; e.finishJob(sl); }"), None, [], viol(SO, SE, "call", "emit->finishJob")),
-    ("N2t", "this->finishJob(sl) in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    if (sl.pos == 0xffffffffu) this->finishJob(sl);\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
+    ("N2t", "this->finishJob(sl) in abortQueued (abortQueued twin of the pre-S5 `this` shape)", [(LOW, None, A + PRE_SL + "    if (sl.pos == 0xffffffffu) this->finishJob(sl);\n")], None, [], viol(LM, SE, "call", LF + "->finishJob")),
     ("N3", "eng->Engine::finishJob(sl) in emit (qualified; pre-S5 Engine::finishJob(sl); that shape: N3t)", _E("if (eng && t == 1u) eng->Engine::finishJob(sl);"), None, [], viol(SO, SE, "call", "emit->finishJob")),
-    ("N3t", "Engine::finishJob(sl) in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    if (sl.pos == 0xffffffffu) Engine::finishJob(sl);\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
+    ("N3t", "Engine::finishJob(sl) in abortQueued (abortQueued twin of the pre-S5 `this` shape)", [(LOW, None, A + PRE_SL + "    if (sl.pos == 0xffffffffu) Engine::finishJob(sl);\n")], None, [], viol(LM, SE, "call", LF + "->finishJob")),
     ("N4", "emit writes spec_on_ (spec_cycle's) through eng", _E("if (eng) eng->spec_on_ = false;"), None, [], ow("emit:spec_on_")),
     ("N5", "emit writes fl_ (prefill's) through eng", _E("if (eng) eng->fl_.epoch = Clock::now();"), None, [], ow("emit:fl_")),
     ("N6", "macro alias of a member in an engine file", [(EC, RUNL, "#define WHX_HOLD gov_hold_\n" + RUNL + "    if (WHX_HOLD) {}\n")], None, [], fnd("#define in an engine file server/engine.cpp")),
@@ -232,14 +284,16 @@ MUT = [
      lambda c: c["aliases"].update({"SlotOutput::emit": "emit"}), ["--no-pin"], viol(SO, SE, "call", "emit->finishJob")),
     ("N8", "govTick becomes GovernorGlue::tick and calls startJob", [(EG, GOVT, "void GovernorGlue::tick(const wddmwatch::Sample& s) {\n    (void)startJob(*slots_.data(), *slots_[0].job);\n"), (EH, GOVT_DECL, "")],
      None, [], viol(GV, SS, "call", "govTick->startJob")),
-    ("X1", "SlotPages::dropCache reads gst_.gov_hold_", [(EP, DROPC, "void SlotPages::dropCache(Slot& sl) {\n    if (gst_.gov_hold_) return;\n"), (EH, DROP_DECL, "")], None, [], viol(SC, GV, "data", "dropCache:gov_hold_")),
+    ("X1", "SlotPages::dropCache reads gst_.gov_hold_", [(SPD, None, A + "    if (gst_.gov_hold_) return;\n")], None, [], viol(SC, GV, "data", "dropCache:gov_hold_")),
     ("X2", "GovernorGlue::tick calls ss_.startJob", [(EG, GOVT, "void GovernorGlue::tick(const wddmwatch::Sample& s) {\n    (void)ss_.startJob(*slots_.data(), *slots_[0].job);\n"), (EH, GOVT_DECL, "")], None, [], viol(GV, SS, "call", "govTick->startJob")),
-    ("X3", "SlotPages::dropCache writes jq_.stop_", [(EP, DROPC, "void SlotPages::dropCache(Slot& sl) {\n    jq_.stop_ = true;\n"), (EH, DROP_DECL, "")], None, [], ow("dropCache:stop_")),
+    ("X3", "SlotPages::dropCache writes jq_.stop_", [(SPD, None, A + "    jq_.stop_ = true;\n")], None, [], ow("dropCache:stop_")),
     ("X4", "body moves to an undeclared class Helper::emit", [(EO, EMIT, "bool Helper::emit(Slot& sl, std::uint32_t t) {\n"), (EOH, EMIT_DECL, "")], None, [], unas("Helper::emit")),
-    ("X5", "dropCache writes bst_ (core.shared)", [(EP, DROPC, DROPC + "    bst_ = BatchStats{};\n")], None, [], sw("dropCache:bst_")),
+    ("X5", "finishJob writes bst_ (core.shared)", [(WRR, None, A + "    bst_ = BatchStats{};\n")], None, [], sw(WF + ":bst_")),
     ("X6", "new Engine inline function reads queue_", [(EH, "    ServerModel& m_;\n", "    std::size_t queued() { return queue_.size(); }\n    ServerModel& m_;\n")], None, [], unas("queued")),
     ("X7", "log.h #define naming a member", [("server/log.h", "APPEND", "\n#define WHX_STOP_FLAG stop_\n")], None, [], fnd("#define naming tracked names server/log.h")),
-    ("X8", "control: dropCache reads gov_hold_", [(EP, DROPC, DROPC + "    if (gov_hold_) return;\n")], None, [], viol(SC, GV, "data", "dropCache:gov_hold_")),
+    ("X8", "control: abortQueued reads gov_hold_", [(LOW, None, A + PRE_SL + "    if (gov_hold_) return;\n")], None, [], viol(LM, GV, "data", LF + ":gov_hold_")),
+    ("LOWc", "s7st control: the @LOW role's prelude alone (PRE_SL, a local Slot& sl in abortQueued) adds no finding",
+     [(LOW, None, A + PRE_SL)], None, [], r"(?#OK)^engine split check: ok"),
     ("X9", "new unlisted slot_output.cpp includes engine.h, free function reads gst_.gov_hold_",
      [("server/slot_output.cpp", None, '#include "engine.h"\nnamespace whirl::server {\nbool flushOutFree(Slot& sl, const GovState& gst_) { return gst_.gov_hold_; }\n}\n')],
      None, [], fnd("file includes an engine header but is neither a module file nor a listed user: server/slot_output.cpp")),
@@ -258,38 +312,38 @@ MUT = [
     # --- review3 (Y1-Y14) ---
     ("Y1", "runLoop gov_json_.append (mutator method on governor data)", [(EC, RUNL, RUNL + '    gov_json_.append("x");\n')], None, [], ow("runLoop:gov_json_")),
     ("Y1c", "control: runLoop gov_json_ += x", [(EC, RUNL, RUNL + '    gov_json_ += "x";\n')], None, [], ow("runLoop:gov_json_")),
-    ("Y2", "dropCache ps_.spes().clear() (chained mutator on core.shared)", [(EP, DROPC, DROPC + "    ps_.spes().clear();\n")], None, [], sw("dropCache:ps_")),
-    ("Y3", "dropCache binds auto& q = stop_ and writes it", [(EP, DROPC, DROPC + "    { auto& q = stop_; q = true; }\n")], None, [], ow("dropCache:stop_")),
-    ("Y4", "Engine& me = *this; me.finishJob", [(EP, DROPC, DROPC + "    { Engine& me = *this; if (sl.pos == 0xffffffffu) me.finishJob(sl); }\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
-    ("Y5", "nested struct Peek with inline body reads gov_hold_; dropCache calls it",
-     [(EH, HOLD, HOLD + "\n    struct Peek { static bool h(const Engine& e) { return e.gov_hold_; } };"), (EP, DROPC, DROPC + "    if (Peek::h(*this)) return;\n")],
+    ("Y2", "finishJob ps_.spes().clear() (chained mutator on core.shared)", [(WRR, None, A + "    ps_.spes().clear();\n")], None, [], sw(WF + ":ps_")),
+    ("Y3", "finishJob binds auto& q = stop_ and writes it", [(WRR, None, A + "    { auto& q = stop_; q = true; }\n")], None, [], ow(WF + ":stop_")),
+    ("Y4", "Engine& me = *this; me.finishJob", [(LOW, None, A + PRE_SL + "    { Engine& me = *this; if (sl.pos == 0xffffffffu) me.finishJob(sl); }\n")], None, [], viol(LM, SE, "call", LF + "->finishJob")),
+    ("Y5", "nested struct Peek with inline body reads gov_hold_; abortQueued calls it",
+     [(EH, HOLD, HOLD + "\n    struct Peek { static bool h(const Engine& e) { return e.gov_hold_; } };"), (LOW, None, A + PRE_SL + "    if (Peek::h(*this)) return;\n")],
      None, [], unas("type:Peek")),
     ("Y5b", "Y5 with type:Peek assigned to slot_cache: its read of governor data still fails",
-     [(EH, HOLD, HOLD + "\n    struct Peek { static bool h(const Engine& e) { return e.gov_hold_; } };"), (EP, DROPC, DROPC + "    if (Peek::h(*this)) return;\n")],
+     [(EH, HOLD, HOLD + "\n    struct Peek { static bool h(const Engine& e) { return e.gov_hold_; } };"), (LOW, None, A + PRE_SL + "    if (Peek::h(*this)) return;\n")],
      lambda c: c["modules"][SC]["funcs"].append("type:Peek"), ["--no-pin"], viol(SC, GV, "data", "type:Peek:gov_hold_")),
-    ("Y5u", "a type used by dropCache but assigned nowhere (struct Peek declared, not defined in the cut)",
-     [(EH, HOLD, HOLD + "\n    struct Peek;"), (EP, DROPC, DROPC + "    Peek* pk = nullptr; (void)pk;\n")], None, [], r"^S0: used but unassigned types: .*type:Peek"),
+    ("Y5u", "a type used by abortQueued but assigned nowhere (struct Peek declared, not defined in the cut)",
+     [(EH, HOLD, HOLD + "\n    struct Peek;"), (LOW, None, A + PRE_SL + "    Peek* pk = nullptr; (void)pk;\n")], None, [], r"^S0: used but unassigned types: .*type:Peek"),
     ("Y6", "member template forPages (slot_cache) reads governor data",
-     [(EH, HOLD, HOLD + "\n    template <class F> void forPages(F f);"), (EP, DROPC, "template <class F> void Engine::forPages(F f) {\n    if (gov_hold_) f();\n}\n" + DROPC)],
+     [(EH, HOLD, HOLD + "\n    template <class F> void forPages(F f);"), (LOW, None, "template <class F> void Engine::forPages(F f) {\n    if (gov_hold_) f();\n}\n" + A)],
      lambda c: c["modules"][SC]["funcs"].append("forPages"), ["--no-pin"], viol(SC, GV, "data", "forPages:gov_hold_")),
-    ("Y7", "lambda [this] in dropCache calls finishJob", [(EP, DROPC, DROPC + "    auto k = [this](Slot& s) { finishJob(s); };\n    if (sl.pos == 0xffffffffu) k(sl);\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
-    ("Y8", "member function pointer &Engine::finishJob in dropCache", [(EP, DROPC, DROPC + "    auto fp = &Engine::finishJob;\n    if (sl.pos == 0xffffffffu) (this->*fp)(sl);\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
-    ("Y9", "Engine* up_ (cut gives up_ to slot_cache); dropCache -> up_->finishJob",
-     [(EH, HOLD, HOLD + "\n    Engine* up_ = nullptr;"), (EP, DROPC, DROPC + "    if (up_ && sl.pos == 0xffffffffu) up_->finishJob(sl);\n")],
+    ("Y7", "lambda [this] in abortQueued calls finishJob", [(LOW, None, A + PRE_SL + "    auto k = [this](Slot& s) { finishJob(s); };\n    if (sl.pos == 0xffffffffu) k(sl);\n")], None, [], viol(LM, SE, "call", LF + "->finishJob")),
+    ("Y8", "member function pointer &Engine::finishJob in abortQueued", [(LOW, None, A + PRE_SL + "    auto fp = &Engine::finishJob;\n    if (sl.pos == 0xffffffffu) (this->*fp)(sl);\n")], None, [], viol(LM, SE, "call", LF + "->finishJob")),
+    ("Y9", "Engine* up_ (cut gives up_ to slot_cache); abortQueued -> up_->finishJob",
+     [(EH, HOLD, HOLD + "\n    Engine* up_ = nullptr;"), (LOW, None, A + PRE_SL + "    if (up_ && sl.pos == 0xffffffffu) up_->finishJob(sl);\n")],
      lambda c: c["modules"][SC]["data"].append("up_"), ["--no-pin"], fnd("member of tracked class Engine holds Engine but is not a cut holder of it")),
     ("Y9b", "Y9 with up_ also listed as a holder of Engine: still a finding",
-     [(EH, HOLD, HOLD + "\n    Engine* up_ = nullptr;"), (EP, DROPC, DROPC + "    if (up_ && sl.pos == 0xffffffffu) up_->finishJob(sl);\n")],
+     [(EH, HOLD, HOLD + "\n    Engine* up_ = nullptr;"), (LOW, None, A + PRE_SL + "    if (up_ && sl.pos == 0xffffffffu) up_->finishJob(sl);\n")],
      lambda c: (c["modules"][SC]["data"].append("up_"), c["holders"].update({"up_": "Engine"})), ["--no-pin"], fnd("cut holder of Engine: up_")),
     ("Y10", "runLoop std::swap(gov_warn_, gov_last_)", [(EC, RUNL, RUNL + "    std::swap(gov_warn_, gov_last_);\n")], None, [], ow("runLoop:gov_warn_")),
     ("Y11", "runLoop std::fill(gov_json_.begin(), ...)", [(EC, RUNL, RUNL + "    std::fill(gov_json_.begin(), gov_json_.end(), ' ');\n")], None, [], ow("runLoop:gov_json_")),
     ("Y12", "runLoop queue_.front()->id = 0", [(EC, RUNL, RUNL + "    if (!queue_.empty()) queue_.front()->id = 0;\n")], None, [], ow("runLoop:queue_")),
-    ("Y13", "dropCache poke(gov_pending_) through a new header's bool& parameter",
-     [("server/slot_util.h", None, "#pragma once\nnamespace whirl::server {\ninline void poke(bool& b) { b = true; }\n}\n"), (EP, '#include "engine_internal.h"\n', '#include "engine_internal.h"\n#include "slot_util.h"\n'), (EP, DROPC, DROPC + "    poke(gov_pending_);\n")], None, [], ow("dropCache:gov_pending_")),
+    ("Y13", "finishJob poke(gov_pending_) through a new header's bool& parameter",
+     [("server/slot_util.h", None, "#pragma once\nnamespace whirl::server {\ninline void poke(bool& b) { b = true; }\n}\n"), (WRR, '#include "engine_internal.h"\n', '#include "engine_internal.h"\n#include "slot_util.h"\n'), (WRR, None, A + "    poke(gov_pending_);\n")], None, [], ow(WF + ":gov_pending_")),
     ("Y14", "runLoop dropAll(queue_) defined in a new .cpp", [("server/sched_util.cpp", None, "#include <deque>\nnamespace whirl::server {\nstruct Job;\nvoid dropAll(std::deque<Job*>& q) { q.clear(); }\n}\n"), (EC, RUNL, "void dropAll(std::deque<Job*>& q);\n" + RUNL + "    dropAll(queue_);\n")],
      None, [], ow("runLoop:queue_")),
     # --- DESIGN 1.5 alias write ---
-    ("AW1", "alias write (DESIGN 1.5): dropCache auto& q = queue_; q.push_back(nullptr)", [(EP, DROPC, DROPC + "    { auto& q = queue_; q.push_back(nullptr); }\n")], None, [], ow("dropCache:queue_")),
-    ("AW2", "alias pointer write: dropCache auto* p = &n_active_; *p = 0", [(EP, DROPC, DROPC + "    { auto* p = &n_active_; *p = 0; }\n")], None, [], ow("dropCache:n_active_")),
+    ("AW1", "alias write (DESIGN 1.5): finishJob auto& q = queue_; q.push_back(nullptr)", [(WRR, None, A + "    { auto& q = queue_; q.push_back(nullptr); }\n")], None, [], ow(WF + ":queue_")),
+    ("AW2", "alias pointer write: finishJob auto* p = &n_active_; *p = 0", [(WRR, None, A + "    { auto* p = &n_active_; *p = 0; }\n")], None, [], ow(WF + ":n_active_")),
     # --- review3 C2: the cut pin ---
     ("P1", "cut edit: slot_output moved up to layer 9 (would allow emit -> finishJob)", [], lambda c: c["modules"][SO].update({"layer": 9}), [], r"^engine cut pin: MISMATCH section modules\.server\.slot_output"),
     ("P2", "cut edit: outside_writers.now widened", [], lambda c: c["outside_writers"]["now"].append("runLoop:gov_json_"), [], r"^engine cut pin: MISMATCH section outside_writers"),
@@ -297,30 +351,30 @@ MUT = [
     # --- S0 review (progress/arch025-engine.S0.REVIEW.md; reviewer mutants scratch/a25_engine/s0review/s0r_mut.py), S0b ---
     # act-on 2: calls through receivers the census does not resolve must not be dropped
     ("U1", "(*eng).finishJob(sl) in emit (pre-S5 (*this); that shape: U1t)", _E("if (eng && t == 1u) (*eng).finishJob(sl);"), None, [], viol(SO, SE, "call", "emit->finishJob")),
-    ("U1t", "(*this).finishJob(sl) in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    if (sl.pos == 0xffffffffu) (*this).finishJob(sl);\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
+    ("U1t", "(*this).finishJob(sl) in abortQueued (abortQueued twin of the pre-S5 `this` shape)", [(LOW, None, A + PRE_SL + "    if (sl.pos == 0xffffffffu) (*this).finishJob(sl);\n")], None, [], viol(LM, SE, "call", LF + "->finishJob")),
     ("U2", "two-level auto alias: auto& me = *eng; auto& me2 = me; me2.stats() in emit (pre-S5 *this, an edge; that shape: U2t). From a "
      "parameter the census does not type the alias and stats is also an untracked class's method: not dropped, an unresolved-call finding",
      _E("if (eng) { auto& me = *eng; auto& me2 = me; (void)me2.stats(); }"), None, [], fnd("unresolved call not in the cut's unresolved_ok: emit: me2.stats(")),
-    ("U2t", "two-level auto alias: auto& me = *this; auto& me2 = me; me2.stats() in dropCache (dropCache twin of the pre-S5 `this` shape)",
-     [(EP, DROPC, DROPC + "    { auto& me = *this; auto& me2 = me; (void)me2.stats(); }\n")], None, [], viol(SC, ENG, "call", "dropCache->stats")),
+    ("U2t", "two-level auto alias: auto& me = *this; auto& me2 = me; me2.stats() in abortQueued (abortQueued twin of the pre-S5 `this` shape)",
+     [(LOW, None, A + PRE_SL + "    { auto& me = *this; auto& me2 = me; (void)me2.stats(); }\n")], None, [], viol(LM, ENG, "call", LF + "->stats")),
     ("U3", "control: Engine& me = *eng; me.stats() in emit (a typed alias is an edge; pre-S5 auto& me = *this, that shape: U3t)", _E("if (eng) { Engine& me = *eng; (void)me.stats(); }"), None, [], viol(SO, ENG, "call", "emit->stats")),
-    ("U3t", "control: auto& me = *this; me.stats() in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    { auto& me = *this; (void)me.stats(); }\n")], None, [], viol(SC, ENG, "call", "dropCache->stats")),
+    ("U3t", "control: auto& me = *this; me.stats() in abortQueued (abortQueued twin of the pre-S5 `this` shape)", [(LOW, None, A + PRE_SL + "    { auto& me = *this; (void)me.stats(); }\n")], None, [], viol(LM, ENG, "call", LF + "->stats")),
     ("U4", "a new unresolved call (unknown receiver, name also an untracked method) is a finding, not only unresolved.txt",
      [(EO, EMIT, EMIT + "    if (t == 7u && sl.job) (void)sl.job->stats();\n")], None, [], fnd("unresolved call not in the cut's unresolved_ok: emit: ")),
     # act-on 1: write shapes the census missed (W1-W10), the accessor returning a reference (W11)
-    ("W1", "auto&& q = stop_; q = true in dropCache", [(EP, DROPC, DROPC + "    { auto&& q = stop_; q = true; }\n")], None, [], ow("dropCache:stop_")),
-    ("W2", "for (auto&& j : queue_) j = nullptr in dropCache", [(EP, DROPC, DROPC + "    for (auto&& j : queue_) j = nullptr;\n")], None, [], ow("dropCache:queue_")),
-    ("W3", "structured binding auto& [a, b] = fl_; a = {} in dropCache", [(EP, DROPC, DROPC + "    { auto& [fa, fb, fc, fd, fe] = fl_; (void)fa; (void)fb; (void)fc; fd = 0; (void)fe; }\n")], None, [], ow("dropCache:fl_")),
+    ("W1", "auto&& q = stop_; q = true in finishJob", [(WRR, None, A + "    { auto&& q = stop_; q = true; }\n")], None, [], ow(WF + ":stop_")),
+    ("W2", "for (auto&& j : queue_) j = nullptr in finishJob", [(WRR, None, A + "    for (auto&& j : queue_) j = nullptr;\n")], None, [], ow(WF + ":queue_")),
+    ("W3", "structured binding auto& [a, b] = fl_; a = {} in finishJob", [(WRR, None, A + "    { auto& [fa, fb, fc, fd, fe] = fl_; (void)fa; (void)fb; (void)fc; fd = 0; (void)fe; }\n")], None, [], ow(WF + ":fl_")),
     ("W3b", "W3 from a higher layer (runLoop, may read prefill data): only the write rule can catch it",
      [(EC, RUNL, RUNL + "    { auto& [fa, fb, fc, fd, fe] = fl_; (void)fa; (void)fb; (void)fc; fd = 0; (void)fe; }\n")], None, [], ow("runLoop:fl_")),
-    ("W4", "parenthesized lvalue (stop_) = true in dropCache", [(EP, DROPC, DROPC + "    (stop_) = true;\n")], None, [], ow("dropCache:stop_")),
-    ("W5", "static_cast<bool&>(stop_) = true in dropCache", [(EP, DROPC, DROPC + "    static_cast<bool&>(stop_) = true;\n")], None, [], ow("dropCache:stop_")),
-    ("W6", "auto it = queue_.begin(); *it = nullptr in dropCache", [(EP, DROPC, DROPC + "    if (!queue_.empty()) { auto it = queue_.begin(); *it = nullptr; }\n")], None, [], ow("dropCache:queue_")),
+    ("W4", "parenthesized lvalue (stop_) = true in finishJob", [(WRR, None, A + "    (stop_) = true;\n")], None, [], ow(WF + ":stop_")),
+    ("W5", "static_cast<bool&>(stop_) = true in finishJob", [(WRR, None, A + "    static_cast<bool&>(stop_) = true;\n")], None, [], ow(WF + ":stop_")),
+    ("W6", "auto it = queue_.begin(); *it = nullptr in finishJob", [(WRR, None, A + "    if (!queue_.empty()) { auto it = queue_.begin(); *it = nullptr; }\n")], None, [], ow(WF + ":queue_")),
     ("W7", "auto* p = gov_json_.data(); p[0] = 'x' in runLoop", [(EC, RUNL, RUNL + "    if (!gov_json_.empty()) { auto* p = gov_json_.data(); p[0] = 'x'; }\n")], None, [], ow("runLoop:gov_json_")),
     ("W8", "auto s = std::span(gov_json_); s[0] = 'x' in runLoop", [(EC, RUNL, RUNL + "    if (!gov_json_.empty()) { auto s = std::span(gov_json_); s[0] = 'x'; }\n")], None, [], ow("runLoop:gov_json_")),
-    ("W9", "data member pointer: auto pm = &Engine::stop_; this->*pm = true in dropCache",
-     [(EP, DROPC, DROPC + "    { auto pm = &Engine::stop_; this->*pm = true; }\n")], None, [], ow("dropCache:stop_")),
-    ("W10", "(*queue_.begin()) = nullptr in dropCache", [(EP, DROPC, DROPC + "    if (!queue_.empty()) (*queue_.begin()) = nullptr;\n")], None, [], ow("dropCache:queue_")),
+    ("W9", "data member pointer: auto pm = &Engine::stop_; this->*pm = true in finishJob",
+     [(WRR, None, A + "    { auto pm = &Engine::stop_; this->*pm = true; }\n")], None, [], ow(WF + ":stop_")),
+    ("W10", "(*queue_.begin()) = nullptr in finishJob", [(WRR, None, A + "    if (!queue_.empty()) (*queue_.begin()) = nullptr;\n")], None, [], ow(WF + ":queue_")),
     ("W11", "bool& holdRef() { return gov_hold_; } in Engine (new_funcs -> governor, pin unchanged); runLoop holdRef() = true",
      [(EH, HOLD, HOLD + "\n    bool& holdRef() { return gov_hold_; }"), (EC, RUNL, RUNL + "    holdRef() = true;\n")],
      lambda c: c["new_funcs"].update({"holdRef": GV}), [], ow("runLoop:gov_hold_")),
@@ -344,15 +398,15 @@ MUT = [
      [], lambda c: c["holders"].update({"zz_": "SlotPages"}), ["@PINWRITE"], r"^engine cut pin: UNREVIEWED"),
     # --- S0b review (progress/arch025-engine.S0b.REVIEW.md; reviewer runner scratch/a25_engine/s0b_review/runner/r_mut.py) ---
     # act-on 1: write shapes the S0b census still missed (N1-N8, N10, N12, N13, N15); N9 / N14 / C1-C5 are controls
-    ("N1", "deref binding: auto& j = *queue_.begin(); j = nullptr (dropCache)", [(EP, DROPC, DROPC + "    if (!queue_.empty()) { auto& j = *queue_.begin(); j = nullptr; }\n")], None, [], ow("dropCache:queue_")),
-    ("N2", "brace-init reference: auto& q{stop_}; q = true (dropCache)", [(EP, DROPC, DROPC + "    { auto& q{stop_}; q = true; }\n")], None, [], ow("dropCache:stop_")),
-    ("N3", "C-style reference cast: ((bool&)stop_) = true (dropCache)", [(EP, DROPC, DROPC + "    ((bool&)stop_) = true;\n")], None, [], ow("dropCache:stop_")),
-    ("N4", "ternary binding: auto& q = sl.job ? stop_ : stop_; q = true (dropCache)", [(EP, DROPC, DROPC + "    { auto& q = sl.job ? stop_ : stop_; q = true; }\n")], None, [], ow("dropCache:stop_")),
-    ("N5", "deref as call argument: std::swap(*queue_.begin(), *queue_.rbegin()) (dropCache)", [(EP, DROPC, DROPC + "    if (queue_.size() > 1) std::swap(*queue_.begin(), *queue_.rbegin());\n")], None, [], ow("dropCache:queue_")),
+    ("N1", "deref binding: auto& j = *queue_.begin(); j = nullptr (finishJob)", [(WRR, None, A + "    if (!queue_.empty()) { auto& j = *queue_.begin(); j = nullptr; }\n")], None, [], ow(WF + ":queue_")),
+    ("N2", "brace-init reference: auto& q{stop_}; q = true (finishJob)", [(WRR, None, A + "    { auto& q{stop_}; q = true; }\n")], None, [], ow(WF + ":stop_")),
+    ("N3", "C-style reference cast: ((bool&)stop_) = true (finishJob)", [(WRR, None, A + "    ((bool&)stop_) = true;\n")], None, [], ow(WF + ":stop_")),
+    ("N4", "ternary binding: auto& q = sl.job ? stop_ : stop_; q = true (finishJob)", [(WRR, None, A + "    { auto& q = sl.job ? stop_ : stop_; q = true; }\n")], None, [], ow(WF + ":stop_")),
+    ("N5", "deref as call argument: std::swap(*queue_.begin(), *queue_.rbegin()) (finishJob)", [(WRR, None, A + "    if (queue_.size() > 1) std::swap(*queue_.begin(), *queue_.rbegin());\n")], None, [], ow(WF + ":queue_")),
     ("N6", "pointer arithmetic deref: *(gov_json_.data() + 1) = 'x' (runLoop)", [(EC, RUNL, RUNL + "    if (gov_json_.size() > 1) *(gov_json_.data() + 1) = 'x';\n")], None, [], ow("runLoop:gov_json_")),
     ("N7", "handle + offset as argument: std::memset(gov_json_.data() + 1, 0, 1) (runLoop)", [(EC, RUNL, RUNL + "    if (gov_json_.size() > 1) std::memset(gov_json_.data() + 1, 0, 1);\n")], None, [], ow("runLoop:gov_json_")),
     ("N8", "fill_n(gov_json_.begin() + 1, 1, 'x') (runLoop)", [(EC, RUNL, RUNL + "    if (gov_json_.size() > 1) std::fill_n(gov_json_.begin() + 1, 1, 'x');\n")], None, [], ow("runLoop:gov_json_")),
-    ("N9", "control: C++20 range-for init-statement with const: for (const auto n = queue_.size(); auto& j : queue_) j = nullptr", [(EP, DROPC, DROPC + "    for (const auto n = queue_.size(); auto& j : queue_) { (void)n; j = nullptr; }\n")], None, [], ow("dropCache:queue_")),
+    ("N9", "control: C++20 range-for init-statement with const: for (const auto n = queue_.size(); auto& j : queue_) j = nullptr", [(WRR, None, A + "    for (const auto n = queue_.size(); auto& j : queue_) { (void)n; j = nullptr; }\n")], None, [], ow(WF + ":queue_")),
     ("N10", "trailing return type accessor: auto holdRef() -> bool& { return gov_hold_; }; runLoop holdRef() = true",
      [(EH, HOLD, HOLD + "\n    auto holdRef() -> bool& { return gov_hold_; }"), (EC, RUNL, RUNL + "    holdRef() = true;\n")], lambda c: c["new_funcs"].update({"holdRef": GV}), ["--no-pin"], ow("runLoop:gov_hold_")),
     ("N11", "decltype(auto) holdRef() { return (gov_hold_); }; runLoop holdRef() = true (the write rule, not 'unassigned decltype')",
@@ -365,19 +419,19 @@ MUT = [
      [(EH, HOLD, HOLD + "\n    std::function<wddmwatch::Sample()>& probeRef() { return vram_probe_; }"), (EC, RUNL, RUNL + "    probeRef() = nullptr;\n")], lambda c: c["new_funcs"].update({"probeRef": "server.vram_watch"}), ["--no-pin"], sw("runLoop:vram_probe_")),
     ("N15", "accessor returning an iterator: auto qBegin() { return queue_.begin(); }; runLoop *qBegin() = nullptr",
      [(EH, HOLD, HOLD + "\n    auto qBegin() { return queue_.begin(); }"), (EC, RUNL, RUNL + "    if (!queue_.empty()) *qBegin() = nullptr;\n")], lambda c: c["new_funcs"].update({"qBegin": GV}), ["--no-pin"], ow("runLoop:queue_")),
-    ("C1", "control: init capture by reference [&q = stop_]{ q = true; }() (dropCache)", [(EP, DROPC, DROPC + "    [&q = stop_] { q = true; }();\n")], None, [], ow("dropCache:stop_")),
-    ("C2", "control: std::exchange(stop_, true) (dropCache)", [(EP, DROPC, DROPC + "    (void)std::exchange(stop_, true);\n")], None, [], ow("dropCache:stop_")),
-    ("C3", "control: *queue_.begin() = nullptr (dropCache)", [(EP, DROPC, DROPC + "    if (!queue_.empty()) *queue_.begin() = nullptr;\n")], None, [], ow("dropCache:queue_")),
+    ("C1", "control: init capture by reference [&q = stop_]{ q = true; }() (finishJob)", [(WRR, None, A + "    [&q = stop_] { q = true; }();\n")], None, [], ow(WF + ":stop_")),
+    ("C2", "control: std::exchange(stop_, true) (finishJob)", [(WRR, None, A + "    (void)std::exchange(stop_, true);\n")], None, [], ow(WF + ":stop_")),
+    ("C3", "control: *queue_.begin() = nullptr (finishJob)", [(WRR, None, A + "    if (!queue_.empty()) *queue_.begin() = nullptr;\n")], None, [], ow(WF + ":queue_")),
     ("C4", "control: auto p = eng; p->finishJob(sl) in emit (pointer alias; pre-S5 auto p = this, that shape: C4t)", _E("if (eng && t == 1u) { auto p = eng; p->finishJob(sl); }"), None, [], viol(SO, SE, "call", "emit->finishJob")),
-    ("C4t", "control: auto p = this; p->finishJob(sl) in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    if (sl.pos == 0xffffffffu) { auto p = this; p->finishJob(sl); }\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
+    ("C4t", "control: auto p = this; p->finishJob(sl) in abortQueued (abortQueued twin of the pre-S5 `this` shape)", [(LOW, None, A + PRE_SL + "    if (sl.pos == 0xffffffffu) { auto p = this; p->finishJob(sl); }\n")], None, [], viol(LM, SE, "call", LF + "->finishJob")),
     ("C5", "control: std::invoke(&Engine::finishJob, eng, sl) in emit (pre-S5 this; that shape: C5t)", _E("if (eng && t == 1u) std::invoke(&Engine::finishJob, eng, sl);"), None, [], viol(SO, SE, "call", "emit->finishJob")),
-    ("C5t", "control: std::invoke(&Engine::finishJob, this, sl) in dropCache (dropCache twin of the pre-S5 `this` shape)", [(EP, DROPC, DROPC + "    if (sl.pos == 0xffffffffu) std::invoke(&Engine::finishJob, this, sl);\n")], None, [], viol(SC, SE, "call", "dropCache->finishJob")),
+    ("C5t", "control: std::invoke(&Engine::finishJob, this, sl) in abortQueued (abortQueued twin of the pre-S5 `this` shape)", [(LOW, None, A + PRE_SL + "    if (sl.pos == 0xffffffffu) std::invoke(&Engine::finishJob, this, sl);\n")], None, [], viol(LM, SE, "call", LF + "->finishJob")),
     # S0c's own probes of the inverted rule (shapes no earlier list enumerated) and read controls that must stay reads
-    ("Z1", "std::ref(stop_).get() = true (dropCache)", [(EP, DROPC, DROPC + "    std::ref(stop_).get() = true;\n")], None, [], ow("dropCache:stop_")),
-    ("Z2", "bool* p = std::addressof(stop_); *p = true (dropCache)", [(EP, DROPC, DROPC + "    { bool* p = std::addressof(stop_); *p = true; }\n")], None, [], ow("dropCache:stop_")),
-    ("Z3", "for (auto it = queue_.rbegin(); it != queue_.rend(); ++it) *it = nullptr (dropCache)", [(EP, DROPC, DROPC + "    for (auto it = queue_.rbegin(); it != queue_.rend(); ++it) *it = nullptr;\n")], None, [], ow("dropCache:queue_")),
-    ("Z4", "if (auto& q = stop_; !q) q = true (if-init binding, dropCache)", [(EP, DROPC, DROPC + "    if (auto& q = stop_; !q) q = true;\n")], None, [], ow("dropCache:stop_")),
-    ("Z5", "std::tie(stop_) = std::make_tuple(true) (dropCache)", [(EP, DROPC, DROPC + "    std::tie(stop_) = std::make_tuple(true);\n")], None, [], ow("dropCache:stop_")),
+    ("Z1", "std::ref(stop_).get() = true (finishJob)", [(WRR, None, A + "    std::ref(stop_).get() = true;\n")], None, [], ow(WF + ":stop_")),
+    ("Z2", "bool* p = std::addressof(stop_); *p = true (finishJob)", [(WRR, None, A + "    { bool* p = std::addressof(stop_); *p = true; }\n")], None, [], ow(WF + ":stop_")),
+    ("Z3", "for (auto it = queue_.rbegin(); it != queue_.rend(); ++it) *it = nullptr (finishJob)", [(WRR, None, A + "    for (auto it = queue_.rbegin(); it != queue_.rend(); ++it) *it = nullptr;\n")], None, [], ow(WF + ":queue_")),
+    ("Z4", "if (auto& q = stop_; !q) q = true (if-init binding, finishJob)", [(WRR, None, A + "    if (auto& q = stop_; !q) q = true;\n")], None, [], ow(WF + ":stop_")),
+    ("Z5", "std::tie(stop_) = std::make_tuple(true) (finishJob)", [(WRR, None, A + "    std::tie(stop_) = std::make_tuple(true);\n")], None, [], ow(WF + ":stop_")),
     ("Z6", "control: reads in runLoop (compare a handle, size arithmetic, ==, !, subscript read) stay reads",
      [(EC, RUNL, RUNL + "    if (!queue_.empty() && queue_.front() != nullptr && gov_json_.size() + 1 > 2 && gov_json_[0] == 'x' && !stop_) {}\n")],
      _epin(_E_Z6), ["--no-pin"], r"(?#OK)^engine split check: ok"),
@@ -458,10 +512,10 @@ MUT = [
     ("Q1c", "control: queue_.front() = nullptr", *_dc("if (!queue_.empty()) queue_.front() = nullptr;", "queue_")),
     ("Q1", "std::find result written: *it = nullptr", *_dc("{ auto it = std::find(queue_.begin(), queue_.end(), nullptr); if (it != queue_.end()) *it = nullptr; }", "queue_")),
     ("Q2", "std::find_if(...)->job = nullptr on slots_ (core.shared)",
-     [(EP, DROPC, DROPC + "    if (!slots_.empty()) std::find_if(slots_.begin(), slots_.end(), [](const Slot& s) { return s.job != nullptr; })->job = nullptr;\n")],
-     None, [], r"^== writes to core\.shared not in shared_writers '\w+' \(\d+\): .*\bdropCache:slots_\b|^   not in the expected list '\w+': .*\bdropCache:slots_\b"),
-    ("Q2c", "control: slots_[0].job = nullptr (core.shared)", [(EP, DROPC, DROPC + "    if (!slots_.empty()) slots_[0].job = nullptr;\n")],
-     None, [], r"^== writes to core\.shared not in shared_writers '\w+' \(\d+\): .*\bdropCache:slots_\b|^   not in the expected list '\w+': .*\bdropCache:slots_\b"),
+     [(WRR, None, A + "    if (!slots_.empty()) std::find_if(slots_.begin(), slots_.end(), [](const Slot& s) { return s.job != nullptr; })->job = nullptr;\n")],
+     None, [], _OWSW(WF + ":slots_")),
+    ("Q2c", "control: slots_[0].job = nullptr (core.shared)", [(WRR, None, A + "    if (!slots_.empty()) slots_[0].job = nullptr;\n")],
+     None, [], _OWSW(WF + ":slots_")),
     ("Q3", "*std::max_element(crlf_norm_) = 0", *_dc("if (!crlf_norm_.empty()) *std::max_element(crlf_norm_.begin(), crlf_norm_.end()) = 0;", "crlf_norm_")),
     ("Q4", "*std::next(queue_.begin()) = nullptr", *_dc("if (queue_.size() > 1) *std::next(queue_.begin()) = nullptr;", "queue_")),
     ("Q5", "*std::lower_bound(crlf_norm_) = 1", *_dc("if (!crlf_norm_.empty()) *std::lower_bound(crlf_norm_.begin(), crlf_norm_.end(), 0u) = 1;", "crlf_norm_")),
@@ -484,16 +538,16 @@ MUT = [
      ["--no-pin"], fnd("cut text_write_ok entry no longer occurs (remove it): runLoop:stop_")),
     # --- S0e review (progress/arch025-engine.S0e.REVIEW.md act-on 1, consider 1 / 3; reviewer runner
     # scratch/a25_engine/s0e_review/runner/r_mut.py): pointee writes through a pointer member in a const method ---
-    ("E1", "pointer member rp_ (job_queue data), pointee written in the const method kvTokBytes (slot_cache)",
-     [(EH, HOLD, HOLD + "\n    int* rp_ = nullptr;"), (EH, _KVT, _KVT + "        *rp_ = 1;\n")],
-     lambda c: c["modules"][JQ]["data"].append("rp_"), ["--no-pin"], ow("kvTokBytes:rp_")),
-    ("E1c", "control: the same pointee write in the non-const dropCache",
-     [(EH, HOLD, HOLD + "\n    int* rp_ = nullptr;"), (EP, DROPC, DROPC + "    *rp_ = 1;\n")],
-     lambda c: c["modules"][JQ]["data"].append("rp_"), ["--no-pin"], ow("dropCache:rp_")),
-    ("E2", "global ::next(size_t*) (writes *p; a std algorithm's name) on &opt_.n_ck in dropCache (core.shared)",
+    ("E1", "pointer member rp_ (job_queue data), pointee written in the const method ctxForNew (slot_cache)",
+     [(EH, HOLD, HOLD + "\n    int* rp_ = nullptr;"), (KC, None, A + "*rp_ = 1; ")],
+     lambda c: c["modules"][JQ]["data"].append("rp_"), ["--no-pin"], ow(KF + ":rp_")),
+    ("E1c", "control: the same pointee write in the non-const finishJob",
+     [(EH, HOLD, HOLD + "\n    int* rp_ = nullptr;"), (WRR, None, A + "    *rp_ = 1;\n")],
+     lambda c: c["modules"][JQ]["data"].append("rp_"), ["--no-pin"], ow(WF + ":rp_")),
+    ("E2", "global ::next(size_t*) (writes *p; a std algorithm's name) on &opt_.n_ck in finishJob (core.shared)",
      [(EH, "#pragma once\n", "#pragma once\n#include <cstddef>\ninline std::size_t* next(std::size_t* p) { *p = 1; return p; }\n"),
-      (EP, DROPC, DROPC + "    (void)::next(&opt_.n_ck);\n")], None, [], sw("dropCache:opt_")),
-    ("E2c", "control: opt_.n_ck = 1 in dropCache", [(EP, DROPC, DROPC + "    opt_.n_ck = 1;\n")], None, [], sw("dropCache:opt_")),
+      (WRR, None, A + "    (void)::next(&opt_.n_ck);\n")], None, [], sw(WF + ":opt_")),
+    ("E2c", "control: opt_.n_ck = 1 in finishJob", [(WRR, None, A + "    opt_.n_ck = 1;\n")], None, [], sw(WF + ":opt_")),
     ("L1", "S0f (S0e review consider 3): an accessor returning a lambda that writes gov_hold_; runLoop runs it",
      *_acc("auto holdSetter() { return [this] { gov_hold_ = true; }; }", "holdSetter()();", name="holdSetter")),
     ("L1b", "S0f: an accessor returning a lambda capturing gov_hold_ by reference; runLoop runs it",
@@ -501,20 +555,20 @@ MUT = [
     # --- S0f review (progress/arch025-engine.S0f.REVIEW.md act-on 1 / 2, consider 1 / 2; runner
     # scratch/a25_engine/s0f_review/runner/r_mut.py): pointees reached through const objects, std namespace from the AST ---
     ("E2y", "control: global ::next(size_t*) without std:: in its signature", [_PRE("#include <cstddef>\ninline size_t* next(size_t* p) { *p = 1; return p; }\n"),
-     (EP, DROPC, DROPC + "    (void)::next(&opt_.n_ck);\n")], None, [], sw("dropCache:opt_")),
-    ("G1", "pointer member rp_, pointee written by a global wrp(int*) in the const kvTokBytes", [_RP, _WRP, _K("wrp(rp_);")], _addm("rp_"), ["--no-pin"], ow("kvTokBytes:rp_")),
-    ("G1c", "same wrp(rp_) in the non-const dropCache", [_RP, _WRP, _D("wrp(rp_);")], _addm("rp_"), ["--no-pin"], ow("dropCache:rp_")),
-    ("G2", "pointer member copied by assignment, written through the copy (kvTokBytes)", [_RP, _K("int* q = nullptr; q = rp_; *q = 1;")], _addm("rp_"), ["--no-pin"], ow("kvTokBytes:rp_")),
-    ("G2c", "same in dropCache", [_RP, _D("int* q = nullptr; q = rp_; *q = 1;")], _addm("rp_"), ["--no-pin"], ow("dropCache:rp_")),
-    ("G3", "pointer field of a struct member, *rh_.p = 1 in kvTokBytes", [*_RH, _K("*rh_.p = 1;")], _addm("rh_"), ["--no-pin"], ow("kvTokBytes:rh_")),
-    ("G4", "macro-wrapped: WSET1(*rh_.p) in kvTokBytes", [*_RH, _MAC, _K("WSET1(*rh_.p);")], _addm("rh_"), ["--no-pin"], ow("kvTokBytes:rh_")),
-    ("G5", "(void)std::exchange(*rh_.p, 1) in kvTokBytes", [*_RH, _K("(void)std::exchange(*rh_.p, 1);")], _addm("rh_"), ["--no-pin"], ow("kvTokBytes:rh_")),
-    ("G6", "vector<int*> member, *vp_[0] = 1 in kvTokBytes", [_VP, _K("*vp_[0] = 1;")], _addm("vp_"), ["--no-pin"], ow("kvTokBytes:vp_")),
-    ("G7", "vector<int*> member, wrp(vp_[0]) in kvTokBytes", [_VP, _WRP, _K("wrp(vp_[0]);")], _addm("vp_"), ["--no-pin"], ow("kvTokBytes:vp_")),
-    ("G8", "pointer member rp_, std::fill(rp_, rp_ + 1, 0) in kvTokBytes", [_RP, _K("std::fill(rp_, rp_ + 1, 0);")], _addm("rp_"), ["--no-pin"], ow("kvTokBytes:rp_")),
-    ("G9", "today's deque<Job*> queue_: (void)std::exchange(queue_.front()->id, 0) in the const kvTokBytes", [_K("(void)std::exchange(queue_.front()->id, 0);")], None, ["--no-pin"], ow("kvTokBytes:queue_")),
-    ("G9c", "control: queue_.front()->id = 0 in kvTokBytes", [_K("queue_.front()->id = 0;")], None, ["--no-pin"], ow("kvTokBytes:queue_")),
-    ("G9n", "control: the same std::exchange in the non-const dropCache", [_D("(void)std::exchange(queue_.front()->id, 0);")], None, ["--no-pin"], ow("dropCache:queue_")),
+     (WRR, None, A + "    (void)::next(&opt_.n_ck);\n")], None, [], sw(WF + ":opt_")),
+    ("G1", "pointer member rp_, pointee written by a global wrp(int*) in the const ctxForNew", [_RP, _WRP, _K("wrp(rp_);")], _addm("rp_"), ["--no-pin"], ow(KF + ":rp_")),
+    ("G1c", "same wrp(rp_) in the non-const finishJob", [_RP, _WRP, _D("wrp(rp_);")], _addm("rp_"), ["--no-pin"], ow(WF + ":rp_")),
+    ("G2", "pointer member copied by assignment, written through the copy (ctxForNew)", [_RP, _K("int* q = nullptr; q = rp_; *q = 1;")], _addm("rp_"), ["--no-pin"], ow(KF + ":rp_")),
+    ("G2c", "same in finishJob", [_RP, _D("int* q = nullptr; q = rp_; *q = 1;")], _addm("rp_"), ["--no-pin"], ow(WF + ":rp_")),
+    ("G3", "pointer field of a struct member, *rh_.p = 1 in ctxForNew", [*_RH, _K("*rh_.p = 1;")], _addm("rh_"), ["--no-pin"], ow(KF + ":rh_")),
+    ("G4", "macro-wrapped: WSET1(*rh_.p) in ctxForNew", [*_RH, _MAC, _K("WSET1(*rh_.p);")], _addm("rh_"), ["--no-pin"], ow(KF + ":rh_")),
+    ("G5", "(void)std::exchange(*rh_.p, 1) in ctxForNew", [*_RH, _K("(void)std::exchange(*rh_.p, 1);")], _addm("rh_"), ["--no-pin"], ow(KF + ":rh_")),
+    ("G6", "vector<int*> member, *vp_[0] = 1 in ctxForNew", [_VP, _K("*vp_[0] = 1;")], _addm("vp_"), ["--no-pin"], ow(KF + ":vp_")),
+    ("G7", "vector<int*> member, wrp(vp_[0]) in ctxForNew", [_VP, _WRP, _K("wrp(vp_[0]);")], _addm("vp_"), ["--no-pin"], ow(KF + ":vp_")),
+    ("G8", "pointer member rp_, std::fill(rp_, rp_ + 1, 0) in ctxForNew", [_RP, _K("std::fill(rp_, rp_ + 1, 0);")], _addm("rp_"), ["--no-pin"], ow(KF + ":rp_")),
+    ("G9", "today's deque<Job*> queue_: (void)std::exchange(queue_.front()->id, 0) in the const ctxForNew", [_K("(void)std::exchange(queue_.front()->id, 0);")], None, ["--no-pin"], ow(KF + ":queue_")),
+    ("G9c", "control: queue_.front()->id = 0 in ctxForNew", [_K("queue_.front()->id = 0;")], None, ["--no-pin"], ow(KF + ":queue_")),
+    ("G9n", "control: the same std::exchange in the non-const finishJob", [_D("(void)std::exchange(queue_.front()->id, 0);")], None, ["--no-pin"], ow(WF + ":queue_")),
     ("L2", "accessor returns a lambda kept in a local first; runLoop runs it",
      *_acc("auto holdSetter() { auto f = [this] { gov_hold_ = true; }; return f; }", "holdSetter()();", name="holdSetter")),
     ("D4b", "S0d: the same binding in a declarator after a nested struct body (struct Hd { bool& r; } hd_{stop_}; the text census has no "
@@ -525,17 +579,17 @@ MUT = [
     # DrafterCtx) is a call edge to the holder class's method, not a data write of the holder; the callee's writes are
     # judged in its own body. A real write of the holder (assign / reset / bind / pass / h.x = / a callee that writes
     # *this) stays a write. ---
-    ("H1", "emut2: dc_.dflTouch(1) in dropCache (the S4 shape: a non-const DrafterCtx method; gap_ is drafter_ctx data) is a call edge",
+    ("H1", "emut2: dc_.dflTouch(1) in finishJob (the S4 shape: a non-const DrafterCtx method; gap_ is drafter_ctx data) is a call edge",
      _H("dc_.dflTouch(1);"), _HC, ["--no-pin"], r"(?#OK)^engine split check: ok"),
     ("H1b", "emut2: the same call in startJob (one of the S4 agent's 7 rows, startJob:dc_)",
      _H("dc_.dflTouch(1);", (EC, STARTJ)), _HC, ["--no-pin"], r"(?#OK)^engine split check: ok"),
-    ("H2", "emut2: dc_ = c (assigning the holder itself, from a copy) stays a write of dc_", _H("{ const DrafterCtx c = dc_; dc_ = c; }"), _HC, ["--no-pin"], ow("dropCache:dc_")),
-    ("H3", "emut2: dc_.gap_ = 3 (a data write through the holder) stays a write of dc_", _H("dc_.gap_ = 3;"), _HC, ["--no-pin"], ow("dropCache:dc_")),
+    ("H2", "emut2: dc_ = c (assigning the holder itself, from a copy) stays a write of dc_", _H("{ const DrafterCtx c = dc_; dc_ = c; }"), _HC, ["--no-pin"], ow(WF + ":dc_")),
+    ("H3", "emut2: dc_.gap_ = 3 (a data write through the holder) stays a write of dc_", _H("dc_.gap_ = 3;"), _HC, ["--no-pin"], ow(WF + ":dc_")),
     ("H4", "emut2: auto& d = dc_; d.dflTouch(1) (bound to a non-const reference) stays a write of dc_",
-     _H("{ auto& d = dc_; d.dflTouch(1); }"), _HC, ["--no-pin"], ow("dropCache:dc_")),
-    ("H5", "emut2: dc_.dflClear() whose body assigns *this (no member use shows it) stays a write of dc_", _H("dc_.dflClear();"), _HC, ["--no-pin"], ow("dropCache:dc_")),
+     _H("{ auto& d = dc_; d.dflTouch(1); }"), _HC, ["--no-pin"], ow(WF + ":dc_")),
+    ("H5", "emut2: dc_.dflClear() whose body assigns *this (no member use shows it) stays a write of dc_", _H("dc_.dflClear();"), _HC, ["--no-pin"], ow(WF + ":dc_")),
     ("H6", "emut2: (void)std::exchange(dc_, DrafterCtx{dc_}) (passed by non-const reference) stays a write of dc_",
-     _H("(void)std::exchange(dc_, DrafterCtx{dc_});"), _HC, ["--no-pin"], ow("dropCache:dc_")),
+     _H("(void)std::exchange(dc_, DrafterCtx{dc_});"), _HC, ["--no-pin"], ow(WF + ":dc_")),
     ("H7", "emut2 control: (void)dc_.dflGap() (const method) is a read", _H("(void)dc_.dflGap();"), _HC, ["--no-pin"], r"(?#OK)^engine split check: ok"),
     # --- arch025-emut2 requirement 1: clang's ExprMutationAnalyzer next to the Python analyzer, writes = the union ---
     ("K1", "emut2 (a): clang write / Python read not pinned in emut_read_ok (the F2 shape, std::format(\"{}\", gov_last_)) counts as a write",
@@ -554,6 +608,13 @@ MUT = [
      None, [], fnd("emut (clang ExprMutationAnalyzer) errors in src/server/engine.cpp")),
 ]
 # S0c: tools a TOOL: edit may name -> path under tools/ (a copy of tools/gates, bench, impact is made for the mutant)
+# s7st: the ids N1-N8 exist twice (review2 and the S0b review); both ran in WORK/<id> at the same time (S7 run: N3 CRASH,
+# its directory removed under it). The second case of an id gets its own directory WORK/<id>_2 (ids unchanged).
+_SEEN = {}
+WDIR = {}
+for _m in MUT:
+    _SEEN[_m[0]] = _SEEN.get(_m[0], 0) + 1
+    WDIR[id(_m)] = _m[0] + ("" if _SEEN[_m[0]] == 1 else f"_{_SEEN[_m[0]]}")
 TOOL_PATHS = {"e8_judge.py": "bench/e8_judge.py", "abjudge.py": "bench/abjudge.py", "revtext.py": "impact/revtext.py"}
 
 
@@ -568,7 +629,7 @@ def one(item):
     if bi >= len(bases):
         return mid, "SKIP", f"{mid} {what}\n   needs --base #{bi + 1} -> SKIPPED (not counted)"
     base = bases[bi]
-    d = os.path.join(WORK, mid)
+    d = os.path.join(WORK, WDIR.get(id(item), mid))
     if os.path.isdir(d): shutil.rmtree(d)
     os.makedirs(d)
     for sub in ("src", "include"):
@@ -589,6 +650,11 @@ def one(item):
                 os.makedirs(os.path.join(d, "tools", os.path.dirname(rp)), exist_ok=True)
                 shutil.copy2(src, os.path.join(d, "tools", rp))
     for rel, old, new in edits:
+        if rel in ROLES:   # s7st: an anchor role, looked up in this mutant's tree (old None = the role's anchor)
+            rrel, ra = find_role(os.path.join(d, "src"), rel)
+            if rrel is None:
+                return mid, "ANCHOR", f"{mid} {what}\n   anchor role {rel}: {ra} -> ANCHOR FAIL"
+            rel, old, new = rrel, (ra if old is None else old), new.replace(A, ra)
         if rel.startswith("TOOL:"):
             tp = os.path.join(d, "tools", TOOL_PATHS[rel[5:]]) if rel[5:] in TOOL_PATHS else os.path.join(tools, rel[5:])
             open(tp, "a", encoding="utf-8").write(new); continue
@@ -744,6 +810,12 @@ def main():
         print(f"engine split selftest: unknown --only id(s): {', '.join(unknown)} (known: {len(known)} ids, e.g. "
               f"{', '.join(sorted(known)[:8])} ...): usage error")
         return 2
+    # s7st: every anchor role must exist once in the first base and sit in the module its rule needs (one line per role)
+    bad = check_roles(os.path.join(bases[0], "src"), json.load(open(CUT, encoding="utf-8")))
+    if bad:
+        for b in bad: print(f"anchor role {b}")
+        print(f"engine split selftest: {len(bad)} anchor role(s) missing - FAIL (re-anchor the role in ROLES, not the cases)")
+        return 1
     os.makedirs(WORK, exist_ok=True)
     os.makedirs(BASESNAP, exist_ok=True)
     sha = setup_ledger()
