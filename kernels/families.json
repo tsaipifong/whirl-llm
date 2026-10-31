@@ -44,7 +44,7 @@
    ]
   },
   "kernels.gdn": {
-   "desc": "Gated DeltaNet: decode fusions, per-token / chunked / WMMA / strix prefill, sequential scan",
+   "desc": "Gated DeltaNet: decode fusions, GDN beta/alpha projection entries (gdn_ab.hip), per-token / chunked / WMMA / strix prefill, sequential scan",
    "paths": [
     "kernels/fused_decode.hip",
     "kernels/gdn_*.hip",
@@ -53,8 +53,7 @@
    ],
    "deps": [
     "kernels.common",
-    "kernels.gemv",
-    "kernels.attn"
+    "kernels.gemv"
    ]
   },
   "kernels.norm": {
@@ -72,10 +71,11 @@
    ]
   },
   "kernels.attn": {
-   "desc": "paged KV (kv_store), decode / split / prefill attention, attn_ws4 (gfx1151); argmax rides in misc_kv_argmax.hip",
+   "desc": "paged KV (kv_store), decode / split / prefill attention, attn_ws4 (gfx1151); argmax rides in misc_kv_argmax.hip (both sets)",
    "paths": [
     "kernels/attn*.hip",
     "kernels/misc_kv_argmax.hip",
+    "kernels/gfx1151/misc_kv_argmax.hip",
     "kernels/gfx1151/attn*.hip"
    ],
    "deps": [
@@ -92,8 +92,7 @@
    "deps": [
     "kernels.common",
     "kernels.gemv",
-    "kernels.gemm",
-    "kernels.gdn"
+    "kernels.gemm"
    ]
   },
   "kernels.sample": {

@@ -10,8 +10,8 @@
 // Expert tensors are 3D GGUF tensors: expert e owns rows [e * rows_e, (e+1) * rows_e).
 // ---------------------------------------------------------------------------
 
-// GDN beta/alpha projections for other quant types (see gdn_ab_q8_0).
-#include "shared/moe_moe_logits_f32.h"  // also in the gfx1201 set (kernels/moe.hip)
+// Router logits in f32 (moe_logits_f32).
+#include "shared/moe_logits_f32.h"  // also in the gfx1201 set (kernels/moe.hip)
 
 // Wide-unit dots for the decode MoE kernels (gemv1s / gemv1s6 unit layout).
 #ifndef MOE_WIDE

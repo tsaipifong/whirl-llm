@@ -639,6 +639,16 @@ Kernel source checks (CPU, HIP clang, no GPU): `cpu_kernel_abi` (`tools/gates/ke
 `cpu_kernel_iso` (`tools/gates/kernel_iso_check.py`: each kernel family of `kernels/families.json` compiles from its
 own and its declared dependencies' fragments only). Both run `--selftest` first.
 
+Kernel equivalence on the code objects (CPU, no GPU; arch025-sc11k, ADR-0005): `tools/gates/kernel_isa_cmp.py A B`
+compares two code objects (or two folders of `*.hsaco`) kernel by kernel - the ROCm `llvm-objdump -d` text of every
+function (PC-relative literals after `s_getpc_b64` symbolized), every `.kd` descriptor (entry offset as a symbol), the
+per-kernel metadata note, the data objects and the ABS resource symbols, matched by name - so moved or reordered kernels
+compare IDENTICAL and a changed one is named with its instruction diff (exit 0 identical, 1 different, 2 setup). A kernel
+refactor (moving code between files, merging duplicates into helpers) is accepted on CPU when the base and new code
+objects compare IDENTICAL; only kernels it reports go to GPU acceptance. Test: `tools/gates/kernel_isa_cmp_test.py`
+(synthetic code objects per architecture: identical, other path / cuid, reordered, one kernel changed, constant table
+changed, kernel removed, LDS size changed; about 2.5 min).
+
 Isolation manifest include closure (CPU, seconds, no build): `cpu_iso_includes` (`tools/gates/iso_includes_check.py`: every quoted `#include` of a file a `tests/**/isolation.txt` stages must itself be staged; `--rev COMMIT` checks a commit read-only). Catches the merge that adds an include to a staged file without the manifest line before the ~1 min per module iso build (C1083) does.
 
 ## <a id="gate-run"></a>How `release_gate.ps1` runs CPU steps: heavy-CPU lock, one retry, parallel sections, safety build cache

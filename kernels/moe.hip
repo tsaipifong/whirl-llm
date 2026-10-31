@@ -1,4 +1,4 @@
-// WHIRL device code (gfx1201 / RDNA 4): mixture of experts: GDN beta/alpha projections, router, top-k, decode experts, prefill routing and grouped GEMM.
+// WHIRL device code (gfx1201 / RDNA 4): mixture of experts: router, top-k, decode experts, prefill routing and grouped GEMM.
 // SPDX-License-Identifier: Apache-2.0
 // Ported from the private prototype; not self-contained: included in order by whirl_kernels.hip.
 
@@ -9,8 +9,8 @@
 // Expert tensors are 3D GGUF tensors: expert e owns rows [e * rows_e, (e+1) * rows_e).
 // ---------------------------------------------------------------------------
 
-// GDN beta/alpha projections for other quant types (see gdn_ab_q8_0).
-#include "shared/moe_moe_logits_f32.h"  // also in the gfx1151 set (kernels/gfx1151/moe.hip)
+// Router logits in f32 (moe_logits_f32).
+#include "shared/moe_logits_f32.h"  // also in the gfx1151 set (kernels/gfx1151/moe.hip)
 
 // Decode experts, gate and up: pair p = blockIdx.y = t * K + k runs expert
 // ids[p] on token t's int8 activation. Rows [0, ff) come from W1 into y1,
