@@ -397,6 +397,852 @@
    "killed_by": "alloc_seq",
    "date": "2026-10-30T17:26:28",
    "source": "alloc_seq kill check (scratch/a25_allocseq/DONE_kill_check: control ok 2/2, m1-state-order FAIL 2/2 cells, gfx1201; gpumut A bins; pins fa8dddf) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_allocseq\\kill_m1_r9700.tsv)"
+  },
+  {
+   "id": "m1-pair-swap",
+   "module": "model.weights",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part1_12.tsv)"
+  },
+  {
+   "id": "m1-norm-swap",
+   "module": "model.weights",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part1_12.tsv)"
+  },
+  {
+   "id": "m1-mx-ref-size",
+   "module": "model.weights",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part1_12.tsv)"
+  },
+  {
+   "id": "m1-type-bytes",
+   "module": "model.weights",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part1_12.tsv)"
+  },
+  {
+   "id": "m1-chunk-offset",
+   "module": "model.weights",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "st_swift_balance",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part1_12.tsv)"
+  },
+  {
+   "id": "m1-msg-vec",
+   "module": "model.weights",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part1_12.tsv)"
+  },
+  {
+   "id": "m1-msg-moe",
+   "module": "model.weights",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part1_12.tsv)"
+  },
+  {
+   "id": "m1-head-norm",
+   "module": "model.weights",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part1_12.tsv)"
+  },
+  {
+   "id": "m1-embd-host",
+   "module": "model.weights",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part1_12.tsv)"
+  },
+  {
+   "id": "m2-kvarr-q2",
+   "module": "model.kv",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part1_12.tsv)"
+  },
+  {
+   "id": "m2-kvarr-mtp",
+   "module": "model.kv",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part1_12.tsv)"
+  },
+  {
+   "id": "m2-mtp-kv",
+   "module": "model.kv",
+   "card": "r9700",
+   "verdict": "NOT-RUN",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part1_12.tsv)"
+  },
+  {
+   "id": "m2-kq8",
+   "module": "model.kv",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m2-ebv",
+   "module": "model.kv",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m2-release-order",
+   "module": "model.kv",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m2-release-keep",
+   "module": "model.kv",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m2-fix-guard",
+   "module": "model.kv",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m2-alloc-unfixed",
+   "module": "model.kv",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m2-pages-early",
+   "module": "model.kv",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m2-map-kvbase",
+   "module": "model.kv",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m2-map-bound",
+   "module": "model.kv",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m3-tune-dedup",
+   "module": "model.tune",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m3-tune-nbuckets",
+   "module": "model.tune",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m3-tune-choice",
+   "module": "model.tune",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m3-tune-partial",
+   "module": "model.tune",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "m3-bufbytes",
+   "module": "model.scratch",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "x12-f1-gemv-boundary",
+   "module": "forward.dispatch",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "x12-f2a-draft-win-scope",
+   "module": "forward.attn",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "x12-f2a-batched",
+   "module": "forward.attn",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "x12-f2b-prec-experts",
+   "module": "forward.ffn",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "st_moe_precise",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "x12-f3-ba-cache",
+   "module": "forward.gdn",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "x12-f4a-inject",
+   "module": "forward.run",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.part2_20.tsv)"
+  },
+  {
+   "id": "x12-f4b-settokens",
+   "module": "forward.mtp_verify",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "x12-f4c-cansegment",
+   "module": "forward.prefill",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "x12-f4d-text-rope",
+   "module": "forward.vision_rows",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "n11-handles-freedev-noop",
+   "module": "handles",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "st_swift_balance",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "n11-handles-pinned-addr",
+   "module": "handles",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "d51-h1-moveassign-no-reset",
+   "module": "handles",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "d51-h2-wait-done-inverted",
+   "module": "handles",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "d51-h3-devbuf-bytes-stale",
+   "module": "handles",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "n11-f1-xq-cache-n",
+   "module": "forward.dispatch",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "n11-f2-moe-topk-k",
+   "module": "forward.ffn",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "st_moe_precise",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "n11-f3-segs-single-rows",
+   "module": "forward.gdn",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "n11-f4-begin-decode-pos",
+   "module": "forward.run",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "n11-f5-restore-snap-set",
+   "module": "forward.mtp_verify",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "n11-f6-batch-prefill-pos",
+   "module": "forward.prefill",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "st_ctx_refuse",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "n11-f7-image-row-src",
+   "module": "forward.vision_rows",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_r9700.tsv)"
+  },
+  {
+   "id": "m1-pair-swap",
+   "module": "model.weights",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m1-norm-swap",
+   "module": "model.weights",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_moe",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m1-mx-ref-size",
+   "module": "model.weights",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m1-type-bytes",
+   "module": "model.weights",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m1-chunk-offset",
+   "module": "model.weights",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_moe",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m1-msg-vec",
+   "module": "model.weights",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m1-msg-moe",
+   "module": "model.weights",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m1-head-norm",
+   "module": "model.weights",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m1-embd-host",
+   "module": "model.weights",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m2-kvarr-q2",
+   "module": "model.kv",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_moe",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m2-kvarr-mtp",
+   "module": "model.kv",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m2-mtp-kv",
+   "module": "model.kv",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_moe",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m2-kq8",
+   "module": "model.kv",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m2-ebv",
+   "module": "model.kv",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m2-release-order",
+   "module": "model.kv",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m2-release-keep",
+   "module": "model.kv",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m2-fix-guard",
+   "module": "model.kv",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m2-alloc-unfixed",
+   "module": "model.kv",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m2-pages-early",
+   "module": "model.kv",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m2-map-kvbase",
+   "module": "model.kv",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m2-map-bound",
+   "module": "model.kv",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m3-tune-dedup",
+   "module": "model.tune",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m3-tune-nbuckets",
+   "module": "model.tune",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m3-tune-choice",
+   "module": "model.tune",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m3-tune-partial",
+   "module": "model.tune",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "m3-bufbytes",
+   "module": "model.scratch",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "x12-f1-gemv-boundary",
+   "module": "forward.dispatch",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "x12-f2a-draft-win-scope",
+   "module": "forward.attn",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "x12-f2a-batched",
+   "module": "forward.attn",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "x12-f2b-prec-experts",
+   "module": "forward.ffn",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "st_moe_precise",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "x12-f3-ba-cache",
+   "module": "forward.gdn",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "x12-f4a-inject",
+   "module": "forward.run",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_moe",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "x12-f4b-settokens",
+   "module": "forward.mtp_verify",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.part1_33.tsv)"
+  },
+  {
+   "id": "x12-f4c-cansegment",
+   "module": "forward.prefill",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "x12-f4d-text-rope",
+   "module": "forward.vision_rows",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "n11-handles-freedev-noop",
+   "module": "handles",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "st_swift_balance",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "n11-handles-pinned-addr",
+   "module": "handles",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_moe",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "d51-h1-moveassign-no-reset",
+   "module": "handles",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "d51-h2-wait-done-inverted",
+   "module": "handles",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "d51-h3-devbuf-bytes-stale",
+   "module": "handles",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "n11-f1-xq-cache-n",
+   "module": "forward.dispatch",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "n11-f2-moe-topk-k",
+   "module": "forward.ffn",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "st_moe_precise",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "n11-f3-segs-single-rows",
+   "module": "forward.gdn",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_moe",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "n11-f4-begin-decode-pos",
+   "module": "forward.run",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_moe",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "n11-f5-restore-snap-set",
+   "module": "forward.mtp_verify",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "n11-f6-batch-prefill-pos",
+   "module": "forward.prefill",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
+  },
+  {
+   "id": "n11-f7-image-row-src",
+   "module": "forward.vision_rows",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_moe",
+   "date": "2026-10-31T17:56:01",
+   "source": "gpumut.ps1 B -Mode first, tree wt_a25_n11b d36bc74 (arch025-n11b), R9700 2026-10-30/31 parts 1-3 + 8060S 2026-10-31 parts 1-2 (C:/ClaudeWorkspace/whirl-work/scratch/a25_n11b/gpumut_B/kill_8060s.tsv)"
   }
  ]
 }
