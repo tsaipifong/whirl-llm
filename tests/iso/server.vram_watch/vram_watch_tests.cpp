@@ -308,7 +308,11 @@ void testIdleTick() {
     r.vw->setVramProbe(r.probe(), true, std::nullopt, c, false, nullptr);
     ISO_CHECK(r.probes == 2);
     const s::TimePoint before = s::Clock::now();
-    const std::optional<s::TimePoint> due = r.vw->vramIdleTick();  // due at once: one sample
+    // setVramProbe made the next sample due 1 us after its own: wait that out, or a fast build calls vramIdleTick
+    // inside the microsecond and nothing is due (cpu_iso_server_vram_watch failed 3/3 that way, 2026-10-31)
+    while (s::Clock::now() - before < std::chrono::microseconds(5)) {
+    }
+    const std::optional<s::TimePoint> due = r.vw->vramIdleTick();  // due now: one sample
     ISO_CHECK(r.probes == 3 && due.has_value() && *due >= before && r.vw->vramLastSample() >= before);
     Rig q(4);
     q.cur = r.cur;
