@@ -1,4 +1,5 @@
-// Model forward, the drivers (arch025-F4, moved from src/model/forward.cpp): Model::forward, the device-resident
+// Model forward, the drivers (arch025-F4, moved from src/model/forward.cpp): Model::forward, Model::step (arch025-n8b3, from
+// forward/dispatch.cpp: it calls forward), the device-resident
 // decode step (decodeStep / decodeStepLaunches / beginDecode), the layer loop Model::run and the prefill scratch
 // lent to the vision encoder (lendScratch). Reimplements the WHIRL Zig research prototype's model/qwen35.zig.
 // SPDX-License-Identifier: Apache-2.0
@@ -16,6 +17,11 @@ void Context::forward(std::span<const u32> tokens, u32 pos0) {
     setTokens(ids, tokens, pos0);
     fwd_pos0 = pos0;
     run(n);
+}
+
+void Context::step(u32 token, u32 pos) {
+    const u32 one[1] = {token};
+    forward(one, pos);
 }
 
 // Decode one token entirely from device state: the input token is ids[0] and
