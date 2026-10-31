@@ -667,11 +667,13 @@ def build(root):
 
 
 def tree_hash(root, files):
+    # CRLF -> LF first (arch025 s0b-merge review act-on 1): .gitattributes checks *.ps1 out CRLF and a tool that rewrites
+    # a file LF must not make --check call the map stale on a clean checkout (as engine_split_check.py's pins do)
     h = hashlib.sha256()
     for f in files:
         if f.endswith(SRC_EXT + (".cmake", ".txt", ".ps1")) and f.split("/")[0] in SCAN_DIRS + ("cmake", "CMakeLists.txt"):
             try:
-                h.update(f.encode() + b"\0" + open(os.path.join(root, f), "rb").read())
+                h.update(f.encode() + b"\0" + open(os.path.join(root, f), "rb").read().replace(b"\r\n", b"\n"))
             except OSError:
                 pass
     return h.hexdigest()[:16]
