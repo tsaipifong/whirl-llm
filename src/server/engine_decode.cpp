@@ -132,7 +132,7 @@ void Engine::dropOutOfRoom(Cycle& cy, std::span<Slot* const> act_in) {
     // slots out of context room end here
     const std::uint32_t nd_room = dc_.draftRoom();
     for (Slot* sl : act_in) {
-        const bool room_ok = spec::rules::decodeRoom(sl->pos, nd_room, ctx_) && ensurePages(*sl, sl->pos + nd_room + 2);
+        const bool room_ok = spec::rules::decodeRoom(sl->pos, nd_room, ctx_) && sc_.ensurePages(*sl, sl->pos + nd_room + 2);
         if (!room_ok) {
             if (spec::rules::decodeRoom(sl->pos, nd_room, ctx_))
             {

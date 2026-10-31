@@ -117,7 +117,8 @@
     "speTok",
     "speEvict",
     "unshares",
-    "evictions"
+    "evictions",
+    "cacheCounters"
    ],
    "data": [
     "kv_arrays_",
@@ -140,7 +141,8 @@
     "slots_",
     "tb_"
    ],
-   "_doc_s6": "S6 (arch025-engine-s6, 2026-10-31): class SlotPagesCounters (src/server/engine_pages.h) holds the former Engine members stat_spe_new_ .. stat_evictions_ (private, same order and initial values; Engine holds it as cnt_ where stat_spe_new_ was). Its 12 in-class methods are entries of this module and header-inline: the six writes noteEviction (evictFor), noteUnshare (cowPages), noteSpeEvict (dropSpe), noteSpeNew (createSpe), noteSpeHit / noteSpeTok (attachSpe) - each body is the former write statement - and the six const reads speNew .. evictions that Engine::stats (server.engine, a downward call) uses instead of reading stat_* (S7 / S16 move stats to sc_.cacheCounters(), DESIGN v3 2.2). No writer list changes: cnt_ is written only by this module's entries (engine_pages.cpp:112/135/170/242/278/283)."
+   "_doc_s6": "S6 (arch025-engine-s6, 2026-10-31): class SlotPagesCounters (src/server/engine_pages.h) holds the former Engine members stat_spe_new_ .. stat_evictions_ (private, same order and initial values; Engine holds it as cnt_ where stat_spe_new_ was). Its 12 in-class methods are entries of this module and header-inline: the six writes noteEviction (evictFor), noteUnshare (cowPages), noteSpeEvict (dropSpe), noteSpeNew (createSpe), noteSpeHit / noteSpeTok (attachSpe) - each body is the former write statement - and the six const reads speNew .. evictions that Engine::stats (server.engine, a downward call) uses instead of reading stat_* (S7 / S16 move stats to sc_.cacheCounters(), DESIGN v3 2.2). No writer list changes: cnt_ is written only by this module's entries (engine_pages.cpp:112/135/170/242/278/283).",
+   "_doc_s7": "S7 (arch025-engine-s7, 2026-10-31): struct SlotPages (src/server/engine_pages.h) holds the functions of this module (saveCkpt .. waitsForSys, pagesFor, poolAvailable, initPool defined in engine_pages.cpp, bodies verbatim; kvTokBytes and the new cacheCounters header-inline); an aggregate of references only: refs ck_ m_ ops_ opt_ pool_ ps_ slots_ tb_ (core.shared, same names), the placed state kv_arrays_ conv_bytes_ ssm_bytes_ cnt_ (Engine keeps them where they were) and dc_ (server.drafter_ctx). Engine holds it as sc_ after dc_; Engine::initPool is the forwarder Engine.initPool; Engine::stats reads the counters through sc_.cacheCounters() (DESIGN v3 2.2). The planned row new_funcs.cacheCounters is deleted: S7 writes it, so it is in funcs / header_inline (keeping both counted it twice: graph 'duplicates: cacheCounters', S7 verify triage)."
   },
   "server.governor": {
    "layer": 3,
@@ -530,7 +532,8 @@
   "speTok",
   "speEvict",
   "unshares",
-  "evictions"
+  "evictions",
+  "cacheCounters"
  ],
  "_doc_header_inline": "functions that stay inline in their module's header (they are inline today: engine.h, or inlined in their callers' TU in the c1ca7ce objects, inline_check.py)",
  "rewrites": {
@@ -563,11 +566,14 @@
  "outside_writers": {
   "_doc": "writes to a module's own data from another module, measured at c1ca7ce (census3). leg_end = what remains after the encapsulation steps S10b / S12b / S9b (DESIGN 4): the constructor statements stay in Engine's constructor in their order (rule A); allocState / setVramProbe are startup installers (DESIGN 2.6 table)",
   "now": [
+   "Engine:cnt_",
    "Engine:conv_bytes_",
    "Engine:crlf_norm_",
    "Engine:ctx_pub_",
+   "Engine:dc_",
    "Engine:fl_",
    "Engine:ids_",
+   "Engine:kv_arrays_",
    "Engine:ssm_bytes_",
    "admitQueued:n_active_",
    "admitQueued:queue_",
@@ -575,10 +581,14 @@
    "attachTier:q_cond_",
    "attachTier:tier_wake_",
    "attachTier:wake_seq_",
+   "dropOutOfRoom:sc_",
+   "finishPrefill:sc_",
    "idleWait:q_cond_",
    "idleWait:q_mutex_",
    "idleWait:tier_wake_",
    "logBatchStats:fl_",
+   "prefillGroup:sc_",
+   "prefillStep:sc_",
    "reapDisconnected:q_cond_",
    "reapDisconnected:queue_",
    "releaseSlot:n_active_",
@@ -588,21 +598,33 @@
    "setVramProbe:vram_others_",
    "startAdmitted:n_active_",
    "startAdmitted:queue_",
+   "startJob:sc_",
+   "tryRestore:sc_",
    "vramNote:gov_warn_"
   ],
   "leg_end": [
+   "Engine:cnt_",
    "Engine:conv_bytes_",
    "Engine:crlf_norm_",
    "Engine:ctx_pub_",
+   "Engine:dc_",
    "Engine:fl_",
    "Engine:ids_",
+   "Engine:kv_arrays_",
    "Engine:ssm_bytes_",
    "allocState:spec_on_",
-   "setVramProbe:vram_others_"
+   "dropOutOfRoom:sc_",
+   "finishPrefill:sc_",
+   "prefillGroup:sc_",
+   "prefillStep:sc_",
+   "setVramProbe:vram_others_",
+   "startJob:sc_",
+   "tryRestore:sc_"
   ],
   "_doc_s0": "S0 re-measure (A1): now adds the lock-protocol writes (q_cond_.notify_all / wait_for, q_mutex_ through WH_UNLOCK_HELD) outside job_queue; leg_end is unchanged: they move behind JobQueue methods (review3 C3, leg 3 design)",
   "_doc_s0d": "S0d (AST census): Engine:ids_ - the constructor's rcx_{opt_.model_name, tok_, ids_} binds ResponseCtx's IdGen& (an aggregate reference member, S0c review R10 shape); present at c1ca7ce too",
-  "_doc_s4": "S4 (arch025-engine-s4, 2026-10-30) listed 7 `<entry>:dc_` rows here (calls of DrafterCtx's non-const methods dflReset / dflIngest on the holder dc_). The s0b merge (main session, 2026-10-31) removed them: the N4-emut2 census counts a non-const call h.f( on a cut holder whose methods use only their own members through this-> as a call edge (census holder_call), not a write of the holder; what the methods write (m_, bst_) stays under shared_writers. engine.h `DrafterCtx dc_{bst_, m_, opt_}` binds bst_ to a BatchStats& member, so Engine is a writer of bst_ (shared_writers now / leg_end; both analyzers, progress/arch025-engine.emut2.REVIEW.md:14)"
+  "_doc_s4": "S4 (arch025-engine-s4, 2026-10-30) listed 7 `<entry>:dc_` rows here (calls of DrafterCtx's non-const methods dflReset / dflIngest on the holder dc_). The s0b merge (main session, 2026-10-31) removed them: the N4-emut2 census counts a non-const call h.f( on a cut holder whose methods use only their own members through this-> as a call edge (census holder_call), not a write of the holder; what the methods write (m_, bst_) stays under shared_writers. engine.h `DrafterCtx dc_{bst_, m_, opt_}` binds bst_ to a BatchStats& member, so Engine is a writer of bst_ (shared_writers now / leg_end; both analyzers, progress/arch025-engine.emut2.REVIEW.md:14)",
+  "_doc_s7": "S7 (arch025-engine-s7, 2026-10-31): (a) Engine:cnt_ / Engine:dc_ / Engine:kv_arrays_ - engine.h `SlotPages sc_{ck_, m_, ops_, opt_, pool_, ps_, slots_, tb_, kv_arrays_, conv_bytes_, ssm_bytes_, cnt_, dc_}` binds SlotPages's non-const reference members to slot_cache's placed state and to the drafter context (the constructor is the assembly point, DESIGN v3 2.6 rule A; the Engine:ids_ shape of rcx_). (b) <entry>:sc_ - the calls sc_.ensurePages (dropOutOfRoom engine_decode.cpp:135, prefillStep engine_prefill.cpp:68, prefillGroup :132, finishPrefill :218, tryRestore engine_tier.cpp:95) and sc_.cowPages (startJob engine.cpp:296, finishPrefill engine_prefill.cpp:217): their bodies build `SlotEvictor ev(*this, ...)` (PagePool's evictor calls back evictFor during the call), so the census holder_call rule (3) keeps the call a write of the holder; SlotPages owns no data (references only), what it writes through them is under shared_writers / its own data. They stay at leg end (the callers are those components' entries)."
  },
  "engine_members_final": [
   "m_",
@@ -702,7 +724,6 @@
   "jqReap": "server.job_queue",
   "jqTierWake": "server.job_queue",
   "vramHealth": "server.vram_watch",
-  "cacheCounters": "server.slot_cache",
   "floorLogPeriod": "server.prefill",
   "floorOn": "server.prefill",
   "Engine.attachTier": "server.engine",
@@ -899,6 +920,7 @@
     "startJob"
    ],
    "slots_": [
+    "Engine",
     "allocState",
     "evictFor",
     "govDrain",
@@ -1149,16 +1171,23 @@
   },
   "_doc_s0b": "S0b (S0 review act-on 1): model:m_ (Engine::model() returns ServerModel& = a non-const reference accessor) and startAdmitted:slots_ (std::span<Slot>(slots_) handed to ps_.pickSlot = a writable view) are conservative writes the S0b census sees; they were there at c1ca7ce too (same census on scratch/a25_engine/s0/base_c1 and base_abe)",
   "_doc_s0d": "S0d (AST census, tools/gates/engine_split_ast.py): Engine:ops_ (in-class sb_{m_, ops_} binds SampleBuffers' Backend&), attachSpe:m_ (m_.mapPages, non-const ServerModel method), idleWait/runLoop:vis_ (vis_.idle(), non-const), startJob:vis_ (vis_.prepare(), non-const), startJob:ck_ (ck_.load(const Ckpt&), non-const CkptStore method; the text census took 'load' for std::atomic::load) - writes by declared type the text rules missed, present at c1ca7ce / abe3512 too",
-  "_doc_s0g": "S0g (strict pointee rule, decisions.tsv ADR candidate 2026-10-30): layoutBatch:spec_ - cy.p = spec_.prof.get() keeps the profiler pointer (non-const pointee) in the cycle state; govDrain / freePages / dropSpe:m_ - m_.stream() (a hipStream_t, a pointer with a non-const pointee) passed to ops_.streamSync / streamWaitEvent; attachSpe:tb_ - tb_.tier()->find(..) is a non-const TierStore method reached through the pointer tb_.tier() returns. Present on c1ca7ce / abe3512 / 7ad196c alike."
+  "_doc_s0g": "S0g (strict pointee rule, decisions.tsv ADR candidate 2026-10-30): layoutBatch:spec_ - cy.p = spec_.prof.get() keeps the profiler pointer (non-const pointee) in the cycle state; govDrain / freePages / dropSpe:m_ - m_.stream() (a hipStream_t, a pointer with a non-const pointee) passed to ops_.streamSync / streamWaitEvent; attachSpe:tb_ - tb_.tier()->find(..) is a non-const TierStore method reached through the pointer tb_.tier() returns. Present on c1ca7ce / abe3512 / 7ad196c alike.",
+  "_doc_s7": "S7 (arch025-engine-s7, 2026-10-31): Engine:slots_ - the sc_ initializer (engine.h) binds std::vector<Slot>& slots_ (SlotPages: evictFor / waitsForSys / poolAvailable, which are listed writers or readers of slots_ already)."
  },
  "_doc_engine_members_final": "E3 (graph3 --core): Engine's data members at leg end, in declaration order; placed state stays at its c1ca7ce position (DESIGN 2.5)",
  "_doc_s0": "S0 (2026-10-29): generated by scratch/a25_engine/s0/gen_cut_s0.py from cut_v3.json; the architecture part is pinned by tests/pins/engine_cut_arch.sha256 (engine_split_check.py --pin-check, review3 C2)",
  "unresolved_ok": [
-  "_doc: S0b (S0 review act-on 2): every unresolved call of the census, exactly (a new one, or a listed one that is gone, is a finding). Measured on c1ca7ce, abe3512 and d6e83ed+S0 (the same 4): calls whose receiver is a member of an untracked class whose method has a tracked entry's name; PrefixStore::attachTier / PagePool::stats are not Engine's",
+  "_doc: S0b (S0 review act-on 2): every unresolved call of the census, exactly (a new one, or a listed one that is gone, is a finding). Measured on c1ca7ce, abe3512 and d6e83ed+S0 (the same 4): calls whose receiver is a member of an untracked class whose method has a tracked entry's name; PrefixStore::attachTier / PagePool::stats are not Engine's; S7 (arch025-engine-s7): the 6 `stats: <expr>.x(` - Engine::stats reads the counters as sc_.cacheCounters().x() (engine.cpp:182-187): the receiver is the call's result (const SlotPagesCounters&), the methods are SlotPagesCounters's const reads (server.slot_cache, a downward call; the holder call sc_.cacheCounters() is the call edge)",
   "attachTier: ps_.attachTier(  (also a method of an untracked class)",
   "flushTierOnStop: pool_.stats(  (also a method of an untracked class)",
   "idleWait: pool_.stats(  (also a method of an untracked class)",
-  "stats: pool_.stats(  (also a method of an untracked class)"
+  "stats: pool_.stats(  (also a method of an untracked class)",
+  "stats: <expr>.evictions(",
+  "stats: <expr>.speEvict(",
+  "stats: <expr>.speHits(",
+  "stats: <expr>.speNew(",
+  "stats: <expr>.speTok(",
+  "stats: <expr>.unshares("
  ],
  "callable_reads": {
   "_doc": "S0d (S0c review consider 1): std::function data members whose call (const operator()) the AST census counts as a read; every other std::function member call is a write. Each target checked by hand: a lambda captured by copy, not mutable, called only on the runLoop thread (owner_.check); the targets call non-const backend methods (be->wddmMemInfo(), be->gpuOthers()) whose side effects the census does not see. A new std::function member is a write until it is listed here (inside the cut pin).",
@@ -1418,6 +1447,13 @@
    ],
    "class": "d lock guard",
    "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "poolAvailable:ps_": {
+   "clang_why": [
+    "write: CXXMemberCallExpr `ps_.spes()`"
+   ],
+   "class": "d non-const overload, result only read",
+   "reason": "engine_pages.cpp:322 `for (const Spe& s : ps_.spes()) own(s.pages);` in the const SlotPages::poolAvailable: ps_ is now PrefixStore& (S7), so the non-const spes() overload (prefix_store.h:151) is picked; the result is bound to const Spe& and only read (Python: read). Until S7 the const Engine method picked the const overload (prefix_store.h:152); both return spes_."
   }
  }
 }

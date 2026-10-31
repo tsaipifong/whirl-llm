@@ -1292,6 +1292,34 @@
    "tier_bridge"
   ],
   [
+   "server.slot_cache",
+   "cache.tier_adapter"
+  ],
+  [
+   "server.slot_cache",
+   "file:src/server/log.h"
+  ],
+  [
+   "server.slot_cache",
+   "model.core"
+  ],
+  [
+   "server.slot_cache",
+   "page_pool"
+  ],
+  [
+   "server.slot_cache",
+   "server.drafter_ctx"
+  ],
+  [
+   "server.slot_cache",
+   "server.engine_types"
+  ],
+  [
+   "server.slot_cache",
+   "spec.rules"
+  ],
+  [
    "server.slot_output",
    "file:src/server/log.h"
   ],

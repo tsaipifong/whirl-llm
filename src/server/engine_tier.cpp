@@ -89,10 +89,10 @@ bool Engine::tryRestore(Slot& sl, Job& job) {
         tier::Entry* x = mt->e;
         const TimePoint t0 = Clock::now();
         // the slot's own VRAM content goes (it is in the tier if it was worth keeping)
-        freePages(sl);
+        sc_.freePages(sl);
         sl.job = &job;
         sl.phase = Phase::restore;
-        if (!ensurePages(sl, x->n_tok)) {
+        if (!sc_.ensurePages(sl, x->n_tok)) {
             logW("req {} | slot {} | kv tier: not restoring {} tok: the kv pool has no room ({} of {} pages for this slot, {} "
                  "free, {} quarantined batches)",
                  job.id, sl.id, x->n_tok, sl.pages.size(), (x->n_tok + kv_page - 1) / kv_page, pool_.freeCount(),
@@ -115,10 +115,10 @@ bool Engine::tryRestore(Slot& sl, Job& job) {
 // the Engine steps TierBridge calls inside a restore (in the order they always ran)
 TierBridge::RestoreSteps Engine::restoreSteps(Slot& sl) {
     TierBridge::RestoreSteps s;
-    s.drop_cache = [this, &sl] { dropCache(sl); };
+    s.drop_cache = [this, &sl] { sc_.dropCache(sl); };
     s.drafter_reset = [this, &sl](std::uint32_t n_tok) { dc_.dflReset(sl, n_tok); };
     s.share = [this, &sl](Ckpt& c, std::uint64_t entry_id) {
-        createSpe(sl, sl.cache_tokens, c.pos, c.kind, std::nullopt, &c, entry_id);
+        sc_.createSpe(sl, sl.cache_tokens, c.pos, c.kind, std::nullopt, &c, entry_id);
     };
     return s;
 }

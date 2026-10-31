@@ -262,7 +262,7 @@
                           "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
    "server.slot_output": {"metrics": [], "metrics_none": "three small functions per decode / prefill step and per error answer (called across TUs, as before the move: the speed is the decode cycle's, measured by the engine split's E8 A/B): no bench key (whirl-iso-server-slot-output-tests)",
                           "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
-   "server.slot_cache": {"metrics": [], "metrics_none": "six counters, one add per eviction / copy-on-write / shared prefix checkpoint event (inline; S6: every product object identical to the 421e22b build): no bench key (whirl-iso-server-slot-cache-tests)",
+   "server.slot_cache": {"metrics": [], "metrics_none": "six counters (S6) and the KV page / checkpoint bookkeeping of the slots (S7: cross-TU calls as before, the bodies one reference load away from the members): no bench key of its own; the server benches (srv_cache_*, 32k prefill: ensurePages per chunk) and P5 of leg 2 cover it",
                           "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
    "server.cycle_prof": {"metrics": [], "metrics_none": "WHIRL_PROFILE only (off in the product default): no bench key (whirl-iso-server-cycle-prof-tests)",
                          "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "server_log_scan"]}},
@@ -772,7 +772,7 @@
   "server.engine": {
    "id": "N4", "desc": "the server engine (class Engine, src/server/engine.h): engine.cpp = construction, the request lifecycle and runLoop's scheduling phases; arch025-N4e / N4f split the rest of its member functions by concern, verbatim: engine_queue.cpp (the request queue: stop, runOnLoop, submitAndWait, abortQueued, the reaper), engine_pages.cpp (checkpoints, KV pages, shared prefix checkpoints), engine_tier.cpp (the scheduler's half of the host tiers), engine_prefill.cpp (prefill phases, decode floor), engine_decode.cpp (the decode cycle and its phases, drafts, DFlash2 context); engine_internal.h is what they include beyond engine.h (CycleProf from server.cycle_prof, KvPoolFull from server.engine_types, the log). Member groups are components (N4a SampleBuffers, N4b ImageEmbeddings, N4c BatchStats, N4f SpecState spec_ / FloorState fl_). Member declaration order = destruction order (pool_ / ps_ / tb_ / kv_arrays_ pinned by comments) is kept by every split (scratch/a25_lane1b/pin_member_order.py against 2d166f4)",
    "paths": ["src/server/engine.cpp", "src/server/engine.h", "src/server/engine_internal.h", "src/server/engine_decode.cpp",
-             "src/server/engine_pages.cpp", "src/server/engine_prefill.cpp", "src/server/engine_queue.cpp", "src/server/engine_tier.cpp"],
+             "src/server/engine_prefill.cpp", "src/server/engine_queue.cpp", "src/server/engine_tier.cpp"],
    "lands_on": "arch025-lane1b (lane 1 leg 3, registration with N4a; leg 4 N4e / N4f split files)",
    "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance",
              "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
@@ -952,12 +952,13 @@
    ]
   },
   "server.slot_cache": {
-   "id": "N4-S6",
-   "desc": "the KV pages of the slots (DESIGN v3 2.3 L2; S6 part: src/server/engine_pages.h, arch025-engine S6): class SlotPagesCounters, the shared prefix checkpoint and KV page counters (spe_new / spe_hits / spe_tok / spe_evict / unshare / evictions of Engine::stats) - the former Engine members stat_spe_new_ .. stat_evictions_, verbatim, private, same order and initial values; one write method per former write statement (engine_pages.cpp: evictFor, cowPages, dropSpe, createSpe, attachSpe) and six const reads (Engine::stats). Engine holds it as cnt_ where stat_spe_new_ was (same offsets: member-order pin). Header-only so far; S7 adds SlotPages sc_ (saveCkpt .. initPool, kvTokBytes) to the module. Isolated: tests/iso/server.slot_cache (header-only manifest, no dependency)",
+   "id": "N4-S6/S7",
+   "desc": "the KV pages and checkpoints of the slots (DESIGN v3 2.3 L2; src/server/engine_pages.{h,cpp}, arch025-engine S6 / S7). S6: class SlotPagesCounters, the shared prefix checkpoint and KV page counters (spe_new / spe_hits / spe_tok / spe_evict / unshare / evictions of Engine::stats) - the former Engine members stat_spe_new_ .. stat_evictions_, verbatim, private; Engine holds it as cnt_ where stat_spe_new_ was. S7: struct SlotPages, the former Engine member functions saveCkpt / dropCache / freePages / evictFor / takePage / cowPages / ensurePages (with the PagePool evictor SlotEvictor), dropSpe / createSpe / attachSpe / waitsForSys (shared prefix checkpoints), pagesFor / poolAvailable (admission arithmetic), initPool and the header-inline kvTokBytes, moved verbatim (engine_pages.cpp; only the definition lines changed), plus cacheCounters() for Engine::stats. An aggregate of references only: the core.shared members ck_ m_ ops_ opt_ pool_ ps_ slots_ tb_, the placed state kv_arrays_ conv_bytes_ ssm_bytes_ cnt_ (Engine keeps them where they were) and the drafter context dc_; Engine holds it as sc_, its last member (member-order pin). Isolated: tests/iso/server.slot_cache (engine_pages.cpp with page_pool, tier_bridge and what they declare, the drafter context headers; FakeServerModel over the NullBackend)",
    "paths": [
+    "src/server/engine_pages.cpp",
     "src/server/engine_pages.h"
    ],
-   "lands_on": "arch025-engine (leg 2, S6)",
+   "lands_on": "arch025-engine (leg 2, S6 / S7)",
    "steps": [
     "cpu_iso_server_slot_cache",
     "cpu_server",
@@ -985,10 +986,10 @@
    },
    "callers": "rdeps",
    "manual": [
-    "whirl-iso-server-slot-cache-tests (every counter starts at 0; each write method changes exactly its counter by the former statement's amount, the token count summed in 64 bits; the six reads; layout: 6 x uint64, alignof 8, standard layout, trivially destroyed) and the s6-cnt-* mutants of tools/impact/mutations.json",
-    "V-move: scratch/a25_engine/s6/apply_s6.py --check (the declarations verbatim after private:, each method body = the former statement; line multiset: every lost / added line explained) and s6/hdr_alone.py",
-    "V-text: tools/impact/revtext.py --rules scratch/a25_engine/s6/revtext_rules_s6.json (cnt_.noteX(k) -> the former statement, cnt_.x() -> stat_x_)",
-    "V-obj: objeq against the 421e22b build: every product object identical (the methods inline to the former code at the same offsets; scratch/a25_engine/s6/objeq_prediction.txt)"
+    "whirl-iso-server-slot-cache-tests: S6 counters (start at 0, each write method changes exactly its counter, 64-bit token sum, the six reads, layout) and S7 SlotPages (aggregate of 13 references, trivially destroyed; initPool / kvTokBytes, pagesFor, ensurePages / takePage evicting an idle slot, poolAvailable, dropSpe, dropCache / waitsForSys / saveCkpt guards, cacheCounters) with the s6-cnt-* and s7-pages-* mutants of tools/impact/mutations.json",
+    "V-move: scratch/a25_engine/s6/apply_s6.py --check and scratch/a25_engine/s7/apply_s7.py --check (declarations and bodies verbatim, only the definition lines changed; line multiset: every lost / added line explained)",
+    "V-text: tools/impact/revtext.py --rules scratch/a25_engine/s7/revtext_rules_s7.json (rules.added declares the new entries)",
+    "V-obj: objeq against the f07e6a0 build (scratch/a25_engine/s7/objeq_prediction.txt: the engine TUs that call the moved functions and server_main (sizeof(Engine)) differ, every other product object identical)"
    ]
   },
   "server.cycle_prof": {

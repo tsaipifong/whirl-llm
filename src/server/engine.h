@@ -64,7 +64,7 @@
 #include "server/engine_state.h"    // BatchStats, SpecState, FloorState
 #include "server/engine_drafter.h"   // DrafterCtx (arch025-engine S4, module server.drafter_ctx)
 #include "server/engine_output.h"    // emit, flushOut, writeError (arch025-engine S5, module server.slot_output)
-#include "server/engine_pages.h"     // SlotPagesCounters (arch025-engine S6, module server.slot_cache)
+#include "server/engine_pages.h"     // SlotPagesCounters, SlotPages (arch025-engine S6 / S7, module server.slot_cache)
 
 namespace whirl::server {
 
@@ -166,22 +166,7 @@ public:
     Stats statsShared() const override;
 
 private:
-    // checkpoints
-    void saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::optional<DevPtr> hid, std::optional<DevPtr> logits);
-    void dropCache(Slot& sl);
-    void freePages(Slot& sl);
-    // pages (arch024 M3: the bookkeeping is pool_'s; these pass the slot's pages and the evictor)
-    struct SlotEvictor;  // PagePool::Evictor over the idle slots and shared checkpoints (prefix cache's choice)
-    bool evictFor(Slot* sl);
-    std::optional<std::int32_t> takePage(Slot* sl);
-    void cowPages(Slot& sl, std::uint32_t reuse, bool spill);
-    bool ensurePages(Slot& sl, std::uint64_t n_tok);
-    // shared prefix checkpoints (the table, the lookups and the schedule: ps_)
-    void dropSpe(Spe& s);
-    void createSpe(Slot& sl, std::span<const std::uint32_t> toks_all, std::uint32_t pos, const char* kind,
-                   std::optional<DevPtr> hid_row, const Ckpt* src, std::uint64_t tier_id);
-    void attachSpe(Slot& sl, Spe& s);
-    bool waitsForSys(Job& job);
+    // the KV pages and checkpoints of the slots: sc_ (arch025-engine S7, module server.slot_cache)
     bool waitsForTier(Job& job);
     void prefetchFor(Job& job);
     // request lifecycle
@@ -235,10 +220,6 @@ private:
     void failSlot(Slot& sl, const std::string& err);
     // FR-SRV P2-2: queued / running requests whose client disconnected end (slot freed)
     void reapDisconnected();
-    // FR-SRV P2-3: pool pages a prompt of n_tok tokens needs; pages free or evictable now minus
-    // what the running prefills still need
-    std::size_t pagesFor(std::uint64_t n_tok) const;
-    std::size_t poolAvailable() const;
     void logBatchStats(bool force);
     // samples the WDDM probe (warns through vram_watch_); "" without a probe
     std::string vramNote();
@@ -256,11 +237,6 @@ private:
     void govDrain();
     void govPublish();
     std::uint32_t ctxForNew() const { return std::min(ctx_, ctx_new_); }
-    std::uint64_t kvTokBytes() const {
-        std::uint64_t b = 0;
-        for (const KvArr& a : kv_arrays_) b += a.row;
-        return b;
-    }
 
     ServerModel& m_;
     device::Backend& ops_;
@@ -346,6 +322,10 @@ private:
     // DFlash2 drafter context of a slot (arch025-engine S4, module server.drafter_ctx): references to bst_, m_, opt_
     // only; the last member, destroyed first, trivial destructor (DESIGN v3 2.5)
     DrafterCtx dc_{bst_, m_, opt_};
+    // KV pages and checkpoints of the slots (arch025-engine S7, module server.slot_cache): references only - core.shared
+    // ck_ .. tb_, slot_cache's placed state kv_arrays_ / conv_bytes_ / ssm_bytes_ / cnt_ (here, where they were) and
+    // dc_; after dc_, the last member, destroyed first, trivial destructor (DESIGN v3 2.5)
+    SlotPages sc_{ck_, m_, ops_, opt_, pool_, ps_, slots_, tb_, kv_arrays_, conv_bytes_, ssm_bytes_, cnt_, dc_};
 };
 
 }  // namespace whirl::server

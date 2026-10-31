@@ -308,7 +308,11 @@ def selftest(work):
     cut = os.path.join(REPO, "tools", "gates", "engine_cut.json")
     eh = "server/engine_pages.cpp"
     src = open(os.path.join(REPO, "src", eh), encoding="utf-8").read()
-    m = re.search(r"void Engine::dropCache\(Slot& sl\) \{\n((?:    [^\n]*\n){2})", src)
+    # arch025-engine S7: dropCache is SlotPages's since S7 (engine_pages.cpp); the cases anchor on the definition the
+    # tree has (DC / DCLS), so they mean the same on trees before and after S7
+    DCLS = next((c for c in ("SlotPages", "Engine") if f"void {c}::dropCache(Slot& sl) {{" in src), "Engine")
+    DC = f"void {DCLS}::dropCache(Slot& sl) {{"
+    m = re.search(re.escape(DC) + r"\n((?:    [^\n]*\n){2})", src)
     cases = []
 
     def tree(name, text, extra=None, rel=eh):
@@ -348,7 +352,7 @@ def selftest(work):
         case("a log text changed (string literal)", t2, {}, 1)
         lit = re.search(r'\("([^"]*)"', lg.group(1)).group(1)
         # revtextfix: allowed_diffs name their entry ("*" is a rules error); the entry is the function around the log line
-        lent = re.findall(r"(?m)^[^\s#/][^\n]*?\b(?:Engine::)?(\w+)\([^\n]*\{\s*$", src[:lg.start() + 1])[-1]
+        lent = re.findall(r"(?m)^[^\s#/][^\n]*?\b(?:(?:Engine|SlotPages)::)?(\w+)\([^\n]*\{\s*$", src[:lg.start() + 1])[-1]
         case("the same change listed in allowed_diffs", t2,
              {"allowed_diffs": [{"entry": lent, "old": '"' + lit + '"', "new": '"x' + lit + '"', "why": "selftest"}]}, 0)
         # revtextfix (S0 review C-6 / S0b review C-4): replace rules work on token boundaries - a string literal is one
@@ -357,9 +361,9 @@ def selftest(work):
              {"replace": [["zq_.", ""]]}, 1, expect=rf"^  DIFF {lent} at token")
     else:
         cases.append(("log anchor", False))
-    # a move with rules: dropCache becomes SlotPages::dropCache with this-> -> sc_. (rules map it back)
-    mv = src.replace("void Engine::dropCache(Slot& sl) {", "void SlotPages::dropCache(Slot& sl) {", 1)
-    case("a move SlotPages::dropCache with the mapping rule", mv, {"replace": [["SlotPages::dropCache", "Engine::dropCache"]]}, 0)
+    # a move with rules: dropCache becomes PrefillPhase::dropCache (before S7: Engine -> SlotPages; rules map it back)
+    mv = src.replace(DC, "void PrefillPhase::dropCache(Slot& sl) {", 1)
+    case("a move PrefillPhase::dropCache with the mapping rule", mv, {"replace": [["PrefillPhase::dropCache", f"{DCLS}::dropCache"]]}, 0)
     case("the same move without the rule", mv, {}, 1)
     # S0b (S0 review act-on 4, scratch/a25_engine/s0review/rt_new): in-class initializers / member types were not compared
     hh = "server/engine.h"
@@ -391,7 +395,7 @@ def selftest(work):
              {"added": {"member:extra_s_": {"equals": "int extra_s_ = 0;", "why": "selftest"}}}, 0, rel=hh)
     else:
         cases.append(("A/N member anchors", False))
-    dm = re.search(r"void Engine::dropCache\(Slot& sl\) \{\n((?:    [^\n]*\n)+)\}\n", src)
+    dm = re.search(re.escape(DC) + r"\n((?:    [^\n]*\n)+)\}\n", src)
     if dm:
         whole, inner = dm.group(0), dm.group(1)
         cp = src.replace(whole, whole + "\n" + whole.replace("dropCache(", "dropCache2(", 1), 1)
@@ -415,7 +419,7 @@ def selftest(work):
              expect=r"^  RENAME COLLISION dropCache: new entries dropCache and dropCache2")
         case("R1b two renames onto one old entry is a rules error", cp,
              {"renames": {"dropCache2": "dropCache", "dropCache": "dropCache"}}, 2, expect=r"^revtext: rules error: renames are not one to one")
-        rn_ = src.replace("void Engine::dropCache(Slot& sl) {", "void Engine::dropCacheX(Slot& sl) {", 1)
+        rn_ = src.replace(DC, f"void {DCLS}::dropCacheX(Slot& sl) {{", 1)
         case("R2 a real rename dropCache -> dropCacheX with its rules (control)", rn_,
              {"renames": {"dropCacheX": "dropCache"}, "replace": [["dropCacheX", "dropCache"]]}, 0, expect=r"^revtext: ok \(")
         case("R3 a rename onto a name the old tree does not have", cp, {"renames": {"dropCache2": "noSuchEntry"}}, 1,

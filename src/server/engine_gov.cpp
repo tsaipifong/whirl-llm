@@ -116,8 +116,8 @@ void Engine::govTick(const wddmwatch::Sample& s) {
     if (p.hold_admission && !gov_hold_)
         logW("memory governor: new requests queue until the running request(s) finish, then the KV pool is re-allocated smaller "
              "({} -> {} tokens, {:.2f} -> {:.2f} GiB)",
-             in.pool, p.pool_target.value_or(in.pool), static_cast<double>(m_.poolPages()) * kv_page * kvTokBytes() / kGiB,
-             static_cast<double>(p.pool_target.value_or(in.pool)) * kvTokBytes() / kGiB);
+             in.pool, p.pool_target.value_or(in.pool), static_cast<double>(m_.poolPages()) * kv_page * sc_.kvTokBytes() / kGiB,
+             static_cast<double>(p.pool_target.value_or(in.pool)) * sc_.kvTokBytes() / kGiB);
     if (p.ctx_new != ctxForNew())
         logI("memory governor: context for new requests {} -> {} tokens ({}; running requests keep theirs)", ctxForNew(), p.ctx_new,
              p.ctx_new < ctxForNew() ? "the smaller KV pool holds no more" : "the KV pool holds it again");
@@ -153,7 +153,7 @@ void Engine::govFreeCache(bool park) {
         if (!sl.pages.empty()) {
             ++n_sl;
             n_pages += sl.pages.size();
-            freePages(sl);
+            sc_.freePages(sl);
         }
         if (park && !sl.parked && !sl.ckpts.empty()) {
             ck_bytes += parkSlotCkpts(ck_, sl);
@@ -165,7 +165,7 @@ void Engine::govFreeCache(bool park) {
             if (!sp.valid) continue;
             ++n_spe;
             n_pages += sp.pages.size();
-            dropSpe(sp);
+            sc_.dropSpe(sp);
         }
         if (park && !spe_parked_ && !ps_.spes().empty()) {
             ps_.waitSpeFences();
@@ -249,12 +249,12 @@ bool Engine::govResize(std::uint32_t tokens, bool shrink) {
     for (Slot& sl : slots_) {
         if (sl.pages.empty() && sl.cache_tokens.empty()) continue;
         ++n_sl;
-        freePages(sl);
+        sc_.freePages(sl);
     }
     for (Spe& sp : ps_.spes()) {
         if (!sp.valid) continue;
         ++n_spe;
-        dropSpe(sp);
+        sc_.dropSpe(sp);
     }
     pool_.reclaim(true);
     // 2. the pool itself (the decode path of the server keeps no captured graph: model.use_graph is off in whirl-server)
@@ -266,7 +266,7 @@ bool Engine::govResize(std::uint32_t tokens, bool shrink) {
         throw;
     }
     // 3. page bookkeeping and the tier's view of the pool arrays (the per-token layout is unchanged)
-    initPool();
+    sc_.initPool();
     const double ms = msSince(t0);
     // the WDDM usage follows a free over ~0.1-0.3 s: read it until two reads 50 ms apart agree (at most 1 s; every slot is
     // idle, a request that arrives meanwhile waits at most that long)
@@ -285,14 +285,14 @@ bool Engine::govResize(std::uint32_t tokens, bool shrink) {
         return false;
     }
     gov_resize_before_ = before.ok ? before.local_usage : 0;
-    gov_resize_delta_ = (static_cast<std::int64_t>(now_tok) - static_cast<std::int64_t>(old)) * static_cast<std::int64_t>(kvTokBytes());
+    gov_resize_delta_ = (static_cast<std::int64_t>(now_tok) - static_cast<std::int64_t>(old)) * static_cast<std::int64_t>(sc_.kvTokBytes());
     std::string vr;
     if (before.ok && after.ok)
         vr = std::format("; WHIRL's VRAM {:.2f} -> {:.2f} GiB, budget {:.2f} GiB", before.local_usage / kGiB, after.local_usage / kGiB,
                          after.local_budget / kGiB);
     logW("memory governor: KV pool re-allocated {} -> {} tokens ({:.2f} -> {:.2f} GiB) in {:.0f} ms with every slot idle; VRAM "
          "prefix cache of {} slot(s) and {} shared checkpoint(s) dropped first (the RAM tier keeps what it had){}",
-         old, now_tok, static_cast<double>(old) * kvTokBytes() / kGiB, static_cast<double>(now_tok) * kvTokBytes() / kGiB, ms, n_sl,
+         old, now_tok, static_cast<double>(old) * sc_.kvTokBytes() / kGiB, static_cast<double>(now_tok) * sc_.kvTokBytes() / kGiB, ms, n_sl,
          n_spe, vr);
     gov_last_ = std::format("pool {} -> {} tokens", old, now_tok);
     return true;
@@ -324,7 +324,7 @@ void Engine::govApply() {
         if (o && s.ok) {
             const std::uint64_t margin_full = gov_margin_ ? gov_margin_(s.local_budget) : 0;
             const std::uint32_t pool = pool_.pages() * kv_page;
-            const std::uint64_t page_b = kvTokBytes() * kv_page;
+            const std::uint64_t page_b = sc_.kvTokBytes() * kv_page;
             const auto addFor = [&](std::uint64_t m) {
                 const std::uint64_t used = s.local_usage + o->now + m;
                 const std::uint64_t room = gov_vram_total_ > used ? gov_vram_total_ - used : 0;
@@ -338,7 +338,7 @@ void Engine::govApply() {
                 margin = memgov::endMargin(margin_full);
                 capped = *target;
             }
-            const std::uint64_t min_add = std::min<std::uint64_t>(gov_->config().min_grow / std::max<std::uint64_t>(kvTokBytes(), 1),
+            const std::uint64_t min_add = std::min<std::uint64_t>(gov_->config().min_grow / std::max<std::uint64_t>(sc_.kvTokBytes(), 1),
                                                                   *target - pool);
             if (capped <= pool || capped - pool < min_add) {
                 if (!gov_grow_denied_logged_)
