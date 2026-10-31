@@ -14,14 +14,7 @@ template <int T>
 __device__ void moe_gu_f_impl(const uint8_t *__restrict__ W1, const uint8_t *__restrict__ W2, uint64_t row_bytes, int ff, int nrows,
                               const float *__restrict__ h, const int *__restrict__ ids, float *__restrict__ y1, float *__restrict__ y2,
                               int C, int K) {
-    const int lane = threadIdx.x % WARP;
-    const int row = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;
-    if (row >= nrows) return;
-    const int p = blockIdx.y;
-    const int t = p / K, e = ids[p];
-    const bool second = row >= ff;
-    const int r = second ? row - ff : row;
-    const uint8_t *wr = (second ? W2 : W1) + ((size_t)e * ff + r) * row_bytes;
+#include "shared/moe_gu_pair.h"  // lane, row, p, t, e, second, r, wr (ADR-0005)
     const float *x = h + (size_t)t * C;
     float acc = 0.f;
     for (int g = lane; g < C / 8; g += WARP) {
@@ -129,14 +122,7 @@ extern "C" __global__ void __launch_bounds__(256) moe_gu_f_mxfp4(const uint8_t *
                                                                 uint64_t row_bytes, int ff, int nrows, const float *__restrict__ h,
                                                                 const int *__restrict__ ids, float *__restrict__ y1,
                                                                 float *__restrict__ y2, int C, int K) {
-    const int lane = threadIdx.x % WARP;
-    const int row = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;
-    if (row >= nrows) return;
-    const int p = blockIdx.y;
-    const int t = p / K, e = ids[p];
-    const bool second = row >= ff;
-    const int r = second ? row - ff : row;
-    const uint8_t *wr = (second ? W2 : W1) + ((size_t)e * ff + r) * row_bytes;
+#include "shared/moe_gu_pair.h"  // lane, row, p, t, e, second, r, wr (ADR-0005)
     const float *x = h + (size_t)t * C;
     float acc = 0.f;
     for (int b = lane; b < C / 32; b += WARP) acc += mxf_blk(wr, b, x);

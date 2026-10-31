@@ -400,18 +400,7 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
     // Q^T fragments (B operand): column = (query, head), k = dims 16s + 8*(lane/16) ..
     // Q^T (f16) for the group's columns in LDS; column c = (query c / grp, head c % grp)
     for (int i = threadIdx.x; i < 16 * CG * (AW_D / 8); i += blockDim.x) {
-        const int c = i / (AW_D / 8), d8 = (i % (AW_D / 8)) * 8;
-        half8 v8;
-        if (c < ncol) {
-            const float *qr = q + ((size_t)(first + c / grp) * n_head + g * grp + c % grp) * q_stride + d8;
-            const float4 a = *(const float4 *)qr, b = *(const float4 *)(qr + 4);
-            v8 = (half8){(_Float16)a.x, (_Float16)a.y, (_Float16)a.z, (_Float16)a.w,
-                         (_Float16)b.x, (_Float16)b.y, (_Float16)b.z, (_Float16)b.w};
-        } else {
-#pragma unroll
-            for (int e = 0; e < 8; ++e) v8[e] = (_Float16)0.f;
-        }
-        *(half8 *)&Qs[c][d8] = v8;
+#include "shared/attn_qs_f16.h"  // Qs[c][d8..+8) = f16 Q of column c (ADR-0005)
     }
     float8 o[AW_D / 16];
 #pragma unroll
@@ -854,17 +843,7 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
     const int my_pos = pos0 + my_qc;
 
     // Q^T fragments (B operand): column = query, k = dims 16s + 8*(lane/16) ..
-    half8 qf[FA_D / 16];
-    {
-        const float *qr = q + ((size_t)my_qc * n_head + h) * q_stride;
-#pragma unroll
-        for (int st = 0; st < FA_D / 16; ++st) {
-            const float4 a = *(const float4 *)(qr + 16 * st + 8 * (lane / 16));
-            const float4 b = *(const float4 *)(qr + 16 * st + 8 * (lane / 16) + 4);
-            qf[st] = (half8){(_Float16)a.x, (_Float16)a.y, (_Float16)a.z, (_Float16)a.w,
-                             (_Float16)b.x, (_Float16)b.y, (_Float16)b.z, (_Float16)b.w};
-        }
-    }
+#include "shared/attn_fa_qfrag.h"  // half8 qf[FA_D / 16]: Q^T fragments of query my_qc (ADR-0005)
     float8 o[FA_D / 16];
 #pragma unroll
     for (int dt = 0; dt < FA_D / 16; ++dt) o[dt] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
@@ -931,32 +910,7 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
             }
         }
         // causal mask + online softmax (per lane = per query; partner lane ^16)
-        float mx = -INFINITY;
-#pragma unroll
-        for (int kt = 0; kt < FA_K / 16; ++kt)
-#pragma unroll
-            for (int v = 0; v < 8; ++v) {
-                const int key = k0 + kt * 16 + 8 * (lane / 16) + v;
-                const float x = (key <= my_pos) ? sc[kt][v] * scale : -INFINITY;
-                sc[kt][v] = x;
-                mx = fmaxf(mx, x);
-            }
-        mx = fmaxf(mx, __shfl_xor(mx, 16, WARP));
-        const float m_new = fmaxf(m, mx);
-        const float alpha = (m == -INFINITY) ? 0.f : __expf(m - m_new);
-        float rs = 0.f;
-        half8 pt[FA_K / 16];
-#pragma unroll
-        for (int kt = 0; kt < FA_K / 16; ++kt)
-#pragma unroll
-            for (int v = 0; v < 8; ++v) {
-                const float p = (sc[kt][v] == -INFINITY) ? 0.f : __expf(sc[kt][v] - m_new);
-                rs += p;
-                pt[kt][v] = (_Float16)p;
-            }
-        rs += __shfl_xor(rs, 16, WARP);
-        l = l * alpha + rs;
-        m = m_new;
+#include "shared/attn_fa_softmax.h"  // mask + online softmax of the key tile (ADR-0005)
         // alpha == 1 on every lane (running max unchanged: the common case
         // deep into a long context) makes the rescale an exact no-op; skip it
         if (MODE != 2 && __builtin_amdgcn_ballot_w32(alpha != 1.f)) {

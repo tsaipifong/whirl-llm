@@ -101,20 +101,7 @@ __device__ __forceinline__ void gemms_impl(const uint8_t *__restrict__ W, uint64
     for (int i = 0; i < TM; ++i)
 #pragma unroll
         for (int j = 0; j < TN; ++j) {
-            const int t = t0 + (wn * TN + j) * 16 + lane % 16;
-            if (t >= n_tok) continue;
-#pragma unroll
-            for (int v = 0; v < 8; ++v) {
-                const int row = m0 + (wm * TM + i) * 16 + 8 * (lane / 16) + v;
-                if (row < nrows) {
-                    if (OH) {
-                        ((_Float16 *)Y)[(size_t)t * nrows + row] = (_Float16)acc[i][j][v];
-                    } else {
-                        float *dst = Y + (size_t)t * nrows + row;
-                        *dst = accumulate ? *dst + acc[i][j][v] : acc[i][j][v];
-                    }
-                }
-            }
+#include "shared/gemm_store_ij.h"  // Y[t][row] of accumulator (i, j) (ADR-0005)
         }
 }
 
@@ -239,20 +226,7 @@ __device__ __forceinline__ void gemmsd_impl(const uint8_t *__restrict__ W, uint6
     for (int i = 0; i < TM; ++i)
 #pragma unroll
         for (int j = 0; j < TN; ++j) {
-            const int t = t0 + (wn * TN + j) * 16 + lane % 16;
-            if (t >= n_tok) continue;
-#pragma unroll
-            for (int v = 0; v < 8; ++v) {
-                const int row = m0 + (wm * TM + i) * 16 + 8 * (lane / 16) + v;
-                if (row < nrows) {
-                    if (OH) {
-                        ((_Float16 *)Y)[(size_t)t * nrows + row] = (_Float16)acc[i][j][v];
-                    } else {
-                        float *dst = Y + (size_t)t * nrows + row;
-                        *dst = accumulate ? *dst + acc[i][j][v] : acc[i][j][v];
-                    }
-                }
-            }
+#include "shared/gemm_store_ij.h"  // Y[t][row] of accumulator (i, j) (ADR-0005)
         }
 }
 extern "C" __global__ void __launch_bounds__(128) gemms_c0_q8_0(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemms_impl<QT_Q8_0, 64, 32, 128, 4, false>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }

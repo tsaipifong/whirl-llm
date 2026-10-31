@@ -59,24 +59,7 @@ template <> __device__ __forceinline__ void wunit<QT_Q4_K>(const uint8_t *row, i
 }
 
 template <> __device__ __forceinline__ void wunit<QT_Q5_K>(const uint8_t *row, int u, WUnit &o) {
-    const int b = u >> 2, j = u & 3;
-    const uint8_t *blk = row + (size_t)b * 176;
-    const uint32_t dm = *(const uint32_t *)blk;
-    const float d = __half2float(__ushort_as_half((uint16_t)(dm & 0xFFFF)));
-    const float dmin = __half2float(__ushort_as_half((uint16_t)(dm >> 16)));
-    int s0, m0, s1, m1;
-    scale_min_k4(2 * j, blk + 4, s0, m0);
-    scale_min_k4(2 * j + 1, blk + 4, s1, m1);
-    o.s0 = d * s0;
-    o.s1 = d * s1;
-    o.m0 = dmin * m0;
-    o.m1 = dmin * m1;
-    const uint4 qa = *(const uint4 *)(blk + 48 + 32 * j);
-    const uint4 qb = *(const uint4 *)(blk + 64 + 32 * j);
-    const uint4 ha = *(const uint4 *)(blk + 16);
-    const uint4 hb = *(const uint4 *)(blk + 32);
-    const uint32_t q[8] = {qa.x, qa.y, qa.z, qa.w, qb.x, qb.y, qb.z, qb.w};
-    const uint32_t h[8] = {ha.x, ha.y, ha.z, ha.w, hb.x, hb.y, hb.z, hb.w};
+#include "shared/wunit11_q5k_head.h"  // b, j, blk, o scales / mins, q[8], h[8] (ADR-0005)
 #pragma unroll
     for (int k = 0; k < 8; ++k) {
         o.w[k] = (q[k] & 0x0F0F0F0F) | (((h[k] >> (2 * j)) & 0x01010101) << 4);
@@ -85,18 +68,7 @@ template <> __device__ __forceinline__ void wunit<QT_Q5_K>(const uint8_t *row, i
 }
 
 template <> __device__ __forceinline__ void wunit<QT_IQ4_XS>(const uint8_t *row, int u, WUnit &o) {
-    const int b = u >> 2, pp = u & 3;
-    const uint8_t *blk = row + (size_t)b * 136;
-    const uint32_t hdr = *(const uint32_t *)blk;
-    const float d = __half2float(__ushort_as_half((uint16_t)(hdr & 0xFFFF)));
-    const uint32_t sh = hdr >> 16;
-    const int ib0 = 2 * pp, ib1 = 2 * pp + 1;
-    const int ls0 = (blk[4 + pp] & 0xF) | (((sh >> (2 * ib0)) & 3) << 4);
-    const int ls1 = (blk[4 + pp] >> 4) | (((sh >> (2 * ib1)) & 3) << 4);
-    o.s0 = d * (ls0 - 32);
-    o.s1 = d * (ls1 - 32);
-    o.m0 = 0.f;
-    o.m1 = 0.f;
+#include "shared/wunit11_iq4xs_head.h"  // b, pp, blk, o scales (ADR-0005)
     const uint4 qa = *(const uint4 *)(blk + 8 + 32 * pp);
     const uint4 qb = *(const uint4 *)(blk + 24 + 32 * pp);
     const uint32_t a[4] = {qa.x, qa.y, qa.z, qa.w}, c[4] = {qb.x, qb.y, qb.z, qb.w};
@@ -144,18 +116,7 @@ template <> struct SplitDec<QT_Q5_K> { static constexpr bool on = GFX1151_SPLIT_
 template <int T> __device__ __forceinline__ void wunit_half(const uint8_t *row, int u, int hs, int *w, WUnit &o);
 
 template <> __device__ __forceinline__ void wunit_half<QT_IQ4_XS>(const uint8_t *row, int u, int hs, int *w, WUnit &o) {
-    const int b = u >> 2, pp = u & 3;
-    const uint8_t *blk = row + (size_t)b * 136;
-    const uint32_t hdr = *(const uint32_t *)blk;
-    const float d = __half2float(__ushort_as_half((uint16_t)(hdr & 0xFFFF)));
-    const uint32_t sh = hdr >> 16;
-    const int ib0 = 2 * pp, ib1 = 2 * pp + 1;
-    const int ls0 = (blk[4 + pp] & 0xF) | (((sh >> (2 * ib0)) & 3) << 4);
-    const int ls1 = (blk[4 + pp] >> 4) | (((sh >> (2 * ib1)) & 3) << 4);
-    o.s0 = d * (ls0 - 32);
-    o.s1 = d * (ls1 - 32);
-    o.m0 = 0.f;
-    o.m1 = 0.f;
+#include "shared/wunit11_iq4xs_head.h"  // b, pp, blk, o scales (ADR-0005)
     const uint4 qa = *(const uint4 *)(blk + 8 + 32 * pp + 16 * hs);
     const uint32_t a[4] = {qa.x, qa.y, qa.z, qa.w};
 #pragma unroll
@@ -183,24 +144,7 @@ template <> __device__ __forceinline__ void wunit_half<QT_MXFP4>(const uint8_t *
 }
 
 template <> __device__ __forceinline__ void wunit_half<QT_Q5_K>(const uint8_t *row, int u, int hs, int *w, WUnit &o) {
-    const int b = u >> 2, j = u & 3;
-    const uint8_t *blk = row + (size_t)b * 176;
-    const uint32_t dm = *(const uint32_t *)blk;
-    const float d = __half2float(__ushort_as_half((uint16_t)(dm & 0xFFFF)));
-    const float dmin = __half2float(__ushort_as_half((uint16_t)(dm >> 16)));
-    int s0, m0, s1, m1;
-    scale_min_k4(2 * j, blk + 4, s0, m0);
-    scale_min_k4(2 * j + 1, blk + 4, s1, m1);
-    o.s0 = d * s0;
-    o.s1 = d * s1;
-    o.m0 = dmin * m0;
-    o.m1 = dmin * m1;
-    const uint4 qa = *(const uint4 *)(blk + 48 + 32 * j);
-    const uint4 qb = *(const uint4 *)(blk + 64 + 32 * j);
-    const uint4 ha = *(const uint4 *)(blk + 16);
-    const uint4 hb = *(const uint4 *)(blk + 32);
-    const uint32_t q[8] = {qa.x, qa.y, qa.z, qa.w, qb.x, qb.y, qb.z, qb.w};
-    const uint32_t h[8] = {ha.x, ha.y, ha.z, ha.w, hb.x, hb.y, hb.z, hb.w};
+#include "shared/wunit11_q5k_head.h"  // b, j, blk, o scales / mins, q[8], h[8] (ADR-0005)
     const int qs = 4 * hs, hsh = 2 * j + hs;
 #pragma unroll
     for (int k = 0; k < 8; ++k) w[k] = ((q[k] >> qs) & 0x0F0F0F0F) | (((h[k] >> hsh) & 0x01010101) << 4);
@@ -259,20 +203,7 @@ template <int T, int NT, int TILES, bool HALF>
 __device__ void gemvw_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
                            const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int accumulate,
                            const int *__restrict__ skip, int bid = -1) {
-    constexpr int ROWS = HALF ? 8 : 16 * TILES;
-    constexpr int NTV = (NT + 1) / 2;
-    __shared__ float red[8][NT][ROWS];
-    if (skip != nullptr && *skip) return;
-    const int lane = threadIdx.x % WARP, w = threadIdx.x / WARP, h = lane >> 4, n = lane & 15;
-    const int r0 = (bid < 0 ? (int)blockIdx.x : bid) * ROWS;
-    const uint8_t *wr[TILES];
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + (HALF ? (n & 7) : n), nrows - 1) * row_bytes;
-    const bool tok_ok = n < NT;
-    const int8_t *xt = xq + (size_t)(tok_ok ? n : 0) * ncols;
-    const uint32_t *xp = (const uint32_t *)xd;
-    const int nb32 = ncols / 32;
-    const int nsb = ncols / 256;
+#include "shared/gemvw11_setup.h"  // ROWS, NTV, red, lane/w/h/n, r0, wr, tok_ok, xt, xp, nb32, nsb (ADR-0005)
     float acc[TILES][4][NTV];
 #pragma unroll
     for (int tt = 0; tt < TILES; ++tt)
@@ -328,21 +259,5 @@ __device__ void gemvw_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, co
             }
         }
     }
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt)
-#pragma unroll
-        for (int v = 0; v < NTV; ++v) {
-            const int t = 2 * v + h;
-            if (t < NT && (!HALF || n < 8)) red[w][t][tt * 16 + n] = (acc[tt][0][v] + acc[tt][1][v]) + (acc[tt][2][v] + acc[tt][3][v]);
-        }
-    __syncthreads();
-    for (int i = threadIdx.x; i < NT * ROWS; i += blockDim.x) {
-        const int t = i / ROWS, nn = i % ROWS, row = r0 + nn;
-        const float s = ((red[0][t][nn] + red[1][t][nn]) + (red[2][t][nn] + red[3][t][nn])) +
-                        ((red[4][t][nn] + red[5][t][nn]) + (red[6][t][nn] + red[7][t][nn]));
-        if (row < nrows) {
-            float *dst = y + (size_t)t * nrows + row;
-            *dst = accumulate ? *dst + s : s;
-        }
-    }
+#include "shared/gemvw11_red_store.h"  // acc -> red -> waves -> y (ADR-0005)
 }

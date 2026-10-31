@@ -68,23 +68,8 @@ template <int TILES, int NV, int XDS, int QT> struct GU_K {
 #pragma unroll
         for (int tt = 0; tt < TILES; ++tt) {
             const uint4 hd = p.hd[tt];
-            const float d = __half2float(__ushort_as_half((uint16_t)(hd.x & 0xFFFF)));
-            const float dmin = __half2float(__ushort_as_half((uint16_t)(hd.x >> 16)));
-            const int sel = 16 * (j & 1);
-            const uint32_t A = hd.y >> sel, B = hd.z >> sel, C = hd.w >> sel;
-            int s0, m0, s1, m1;
-            if constexpr (!J2) {
-                s0 = A & 63;
-                s1 = (A >> 8) & 63;
-                m0 = B & 63;
-                m1 = (B >> 8) & 63;
-            } else {
-                s0 = (C & 0xF) | (((A >> 6) & 3) << 4);
-                s1 = ((C >> 8) & 0xF) | (((A >> 14) & 3) << 4);
-                m0 = ((C >> 4) & 0xF) | (((B >> 6) & 3) << 4);
-                m1 = ((C >> 12) & 0xF) | (((B >> 14) & 3) << 4);
-            }
-            const float ds0 = d * s0, ds1 = d * s1, dm0 = dmin * m0, dm1 = dmin * m1;
+#define GKS_LOW_J constexpr (!J2)
+#include "shared/gemv_kscale.h"  // ds0, ds1, dm0, dm1 of sub-blocks 2j, 2j+1 (ADR-0005)
             const uint32_t q[4] = {p.qv[tt].x, p.qv[tt].y, p.qv[tt].z, p.qv[tt].w};
             int lo[4], hi[4];
             if constexpr (QT == QT_Q4_K) {
@@ -186,23 +171,7 @@ template <int TILES, int NV, int XDS, int QT> struct GU_4L {
         }
 #pragma unroll
         for (int tt = 0; tt < TILES; ++tt) {
-            float dl0, dl1;
-            if constexpr (QT == QT_IQ4_XS) {
-                const uint32_t hdr = p.hdr[tt];
-                const float d = __half2float(__ushort_as_half((uint16_t)(hdr & 0xFFFF)));
-                const uint32_t sh = hdr >> 16;
-                const int ib0 = 2 * pp, ib1 = 2 * pp + 1;
-                const uint32_t sl = (p.sc[tt] >> (8 * pp)) & 0xFF;
-                const int ls0 = (sl & 0xF) | (((sh >> (2 * ib0)) & 3) << 4);
-                const int ls1 = (sl >> 4) | (((sh >> (2 * ib1)) & 3) << 4);
-                dl0 = d * (ls0 - 32);
-                dl1 = d * (ls1 - 32);
-            } else {
-                const uint32_t ee = p.hdr[tt];
-                dl0 = e8m0_half(ee & 0xFF);
-                dl1 = e8m0_half(ee >> 8);
-            }
-            const uint2 g0 = p.g0[tt], g1 = p.g1[tt];
+#include "shared/gemv_unit4_scales.h"  // dl0, dl1, g0, g1 of tile tt (ADR-0005)
             wi8 c0, c1;
             if constexpr (QT == QT_IQ4_XS) {
                 c0 = wmma_iu8(p.a0.x, p.a0.y, IQ4F(g0.x & 0x0F0F0F0F), IQ4F(g0.y & 0x0F0F0F0F), z);
@@ -266,14 +235,7 @@ __device__ __forceinline__ void gw2_impl(const uint8_t *__restrict__ W, uint64_t
     constexpr int NV = NT < 8 ? NT : 8;
     __shared__ float red[8][NT][ROWS];
     if (skip != nullptr && *skip) return;
-    const int lane = threadIdx.x % WARP, h = lane >> 4, n = lane & 15;
-    const int w = __builtin_amdgcn_readfirstlane(threadIdx.x / WARP);
-    const int r0 = bid * ROWS;
-    const uint8_t *wr[TILES];
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + n, nrows - 1) * row_bytes;
-    const int8_t *xt = xq + (size_t)min(n, NT - 1) * ncols;
-    const int nb32 = ncols / 32;
+#include "shared/gemvw_rows.h"  // lane, h, n, w, r0, wr[TILES], xt, nb32 (ADR-0005)
     const int nu = GU<T, TILES, NV, XDS>::units(ncols);
     const int t0 = 8 * h;
     float acc[4][TILES][NV];
@@ -287,23 +249,7 @@ __device__ __forceinline__ void gw2_impl(const uint8_t *__restrict__ W, uint64_t
         gw2_loop<T, NT, TILES, XDS, true, DEPTH>(wr, xt, xd, nb32, nu, w, h, t0, lane, acc);
     else
         gw2_loop<T, NT, TILES, XDS, false, DEPTH>(wr, xt, xd, nb32, nu, w, h, t0, lane, acc);
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt)
-#pragma unroll
-        for (int v = 0; v < NV; ++v) {
-            const int t = t0 + v;
-            if (t < NT) red[w][t][tt * 16 + n] = (acc[0][tt][v] + acc[2][tt][v]) + (acc[1][tt][v] + acc[3][tt][v]);
-        }
-    __syncthreads();
-    for (int i = threadIdx.x; i < NT * ROWS; i += blockDim.x) {
-        const int t = i / ROWS, nn = i % ROWS, row = r0 + nn;
-        const float s = ((red[0][t][nn] + red[4][t][nn]) + (red[2][t][nn] + red[6][t][nn])) +
-                        ((red[1][t][nn] + red[5][t][nn]) + (red[3][t][nn] + red[7][t][nn]));
-        if (row < nrows) {
-            float *dst = y + (size_t)t * nrows + row;
-            *dst = accumulate ? *dst + s : s;
-        }
-    }
+#include "shared/gemvw_red_store.h"  // slots -> red -> waves -> y (ADR-0005)
 }
 // item V: Q6_K pipelined unit for gw2 (same unit / fragment / float expression as WMU<QT_Q6_K>).
 // u = 8b + 4n + g with u = w + 8k: n = (w >> 2) & 1 and g = w & 3 are wave constants, b = k.
@@ -368,23 +314,7 @@ template <int TILES, int NV, int XDS> struct GU<QT_Q6_K, TILES, NV, XDS> {
         for (int tt = 0; tt < TILES; ++tt) {
             const uint2 l = p.l[tt], hq = p.hq[tt], scw = p.scw[tt];
             const float dd = __half2float(__ushort_as_half((uint16_t)p.dd[tt]));
-            float scf[4];
-#pragma unroll
-            for (int q = 0; q < 4; ++q) {
-                const uint32_t word = (is + 2 * q) < 4 ? scw.x : scw.y;
-                scf[q] = (float)(int8_t)(word >> (8 * ((is + 2 * q) & 3)));
-            }
-            int wq[2][2];
-#pragma unroll
-            for (int e = 0; e < 2; ++e) {
-                const int qq = h + 2 * e;
-                const uint32_t L[2] = {l.x, l.y}, H[2] = {hq.x, hq.y};
-#pragma unroll
-                for (int k = 0; k < 2; ++k) {
-                    const uint32_t v = ((L[k] >> (4 * e)) & 0x0F0F0F0Fu) | (((H[k] >> (2 * qq)) & 0x03030303u) << 4);
-                    wq[e][k] = (int)(((v | 0x80808080u) - 0x20202020u) ^ 0x80808080u);
-                }
-            }
+#include "shared/gemv_q6_unit.h"  // scf[4], wq[2][2] (ADR-0005)
             const wi8 c0 = wmma_iu8(p.a01.x, p.a01.y, wq[0][0] & m0, wq[0][1] & m0, z);
             const wi8 c1 = wmma_iu8(p.a01.x, p.a01.y, wq[0][0] & m1, wq[0][1] & m1, z);
             const wi8 c2 = wmma_iu8(p.a23.x, p.a23.y, wq[1][0] & m0, wq[1][1] & m0, z);
@@ -567,14 +497,7 @@ __device__ __forceinline__ void gw8_impl(const uint8_t *__restrict__ W, uint64_t
         for (int i = threadIdx.x; i < 512; i += blockDim.x) grid_s[i] = k_iq3s_grid[i];
         __syncthreads();
     }
-    const int lane = threadIdx.x % WARP, h = lane >> 4, n = lane & 15;
-    const int w = __builtin_amdgcn_readfirstlane(threadIdx.x / WARP);
-    const int r0 = bid * ROWS;
-    const uint8_t *wr[TILES];
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + n, nrows - 1) * row_bytes;
-    const int8_t *xt = xq + (size_t)min(n, NT - 1) * ncols;
-    const int nb32 = ncols / 32;
+#include "shared/gemvw_rows.h"  // lane, h, n, w, r0, wr[TILES], xt, nb32 (ADR-0005)
     const int nsb = ncols / 256;
     const int t0 = 8 * h;
     float acc[4][TILES][NV];
@@ -601,23 +524,7 @@ __device__ __forceinline__ void gw8_impl(const uint8_t *__restrict__ W, uint64_t
         }
     }
     if (b < nsb) gw8_compute<T, NT, TILES>(p[0], wr, b, w, h, n, acc, grid_s);
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt)
-#pragma unroll
-        for (int v = 0; v < NV; ++v) {
-            const int t = t0 + v;
-            if (t < NT) red[w][t][tt * 16 + n] = (acc[0][tt][v] + acc[2][tt][v]) + (acc[1][tt][v] + acc[3][tt][v]);
-        }
-    __syncthreads();
-    for (int i = threadIdx.x; i < NT * ROWS; i += blockDim.x) {
-        const int t = i / ROWS, nn = i % ROWS, row = r0 + nn;
-        const float s = ((red[0][t][nn] + red[4][t][nn]) + (red[2][t][nn] + red[6][t][nn])) +
-                        ((red[1][t][nn] + red[5][t][nn]) + (red[3][t][nn] + red[7][t][nn]));
-        if (row < nrows) {
-            float *dst = y + (size_t)t * nrows + row;
-            *dst = accumulate ? *dst + s : s;
-        }
-    }
+#include "shared/gemvw_red_store.h"  // slots -> red -> waves -> y (ADR-0005)
 }
 
 #define GEMVW2_ENTRY(NT, V, TILES, DEPTH, SUF, T)                                                 \

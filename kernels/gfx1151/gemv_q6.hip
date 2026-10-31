@@ -78,20 +78,7 @@ template <int NT, int TILES, bool HALF>
 __device__ void gemvw6_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
                             const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int accumulate,
                             const int *__restrict__ skip, int bid = -1) {
-    constexpr int ROWS = HALF ? 8 : 16 * TILES;
-    constexpr int NTV = (NT + 1) / 2;
-    __shared__ float red[8][NT][ROWS];
-    if (skip != nullptr && *skip) return;
-    const int lane = threadIdx.x % WARP, w = threadIdx.x / WARP, h = lane >> 4, n = lane & 15;
-    const int r0 = (bid < 0 ? (int)blockIdx.x : bid) * ROWS;
-    const uint8_t *wr[TILES];
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + (HALF ? (n & 7) : n), nrows - 1) * row_bytes;
-    const bool tok_ok = n < NT;
-    const int8_t *xt = xq + (size_t)(tok_ok ? n : 0) * ncols;
-    const uint32_t *xp = (const uint32_t *)xd;
-    const int nb32 = ncols / 32;
-    const int nsb = ncols / 256;
+#include "shared/gemvw11_setup.h"  // ROWS, NTV, red, lane/w/h/n, r0, wr, tok_ok, xt, xp, nb32, nsb (ADR-0005)
     const int hn = w & 1;
     float acc[TILES][4][NTV];
 #pragma unroll
@@ -126,23 +113,7 @@ __device__ void gemvw6_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, c
             }
         }
     }
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt)
-#pragma unroll
-        for (int v = 0; v < NTV; ++v) {
-            const int t = 2 * v + h;
-            if (t < NT && (!HALF || n < 8)) red[w][t][tt * 16 + n] = (acc[tt][0][v] + acc[tt][1][v]) + (acc[tt][2][v] + acc[tt][3][v]);
-        }
-    __syncthreads();
-    for (int i = threadIdx.x; i < NT * ROWS; i += blockDim.x) {
-        const int t = i / ROWS, nn = i % ROWS, row = r0 + nn;
-        const float s = ((red[0][t][nn] + red[1][t][nn]) + (red[2][t][nn] + red[3][t][nn])) +
-                        ((red[4][t][nn] + red[5][t][nn]) + (red[6][t][nn] + red[7][t][nn]));
-        if (row < nrows) {
-            float *dst = y + (size_t)t * nrows + row;
-            *dst = accumulate ? *dst + s : s;
-        }
-    }
+#include "shared/gemvw11_red_store.h"  // acc -> red -> waves -> y (ADR-0005)
 }
 
 template <int T, int NT, int R>

@@ -61,23 +61,8 @@ struct WMU_K {  // Q4_K / Q5_K
         // header in one 16-byte load: d, dmin, scales[12]; scale_min_k4 for
         // sub-blocks 2j, 2j+1 without byte loads or branches (j is wave-uniform)
         const uint4 hd = *(const uint4 *)blk;
-        const float d = __half2float(__ushort_as_half((uint16_t)(hd.x & 0xFFFF)));
-        const float dmin = __half2float(__ushort_as_half((uint16_t)(hd.x >> 16)));
-        const int sel = 16 * (j & 1);
-        const uint32_t A = hd.y >> sel, B = hd.z >> sel, C = hd.w >> sel;  // sc[k], sc[k+4], sc[k+8], k = 2(j&1)
-        int s0, m0, s1, m1;
-        if (j < 2) {
-            s0 = A & 63;
-            s1 = (A >> 8) & 63;
-            m0 = B & 63;
-            m1 = (B >> 8) & 63;
-        } else {
-            s0 = (C & 0xF) | (((A >> 6) & 3) << 4);
-            s1 = ((C >> 8) & 0xF) | (((A >> 14) & 3) << 4);
-            m0 = ((C >> 4) & 0xF) | (((B >> 6) & 3) << 4);
-            m1 = ((C >> 12) & 0xF) | (((B >> 14) & 3) << 4);
-        }
-        const float ds0 = d * s0, ds1 = d * s1, dm0 = dmin * m0, dm1 = dmin * m1;
+#define GKS_LOW_J (j < 2)
+#include "shared/gemv_kscale.h"  // ds0, ds1, dm0, dm1 of sub-blocks 2j, 2j+1 (ADR-0005)
         const uint4 qv = *(const uint4 *)(blk + (T == QT_Q4_K ? 16 : 48) + 32 * j + 16 * h);
         const uint32_t q[4] = {qv.x, qv.y, qv.z, qv.w};
         int lo[4], hi[4];
@@ -118,16 +103,7 @@ template <> struct WMU<QT_IQ4_XS> {
     static __device__ __forceinline__ int units(int ncols) { return ncols / 256 * per_sb; }
     // sub-block 2p: values 8h..8h+8 (low nibbles) and 16+8h.. (high); same
     // for sub-block 2p+1 -> four 8-byte x pieces
-    struct X {
-        int2 a0, a1, c0, c1;
-    };
-    static __device__ __forceinline__ void load_x(const int8_t *xt, int u, int h, X &x) {
-        const int base = (u >> 2) * 256 + 64 * (u & 3) + 8 * h;
-        x.a0 = *(const int2 *)(xt + base);
-        x.a1 = *(const int2 *)(xt + base + 16);
-        x.c0 = *(const int2 *)(xt + base + 32);
-        x.c1 = *(const int2 *)(xt + base + 48);
-    }
+#include "shared/gemvw_unit4_x.h"  // struct X, load_x (ADR-0005)
     template <int NV>
     static __device__ __forceinline__ void run(const uint8_t *row, int u, int h, const X &x, const float *xd, int nb32,
                                                int t0, int ntm1, float *acc) {
@@ -140,22 +116,8 @@ template <> struct WMU<QT_IQ4_XS> {
         const int ls0 = (blk[4 + pp] & 0xF) | (((sh >> (2 * ib0)) & 3) << 4);
         const int ls1 = (blk[4 + pp] >> 4) | (((sh >> (2 * ib1)) & 3) << 4);
         const float dl0 = d * (ls0 - 32), dl1 = d * (ls1 - 32);
-        const uint2 g0 = *(const uint2 *)(blk + 8 + 32 * pp + 8 * h);
-        const uint2 g1 = *(const uint2 *)(blk + 24 + 32 * pp + 8 * h);
-        const wi8 z = {0, 0, 0, 0, 0, 0, 0, 0};
-        wi8 c0 = wmma_iu8(x.a0.x, x.a0.y, iq4_lut4(g0.x & 0x0F0F0F0F), iq4_lut4(g0.y & 0x0F0F0F0F), z);
-        c0 = wmma_iu8(x.a1.x, x.a1.y, iq4_lut4((g0.x >> 4) & 0x0F0F0F0F), iq4_lut4((g0.y >> 4) & 0x0F0F0F0F), c0);
-        wi8 c1 = wmma_iu8(x.c0.x, x.c0.y, iq4_lut4(g1.x & 0x0F0F0F0F), iq4_lut4(g1.y & 0x0F0F0F0F), z);
-        c1 = wmma_iu8(x.c1.x, x.c1.y, iq4_lut4((g1.x >> 4) & 0x0F0F0F0F), iq4_lut4((g1.y >> 4) & 0x0F0F0F0F), c1);
-        const int xi = (b * 256 + 64 * pp) >> 5;
-#pragma unroll
-        for (int v = 0; v < NV; ++v) {
-            const int t = min(t0 + v, ntm1);
-            const float *xdt = xd + (size_t)t * nb32 + xi;
-            const float x0 = xdt[0], x1 = xdt[1];
-            const int s0 = c0[v], s1 = c1[v];
-            acc[v] += dl0 * x0 * s0 + dl1 * x1 * s1;
-        }
+#define GW4_LUT iq4_lut4
+#include "shared/gemvw_unit4_run.h"  // c0, c1 dots -> acc (ADR-0005)
     }
 };
 
@@ -164,16 +126,7 @@ template <> struct WMU<QT_IQ4_XS> {
 template <> struct WMU<QT_MXFP4> {
     static constexpr int per_sb = 4;
     static __device__ __forceinline__ int units(int ncols) { return ncols / 256 * per_sb; }
-    struct X {
-        int2 a0, a1, c0, c1;
-    };
-    static __device__ __forceinline__ void load_x(const int8_t *xt, int u, int h, X &x) {
-        const int base = (u >> 2) * 256 + 64 * (u & 3) + 8 * h;
-        x.a0 = *(const int2 *)(xt + base);
-        x.a1 = *(const int2 *)(xt + base + 16);
-        x.c0 = *(const int2 *)(xt + base + 32);
-        x.c1 = *(const int2 *)(xt + base + 48);
-    }
+#include "shared/gemvw_unit4_x.h"  // struct X, load_x (ADR-0005)
     template <int NV>
     static __device__ __forceinline__ void run(const uint8_t *row, int u, int h, const X &x, const float *xd, int nb32,
                                                int t0, int ntm1, float *acc) {
@@ -181,22 +134,8 @@ template <> struct WMU<QT_MXFP4> {
         const uint8_t *blk = row + (size_t)b * 136;
         const uint32_t ee = *(const uint16_t *)(blk + 2 * pp);
         const float dl0 = e8m0_half(ee & 0xFF), dl1 = e8m0_half(ee >> 8);
-        const uint2 g0 = *(const uint2 *)(blk + 8 + 32 * pp + 8 * h);
-        const uint2 g1 = *(const uint2 *)(blk + 24 + 32 * pp + 8 * h);
-        const wi8 z = {0, 0, 0, 0, 0, 0, 0, 0};
-        wi8 c0 = wmma_iu8(x.a0.x, x.a0.y, mx_lut4(g0.x & 0x0F0F0F0F), mx_lut4(g0.y & 0x0F0F0F0F), z);
-        c0 = wmma_iu8(x.a1.x, x.a1.y, mx_lut4((g0.x >> 4) & 0x0F0F0F0F), mx_lut4((g0.y >> 4) & 0x0F0F0F0F), c0);
-        wi8 c1 = wmma_iu8(x.c0.x, x.c0.y, mx_lut4(g1.x & 0x0F0F0F0F), mx_lut4(g1.y & 0x0F0F0F0F), z);
-        c1 = wmma_iu8(x.c1.x, x.c1.y, mx_lut4((g1.x >> 4) & 0x0F0F0F0F), mx_lut4((g1.y >> 4) & 0x0F0F0F0F), c1);
-        const int xi = (b * 256 + 64 * pp) >> 5;
-#pragma unroll
-        for (int v = 0; v < NV; ++v) {
-            const int t = min(t0 + v, ntm1);
-            const float *xdt = xd + (size_t)t * nb32 + xi;
-            const float x0 = xdt[0], x1 = xdt[1];
-            const int s0 = c0[v], s1 = c1[v];
-            acc[v] += dl0 * x0 * s0 + dl1 * x1 * s1;
-        }
+#define GW4_LUT mx_lut4
+#include "shared/gemvw_unit4_run.h"  // c0, c1 dots -> acc (ADR-0005)
     }
 };
 
@@ -233,24 +172,7 @@ template <> struct WMU<QT_Q6_K> {
         const float dd = h2f(blk + 208);
         const uint2 scw = ld64a2(blk + 192 + 8 * n);  // sc[8n .. 8n + 8]
         const int is = g >> 1;
-        float scf[4];
-#pragma unroll
-        for (int q = 0; q < 4; ++q) {
-            const uint32_t word = (is + 2 * q) < 4 ? scw.x : scw.y;
-            scf[q] = (float)(int8_t)(word >> (8 * ((is + 2 * q) & 3)));
-        }
-        // quarter h (low nibbles) and h + 2 (high nibbles), bytewise q - 32
-        int wq[2][2];
-#pragma unroll
-        for (int e = 0; e < 2; ++e) {
-            const int qq = h + 2 * e;
-            const uint32_t L[2] = {l.x, l.y}, H[2] = {hq.x, hq.y};
-#pragma unroll
-            for (int k = 0; k < 2; ++k) {
-                const uint32_t v = ((L[k] >> (4 * e)) & 0x0F0F0F0Fu) | (((H[k] >> (2 * qq)) & 0x03030303u) << 4);
-                wq[e][k] = (int)(((v | 0x80808080u) - 0x20202020u) ^ 0x80808080u);
-            }
-        }
+#include "shared/gemv_q6_unit.h"  // scf[4], wq[2][2] (ADR-0005)
         const wi8 z = {0, 0, 0, 0, 0, 0, 0, 0};
         const int m0 = h == 0 ? -1 : 0, m1 = ~m0;  // quarter q -> h = 0 lanes, q + 1 -> h = 1
         const wi8 c0 = wmma_iu8(x.a01.x, x.a01.y, wq[0][0] & m0, wq[0][1] & m0, z);
@@ -410,14 +332,7 @@ __device__ __forceinline__ void gemvw8_impl(const uint8_t *__restrict__ W, uint6
     constexpr int NV = NT < 8 ? NT : 8;
     __shared__ float red[8][NT][ROWS];
     if (skip != nullptr && *skip) return;
-    const int lane = threadIdx.x % WARP, h = lane >> 4, n = lane & 15;
-    const int w = __builtin_amdgcn_readfirstlane(threadIdx.x / WARP);
-    const int r0 = bid * ROWS;
-    const uint8_t *wr[TILES];
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + n, nrows - 1) * row_bytes;
-    const int8_t *xt = xq + (size_t)min(n, NT - 1) * ncols;
-    const int nb32 = ncols / 32;
+#include "shared/gemvw_rows.h"  // lane, h, n, w, r0, wr[TILES], xt, nb32 (ADR-0005)
     const int nu = WMU8<T>::units(ncols);
     const int t0 = 8 * h;
     // slot-major so a slot is a float[TILES][8] block
@@ -446,23 +361,7 @@ __device__ __forceinline__ void gemvw8_impl(const uint8_t *__restrict__ W, uint6
     }
     if (w + 8 * k < nu) gemvw8_pair<T, NT, TILES>(wr, xt, xd, nb32, h, n, w + 8 * k, w + 8 * (k + 1) < nu, acc[0], acc[1]);
     if (w + 8 * (k + 2) < nu) gemvw8_pair<T, NT, TILES>(wr, xt, xd, nb32, h, n, w + 8 * (k + 2), false, acc[2], acc[3]);
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt)
-#pragma unroll
-        for (int v = 0; v < NV; ++v) {
-            const int t = t0 + v;
-            if (t < NT) red[w][t][tt * 16 + n] = (acc[0][tt][v] + acc[2][tt][v]) + (acc[1][tt][v] + acc[3][tt][v]);
-        }
-    __syncthreads();
-    for (int i = threadIdx.x; i < NT * ROWS; i += blockDim.x) {
-        const int t = i / ROWS, nn = i % ROWS, row = r0 + nn;
-        const float s = ((red[0][t][nn] + red[4][t][nn]) + (red[2][t][nn] + red[6][t][nn])) +
-                        ((red[1][t][nn] + red[5][t][nn]) + (red[3][t][nn] + red[7][t][nn]));
-        if (row < nrows) {
-            float *dst = y + (size_t)t * nrows + row;
-            *dst = accumulate ? *dst + s : s;
-        }
-    }
+#include "shared/gemvw_red_store.h"  // slots -> red -> waves -> y (ADR-0005)
 }
 
 // One 16 * TILES-row by NT-token pass of gemvw_impl: zero the accumulators,
@@ -550,15 +449,8 @@ __device__ __forceinline__ void gemvw_impl(const uint8_t *__restrict__ W, uint64
     constexpr int ROWS = 16 * TILES;
     __shared__ float red[8][NT][ROWS];
     if (skip != nullptr && *skip) return;
-    const int lane = threadIdx.x % WARP, h = lane >> 4, n = lane & 15;
     // wave-uniform unit index -> scalar block math and uniform scale branches
-    const int w = __builtin_amdgcn_readfirstlane(threadIdx.x / WARP);
-    const int r0 = bid * ROWS;
-    const uint8_t *wr[TILES];
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + n, nrows - 1) * row_bytes;
-    const int8_t *xt = xq + (size_t)min(n, NT - 1) * ncols;  // A row = token n
-    const int nb32 = ncols / 32;
+#include "shared/gemvw_rows.h"  // lane, h, n, w, r0, wr[TILES], xt, nb32 (ADR-0005)
     const int nu = WMU<T>::units(ncols);
     gemvw_pass<T, NT, TILES, PIN>(wr, xt, xd, y, red, nb32, nu, nrows, accumulate, ystride, r0);
 }

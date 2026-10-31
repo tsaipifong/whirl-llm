@@ -80,25 +80,7 @@ extern "C" __global__ void __launch_bounds__(256)
         }
         sm.kq[m][sw128(t, cc)] = cvt44(a, b);
     }
-    if (tid < GCH) {
-        const int tok = t0 + tid;
-        G[tid] = tok < n_tok ? gl[(size_t)tok * n_v_heads + h] : 0.f;
-        Bt[tid] = tok < n_tok ? beta[(size_t)tok * n_v_heads + h] : 0.f;
-    }
-    __syncthreads();
-    if (tid < WARP) {  // inclusive scan of g over 64 values (2 per lane)
-        float a0 = G[2 * tid], a1 = G[2 * tid + 1];
-        a1 += a0;
-        float x = a1;
-#pragma unroll
-        for (int o = 1; o < WARP; o <<= 1) {
-            const float y = __shfl_up(x, o, WARP);
-            if (tid >= o) x += y;
-        }
-        const float base = x - a1;
-        G[2 * tid] = base + a0;
-        G[2 * tid + 1] = x;
-    }
+#include "shared/gdn_gscan.h"  // G = inclusive scan of g, Bt = beta of the chunk (ADR-0005)
     // KK and QK lower tiles: 20 tiles over 8 waves (tile list: 0..9 KK, 10..19 QK)
     wf8 acc[3];
     int tr[3], tc[3];

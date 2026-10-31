@@ -496,6 +496,10 @@
    "kernels.abi"
   ],
   [
+   "kernels.attn",
+   "kernels.common"
+  ],
+  [
    "kernels.gdn",
    "kernels.abi"
   ],
@@ -508,8 +512,20 @@
    "kernels.abi"
   ],
   [
+   "kernels.moe",
+   "kernels.gemm"
+  ],
+  [
    "kernels.sample",
    "kernels.abi"
+  ],
+  [
+   "kernels.sample",
+   "kernels.common"
+  ],
+  [
+   "kernels.sample",
+   "kernels.norm"
   ],
   [
    "kernels.unity",

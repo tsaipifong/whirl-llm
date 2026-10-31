@@ -33,28 +33,7 @@ extern "C" __global__ void __launch_bounds__(1024) argmax(const float *x, int n,
                                                           int advance) {
     __shared__ float bv[1024];
     __shared__ int bi[1024];
-    float best = -INFINITY;
-    int idx = 0;
-    for (int i = threadIdx.x; i < n; i += blockDim.x) {
-        if (x[i] > best) {
-            best = x[i];
-            idx = i;
-        }
-    }
-    bv[threadIdx.x] = best;
-    bi[threadIdx.x] = idx;
-    __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (threadIdx.x < s) {
-            const float o = bv[threadIdx.x + s];
-            const int oi = bi[threadIdx.x + s];
-            if (o > bv[threadIdx.x] || (o == bv[threadIdx.x] && oi < bi[threadIdx.x])) {
-                bv[threadIdx.x] = o;
-                bi[threadIdx.x] = oi;
-            }
-        }
-        __syncthreads();
-    }
+#include "shared/block_argmax.h"  // argmax of x[0..n) -> bv[0], bi[0] (ADR-0005)
     if (threadIdx.x == 0) {
         out[0] = bi[0];
         ids[0] = bi[0];
