@@ -556,6 +556,10 @@
    "kernels.sample"
   ],
   [
+   "kernels.vision",
+   "kernels.gemm"
+  ],
+  [
    "mem.fit",
    "common.base"
   ],

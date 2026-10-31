@@ -305,6 +305,13 @@ AddStep "cpu_kernel_abi" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '
 # dependencies, per architecture, plus boundary mutants. CPU, HIP clang -fsyntax-only, ~1 min.
 AddStep "cpu_kernel_iso" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\kernel_iso_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\kernel_iso_check.py")'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^kernel iso check selftest: PASS") -and ($o -match "(?m)^kernel iso check: ok \(") }
+# arch025-sc11c / SC-17 (ADR-0005): the per-kernel code object comparison (tools/gates/kernel_isa_cmp.py: ISA, .kd
+# descriptor, metadata per kernel, on the official llvm-objdump) and the code object builder that feeds it
+# (tools/gates/kernel_co_build.py: whirl_kernels / whirl_vision with the clang flags read from CMakeLists.txt /
+# cmake/vision.cmake) - their tests on synthetic code objects of both architectures, incl. the one-kernel / descriptor /
+# data / missing-kernel FAIL cases and a failed compile. CPU, HIP clang + llvm-objdump, ~2.5 min.
+AddStep "cpu_kernel_isa_cmp" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\kernel_isa_cmp_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\kernel_co_build_test.py")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^kernel_isa_cmp test: PASS") -and ($o -match "(?m)^kernel_co_build test: PASS") }
 # arch025-Q6: the FAIL / PASS proofs of srv_vis, vis_ab, pkg_smoke, srv_kvram719, srv_env_e2 and of the dense / dfl
 # availability rule (tools/gates/gate_steps_selftest.ps1: planted outputs through each step's own rule via -RuleCheck,
 # and the -SelfTest of the scripts behind them). CPU, no exe, no model.

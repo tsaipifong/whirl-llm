@@ -253,140 +253,14 @@ extern "C" __global__ void __launch_bounds__(256) gated_norm_x8ht(const float *o
     gated_norm_x_impl<true, _Float16, true>(o, z, w, q, sx, n_heads, eps);
 }
 
-// ---------------------------------------------------------------------------
-// Item K: f16-weight x f16-activation prefill GEMM (Q4_K_M etc. after dequant_f16),
-// bitwise the same as gemm3_impl (gemm_cN_f16): same per-accumulator WMMA order.
-// Both operands are staged through LDS in WMMA fragment order (conflict-free
-// ds_load_b128, 16 x 16 fragment = 512 contiguous bytes, lane l = row l%16,
-// k (l/16)*8 .. +8), 32-k slabs, 128 rows x 256 tokens, 8 waves (TM 2 x TN 8),
-// rasterized in groups of 4 token blocks, 16-byte epilogue stores.
-// Row-major W (row stride ncols) and X, ncols % 32 == 0.
-// ---------------------------------------------------------------------------
+// Item K f16 x f16 prefill GEMM (gemmh_impl): kernels/shared/gemmh_impl.h, also built into the vision code object
+// (ADR-0005). The barrier here is g8t_lds_barrier; T >= 0 dequantizes with dec_group_h.
+#define GEMMH_LDS_BARRIER() g8t_lds_barrier()
+#define GEMMH_DEQUANT 1
 template <bool OH, int T = -1>
 __device__ void gemmh_impl(const uint8_t *__restrict__ Wb, uint64_t row_bytes, const _Float16 *__restrict__ X,
                            float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {
-    constexpr int BM = 128, BN = 256, BK = 32, WAVES_M = 4, NTH = 256, TG = 4;
-    constexpr int WAVES_N = NTH / 32 / WAVES_M;
-    constexpr int TM = BM / 16 / WAVES_M, TN = BN / 16 / WAVES_N;
-    constexpr int KSPS = BK / 16, GPR = BK / 8;
-    constexpr int A_PER = BM * GPR / NTH, B_PER = BN * GPR / NTH;
-    constexpr int ABUF = BM * BK;
-    __shared__ __attribute__((aligned(16))) _Float16 S[ABUF + BN * BK];
-    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
-    const int wm = wid % WAVES_M, wn = wid / WAVES_M;
-    int bx, by;
-    {
-        const int gx = gridDim.x, gy = gridDim.y, bid = blockIdx.y * gx + blockIdx.x;
-        const int per = TG * gy, g = bid / per, rem = bid % per;
-        const int tg = min(TG, gx - g * TG);
-        bx = g * TG + rem % tg;
-        by = rem / tg;
-    }
-    const int m0 = by * BM, t0 = bx * BN;
-    float8 acc[TM][TN];
-#pragma unroll
-    for (int i = 0; i < TM; ++i)
-#pragma unroll
-        for (int j = 0; j < TN; ++j) acc[i][j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
-    half8 ra[A_PER], rb[B_PER];
-    auto fetch = [&](int k0) {
-#pragma unroll
-        for (int e = 0; e < A_PER; ++e) {
-            const int i = threadIdx.x + e * NTH;
-            const int r = i % BM, gg = i / BM;
-            int gr = m0 + r;
-            gr = gr < nrows ? gr : nrows - 1;  // clamped: never stored
-            if constexpr (T < 0) ra[e] = *(const half8 *)(Wb + (size_t)gr * row_bytes + (size_t)(k0 + gg * 8) * 2);
-            else ra[e] = dec_group_h<T>(Wb + (size_t)gr * row_bytes, k0 / 8 + gg);
-        }
-#pragma unroll
-        for (int e = 0; e < B_PER; ++e) {
-            const int i = threadIdx.x + e * NTH;
-            const int t = i % BN, gg = i / BN;
-            int gt = t0 + t;
-            gt = gt < n_tok ? gt : n_tok - 1;  // clamped: never stored
-            rb[e] = *(const half8 *)(X + (size_t)gt * ncols + k0 + gg * 8);
-        }
-    };
-    auto store = [&]() {
-        _Float16 *sb = S + ABUF;
-#pragma unroll
-        for (int e = 0; e < A_PER; ++e) {
-            const int i = threadIdx.x + e * NTH;
-            const int r = i % BM, gg = i / BM;
-            *(half8 *)(S + (((r >> 4) * KSPS + (gg >> 1)) * 32 + (r & 15) + 16 * (gg & 1)) * 8) = ra[e];
-        }
-#pragma unroll
-        for (int e = 0; e < B_PER; ++e) {
-            const int i = threadIdx.x + e * NTH;
-            const int t = i % BN, gg = i / BN;
-            *(half8 *)(sb + (((t >> 4) * KSPS + (gg >> 1)) * 32 + (t & 15) + 16 * (gg & 1)) * 8) = rb[e];
-        }
-    };
-    auto compute = [&]() {
-        const _Float16 *sb = S + ABUF;
-#pragma unroll
-        for (int st = 0; st < KSPS; ++st) {
-            half8 a[TM], b[TN];
-#pragma unroll
-            for (int i = 0; i < TM; ++i) a[i] = *(const half8 *)(S + (((wm * TM + i) * KSPS + st) * 32 + lane) * 8);
-#pragma unroll
-            for (int j = 0; j < TN; ++j) b[j] = *(const half8 *)(sb + (((wn * TN + j) * KSPS + st) * 32 + lane) * 8);
-#pragma unroll
-            for (int i = 0; i < TM; ++i)
-#pragma unroll
-                for (int j = 0; j < TN; ++j) acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a[i], b[j], acc[i][j]);
-        }
-    };
-    const int nslabs = ncols / BK;
-    fetch(0);
-    for (int s = 0; s < nslabs; ++s) {
-        if (s > 0) g8t_lds_barrier();
-        store();
-        g8t_lds_barrier();
-        if (s + 1 < nslabs) fetch((s + 1) * BK);
-        compute();
-    }
-#pragma unroll
-    for (int j = 0; j < TN; ++j) {
-        const int t = t0 + (wn * TN + j) * 16 + lane % 16;
-        if (t >= n_tok) continue;
-#pragma unroll
-        for (int i = 0; i < TM; ++i) {
-            const int row0 = m0 + (wm * TM + i) * 16 + 8 * (lane / 16);
-            const bool full = (nrows & 7) == 0 && row0 + 8 <= nrows;
-            if (OH) {
-                _Float16 *dh = (_Float16 *)Y + (size_t)t * nrows + row0;
-                if (full) {
-                    half8 hv;
-#pragma unroll
-                    for (int v = 0; v < 8; ++v) hv[v] = (_Float16)acc[i][j][v];
-                    *(half8 *)dh = hv;
-                } else {
-#pragma unroll
-                    for (int v = 0; v < 8; ++v)
-                        if (row0 + v < nrows) dh[v] = (_Float16)acc[i][j][v];
-                }
-                continue;
-            }
-            float *dst = Y + (size_t)t * nrows + row0;
-            if (full) {
-                float4 y0 = {acc[i][j][0], acc[i][j][1], acc[i][j][2], acc[i][j][3]};
-                float4 y1 = {acc[i][j][4], acc[i][j][5], acc[i][j][6], acc[i][j][7]};
-                if (accumulate) {
-                    const float4 o0 = *(const float4 *)dst, o1 = *(const float4 *)(dst + 4);
-                    y0.x = o0.x + y0.x; y0.y = o0.y + y0.y; y0.z = o0.z + y0.z; y0.w = o0.w + y0.w;
-                    y1.x = o1.x + y1.x; y1.y = o1.y + y1.y; y1.z = o1.z + y1.z; y1.w = o1.w + y1.w;
-                }
-                *(float4 *)dst = y0;
-                *(float4 *)(dst + 4) = y1;
-            } else {
-#pragma unroll
-                for (int v = 0; v < 8; ++v)
-                    if (row0 + v < nrows) dst[v] = accumulate ? dst[v] + acc[i][j][v] : acc[i][j][v];
-            }
-        }
-    }
+#include "shared/gemmh_impl.h"
 }
 extern "C" __global__ void __launch_bounds__(256) gemmh_f16(const _Float16 *W, const _Float16 *X, float *Y, int ncols, int nrows,
                                                             int n_tok, int accumulate) {

@@ -1084,8 +1084,9 @@
   "kernels.gemm": {
      "id": "N5/N14",
      "desc": "kernel family gemm: prefill GEMM (WMMA f16), small-batch GEMM, MXFP4 x fp8 GEMM, gemv_h (precise f16-activation decode / verify matmul on the small-batch stages) (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
-     "paths": ["kernels/gemm_*.hip", "kernels/gemv_h.hip", "kernels/gfx1151/gemm_*.hip", "kernels/gfx1151/gemv_h.hip", "kernels/shared/gemm_prefill_dequant_f16_f32.h", "kernels/shared/gemm_prefill_f32_to_f16.h", "kernels/shared/gemm_prefill_gemm_c12_f32.h", "kernels/shared/gemm_prefill_gemm_c2_q8_0.h", "kernels/shared/gemm_prefill_gemm_entry.h", "kernels/shared/gemm_prefill_wmma_entry.h", "kernels/gemm_small_addr.h"],
+     "paths": ["kernels/gemm_*.hip", "kernels/gemv_h.hip", "kernels/gfx1151/gemm_*.hip", "kernels/gfx1151/gemv_h.hip", "kernels/shared/gemm_prefill_dequant_f16_f32.h", "kernels/shared/gemm_prefill_f32_to_f16.h", "kernels/shared/gemm_prefill_gemm_c12_f32.h", "kernels/shared/gemm_prefill_gemm_c2_q8_0.h", "kernels/shared/gemm_prefill_gemm_entry.h", "kernels/shared/gemm_prefill_wmma_entry.h", "kernels/shared/gemmh_impl.h", "kernels/gemm_small_addr.h"],
      "lands_on": "arch025-kern (lane 3)",
+     "callers": "rdeps",
      "steps": ["cpu_iso_kernels_gemm", "cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_swift_balance", "st_moe_precise"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_swift_balance": 2, "st_moe_precise": 2},
      "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
@@ -1146,12 +1147,12 @@
   },
   "kernels.vision": {
      "id": "N14",
-     "desc": "kernel family vision: Qwen3-VL / Qwen3.5 ViT encoder kernels, one source (kernels/vision/vision.hip), its own code object per architecture built by cmake/vision.cmake and loaded only when an image arrives; standalone (no dependency on another family, not in the whirl_kernels translation unit; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "desc": "kernel family vision: Qwen3-VL / Qwen3.5 ViT encoder kernels, one source (kernels/vision/vision.hip), its own code object per architecture built by cmake/vision.cmake and loaded only when an image arrives; not in the whirl_kernels translation unit; its f16 GEMM vis_gemm #includes the gemmh body of kernels.gemm (kernels/shared/gemmh_impl.h, ADR-0005 / arch025-sc11c), no other dependency (compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
      "paths": ["kernels/vision/vision.hip"],
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_vision", "srv_vis", "vis_ab"],
      "gpus": {"srv_vis": 2, "vis_ab": 2},
-     "manual": ["V-co: the vision code object per architecture identical to the base build (hsaco from cmake/vision.cmake, tools/impact/work_equal.py code_objects; CPU)"]
+     "manual": ["V-co: the vision code object per architecture identical to the base build (hsaco from cmake/vision.cmake, tools/impact/work_equal.py code_objects; CPU); per kernel: tools/gates/kernel_co_build.py --what vision + tools/gates/kernel_isa_cmp.py (a change of kernels/shared/gemmh_impl.h changes this code object too)"]
   },
   "kernels.unity": {
      "id": "N14",
