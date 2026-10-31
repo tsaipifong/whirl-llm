@@ -1,0 +1,117 @@
+# ARCH-1 8.5 isolation check of server.slot_cache (arch025-engine S6 / S7, DESIGN v3 section 4 S6 / S7 rows): the
+# module's sources, its DECLARED dependencies and the ONLY headers they may see. Format: tests/sampling/isolation.txt; read
+# by cmake/iso.cmake and tools/gates/iso_check.py.
+# module: src/server/engine_pages.h (class SlotPagesCounters, S6: the shared prefix checkpoint / KV page counters;
+# struct SlotPages, S7: the KV pages and checkpoints of the slots, an aggregate of references) and
+# src/server/engine_pages.cpp (SlotPages's functions, moved verbatim out of Engine).
+# declared dependencies (DESIGN v3 3.1: core.shared and server.drafter_ctx; refs ck_ m_ ops_ opt_ pool_ ps_ slots_ tb_):
+# the KV pool pages (cache/page_pool.cpp), the tier bridge (tier_bridge.cpp) with what it declares (tests/iso/tier_bridge:
+# the prefix store, chat tokens + tokenizer + GGUF reader, prefix cache, tier view, ckpt_store, the KV host tier, the
+# NullBackend, threads + the server log, util, platform), the drafter context (server.drafter_ctx, header only, with the
+# server model contract server/backend.h), the engine types and the slot (headers only), the speculative-decoding rules
+# header that engine_pages.cpp includes (spec/policy.cpp: SpecState's CycleCost through engine_state.h).
+# Test double: tests/iso/fake_server_model.h (settable poolPages / kvArrays) over the host-memory NullBackend.
+# NOT declared: the engine (server/engine.h), the model (class Model), the HIP layer.
+module    server.slot_cache
+exe       whirl-iso-server-slot-cache-tests
+mutate    src/server/engine_pages.cpp
+# the include mutants go at the end (as tests/iso/tier_bridge: the anonymous-namespace kv_page of tier_bridge.cpp)
+mutinc    end
+mutsym    hip
+mutsym    engine
+mutsym    model
+syslib    winmm.lib
+# module sources
+src       src/server/engine_pages.cpp
+# declared dependency sources
+src       src/cache/page_pool.cpp
+src       src/server/tier_bridge.cpp
+src       src/server/prefix_store.cpp
+src       src/chat/chat_tokens.cpp
+src       src/tokenizer/tokenizer.cpp
+src       src/tokenizer/unicode.cpp
+src       src/gguf/gguf.cpp
+src       src/cache/prefix_cache.cpp
+src       src/cache/tier_adapter.cpp
+src       src/cache/ckpt_store.cpp
+src       src/tier/kv_tier.cpp
+src       src/device/null_backend.cpp
+src       src/spec/policy.cpp
+src       src/chat/json.cpp
+src       src/server/engine_thread.cpp
+src       src/server/log.cpp
+src       src/common/util.cpp
+src       src/platform/env_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/args_win.cpp
+src       src/platform/time_win.cpp
+src       src/platform/proc_win.cpp
+# module headers
+hdr       src/server/engine_pages.h
+# declared dependency headers (include closure of the sources above and the test)
+hdr       include/whirl/chat.h
+hdr       include/whirl/chat_tokens.h
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/dflash_policy.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/json.h
+hdr       include/whirl/json_fields.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/prefill_schedule.h
+hdr       include/whirl/relax_accept.h
+hdr       include/whirl/small_helpers.h
+hdr       include/whirl/spec_sample.h
+hdr       include/whirl/thread_annotations.h
+hdr       include/whirl/tokenizer.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/unicode.h
+hdr       include/whirl/vision.h
+hdr       include/whirl/vismap.h
+hdr       include/whirl/wddm_watch.h
+hdr       src/cache/cache_model.h
+hdr       src/cache/ckpt_store.h
+hdr       src/cache/page_pool.h
+hdr       src/cache/prefix_cache.h
+hdr       src/cache/tier_adapter.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/model/qwen35/kv.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/platform/time.h
+hdr       src/sampling/sampler.h
+hdr       src/server/backend.h
+hdr       src/server/decode_floor.h
+hdr       src/server/engine_api.h
+hdr       src/server/engine_common.h
+hdr       src/server/engine_drafter.h
+hdr       src/server/engine_options.h
+hdr       src/server/engine_slot.h
+hdr       src/server/engine_state.h
+hdr       src/server/engine_thread.h
+hdr       src/server/log.h
+hdr       src/server/prefix_store.h
+hdr       src/server/protocol.h
+hdr       src/server/stream.h
+hdr       src/server/tier_bridge.h
+hdr       src/server/vision_iface.h
+hdr       src/spec/policy.h
+hdr       src/spec/slot_drafts.h
+hdr       src/spec/spec_rules.h
+hdr       src/tier/evict_policy.h
+hdr       src/tier/idle_flush.h
+hdr       src/tier/kv_tier.h
+hdr       src/tokenizer/unicode_tables.inc
+# test program
+testsrc   tests/iso/server.slot_cache/slot_cache_tests.cpp
+testhdr   tests/iso/fake_server_model.h
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

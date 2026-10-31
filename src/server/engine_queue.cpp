@@ -98,7 +98,7 @@ void Engine::reapDisconnected() {
         // prefilling: nothing was sent yet; the partial prefill is dropped
         logW("req {} | slot {} | client disconnected during prefill ({} of {} prompt tokens); slot freed", sl.job->id, sl.id,
              sl.reuse + sl.pf_off, sl.n_prompt);
-        dropCache(sl);
+        sc_.dropCache(sl);
         releaseSlot(sl);
     }
 }

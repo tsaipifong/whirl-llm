@@ -1,9 +1,10 @@
 // Server engine, KV pages and checkpoints (arch025-N4f, from engine.cpp): the slots' checkpoints, page allocation /
 // eviction / copy-on-write over pool_, the shared prefix checkpoints over ps_, and the pool arithmetic of admission.
+// arch025-engine S7: these are SlotPages's (module server.slot_cache, engine_pages.h); only the definition lines changed
+// (Engine:: -> SlotPages::, SlotEvictor holds SlotPages&); initPool (from engine.cpp) is the last one.
 // SPDX-License-Identifier: Apache-2.0
 
-#include "engine.h"
-#include "engine_internal.h"
+#include "server/engine_pages.h"
 
 #include "cache/tier_adapter.h"
 #include "log.h"
@@ -24,7 +25,7 @@ namespace whirl::server {
 // ---------------------------------------------------------------------------
 // checkpoints (of the currently selected slot)
 
-void Engine::saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::optional<DevPtr> hid,
+void SlotPages::saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::optional<DevPtr> hid,
                       std::optional<DevPtr> logits) {
     if (opt_.no_prefix_cache || sl.ckpts.empty()) return;
     // item T3: a restore tail still arriving: done -> its checkpoints are
@@ -42,13 +43,13 @@ void Engine::saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::option
     slot->kind = kind;
 }
 
-void Engine::dropCache(Slot& sl) {
+void SlotPages::dropCache(Slot& sl) {
     for (Ckpt& c : sl.ckpts) c.valid = false;
     sl.cache_tokens.clear();
     dc_.dflReset(sl, 0);
 }
 
-void Engine::freePages(Slot& sl) {
+void SlotPages::freePages(Slot& sl) {
     const bool busy = sl.spill_busy && !ops_.eventDone(sl.spill_ev.get());
     sl.spill_busy = false;
     if (sl.spill_wanted) logW("slot {} | kv tier: deferred spill dropped (pages evicted)", sl.id);
@@ -77,16 +78,16 @@ void Engine::freePages(Slot& sl) {
 // ---------------------------------------------------------------------------
 // pool pages (item S: reference counts)
 
-struct Engine::SlotEvictor final : PagePool::Evictor {
-    Engine& e;
+struct SlotPages::SlotEvictor final : PagePool::Evictor {
+    SlotPages& e;
     Slot* sl;
-    SlotEvictor(Engine& e_, Slot* sl_) : e(e_), sl(sl_) {}
+    SlotEvictor(SlotPages& e_, Slot* sl_) : e(e_), sl(sl_) {}
     bool evictOne() override { return e.evictFor(sl); }
 };
 
 // the prefix cache's victim for a page sl (nullptr: none) needs: a shared checkpoint dropped or an idle slot's pages
 // freed (true), or nothing to evict (false)
-bool Engine::evictFor(Slot* sl) {
+bool SlotPages::evictFor(Slot* sl) {
     const cache::Victim v = ps_.cache().evictVictim(
         slots_,
         [&](std::size_t i) {
@@ -109,17 +110,17 @@ bool Engine::evictFor(Slot* sl) {
         logI("kv pool full: evicting idle slot {} ({} pages, {} cached tokens)", victim->id, victim->pages.size(),
              victim->cache_tokens.size());
     }
-    stat_evictions_ += 1;
+    cnt_.noteEviction();
     freePages(*victim);
     return true;
 }
 
-std::optional<std::int32_t> Engine::takePage(Slot* sl) {
+std::optional<std::int32_t> SlotPages::takePage(Slot* sl) {
     SlotEvictor ev(*this, sl);
     return pool_.take(ev);
 }
 
-void Engine::cowPages(Slot& sl, std::uint32_t reuse, bool spill) {
+void SlotPages::cowPages(Slot& sl, std::uint32_t reuse, bool spill) {
     const std::size_t keep = reuse == 0 ? 0 : (reuse - 1) / kv_page;
     SlotEvictor ev(*this, &sl);
     switch (pool_.cow(sl.pages, sl.id, reuse, spill, ev)) {
@@ -132,11 +133,11 @@ void Engine::cowPages(Slot& sl, std::uint32_t reuse, bool spill) {
     case PagePool::Cow::done:
         break;
     }
-    if (!spill) stat_unshare_ += 1;
+    if (!spill) cnt_.noteUnshare();
     sl.tier_pages = std::min(sl.tier_pages, static_cast<std::uint32_t>(keep));
 }
 
-bool Engine::ensurePages(Slot& sl, std::uint64_t n_tok) {
+bool SlotPages::ensurePages(Slot& sl, std::uint64_t n_tok) {
     SlotEvictor ev(*this, &sl);
     return pool_.ensure(sl.pages, sl.id, n_tok, ev);
 }
@@ -144,7 +145,7 @@ bool Engine::ensurePages(Slot& sl, std::uint64_t n_tok) {
 // ---------------------------------------------------------------------------
 // item S: shared prefix checkpoints
 
-void Engine::dropSpe(Spe& s) {
+void SlotPages::dropSpe(Spe& s) {
     if (!s.valid) return;
     const bool busy = s.spill_busy && !ops_.eventDone(s.spill_ev.get());
     s.spill_busy = false;
@@ -167,10 +168,10 @@ void Engine::dropSpe(Spe& s) {
     s.valid = false;
     s.n = 0;
     s.tier_id = 0;
-    stat_spe_evict_ += 1;
+    cnt_.noteSpeEvict();
 }
 
-void Engine::createSpe(Slot& sl, std::span<const std::uint32_t> toks_all, std::uint32_t pos, const char* kind,
+void SlotPages::createSpe(Slot& sl, std::span<const std::uint32_t> toks_all, std::uint32_t pos, const char* kind,
                        std::optional<DevPtr> hid_row, const Ckpt* src, std::uint64_t tier_id) {
     if (ps_.spes().empty() || opt_.no_prefix_cache || pos == 0 || pos > toks_all.size()) return;
     const auto toks = toks_all.subspan(0, pos);
@@ -239,7 +240,7 @@ void Engine::createSpe(Slot& sl, std::span<const std::uint32_t> toks_all, std::u
     s.last_used = use;
     s.uses = 0;
     s.tier_id = tier_id;
-    stat_spe_new_ += 1;
+    cnt_.noteSpeNew();
     logI("req {} | slot {} | shared prefix: kept {} checkpoint @{} ({} pages shared, 1 copied){}", sl.reqId(), sl.id,
          kind, pos, last, src ? " from the restored entry" : "");
     if (tier_id == 0) {
@@ -251,7 +252,7 @@ void Engine::createSpe(Slot& sl, std::span<const std::uint32_t> toks_all, std::u
     }
 }
 
-void Engine::attachSpe(Slot& sl, Spe& s) {
+void SlotPages::attachSpe(Slot& sl, Spe& s) {
     s.pin = true;
     struct Unpin {
         Spe& s;
@@ -275,15 +276,15 @@ void Engine::attachSpe(Slot& sl, Spe& s) {
     dc_.dflReset(sl, s.n);
     s.last_used = ps_.cache().touch();
     s.uses += 1;
-    stat_spe_hits_ += 1;
+    cnt_.noteSpeHit();
     // the checkpoint's RAM tier entry was reused (served from VRAM here, so no tier restore marked it):
     // worth an SSD write under the seen-once filter, and on eviction in shutdown mode (TIER-EVICT)
     if (tb_.tier() != nullptr && s.tier_id != 0)
         if (tier::Entry* x = tb_.tier()->find(s.tier_id)) x->reused = true;
-    stat_spe_tok_ += s.n;
+    cnt_.noteSpeTok(s.n);
 }
 
-bool Engine::waitsForSys(Job& job) {
+bool SlotPages::waitsForSys(Job& job) {
     if (ps_.spes().empty() || opt_.no_prefix_cache || !job.params.cache_prompt) return false;
     const std::span<const std::uint32_t> toks = job.tokens;
     const std::uint32_t b = ps_.sysSplit(toks);
@@ -303,11 +304,11 @@ bool Engine::waitsForSys(Job& job) {
     return false;
 }
 
-std::size_t Engine::pagesFor(std::uint64_t n_tok) const {
+std::size_t SlotPages::pagesFor(std::uint64_t n_tok) const {
     return PagePool::pagesFor(n_tok + dc_.draftRoom() + 2);
 }
 
-std::size_t Engine::poolAvailable() const {
+std::size_t SlotPages::poolAvailable() const {
     std::size_t n = pool_.reclaimable(), owed = 0;
     auto own = [&](const std::vector<std::int32_t>& pages) { n += pool_.soleOwned(pages); };
     for (const Slot& sl : slots_) {
@@ -320,6 +321,12 @@ std::size_t Engine::poolAvailable() const {
     }
     for (const Spe& s : ps_.spes()) own(s.pages);
     return n > owed ? n - owed : 0;
+}
+
+void SlotPages::initPool() {
+    const std::uint32_t n = m_.poolPages();
+    kv_arrays_ = m_.kvArrays();
+    pool_.init(n, kv_arrays_);
 }
 
 }  // namespace whirl::server

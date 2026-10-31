@@ -131,9 +131,7 @@ void Engine::allocState() {
 }
 
 void Engine::initPool() {
-    const std::uint32_t n = m_.poolPages();
-    kv_arrays_ = m_.kvArrays();
-    pool_.init(n, kv_arrays_);
+    sc_.initPool();
 }
 
 // the vision settings of the prefix store + the image embeddings (here, not in engine_vision.cpp: that file must not
@@ -181,12 +179,12 @@ Engine::Health Engine::health() {
 
 Engine::Stats Engine::stats() const {
     Stats s;
-    s.spe_new = stat_spe_new_;
-    s.spe_hits = stat_spe_hits_;
-    s.spe_tok = stat_spe_tok_;
-    s.spe_evict = stat_spe_evict_;
-    s.unshare = stat_unshare_;
-    s.evictions = stat_evictions_;
+    s.spe_new = sc_.cacheCounters().speNew();
+    s.spe_hits = sc_.cacheCounters().speHits();
+    s.spe_tok = sc_.cacheCounters().speTok();
+    s.spe_evict = sc_.cacheCounters().speEvict();
+    s.unshare = sc_.cacheCounters().unshares();
+    s.evictions = sc_.cacheCounters().evictions();
     s.cow_pages = pool_.stats().cow_pages;
     s.q_waits = pool_.stats().q_waits;
     s.spill_waits = tb_.spillWaits();
@@ -280,7 +278,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     const std::uint32_t sys = ps_.sysSplit(toks);
     const std::uint32_t lcp_t = ps_.lcpTarget(slots_, toks, spe_hit ? spe_hit->n : mt.reuse, sys, sl.id, sl.tier_id);
     if (spe_hit) {
-        attachSpe(sl, *spe_hit);
+        sc_.attachSpe(sl, *spe_hit);
         mt = PrefixStore::Match{spe_hit->n, &spe_hit->ck, std::max<std::size_t>(mt.lcp, spe_hit->n)};
     }
     sl.reuse = mt.reuse;
@@ -295,7 +293,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
         if (ops_.eventDone(sl.spill_ev.get())) sl.spill_busy = false;
         else spill = true;
     }
-    if (spill || pool_.sharedFrom(sl.pages, mt.reuse)) cowPages(sl, mt.reuse, spill);
+    if (spill || pool_.sharedFrom(sl.pages, mt.reuse)) sc_.cowPages(sl, mt.reuse, spill);
     sl.tier_pages = std::min(sl.tier_pages, mt.reuse / kv_page);
     // a request that reuses nothing of the slot starts a new lineage
     if (mt.reuse == 0) {
@@ -458,7 +456,7 @@ void Engine::finishJob(Slot& sl) {
     if (sl.pos > N && sl.pos == sl.cache_tokens.size() && sl.logits_ok) {
         const std::optional<DevPtr> last_hid =
             opt_.use_mtp ? std::optional<DevPtr>(m_.mtpH() + static_cast<std::uint64_t>(sl.last_acc) * E * 4) : std::nullopt;
-        saveCkpt(sl, sl.pos, "gen-end", last_hid, sb_.logitsRow(sl.last_row));
+        sc_.saveCkpt(sl, sl.pos, "gen-end", last_hid, sb_.logitsRow(sl.last_row));
         // MTP KV rows for the accepted drafts of the last cycle (normally
         // written at the start of the next cycle)
         if (opt_.use_mtp && sl.n_pend > 1)
@@ -470,7 +468,7 @@ void Engine::finishJob(Slot& sl) {
     } else {
         logW("req {} | slot {} | cache bookkeeping mismatch (pos {}, tokens {}); dropping prefix cache", job.id, sl.id, sl.pos,
              sl.cache_tokens.size());
-        dropCache(sl);
+        sc_.dropCache(sl);
     }
     ops_.streamSync(m_.stream());
 
@@ -564,7 +562,7 @@ void Engine::failSlot(Slot& sl, const std::string& err) {
             job->w->flush();
         }
     }
-    dropCache(sl);
+    sc_.dropCache(sl);
     releaseSlot(sl);
 }
 
@@ -819,7 +817,7 @@ std::vector<Job*> Engine::admitQueued(std::uint32_t n_busy) {
     while (qi < queue_.size() && n_busy + admit.size() < admit_cap) {
         // item S: a new session whose system message another request is
         // prefilling right now waits for that checkpoint
-        if (waitsForSys(*queue_[qi]) || waitsForTier(*queue_[qi])) {
+        if (sc_.waitsForSys(*queue_[qi]) || waitsForTier(*queue_[qi])) {
             ++qi;
             continue;
         }
@@ -827,9 +825,9 @@ std::vector<Job*> Engine::admitQueued(std::uint32_t n_busy) {
         // queue (in order: later requests wait behind it) instead of failing mid-prefill. Alone it
         // always starts (startJob rejects a prompt larger than the whole pool).
         {
-            if (!pool_avail) pool_avail = poolAvailable();
+            if (!pool_avail) pool_avail = sc_.poolAvailable();
             Job& qj = *queue_[qi];
-            const std::size_t need = pagesFor(qj.tokens.size());
+            const std::size_t need = sc_.pagesFor(qj.tokens.size());
             if (n_busy + admit.size() > 0 && need <= pool_.pages() && need > *pool_avail) {
                 if (!qj.pool_wait_logged) {
                     qj.pool_wait_logged = true;

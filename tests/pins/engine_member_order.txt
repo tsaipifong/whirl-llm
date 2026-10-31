@@ -13,13 +13,14 @@
 # | stat_* (6) | uint64 | trivial | merged into cnt_ at stat_spe_new_ (S6) | trivial |
 # | gov_mu_ (new) | whirl::Mutex | trivial | last member of GovState (S8) | nobody holds it at ~Engine (C3) |
 # | dc_ (new in S4) | DrafterCtx (BatchStats&, ServerModel&, const EngineOptions&) | trivial (references only; static_assert in tests/iso/server.drafter_ctx) | added last, after vis_ (S4) | destroyed first; no destructor reads it, it owns nothing; no member before it moves (offsets unchanged) |
+# | sc_ (new in S7) | SlotPages (13 references: CkptStore&, ServerModel&, Backend&, const EngineOptions&, PagePool&, PrefixStore&, vector<Slot>&, TierBridge&, vector<KvArr>&, const uint64&, const uint64&, SlotPagesCounters&, DrafterCtx&) | trivial (references only; static_assert in tests/iso/server.slot_cache) | added last, after dc_ (S7) | destroyed first; no destructor reads it, it owns nothing (kv_arrays_ / conv_bytes_ / ssm_bytes_ / cnt_ stay where they were); no member before it moves (offsets unchanged) |
 # Stored callbacks that capture `this` (review3 C4): today they capture Engine; after the split they capture a
 # component (sc_ / dc_ / tg_), which is declared after vis_ and destroyed FIRST, while tb_ / the Tier outlive it.
 # | callback | stored in | captures (today -> after split) | lifetime rule |
 # | t->setWake([this]{..}) engine_tier.cpp:29 | Tier (outlives Engine) | Engine -> jq_ (JobQueue) | ~Engine must clear the wake (H1 / F13) before jq_ goes; C3 test |
 # | s.drop_cache / s.drafter_reset / s.share = [this, &sl] engine_tier.cpp:118-120 | TierBridge::RestoreSteps (stack of a restore) | Engine -> sc_ / dc_ | used only inside tb_.tryRestore called from the loop; no restore runs at ~Engine (stopIo before ~Engine) |
 # | tb_.flushOnStop([this]{ tierTick(); }) engine_tier.cpp:177 | call argument (not stored after return) | Engine -> tg_ | runs inside stop() before ~Engine; C3 test triggers flushOnStop before the reset |
-groups: BatchStats SampleBuffers ImageEmbeddings SpecState FloorState
+groups: BatchStats SampleBuffers ImageEmbeddings SpecState FloorState SlotPagesCounters
 m_
 ops_
 tok_
@@ -122,12 +123,12 @@ last_tick_
 last_reap_
 ps_
 tb_
-stat_spe_new_
-stat_spe_hits_
-stat_spe_tok_
-stat_spe_evict_
-stat_unshare_
-stat_evictions_
+cnt_.stat_spe_new_
+cnt_.stat_spe_hits_
+cnt_.stat_spe_tok_
+cnt_.stat_spe_evict_
+cnt_.stat_unshare_
+cnt_.stat_evictions_
 vis_.m_
 vis_.ops_
 vis_.cfg_
@@ -141,3 +142,4 @@ vis_.lend_
 vis_.snap0_
 vis_.rel_pending_
 dc_
+sc_

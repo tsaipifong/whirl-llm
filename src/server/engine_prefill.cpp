@@ -44,7 +44,7 @@ void Engine::maybeSplitCkpt(Slot& sl, DevPtr hid_row) {
     if (sl.on_sched && ((sl.sys_split > 0 && cur == sl.sys_split) || (sl.lcp_ck > 0 && cur == sl.lcp_ck) || (sl.img_ck > 0 && cur == sl.img_ck))) {
         const char* kind = cur == sl.sys_split ? "system" : "prefix";
         try {
-            createSpe(sl, sl.job->tokens, static_cast<std::uint32_t>(cur), kind,
+            sc_.createSpe(sl, sl.job->tokens, static_cast<std::uint32_t>(cur), kind,
                       opt_.use_mtp ? std::optional<DevPtr>(hid_row) : std::nullopt, nullptr, 0);
         } catch (const std::exception& ex) {
             logW("req {} | slot {} | shared prefix: checkpoint @{} not kept: {} ({})", sl.reqId(), sl.id, cur, ex.what(),
@@ -54,18 +54,18 @@ void Engine::maybeSplitCkpt(Slot& sl, DevPtr hid_row) {
     // TAIL-CK: slot checkpoint at the start of the last schedule chunk (cold-exact)
     if (sl.tail_ck > 0 && cur == sl.tail_ck) {
         m_.selectSeq(sl.id);
-        saveCkpt(sl, sl.tail_ck, "prefix", opt_.use_mtp ? std::optional<DevPtr>(hid_row) : std::nullopt, std::nullopt);
+        sc_.saveCkpt(sl, sl.tail_ck, "prefix", opt_.use_mtp ? std::optional<DevPtr>(hid_row) : std::nullopt, std::nullopt);
     }
     if (sl.pf_split == 0 || cur != sl.pf_split) return;
     m_.selectSeq(sl.id);
-    saveCkpt(sl, sl.pf_split, "think-open", opt_.use_mtp ? std::optional<DevPtr>(hid_row) : std::nullopt, std::nullopt);
+    sc_.saveCkpt(sl, sl.pf_split, "think-open", opt_.use_mtp ? std::optional<DevPtr>(hid_row) : std::nullopt, std::nullopt);
 }
 
 void Engine::prefillStep(Slot& sl) {
     Job& job = *sl.job;
     const std::span<const std::uint32_t> toks = std::span<const std::uint32_t>(job.tokens).subspan(sl.reuse);
     const std::size_t n = chunkLen(sl);
-    if (!ensurePages(sl, sl.reuse + sl.pf_off + n)) throw KvPoolFull();
+    if (!sc_.ensurePages(sl, sl.reuse + sl.pf_off + n)) throw KvPoolFull();
     m_.selectSeq(sl.id);
     if (opt_.use_mtp) {
         m_.prefillMtpChunk(toks, sl.reuse, sl.pf_off, n, sl.ck_hid);
@@ -129,7 +129,7 @@ std::size_t Engine::prefillGroup(Slot& first, std::size_t row_budget) {
         for (Slot* sl : grp) {
             bool ok = false;
             try {
-                ok = ensurePages(*sl, sl->reuse + sl->pf_off + chunkLen(*sl));
+                ok = sc_.ensurePages(*sl, sl->reuse + sl->pf_off + chunkLen(*sl));
             } catch (const std::exception&) {
                 ok = false;
             }
@@ -214,8 +214,8 @@ void Engine::finishPrefill(Slot& sl) {
         {
             const bool busy = sl.spill_busy && !ops_.eventDone(sl.spill_ev.get());
             if (busy || pool_.sharedFrom(sl.pages, 0)) {
-                cowPages(sl, 0, busy);
-                if (!ensurePages(sl, N)) throw KvPoolFull();
+                sc_.cowPages(sl, 0, busy);
+                if (!sc_.ensurePages(sl, N)) throw KvPoolFull();
             }
         }
         m_.selectSeq(sl.id);
@@ -275,7 +275,7 @@ void Engine::finishPrefill(Slot& sl) {
     const std::uint32_t n_new = N - sl.reuse;
     // (thinking-mode prompts keep the think-open checkpoint at N - 1 instead)
     if (sl.reuse < N && ct_.thinkOpenSplit(toks) == 0)
-        saveCkpt(sl, N, "prompt-end", opt_.use_mtp ? std::optional<DevPtr>(m_.mtpH()) : std::nullopt, m_.logits());
+        sc_.saveCkpt(sl, N, "prompt-end", opt_.use_mtp ? std::optional<DevPtr>(m_.mtpH()) : std::nullopt, m_.logits());
     logI("req {} | slot {} | prefill: {} tok in {:.1f} ms ({:.1f} tok/s)", job.id, sl.id, n_new, sl.prompt_ms,
          sl.prompt_ms > 0 ? static_cast<double>(n_new) * 1000.0 / sl.prompt_ms : 0.0);
 
