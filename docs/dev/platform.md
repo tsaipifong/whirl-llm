@@ -148,6 +148,11 @@ fixed environment set hashes to a constant computed outside C++), `testPlatformP
 
 ## proc / sys / args (PL4)
 
+arch025-lpath (2026-11-01) closed the three long-path follow-ups of arch025-d7 (PRIOR_ART: progress/arch025-lpath.PRIOR_ART.md; no reference engine handles them):
+- `fs::shortPathForm` (no Win32 call) is the inverse of `longPathForm`: `\\?\X:\...` and `\\?\UNC\...` come back plain when the plain form is under 248 characters, everything else unchanged. `exeDirectory()` (= `exeDirectoryOf(exePath())`) applies it to the folder, so a program started through a `\\?\` path reports the same folder (and draft-vocabulary path in the log) as one started plainly; a folder of 248+ characters keeps the prefix because the plain form could not be opened. `exeIdentity` is not touched (keys are unchanged).
+- `fs::longPathFormDir(dir, 48)` in `Tier::start`: a `--kv-ssd-dir` whose files (`<16 hex>-<16 hex>.wkv`, `whirl.lock`) would pass 247 characters is used in the long-path form for the lock, the listing and every entry file (`filePath` = that form + name). A directory of up to 198 characters is unchanged; the log line still shows the directory as given. Test: `testSsdLongDir`.
+- `server::ssdDirForExeId` (module server.args) holds the "exe identity 0 -> no SSD tier" decision and its WARN text of arch025-d7; `startTier` only logs what it returns. Test: server-args `ssd_dir_for_exe_id`.
+
 PL4 (2026-10-27) moved the last calls, one function per Win32 call, arguments as in v0.2.4 0e35407:
 - `proc::exePath()` is GetModuleFileNameW into a 1024-character buffer with nSize 1023 and `buf[n] = 0`, exactly the
   two copies it replaced (`exeDirectory` in src/spec/policy.cpp, `exeIdentity` in src/tier/kv_tier.cpp). arch025-d7

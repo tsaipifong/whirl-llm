@@ -1545,6 +1545,10 @@
   ],
   [
    "spec.policy",
+   "platform.fs"
+  ],
+  [
+   "spec.policy",
    "platform.proc"
   ],
   [
