@@ -9,7 +9,8 @@ left must be listed in the rules' allowed_diffs; an entry missing in the new tre
 
   python -I tools/impact/revtext.py --old <tree> --new <tree> [--rules step_rules.json] [--cut tools/gates/engine_cut.json]
                                     [--work DIR]
-  python -I tools/impact/revtext.py --selftest [--work DIR]     fault cases on this repo's tree
+  python -I tools/impact/revtext.py --selftest [--work DIR] [--only REGEX]     fault cases on this repo's tree (--only: the
+                                    cases whose name matches, for red / green runs; acceptance is the full run)
 rules (JSON; keys starting with "_" are comments, any other unknown key is a rules error, exit 2):
   "replace": [[new_text, old_text], ...]   applied to the NEW text (comments already dropped), in order, left to right,
         non-overlapping, ON TOKEN BOUNDARIES (arch025-revtextfix, S0 review C-6): new_text is tokenized with the same
@@ -21,14 +22,23 @@ rules (JSON; keys starting with "_" are comments, any other unknown key is a rul
         called that old name (two new entries onto one old entry = a copy: declare the second one in "added"); the
         key must be a new-tree entry and the value an old-tree entry.
   "removed": {"old entry": "why"}          old entries that are gone; listing an entry the new tree still has fails.
-  "added": {"new entry": {"equals": "<token text>" | "is": "<token text>" | "planned": true, "why": "..."}}
+  "added": {"new entry": {"equals": "<token text>", "sig": "<token text>" | "is": "<token text>" | "planned": true, "why": "..."}}
         entries ONLY in the new tree (functions, `member:<name>` declarations). Every new-tree entry that maps to no
         old entry must be listed here, or the run fails (`NEW <entry>`). After the replace / regex rules:
-          equals  - a function: the tokens inside its body braces; a member: its whole declaration statement
+          equals  - a function: the tokens inside its body braces AND (sig, required for a function; arch025-engine-rt2,
+                    S6 review act-on 1) the tokens before the body brace: return type, name, parameters, qualifiers
+                    (out of class: the definition's line, e.g. "void SlotPages::f(Slot& sl)"); a member: its whole
+                    declaration statement (no sig)
           is      - all tokens of the entry (signature + body, or the declaration)
           planned - the name is a planned row of the cut (new_funcs `<name>` / `Engine.<name>`; new_data for members);
                     use it only for code the step writes new, the review reads it (the text is not checked)
-        e.g. S6: "added": {"noteSpeNew": {"equals": "stat_spe_new_ += 1;", "why": "the former statement of createSpe"}}
+        e.g. S6: "added": {"noteSpeNew": {"equals": "stat_spe_new_ += 1;", "sig": "void noteSpeNew()", "why": "the former statement of createSpe"}}
+        An in-class entry starts at its first code character (census, rt2), so `is` works on a one-line inline method.
+        rt3: every declaration statement of a tracked class is an entry (census class_decls.tsv): `decl:<name>` a
+        member function declaration without a body (default arguments, virtual / override / const), `member:<name>` a
+        static constexpr data member, `decl:enum:<X>`, `decl:using:<X>`, `decl:fwd:<X>`, `decl:static_assert`; their
+        equals is the whole declaration statement (no sig), like a member's. The sig split is bracket-aware (`n = {}`,
+        `noexcept(T{})`, `: a_{0} {`), and tokens after the body's `}` (other than `;`) fail.
   "allowed_diffs": [{"entry": "<entry>" | ["<entry>", ...], "old": "<token text>", "new": "<token text>", "why": "..."}]
         a difference left after the rules: in each named entry the first whole-token run equal to `new` is put back
         to `old` (once per entry), then the entry is compared again. The entry must be named: "*" or any wildcard is a
@@ -85,7 +95,22 @@ def census(tree, out, cut):
     for l in list(open(md, encoding="utf-8"))[1:]:
         c, n, f, ln, a0, a1 = l.rstrip("\n").split("\t")
         rows.setdefault("member:" + n, []).append((f, int(ln), -1, f"decl {c}::{n} @{a0}:{a1}"))
+    # rt3 (rt2 review act-on 1): every other declaration statement of a tracked class is an entry too - a member function
+    # declaration without a body "decl:<name>" (default arguments, virtual / override / const / = delete), a static
+    # constexpr data member "member:<name>", "decl:enum:<X>", "decl:using:<X>", "decl:fwd:<X>", "decl:static_assert";
+    # they were in no entry (rt2's in-class start dropped even the line before an entry that used to carry them)
+    cd = os.path.join(out, "class_decls.tsv")
+    if not os.path.exists(cd):
+        raise SystemExit(f"revtext: census of {tree} wrote no class_decls.tsv (old census?): FAIL")
+    for l in list(open(cd, encoding="utf-8"))[1:]:
+        c, e, f, ln, a0, a1 = l.rstrip("\n").split("\t")
+        rows.setdefault(e, []).append((f, int(ln), -1, f"decl {c}::{e} @{a0}:{a1}"))
     return rows
+
+
+def is_decl(k):
+    """rt3: entries compared as one whole declaration statement (members, body-less declarations)"""
+    return k.startswith(("member:", "decl:"))
 
 
 def body_text(tree, rows):
@@ -100,7 +125,9 @@ def body_text(tree, rows):
             parts.append(re.sub(r"^\s*(?:public|private|protected)\s*:", "", raw[a0:a1]))
             continue
         lines = raw.split("\n")
-        parts.append("\n".join(lines[ln - 1:ln - 1 + n]))
+        # rt2: the census starts an in-class entry at its first code character; an access specifier on that same line
+        # (`public: void f() {..}`) is not part of the entry (members drop it the same way)
+        parts.append(re.sub(r"^\s*(?:(?:public|private|protected)\s*:(?!:)\s*)+", "", "\n".join(lines[ln - 1:ln - 1 + n])))
     return strip_comments("\n".join(parts))
 
 
@@ -143,6 +170,12 @@ def check_rules(rules):
         if "planned" in v and v["planned"] is not True: raise RulesError(f"added[{k!r}]: planned must be true")
         if not str(v.get("why", "")).strip(): raise RulesError(f"added[{k!r}] needs a why")
         if k in ren: raise RulesError(f"{k!r} is in both added and renames")
+        # rt2 (S6 review act-on 1): equals on a function compares its body AND its signature (the tokens before the
+        # body brace: return type, name, parameters, qualifiers); before, a function's equals was body-only
+        if "sig" in v and not ("equals" in v and not is_decl(k)):
+            raise RulesError(f"added[{k!r}]: sig belongs to a function's equals (is compares all tokens; a member's equals is its whole declaration)")
+        if "equals" in v and not is_decl(k) and (not isinstance(v.get("sig"), str) or not tokens(v["sig"])):
+            raise RulesError(f"added[{k!r}]: a function's equals needs sig (the tokens before the body brace, e.g. 'std::uint64_t speNew() const')")
     for i, ad in enumerate(rules.get("allowed_diffs", [])):
         ents = ad.get("entry")
         ents = [ents] if isinstance(ents, str) else ents
@@ -194,16 +227,47 @@ def apply_rules(text, rules):
 
 def body_tokens(tt, name):
     """tokens inside the body braces of function `name` (the first `{` after `name (`), or None"""
+    sb = sig_body(tt, name)
+    return None if sb is None else sb[1]
+
+
+def _close(tt, x, op, cl):
+    """index of the token closing the op at tt[x], or None"""
+    d = 0
+    for y in range(x, len(tt)):
+        d += (tt[y] == op) - (tt[y] == cl)
+        if d == 0: return y
+    return None
+
+
+def sig_body(tt, name):
+    """rt2: (the signature = the tokens before the body brace, the tokens inside the body braces, the tokens after the
+    body's closing brace) of function `name`, or None.
+    rt3 (rt2 review consider-1): bracket-aware - the parameter list is matched as a whole (`n = {}` defaults), brackets
+    after it are skipped (`noexcept(T{})`, `-> decltype(T{})`), and in a member initializer list a `{` right after a
+    name or `>` is that member's initializer (`X() : a_{0}, b_{1} { body }`), not the body."""
     short = name.split("::")[-1]
     for i in range(len(tt) - 1):
         if tt[i] == short and tt[i + 1] == "(":
-            j = next((x for x in range(i, len(tt)) if tt[x] == "{"), None)
-            if j is None: return None
-            d = 0
-            for x in range(j, len(tt)):
-                d += (tt[x] == "{") - (tt[x] == "}")
-                if d == 0: return tt[j + 1:x]
-            return None
+            x = _close(tt, i + 1, "(", ")")
+            if x is None: return None
+            x += 1; pd = 0; init = False
+            while x < len(tt):
+                t = tt[x]
+                if t in ("(", "["): pd += 1
+                elif t in (")", "]"): pd -= 1
+                elif pd == 0 and t == ":": init = True
+                elif pd == 0 and t == "{":
+                    if init and (re.match(r"\w", tt[x - 1]) or tt[x - 1] == ">"):
+                        y = _close(tt, x, "{", "}")
+                        if y is None: return None
+                        x = y + 1; continue
+                    break
+                x += 1
+            if x >= len(tt): return None
+            e = _close(tt, x, "{", "}")
+            if e is None: return None
+            return tt[:x], tt[x + 1:e], tt[e + 1:]
     return None
 
 
@@ -283,12 +347,20 @@ def run(old, new, rules, cut, work, ro=None):
         parts = [r for r in rn[k] if "in-class initializer" not in r[3]]
         if "is" in spec:
             got, want, what = tt, tokens(spec["is"]), "all tokens"
-        elif k.startswith("member:"):
+        elif is_decl(k):
             got, want, what = tt, tokens(spec["equals"]), "declaration"
         elif len(parts) != 1:
             bad.append(f"ADDED {k}: {len(parts)} census parts (overloads?): use is, not equals"); continue
         else:
-            got, want, what = body_tokens(tt, k), tokens(spec["equals"]), "body"
+            sb = sig_body(tt, k)
+            if sb is not None and sb[2] and sb[2] != [";"]:   # rt3 (consider-1): the body must close the entry
+                bad.append(f"ADDED {k}: tokens after the body: [{' '.join(sb[2][:12])}]"); continue
+            if sb is not None and sb[0] != tokens(spec["sig"]):   # rt2: the signature (return type, parameters, const)
+                g, want = sb[0], tokens(spec["sig"])
+                j = next((i for i, (x, y) in enumerate(zip(want, g)) if x != y), min(len(want), len(g)))
+                bad.append(f"ADDED {k}: the signature is not the declared text at token {j}: declared [{' '.join(want[max(0, j - 6):j + 8])}] "
+                           f"new [{' '.join(g[max(0, j - 6):j + 8])}]"); continue
+            got, want, what = (None if sb is None else sb[1]), tokens(spec["equals"]), "body"
         if got == want:
             nadd += 1
         else:
@@ -327,8 +399,11 @@ def selftest(work):
     # revtextfix: the old tree is this repo for every case: one census (the selftest took ~45 s a case with two)
     ro = census(REPO, os.path.join(work, "_old"), cut)
 
+    only = arg("--only")   # rt2: a regex on the case names (red / green runs of a few cases; the full run has no --only)
+
     def case(name, text, rules, want, extra=None, rel=eh, expect=None):
         """want = exit code; expect = a regex the run's output must match (the case is red for the right reason)"""
+        if only and not re.search(only, name): return
         d = tree(name, text, extra, rel)
         print(f"-- {name}")
         buf = io.StringIO()
@@ -402,10 +477,11 @@ def selftest(work):
         # new entries only in the new tree: a copy of a body into a new function, the old one left as it was
         case("N1 a new function only in the new tree (copy of dropCache as dropCache2)", cp, {}, 1,
              expect=r"^  NEW dropCache2: only in the new tree")
+        dsig = f"void {DCLS}::dropCache2(Slot& sl)"   # rt2: a function's equals declares its signature too
         case("N2 the copy declared in rules.added with its body (control)", cp,
-             {"added": {"dropCache2": {"equals": inner, "why": "selftest"}}}, 0, expect=r", 1 added entries as declared\)")
+             {"added": {"dropCache2": {"equals": inner, "sig": dsig, "why": "selftest"}}}, 0, expect=r", 1 added entries as declared\)")
         case("N3 rules.added with a body that is not the new body", cp,
-             {"added": {"dropCache2": {"equals": inner.split("\n")[0], "why": "selftest"}}}, 1,
+             {"added": {"dropCache2": {"equals": inner.split("\n")[0], "sig": dsig, "why": "selftest"}}}, 1,
              expect=r"^  ADDED dropCache2: the body is not the declared text")
         case("N4 rules.added planned for a name not in the cut's new_funcs", cp,
              {"added": {"dropCache2": {"planned": True, "why": "selftest"}}}, 1, expect=r"^  ADDED dropCache2: planned, but the cut")
@@ -438,6 +514,95 @@ def selftest(work):
         cases.append(("dropCache body anchor", False))
     case("K1 an unknown rules key (typo allowed_diff) is a rules error", src, {"allowed_diff": []}, 2,
          expect=r"^revtext: rules error: unknown key")
+    # ---- rt2 (S6 review act-on 1): added.equals compared only the body; the signature (return type, parameters,
+    # const) of a new function was never looked at (probe_ret / probe_par passed); `is` on a single-line inline method
+    # failed because the census started an in-class entry on the line before it ----
+    ph = "server/engine_pages.h"
+    ps = open(os.path.join(REPO, "src", ph), encoding="utf-8").read()
+    SN = "    std::uint64_t speNew() const { return stat_spe_new_; }\n"
+    if ps.count(SN) == 1:
+        def addl(line):   # a new inline method right after speNew (the line before it is speNew's)
+            return ps.replace(SN, SN + line + "\n", 1)
+        rok = "    std::uint64_t speNew2() const { return stat_spe_new_; }"
+        case("S1 a new read method declared with equals + sig (control)", addl(rok),
+             {"added": {"speNew2": {"equals": "return stat_spe_new_;", "sig": "std::uint64_t speNew2() const", "why": "selftest"}}}, 0,
+             rel=ph, expect=r", 1 added entries as declared\)")
+        case("S2 equals: the new method's return type narrowed (uint64 -> uint32)", addl(rok.replace("std::uint64_t", "std::uint32_t", 1)),
+             {"added": {"speNew2": {"equals": "return stat_spe_new_;", "sig": "std::uint64_t speNew2() const", "why": "selftest"}}}, 1,
+             rel=ph, expect=r"^  ADDED speNew2: the signature is not the declared text")
+        case("S3 equals: the new method's parameter type narrowed (uint32 -> uint16)",
+             addl("    void noteSpeTok2(std::uint16_t n) { stat_spe_tok_ += n; }"),
+             {"added": {"noteSpeTok2": {"equals": "stat_spe_tok_ += n;", "sig": "void noteSpeTok2(std::uint32_t n)", "why": "selftest"}}}, 1,
+             rel=ph, expect=r"^  ADDED noteSpeTok2: the signature is not the declared text")
+        case("S4 equals on a function without sig is a rules error", addl(rok),
+             {"added": {"speNew2": {"equals": "return stat_spe_new_;", "why": "selftest"}}}, 2,
+             rel=ph, expect=r"^revtext: rules error: added\['speNew2'\]: a function's equals needs sig")
+        case("I1 is on a single-line inline method (control: the census entry is that one line)",
+             addl("    void noteSpeNew2() { stat_spe_new_ += 1; }"),
+             {"added": {"noteSpeNew2": {"is": "void noteSpeNew2() { stat_spe_new_ += 1; }", "why": "selftest"}}}, 0,
+             rel=ph, expect=r", 1 added entries as declared\)")
+        case("I2 is on a single-line inline method whose return type changed", addl(rok.replace("std::uint64_t", "std::uint32_t", 1)),
+             {"added": {"speNew2": {"is": rok.strip(), "why": "selftest"}}}, 1,
+             rel=ph, expect=r"^  ADDED speNew2: the all tokens is not the declared text at token 2:")
+        # rt3 (rt2 review consider-4): a qualifier-only change (const dropped) of a new in-class method
+        case("Q2 equals: the new method lost its const (sig declares const)", addl(rok.replace(") const {", ") {", 1)),
+             {"added": {"speNew2": {"equals": "return stat_spe_new_;", "sig": "std::uint64_t speNew2() const", "why": "selftest"}}}, 1,
+             rel=ph, expect=r"^  ADDED speNew2: the signature is not the declared text")
+        # rt3 (rt2 review consider-1): a brace inside the signature (`= {}` default) cut sig / body at the wrong `{`
+        case("B1 equals + sig on a method with a brace default argument (control)",
+             addl("    void noteSpeTok3(std::uint32_t n = {}) { stat_spe_tok_ += n; }"),
+             {"added": {"noteSpeTok3": {"equals": "stat_spe_tok_ += n;", "sig": "void noteSpeTok3(std::uint32_t n = {})", "why": "selftest"}}}, 0,
+             rel=ph, expect=r", 1 added entries as declared\)")
+        case("B2 is a brace default argument changed ({} -> {7}) caught by sig",
+             addl("    void noteSpeTok3(std::uint32_t n = {7}) { stat_spe_tok_ += n; }"),
+             {"added": {"noteSpeTok3": {"equals": "stat_spe_tok_ += n;", "sig": "void noteSpeTok3(std::uint32_t n = {})", "why": "selftest"}}}, 1,
+             rel=ph, expect=r"^  ADDED noteSpeTok3: the signature is not the declared text")
+    else:
+        cases.append(("S/I speNew anchor", False))
+    if dm:
+        # rt3 (rt2 review consider-4): an out-of-class definition whose parameter type differs from the declared sig
+        cq = src.replace(whole, whole + "\n" + whole.replace("dropCache(Slot& sl)", "dropCache2(const Slot& sl)", 1), 1)
+        case("Q1 equals: an out-of-class new function's parameter differs from sig (const Slot&)", cq,
+             {"added": {"dropCache2": {"equals": inner, "sig": f"void {DCLS}::dropCache2(Slot& sl)", "why": "selftest"}}}, 1,
+             expect=r"^  ADDED dropCache2: the signature is not the declared text")
+    # ---- rt3 (rt2 review act-on 1): declarations of a tracked class that have no body (member function declarations:
+    # default arguments, override / virtual / const; static constexpr data members; enums, using, static_assert) were
+    # in no census entry; after rt2 moved in-class entries to their first code character not even the line before an
+    # entry carried them (review probe: old tools FAIL 2, rt2 tools ok). Every declaration statement is compared now. ----
+    RL = "    void runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout = std::chrono::milliseconds(60000));\n"
+    SF = "    static constexpr std::uint64_t shutdown_flush_long_ms = 60000;\n"
+    SW = "    void submitAndWait(Job& job) override;\n"
+    if hs.count(RL) == 1 and hs.count(SF) == 1 and hs.count(SW) == 1:
+        d1 = hs.replace(RL, RL.replace("milliseconds(60000)", "milliseconds(600)"), 1)
+        case("D1 a default argument of a member function declaration changed (runOnLoop 60000 -> 600 ms)", d1, {}, 1,
+             rel=hh, expect=r"^  DIFF decl:runOnLoop at token")
+        case("D2 a static constexpr value changed (shutdown_flush_long_ms 60000 -> 600)", hs.replace(SF, SF.replace("60000", "600"), 1), {}, 1,
+             rel=hh, expect=r"^  DIFF member:shutdown_flush_long_ms at token")
+        case("D3 override removed from a declaration (submitAndWait)", hs.replace(SW, SW.replace(" override", ""), 1), {}, 1,
+             rel=hh, expect=r"^  DIFF decl:submitAndWait at token")
+        case("D4 the default argument change listed in allowed_diffs (control)", d1,
+             {"allowed_diffs": [{"entry": "decl:runOnLoop", "old": "60000", "new": "600", "why": "selftest"}]}, 0, rel=hh,
+             expect=r"^revtext: ok \(.*1 allowed differences")
+        dn = hs.replace(SW, SW + "    void zqDecl(int n = 3);\n", 1)
+        case("D5 a new member function declaration only in the new tree", dn, {}, 1, rel=hh,
+             expect=r"^  NEW decl:zqDecl: only in the new tree")
+        case("D6 the new declaration in rules.added (control)", dn,
+             {"added": {"decl:zqDecl": {"equals": "void zqDecl(int n = 3);", "why": "selftest"}}}, 0, rel=hh,
+             expect=r", 1 added entries as declared\)")
+        case("D7 rules.added declaration text differs (default 3 declared, 4 in the tree)", hs.replace(SW, SW + "    void zqDecl(int n = 4);\n", 1),
+             {"added": {"decl:zqDecl": {"equals": "void zqDecl(int n = 3);", "why": "selftest"}}}, 1, rel=hh,
+             expect=r"^  ADDED decl:zqDecl: the declaration is not the declared text")
+        case("D8 a declaration's added entry with sig is a rules error", dn,
+             {"added": {"decl:zqDecl": {"equals": "void zqDecl(int n = 3);", "sig": "void zqDecl(int n = 3)", "why": "selftest"}}}, 2, rel=hh,
+             expect=r"^revtext: rules error: added\['decl:zqDecl'\]: sig belongs")
+        case("E1 a new enum in the class is reported", hs.replace(SW, SW + "    enum class ZqMode { A = 1, B = 2 };\n", 1), {}, 1, rel=hh,
+             expect=r"^  NEW decl:enum:ZqMode: only in the new tree")
+        case("E2 a new using alias in the class is reported", hs.replace(SW, SW + "    using ZqClock = std::chrono::steady_clock;\n", 1), {}, 1, rel=hh,
+             expect=r"^  NEW decl:using:ZqClock: only in the new tree")
+    else:
+        cases.append(("D runOnLoop / shutdown_flush_long_ms / submitAndWait anchors", False))
+    if only and not cases:   # rt3 (rt2 review consider-3): a typo in --only must not look green
+        print(f"revtext selftest: --only {only!r} matched no case"); return 2
     ok = all(g for _, g in cases)
     for n, g in cases: print(f"  {'ok  ' if g else 'FAIL'} {n}")
     print(f"revtext selftest: {sum(g for _, g in cases)}/{len(cases)} as expected")

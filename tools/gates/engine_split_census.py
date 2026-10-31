@@ -140,6 +140,7 @@ for dp, dn, fn in os.walk(os.path.join(ROOT, "include")):
 
 data, funcs, types, statics = [], [], [], []   # data: (name, line, access, decl, class, file)
 decls = []   # S0b: (class, member, file, line, start, end) of every data member declaration (revtext compares them)
+cdecls = []  # rt3: (class, entry, file, line, start, end) of every OTHER declaration statement of a tracked class (revtext)
 bodies = {}  # key -> (file, line, text, def)
 branges = {}  # S0d: key -> [(file, start, end)] character offsets of the body text (the AST census maps clang positions)
 class_files = {}
@@ -151,6 +152,14 @@ def add_body(key, f, ln, txt, dfn, rng=None):
     bodies[key] = (f, ln, txt, dfn)
     branges[key] = rng or []
     return key
+
+
+def code_start(hs, i):
+    """rt2 (S6 review act-on 1): the first code character at or after i, past whitespace and access specifiers (hs has its
+    comments blanked). An in-class entry starts there: from stmt0 (the end of the statement before) the entry began on
+    the line before it, and revtext (which takes whole lines) compared that line too."""
+    m = re.compile(r"(?:\s|(?:public|private|protected)\s*:(?!:))*").match(hs, i)
+    return m.end()
 
 
 def parse_class(cname, rel, hs, a):
@@ -171,14 +180,21 @@ def parse_class(cname, rel, hs, a):
                 tn = re.findall(r"\w+", hd)[1]
                 types.append((tn, lineno(hs, stmt0), cname))
                 if not hd.startswith("enum"):   # A2: the nested type's inline bodies are an entry type:X
-                    add_body("type:" + tn, rel, lineno(hs, stmt0), hs[stmt0:j + 1], f"struct {cname}::{tn} (in-class)", [(rel, stmt0, j + 1)])
-                k = hs.index(";", j); i = k + 1; stmt0 = i; continue
+                    s0 = code_start(hs, stmt0)
+                    add_body("type:" + tn, rel, lineno(hs, s0), hs[s0:j + 1], f"struct {cname}::{tn} (in-class)", [(rel, s0, j + 1)])
+                k = hs.index(";", j)
+                if hd.startswith("enum"):   # rt3: an enum's enumerators were in no entry; revtext compares the definition
+                    me = re.match(r"enum\s+(?:(?:class|struct)\s+)?(\w+)", hd)
+                    s0 = code_start(hs, stmt0)
+                    cdecls.append((cname, "decl:enum:" + (me.group(1) if me else "(anonymous)"), rel, lineno(hs, s0), s0, k + 1))
+                i = k + 1; stmt0 = i; continue
             hd = re.sub(r"\bdecltype\s*\(\s*auto\s*\)", "decltype_auto", hd)   # S0c (N11): a return type, not a call
             if "(" in hd.split("=")[0] and re.search(r"\w\s*$", hd.split("(")[0]) is not None:
                 pre = hd.split("(")[0]
                 nm = re.search(r"(operator\s*\S+|~?\w+)\s*$", pre).group(1)
                 funcs.append((nm, lineno(hs, stmt0), access, re.sub(r"\s+", " ", hd)[:90], cname))
-                add_body(resolve(cname, nm), rel, lineno(hs, stmt0), hs[stmt0:j + 1], f"{cname}::{nm} (inline)", [(rel, stmt0, j + 1)])
+                s0 = code_start(hs, stmt0)
+                add_body(resolve(cname, nm), rel, lineno(hs, s0), hs[s0:j + 1], f"{cname}::{nm} (inline)", [(rel, s0, j + 1)])
                 i = j + 1; stmt0 = i; continue
             i = j + 1; continue
         if c == ";":
@@ -193,17 +209,27 @@ def parse_class(cname, rel, hs, a):
             if s.startswith("friend"):
                 findings.append(f"friend in tracked class {cname} ({rel}:{ln}): {s[:80]}")
                 continue
+            # rt3 (rt2 review act-on 1): every declaration statement that is not a data member is a class_decls row
+            # (revtext compares the whole statement: default arguments, override, constexpr values, aliases)
+            if s.startswith("using "):
+                mu = re.match(r"using\s+(\w+)\s*=", s) or re.search(r"(\w+)\s*$", s)
+                cdecls.append((cname, "decl:using:" + (mu.group(1) if mu else s), rel, ln, span[0], span[1]))
+            elif s.startswith("static_assert"):
+                cdecls.append((cname, "decl:static_assert", rel, ln, span[0], span[1]))
             if not s or s.startswith(("using ", "static_assert")):
                 continue
             m = re.match(r"(struct|class) (\w+)$", s)
             if m:
+                cdecls.append((cname, "decl:fwd:" + m.group(2), rel, ln, span[0], span[1]))
                 types.append((m.group(2), ln, cname)); continue
             s2 = re.sub(r"\bdecltype\s*\(\s*auto\s*\)", "decltype_auto", detpl(re.sub(r"WH_\w+\([^)]*\)", "", s)))
             if s2.startswith("static constexpr"):
-                statics.append((re.search(r"(\w+)\s*=", s2).group(1), ln)); continue
+                statics.append((re.search(r"(\w+)\s*=", s2).group(1), ln))
+                cdecls.append((cname, "member:" + statics[-1][0], rel, ln, span[0], span[1])); continue
             if "(" in re.sub(r"operator\s*=", "operator_assign", s2).split("=")[0] and not re.match(r"[\w:<>,\s*&]+\s+\w+\s*\{", s2):
                 pre = s2.split("(")[0]
                 nm = re.search(r"(operator\s*\S+|~?\w+)\s*$", pre).group(1)
+                cdecls.append((cname, "decl:" + re.sub(r"\s+", "", nm), rel, ln, span[0], span[1]))
                 funcs.append((nm, ln, access, s[:90], cname)); continue
             s3 = re.sub(r"\{[^{}]*\}", "", s2)
             parts, d, cur = [], 0, ""
@@ -1048,6 +1074,16 @@ with open(os.path.join(OUT, "member_decls.tsv"), "w", encoding="utf-8") as o:   
     o.write("class\tmember\tfile\tline\tstart\tend\n")
     for cname, nm, rel, ln, a0, a1 in decls:
         o.write(f"{cname}\t{nm}\t{rel}\t{ln}\t{a0}\t{a1}\n")
+# rt3: a declaration Engine keeps for a public forwarder while a component class declares the same function (S7:
+# `void initPool();` in Engine and in SlotPages) is "decl:Engine.<f>", like the forwarder's body entry "Engine.<f>";
+# the component's declaration keeps "decl:<f>" (it is the moved one)
+_comp_decls = {e for c, e, *_ in cdecls if c != "Engine" and e.startswith("decl:") and ":" not in e[5:]}
+cdecls = [(c, ("decl:Engine." + e[5:]) if c == "Engine" and e in _comp_decls and e[5:] not in ("Engine", "~Engine") else e, *r)
+          for c, e, *r in cdecls]
+with open(os.path.join(OUT, "class_decls.tsv"), "w", encoding="utf-8") as o:   # rt3: for revtext (rt2 review act-on 1)
+    o.write("class\tentry\tfile\tline\tstart\tend\n")
+    for cname, e, rel, ln, a0, a1 in cdecls:
+        o.write(f"{cname}\t{e}\t{rel}\t{ln}\t{a0}\t{a1}\n")
 with open(os.path.join(OUT, "files.txt"), "w", encoding="utf-8") as o:
     for f in sorted(files_with_defs):
         o.write(f"{f}\t{len(files_with_defs[f])}\n")
