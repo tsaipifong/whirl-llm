@@ -84,7 +84,7 @@ PATHS = {
                           "metric": None, "desc": "SSD tier identity: which saved states a new server may reuse"},
     "vision":            {"roots": ["ImageEmbeddings::prepare", "Engine::attachVision", "Qwen35Vision::encode", "Context::visRow",
                                     "Context::injectRows"], "metric": None, "desc": "image encoder and image-token injection"},
-    "http":              {"roots": ["Engine::writeError", "StreamState::send"], "metric": None,
+    "http":              {"roots": ["writeError", "StreamState::send"], "metric": None,  # writeError: free function since arch025-engine S5
                           "desc": "HTTP transport, OpenAI protocol, streaming"},
     "load":              {"roots": ["Model::load", "loadOrTune", "Model::autotuneGemm", "Model::checkPreciseDecode"], "metric": "all",
                           "desc": "model load, kernel table, auto-tune, precise self-checks"},
@@ -671,11 +671,13 @@ def build(root):
 
 
 def tree_hash(root, files):
+    # CRLF -> LF first (arch025 s0b-merge review act-on 1): .gitattributes checks *.ps1 out CRLF and a tool that rewrites
+    # a file LF must not make --check call the map stale on a clean checkout (as engine_split_check.py's pins do)
     h = hashlib.sha256()
     for f in files:
         if f.endswith(SRC_EXT + (".cmake", ".txt", ".ps1")) and f.split("/")[0] in SCAN_DIRS + ("cmake", "CMakeLists.txt"):
             try:
-                h.update(f.encode() + b"\0" + open(os.path.join(root, f), "rb").read())
+                h.update(f.encode() + b"\0" + open(os.path.join(root, f), "rb").read().replace(b"\r\n", b"\n"))
             except OSError:
                 pass
     return h.hexdigest()[:16]

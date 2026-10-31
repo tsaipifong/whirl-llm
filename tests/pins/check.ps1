@@ -3,6 +3,9 @@
 # engine_*_tier (arch024-S6b: the spill span sequence through a RAM tier) were recorded on 906e367, before the TierBridge move.
 # engine_*_restore (arch024-S7: restores from the RAM tier, the in-place spill after one) were recorded on 869e56c, before the restore move.
 # engine_*_gov (arch024-S9: the memory governor shrinks the KV pool and grows it back) were recorded on 511271d, before the governor move.
+# engine_f16_ordered / engine_f16_tier_ordered (arch025-engine S0 C1, DESIGN v3 6 C1: the "~Engine (ordered)" section with event /
+# stream calls; --tier --ordered holds tier-stream fences, so ~Slot / ~Spe fences and quarantine events exist at ~Engine) were
+# recorded on abe3512 (N4 leg 1) with this pins.cpp, before S3; d6e83ed printed the same bytes.
 # SPDX-License-Identifier: Apache-2.0
 #   pwsh -NoProfile -File tests/pins/check.ps1 -Bin <build\Release> -Swift <gguf> -Moe <gguf> [-Out <dir>] [-Record]
 # -Record writes the outputs into tests/pins/expected instead of comparing (approval style: only on the base, by hand).
@@ -11,6 +14,7 @@ param(
     [Parameter(Mandatory)][string]$Swift,
     [Parameter(Mandatory)][string]$Moe,
     [string]$Out = "",
+    [string[]]$Only = @(),
     [switch]$Record
 )
 $ErrorActionPreference = "Stop"
@@ -33,8 +37,13 @@ $runs = @(
     @{ name = "engine_f16_gov"; exe = "whirl-pins"; args = @("engine", "--gguf", $Swift, "--kv", "f16", "--gov") },
     @{ name = "engine_q8h_gov"; exe = "whirl-pins"; args = @("engine", "--gguf", $Swift, "--kv", "q8h", "--gov") },
     @{ name = "engine_q4_gov"; exe = "whirl-pins"; args = @("engine", "--gguf", $Swift, "--kv", "q4", "--gov") },
+    @{ name = "engine_f16_ordered"; exe = "whirl-pins"; args = @("engine", "--gguf", $Swift, "--kv", "f16", "--ordered") },
+    @{ name = "engine_f16_tier_ordered"; exe = "whirl-pins"; args = @("engine", "--gguf", $Swift, "--kv", "f16", "--tier", "--ordered") },
     @{ name = "startup_table"; exe = "whirl-startup-replay"; args = @("--table", (Join-Path $here "startup_table.txt")) }
 )
+# -Only <name,...>: run just those (S0 C1 mutants: the ordered runs); the summary line names the count
+$Only = @($Only | ForEach-Object { $_ -split "," } | Where-Object { $_ })
+if ($Only.Count -gt 0) { $runs = @($runs | Where-Object { $Only -contains $_.name }); if ($runs.Count -eq 0) { Write-Output "FAIL: -Only matched nothing"; exit 1 } }
 $bad = 0
 foreach ($r in $runs) {
     $f = Join-Path $Out "$($r.name).txt"

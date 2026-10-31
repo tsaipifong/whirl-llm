@@ -79,6 +79,27 @@ def ns_cases():
             ("ns_root: one::draw is one node, draw is two", rs("one::draw") == [A] and sorted(rs("draw")) == [A, B])]
 
 
+def eol_cases():
+    """-> [(name, ok)]: tree_hash ignores line endings (arch025 s0b-merge review act-on 1: .gitattributes checks *.ps1
+    out CRLF, a tool rewrote two of them LF in one worktree, and --check called the map stale on a clean checkout)."""
+    nl, crlf = chr(10), chr(13) + chr(10)
+    files = {"src/a.cpp": ["int a() {", "  return 1;", "}", ""], "tools/gates/g.ps1": ["param($x)", "Write-Host $x", ""]}
+    hashes = {}
+    for name, eol in (("lf", nl), ("crlf", crlf)):
+        with tempfile.TemporaryDirectory() as d:
+            for p, lines in files.items():
+                os.makedirs(os.path.dirname(os.path.join(d, p)), exist_ok=True)
+                open(os.path.join(d, p), "w", encoding="utf-8", newline="").write(eol.join(lines))
+            hashes[name] = impact_build.tree_hash(d, sorted(files))
+    with tempfile.TemporaryDirectory() as d:   # control: a real content change still changes the hash
+        for p, lines in files.items():
+            os.makedirs(os.path.dirname(os.path.join(d, p)), exist_ok=True)
+            open(os.path.join(d, p), "w", encoding="utf-8", newline="").write(nl.join(lines).replace("return 1", "return 2"))
+        changed = impact_build.tree_hash(d, sorted(files))
+    return [("eol: the same files with LF and with CRLF have one tree_hash", hashes["lf"] == hashes["crlf"]),
+            ("eol control: a content change changes tree_hash", changed != hashes["lf"])]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=os.path.normpath(os.path.join(HERE, "..", "..")))
@@ -113,7 +134,12 @@ def main():
         print(f"{'ok  ' if ok else 'FAIL'} {name}")
     k = sum(ok for _, ok in ns)
     print(f"impact_build_test ns: {k}/{len(ns)} ok")
-    return 0 if n == len(results) and k == len(ns) else 1
+    eol = eol_cases()
+    for name, ok in eol:
+        print(f"{'ok  ' if ok else 'FAIL'} {name}")
+    e = sum(ok for _, ok in eol)
+    print(f"impact_build_test eol: {e}/{len(eol)} ok")
+    return 0 if n == len(results) and k == len(ns) and e == len(eol) else 1
 
 
 if __name__ == "__main__":

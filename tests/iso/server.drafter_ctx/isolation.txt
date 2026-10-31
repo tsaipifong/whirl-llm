@@ -1,0 +1,99 @@
+# ARCH-1 8.5 isolation check of server.drafter_ctx (arch025-engine S4, DESIGN v3 section 4 S4 row): a header-only
+# module, so the boundary is the test program itself - it includes only the module's header and its declared
+# dependencies, built with that copy as the ONLY include path (tools/gates/iso_check.py header-only mode: `mutate` names
+# an hdr line). Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# module: src/server/engine_drafter.h (struct DrafterCtx: draftRoom / dflReset / dflIngest / dflReady, moved verbatim out
+# of engine.h / engine_decode.cpp; references to BatchStats, ServerModel, EngineOptions). declared dependencies (DESIGN
+# v3 3.1: core.shared only, refs bst_ m_ opt_): the server model contract (server/backend.h: dflashMaxDrafts, captureN,
+# dflashIngest, dflashTrim; headers only), the engine types (server.engine_types: engine_options.h, engine_state.h), the
+# slot (server.slot: engine_slot.h, headers only) and the DFlash2 rules (include/whirl/dflash_policy.h, header only).
+# Test double: tests/iso/fake_server_model.h (settable dflashMaxDrafts / captureN, recorded trim / ingest) over the
+# host-memory NullBackend (src/device/null_backend.cpp). No engine, no HIP runtime, no tokenizer object.
+module    server.drafter_ctx
+exe       whirl-iso-server-drafter-ctx-tests
+mutate    src/server/engine_drafter.h
+# the include mutants go at the end: server/engine.h includes engine_drafter.h back (as "server/engine_drafter.h", so
+# the shadow copy is the one it reaches), and a line at the top would see the module half-read
+mutinc    end
+mutsym    hip
+mutsym    engine
+mutsym    model
+mutsym    tier
+syslib    winmm.lib
+# declared dependency sources: the test double's NullBackend; the dependency headers' own inline bodies (iso4 decl-link
+# with -femit-all-decls): json_fields.h -> json::Value (src/chat/json.cpp), engine_thread.h's owner check ->
+# EngineThread::violation (src/server/engine_thread.cpp, which logs: src/server/log.cpp, the platform layer), and
+# engine_state.h's SpecState -> CycleCost::reset (src/spec/policy.cpp with what it links, as tests/iso/server.engine_types).
+# No `log` link mutant: Log::line is linked here.
+src       src/device/null_backend.cpp
+src       src/spec/policy.cpp
+src       src/common/util.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/proc_win.cpp
+src       src/chat/json.cpp
+src       src/server/engine_thread.cpp
+src       src/server/log.cpp
+src       src/platform/time_win.cpp
+src       src/platform/env_win.cpp
+# module header
+hdr       src/server/engine_drafter.h
+# declared dependency headers (include closure of the module header and the test)
+hdr       include/whirl/chat.h
+hdr       include/whirl/chat_tokens.h
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/dflash_policy.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/json.h
+hdr       include/whirl/json_fields.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/prefill_schedule.h
+hdr       include/whirl/relax_accept.h
+hdr       include/whirl/small_helpers.h
+hdr       include/whirl/spec_sample.h
+hdr       include/whirl/thread_annotations.h
+hdr       include/whirl/tokenizer.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/vision.h
+hdr       include/whirl/vismap.h
+hdr       include/whirl/wddm_watch.h
+hdr       src/cache/cache_model.h
+hdr       src/cache/ckpt_store.h
+hdr       src/cache/prefix_cache.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/model/qwen35/kv.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/platform/time.h
+hdr       src/sampling/sampler.h
+hdr       src/server/backend.h
+hdr       src/server/decode_floor.h
+hdr       src/server/engine_api.h
+hdr       src/server/engine_common.h
+hdr       src/server/engine_options.h
+hdr       src/server/engine_slot.h
+hdr       src/server/engine_state.h
+hdr       src/server/engine_thread.h
+hdr       src/server/log.h
+hdr       src/server/prefix_store.h
+hdr       src/server/protocol.h
+hdr       src/server/stream.h
+hdr       src/server/tier_bridge.h
+hdr       src/server/vision_iface.h
+hdr       src/spec/policy.h
+hdr       src/tier/evict_policy.h
+hdr       src/tier/idle_flush.h
+hdr       src/tier/kv_tier.h
+# test program
+testsrc   tests/iso/server.drafter_ctx/drafter_ctx_tests.cpp
+testhdr   tests/iso/fake_server_model.h
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

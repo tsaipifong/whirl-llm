@@ -36,6 +36,16 @@
 //       govFreeCache / govResize / govDrain), a request in the smaller pool, the budget back (the pool grows back to
 //       its startup size: the episode ends), a last request. The governor status (/health "governor") after each phase
 //       is printed after the device sequence.
+//   whirl-pins engine ... --ordered   (arch025-engine S0 C1, DESIGN v3 6 C1; golden recorded on abe3512)
+//       the same output, plus a last "# ~Engine (ordered)" section: Engine's destruction in call order (not sorted):
+//       M / H / F / FH / C lines as above, and the event / stream calls with creation ordinals (E#n, S#n; S#0 = the
+//       null stream): EC create, ED destroy, ER record (event, stream), EQ / EQC done query, ES sync, SW stream wait,
+//       SC / SD / SS stream create / destroy / sync; then one "legend E#n created in <phase>, first record S#m" line
+//       per event named in the section. A fence waited before a free shows as EQ (or EQ + ES) of the event right
+//       before its ED; member order shows as the order of the blocks. With --tier, --ordered also turns on a fence
+//       model (RecBackend::holdFences): tier-stream events stay pending until synced, so at ~Engine there are slot
+//       spill fences (~Slot), shared checkpoint spill / ready fences (~Spe) and page pool quarantine events; that
+//       run's other sections differ from the run without --ordered (own golden). Without --ordered nothing changes.
 // Output goes to stdout; tests/pins/check.ps1 compares it with the recorded file.
 
 #include "http_client.h"
@@ -58,6 +68,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -132,18 +143,86 @@ public:
         if (bytes == 0) return;
         std::lock_guard<std::mutex> lk(mu_);
         if (on_) lines_.push_back("C " + where(dst) + " <- " + where(src) + " n " + std::to_string(bytes) + " s" + streamId(s));
+        if (ord_on_) ord_.push_back("C " + where(dst) + " <- " + where(src) + " n " + std::to_string(bytes) + " " + sName(s));
     }
     void download(void* dst, device::DevPtr src, std::uint64_t bytes) override { n_.download(dst, src, bytes); }
-    device::Stream streamCreateNonBlocking() override { return n_.streamCreateNonBlocking(); }
-    void streamDestroy(device::Stream s) override { n_.streamDestroy(s); }
-    void streamSync(device::Stream s) override { n_.streamSync(s); }
-    void streamWaitEvent(device::Stream s, device::Event e) override { n_.streamWaitEvent(s, e); }
-    device::Event eventCreate() override { return n_.eventCreate(); }
-    void eventDestroy(device::Event e) override { n_.eventDestroy(e); }
-    void eventRecord(device::Event e, device::Stream s) override { n_.eventRecord(e, s); }
-    bool eventDone(device::Event e) override { return n_.eventDone(e); }
-    bool eventDoneChecked(device::Event e) override { return n_.eventDoneChecked(e); }
-    void eventSync(device::Event e) override { n_.eventSync(e); }
+    // arch025-engine S0 C1: events and streams get creation ordinals (E#n / S#n, in the creation order of the whole
+    // pin; a handle value can be reused after a destroy, so the map holds live handles only). They are logged only in
+    // the "~Engine (ordered)" section (--ordered); the other sections and the output without --ordered are unchanged.
+    device::Stream streamCreateNonBlocking() override {
+        const device::Stream s = n_.streamCreateNonBlocking();
+        std::lock_guard<std::mutex> lk(mu_);
+        st_[s] = ++next_st_;
+        ordLine("SC " + sName(s));
+        return s;
+    }
+    void streamDestroy(device::Stream s) override {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            ordLine("SD " + sName(s));
+            st_.erase(s);
+        }
+        n_.streamDestroy(s);
+    }
+    void streamSync(device::Stream s) override {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            ordLine("SS " + sName(s));
+            if (s != nullptr && s == held_) pend_.clear();  // every held event is on the held stream
+        }
+        n_.streamSync(s);
+    }
+    void streamWaitEvent(device::Stream s, device::Event e) override {
+        ordLock("SW " + sName(s) + " " + eName(e));
+        n_.streamWaitEvent(s, e);
+    }
+    device::Event eventCreate() override {
+        const device::Event e = n_.eventCreate();
+        std::lock_guard<std::mutex> lk(mu_);
+        ev_[e] = EvInfo{++next_ev_, cur_phase_, std::string()};
+        ordLine("EC " + eName(e));
+        return e;
+    }
+    void eventDestroy(device::Event e) override {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            ordLine("ED " + eName(e));
+            ev_.erase(e);
+            pend_.erase(e);
+        }
+        n_.eventDestroy(e);
+    }
+    void eventRecord(device::Event e, device::Stream s) override {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            auto it = ev_.find(e);
+            if (it != ev_.end() && it->second.rec.empty()) it->second.rec = sName(s);
+            ordLine("ER " + eName(e) + " " + sName(s));
+            if (hold_ && s != nullptr && s == held_) pend_.insert(e);
+            else pend_.erase(e);
+        }
+        n_.eventRecord(e, s);
+    }
+    bool eventDone(device::Event e) override {
+        const bool r = n_.eventDone(e);
+        std::lock_guard<std::mutex> lk(mu_);
+        ordLine("EQ " + eName(e));
+        return r && pend_.count(e) == 0;
+    }
+    bool eventDoneChecked(device::Event e) override {
+        const bool r = n_.eventDoneChecked(e);
+        std::lock_guard<std::mutex> lk(mu_);
+        ordLine("EQC " + eName(e));
+        return r && pend_.count(e) == 0;
+    }
+    void eventSync(device::Event e) override {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            ordLine("ES " + eName(e));
+            pend_.erase(e);
+        }
+        n_.eventSync(e);
+    }
     void* hostMalloc(std::uint64_t bytes) override {
         void* p = n_.hostMalloc(bytes);
         add(reinterpret_cast<std::uint64_t>(p), bytes, "H");
@@ -172,9 +251,26 @@ public:
     // phase names starting with '~' (destructors) are recorded as a sorted multiset: which buffers a destructor frees
     // is pinned, the order members are destroyed in is not (S2 / S3 turn manual frees into member destruction; F1
     // ordering is tested by the NullBackend tracking mode, not here)
+    // S0 C1: with ordered(true), the "~Engine" phase is also kept unsorted in a second list (allocations, frees,
+    // copies, event and stream calls, in call order), printed as "# ~Engine (ordered)" after the other sections
+    void ordered(bool on) { ordered_ = on; }
+    // S0 C1 fence model (--ordered --tier): while on, an event recorded on stream s (the RAM tier's stream) stays
+    // pending (eventDone false) until eventSync of it or streamSync(s) (Tier::stopIo does that before ~Engine): the
+    // device never finishes tier-stream work on its own, so spill fences are really pending, the page pool
+    // quarantines pages a spill still reads, and those quarantine batches are still there at ~Engine. Only the
+    // engine thread syncs the tier stream in this pin (RAM tier only: the IO thread copies nothing), so the result
+    // does not depend on thread timing. Off: every event is done (NullBackend without tracking).
+    void holdFences(device::Stream s, bool on) {
+        std::lock_guard<std::mutex> lk(mu_);
+        held_ = s;
+        hold_ = on;
+    }
     void record(bool on, const char* phase) {
         std::lock_guard<std::mutex> lk(mu_);
         if (sorted_from_ != std::string::npos) std::sort(lines_.begin() + static_cast<std::ptrdiff_t>(sorted_from_), lines_.end());
+        cur_phase_ = phase;
+        ord_on_ = ordered_ && std::string(phase) == "~Engine";
+        if (ord_on_) ord_seen_.clear();
         on_ = on;
         lines_.push_back(std::string("# ") + phase + (phase[0] == '~' ? " (sorted)" : ""));
         sorted_from_ = phase[0] == '~' ? lines_.size() : std::string::npos;
@@ -183,8 +279,39 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         return lines_;
     }
+    // the ordered section, then one legend line per event it names (where the event was created and the stream of
+    // its first record), so a reader can tell a slot spill fence from a shared checkpoint fence or a quarantine event
+    std::vector<std::string> orderedLines() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        std::vector<std::string> r = ord_;
+        for (const auto& [ord, what] : ord_seen_) r.push_back("legend E#" + std::to_string(ord) + " " + what);
+        return r;
+    }
 
 private:
+    struct EvInfo {
+        std::uint64_t ord;
+        std::string phase, rec;
+    };
+    void ordLine(std::string l) {  // under mu_
+        if (ord_on_) ord_.push_back(std::move(l));
+    }
+    void ordLock(std::string l) {
+        std::lock_guard<std::mutex> lk(mu_);
+        ordLine(std::move(l));
+    }
+    std::string sName(device::Stream s) const {
+        if (s == nullptr) return "S#0";
+        auto it = st_.find(s);
+        return it != st_.end() ? "S#" + std::to_string(it->second) : std::string("S?");
+    }
+    std::string eName(device::Event e) {  // under mu_
+        auto it = ev_.find(e);
+        if (it == ev_.end()) return "E?";
+        if (ord_on_ && ord_seen_.count(it->second.ord) == 0)
+            ord_seen_[it->second.ord] = "created in " + it->second.phase + ", first record " + (it->second.rec.empty() ? "none" : it->second.rec);
+        return "E#" + std::to_string(it->second.ord);
+    }
     struct A {
         std::uint64_t bytes, ord;
     };
@@ -193,11 +320,13 @@ private:
         const std::uint64_t ord = next_++;
         live_[p] = A{bytes, ord};
         if (on_) lines_.push_back(std::string(k) + " #" + std::to_string(ord) + " " + std::to_string(bytes));
+        ordLine(std::string(k) + " #" + std::to_string(ord) + " " + std::to_string(bytes));
     }
     void drop(std::uint64_t p, const char* k) {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = live_.find(p);
         if (on_) lines_.push_back(std::string(k) + " " + (it != live_.end() ? "#" + std::to_string(it->second.ord) : std::string("?")));
+        ordLine(std::string(k) + " " + (it != live_.end() ? "#" + std::to_string(it->second.ord) : std::string("?")));
         if (it != live_.end()) live_.erase(it);
     }
     std::string where(std::uint64_t v) const {
@@ -222,13 +351,24 @@ private:
     std::map<device::Stream, std::size_t> streams_;
     std::vector<std::string> lines_;
     std::size_t sorted_from_ = std::string::npos;
+    // S0 C1 (ordered ~Engine)
+    bool ordered_ = false, ord_on_ = false;
+    std::string cur_phase_;
+    std::uint64_t next_ev_ = 0, next_st_ = 0;
+    std::map<device::Event, EvInfo> ev_;
+    std::map<device::Stream, std::uint64_t> st_;
+    std::vector<std::string> ord_;
+    std::map<std::uint64_t, std::string> ord_seen_;
+    device::Stream held_ = nullptr;
+    bool hold_ = false;
+    std::set<device::Event> pend_;
 };
 
 std::string chatBody(const std::string& messages) {
     return "{\"messages\":" + messages + ",\"max_tokens\":8,\"temperature\":0,\"stream\":false}";
 }
 
-int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool with_restore, bool with_gov) {
+int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool with_restore, bool with_gov, bool with_ordered) {
     test::MockConfig mc;
     mc.parallel = 2;
     mc.slot_ctx = 16384;
@@ -244,6 +384,7 @@ int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool 
     }
     device::NullBackend null_ops;
     RecBackend ops(null_ops);
+    ops.ordered(with_ordered);
     ops.record(true, "model");
     auto model = std::make_unique<test::MockModel>(ops, tok, mc);
     EngineOptions eo;
@@ -281,6 +422,7 @@ int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool 
         lay.tok_cap = mc.slot_ctx;
         engine->attachTier(tr.get());
         tr->start(tc, lay, 7);
+        if (with_ordered) ops.holdFences(tr->stream(), true);
     }
     // arch024-S9: --gov, the memory governor over an injected WDDM probe (deterministic: each budget change waits for
     // the governor's action before the next request; idle samples every 20 ms)
@@ -451,6 +593,11 @@ int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool 
         if (l.rfind("C ", 0) == 0) ++copies;
         if (l.rfind("M ", 0) == 0 || l.rfind("H ", 0) == 0) ++allocs;
     }
+    // S0 C1 (--ordered): the ~Engine phase again, in call order, with event / stream calls (DESIGN v3 6 C1)
+    if (with_ordered) {
+        std::printf("# ~Engine (ordered)\n");
+        for (const std::string& l : ops.orderedLines()) std::printf("%s\n", l.c_str());
+    }
     for (const std::string& l : gov_lines) std::printf("%s\n", l.c_str());
     // bug-tbrig-order: no event use on a destroyed stream at teardown (printed only when it happens: the pin stays)
     const std::uint64_t dead = null_ops.deadStreamEventUses();
@@ -469,7 +616,7 @@ int main(int argc, char** argv) {
     }
     const std::string cmd = argv[1];
     std::string gguf_path, req_path, kv = "f16";
-    bool with_tier = false, with_restore = false, with_gov = false;
+    bool with_tier = false, with_restore = false, with_gov = false, with_ordered = false;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--gguf" && i + 1 < argc) gguf_path = argv[++i];
@@ -478,6 +625,7 @@ int main(int argc, char** argv) {
         else if (a == "--tier") with_tier = true;
         else if (a == "--restore") with_tier = with_restore = true;
         else if (a == "--gov") with_gov = true;
+        else if (a == "--ordered") with_ordered = true;
         else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
             return 2;
@@ -501,7 +649,7 @@ int main(int argc, char** argv) {
         if (req_path.empty()) return 2;
         return tokensPin(*file, *tok, req_path);
     }
-    if (cmd == "engine") return enginePin(*tok, kv, with_tier, with_restore, with_gov);
+    if (cmd == "engine") return enginePin(*tok, kv, with_tier, with_restore, with_gov, with_ordered);
     std::fprintf(stderr, "unknown command %s\n", cmd.c_str());
     return 2;
 }

@@ -281,6 +281,15 @@ AddStep "cpu_layering" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(
 # Seconds, no build; the block / pass selftest runs first.
 AddStep "cpu_iso_includes" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\iso_includes_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\iso_includes_check.py")'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^iso includes check selftest: PASS \(([1-9]\d*)/\1\)") -and ($o -match "(?m)^iso includes check: ok \(") }
+# arch025-engine S0 (PLAN N4, class Engine split): the cut check (census + graph of tools/gates/engine_cut.json, the cut's
+# architecture pinned by tests/pins/engine_cut_arch.sha256) after its self-test (every mutant caught by its named rule) and the
+# fault cases of the per-step reverse text proof (tools/impact/revtext.py, DESIGN 5 P1),
+# the P4 / E7 EQUIVALENT-MODULO-TIMING comparer's rule self-test (tools/gates/mt_equiv_compare.py, review3 A4: each leg's GPU
+# batch is compared with it, --hh = that batch's own B / B2 pair), and the member-order pin (declaration order == destruction order, tests/pins/engine_member_order.txt) after its fault cases.
+AddStep "cpu_engine_split" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\mt_equiv_compare.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\engine_split_check.py")' --selftest --work '@WORK@\selftest'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\revtext.py")' --selftest --work '@WORK@\revtext'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\engine_split_check.py")' --work '@WORK@\check'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^selftest: ([1-9]\d*)/\1 PASS") -and ($o -match "(?m)^engine split selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^revtext selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^engine split check: ok") }
+AddStep "cpu_member_order" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\member_order_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\member_order_check.py")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^member order selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^member order: ok") }
 # arch025 D11 N17: modules.json <-> CMake targets (tools/gates/cmake_modules_check.py): every module source file is built by a
 # target (or #included by a built source / the device TU), every compiled product source has exactly one module (the census
 # rule), the iso targets match the isolation manifests. Configure-only (~1 min, HIP on, nothing compiled) into

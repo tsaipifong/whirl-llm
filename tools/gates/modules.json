@@ -147,6 +147,8 @@
    "accept_policy": {"metrics": ["host.sched.round_us_per_cycle"], "proof": {"refactor": ["exit_rule", "golden_exact", "host_work"]}},
    "env_snapshot": {"metrics": [], "metrics_none": "read once per load, no bench key",
                     "proof": {"refactor": ["exit_rule", "golden_exact"]}},
+   "server.engine_split_tools": {"metrics": [], "metrics_none": "checker tools and pins, no product code: no bench key",
+                                 "proof": {"refactor": ["exit_rule", "move_equal"]}},
    "handles": {"metrics": ["host.handles.devbuf_alloc_free", "host.handles.pinned_alloc_free", "host.handles.event_create_destroy"],
                "proof": {"refactor": ["exit_rule", "host_work", "host_time"]}},
    "ckpt_store": {"metrics": ["host.ckpt.init_release", "host.ckpt.save", "host.ckpt.load", "tier.copy.d2d_gbps"],
@@ -255,6 +257,12 @@
                      "proof": {"refactor": ["exit_rule", "golden_exact", "work_trace", "move_equal", "host_work", "host_time"]}},
    "server.slot": {"metrics": [], "metrics_none": "per-request state and one park call per idle slot when the governor frees VRAM: no bench key (whirl-iso-server-slot-tests, whirl-server-tests ckpt_f1 / governor)",
                    "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
+   "server.engine_types": {"metrics": [], "metrics_none": "types, constants and aliases only (no function of its own): no bench key (whirl-iso-server-engine-types-tests)",
+                           "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal"]}},
+   "server.drafter_ctx": {"metrics": [], "metrics_none": "four small functions the decode cycle, prefill and the tier restore call (inline in their callers, as before the move: the speed is the decode cycle's, measured by the engine split's E8 A/B): no bench key (whirl-iso-server-drafter-ctx-tests)",
+                          "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
+   "server.slot_output": {"metrics": [], "metrics_none": "three small functions per decode / prefill step and per error answer (called across TUs, as before the move: the speed is the decode cycle's, measured by the engine split's E8 A/B): no bench key (whirl-iso-server-slot-output-tests)",
+                          "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
    "server.cycle_prof": {"metrics": [], "metrics_none": "WHIRL_PROFILE only (off in the product default): no bench key (whirl-iso-server-cycle-prof-tests)",
                          "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "server_log_scan"]}},
    "server.sample_buffers": {"metrics": ["host.sched.round_us_per_cycle"],
@@ -744,17 +752,27 @@
               "isolation: header-only over model.arch_registry and whirl/model.h (ModelError); no own iso program"]
   },
   "server.engine": {
-   "id": "N4", "desc": "the server engine (class Engine, src/server/engine.h): engine.cpp = construction, the request lifecycle and runLoop's scheduling phases; arch025-N4e / N4f split the rest of its member functions by concern, verbatim: engine_queue.cpp (the request queue: stop, runOnLoop, submitAndWait, abortQueued, the reaper), engine_pages.cpp (checkpoints, KV pages, shared prefix checkpoints), engine_tier.cpp (the scheduler's half of the host tiers), engine_prefill.cpp (prefill phases, decode floor), engine_decode.cpp (the decode cycle and its phases, drafts, DFlash2 context); engine_internal.h holds the types they share (KvPoolFull, CycleProf). Member groups are components (N4a SampleBuffers, N4b ImageEmbeddings, N4c BatchStats, N4f SpecState spec_ / FloorState fl_). Member declaration order = destruction order (pool_ / ps_ / tb_ / kv_arrays_ pinned by comments) is kept by every split (scratch/a25_lane1b/pin_member_order.py against 2d166f4)",
+   "id": "N4", "desc": "the server engine (class Engine, src/server/engine.h): engine.cpp = construction, the request lifecycle and runLoop's scheduling phases; arch025-N4e / N4f split the rest of its member functions by concern, verbatim: engine_queue.cpp (the request queue: stop, runOnLoop, submitAndWait, abortQueued, the reaper), engine_pages.cpp (checkpoints, KV pages, shared prefix checkpoints), engine_tier.cpp (the scheduler's half of the host tiers), engine_prefill.cpp (prefill phases, decode floor), engine_decode.cpp (the decode cycle and its phases, drafts, DFlash2 context); engine_internal.h is what they include beyond engine.h (CycleProf from server.cycle_prof, KvPoolFull from server.engine_types, the log). Member groups are components (N4a SampleBuffers, N4b ImageEmbeddings, N4c BatchStats, N4f SpecState spec_ / FloorState fl_). Member declaration order = destruction order (pool_ / ps_ / tb_ / kv_arrays_ pinned by comments) is kept by every split (scratch/a25_lane1b/pin_member_order.py against 2d166f4)",
    "paths": ["src/server/engine.cpp", "src/server/engine.h", "src/server/engine_internal.h", "src/server/engine_decode.cpp",
              "src/server/engine_pages.cpp", "src/server/engine_prefill.cpp", "src/server/engine_queue.cpp", "src/server/engine_tier.cpp"],
    "lands_on": "arch025-lane1b (lane 1 leg 3, registration with N4a; leg 4 N4e / N4f split files)",
-   "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance",
+   "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance",
              "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_balance": 2, "srv_fast": 2,
             "srv_cache_precise": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_vis": 1},
    "callers": "rdeps",
    "manual": ["whirl-server-tests (all: the end-to-end engine tests on MockModel / NullBackend) and whirl-pins (engine memory / copy sequence)",
               "V-srv: server golden + srv_* == the parent exe on both GPUs with every WHIRL_* unset (work_equal of the launch logs)"]
+  },
+  "server.engine_split_tools": {
+   "id": "N4-S0b", "desc": "the class Engine split checkers (arch025-engine S0 / S0b): the cut (tools/gates/engine_cut.json), its pin and review ledger, the census / graph / check / self-test, the c1ca7ce inline table, the member-order pin with its origin list and checker, the reverse text proof and the E8 judge. Not product code: a change here re-runs the checkers' own self-tests and the checks (the pin also holds the tools' sha256, so a tool change needs a pin rewrite and a review row)",
+   "paths": ["tools/gates/engine_cut.json", "tools/gates/engine_split_*", "tools/gates/member_order_check.py",
+             "tests/pins/engine_cut_arch.sha256", "tests/pins/engine_cut_reviews.tsv", "tests/pins/engine_member_order.txt",
+             "tests/pins/engine_member_order_origin.txt", "tools/impact/revtext.py", "tools/bench/e8_judge.py"],
+   "lands_on": "arch025-engine-s0b (S0b)",
+   "steps": ["cpu_engine_split", "cpu_member_order"],
+   "gpus": {},
+   "manual": ["python -I tools/bench/e8_judge.py --selftest (the E8 judge has no gate step; run it when e8_judge.py changes)"]
   },
   "server.slot": {
    "id": "N4-S1",
@@ -768,6 +786,7 @@
     "cpu_iso_server_slot",
     "cpu_server",
     "cpu_pins",
+    "cpu_engine_split",
     "golden_swift",
     "golden_moe",
     "srv_mt_precise",
@@ -790,6 +809,128 @@
     "whirl-iso-server-slot-tests (parkSlotCkpts == the c1ca7ce engine_gov.cpp body: bytes, fence, list cleared, parked; Slot F1 waits and noexcept moves; SlotData defaults) and whirl-server-tests ckpt_f1 / governor",
     "V-move: scratch/a25_engine/apply_s1.py --check (the moved block and body equal the c1ca7ce text; line multiset: 0 lines lost)",
     "V-srv: server golden + srv_* == the c1ca7ce exe (work_equal)"
+   ]
+  },
+  "server.engine_types": {
+   "id": "N4-S3",
+   "desc": "the server engine's shared types (src/server/engine_common.h, engine_options.h, engine_state.h; arch025-engine S3, moved verbatim out of engine.h and engine_internal.h): engine_common.h = the aliases every engine file uses (kv_page, gdn_max_seg, the prefill schedule names, tail_ck_slots, msSince, sampling::Cand / Sampler) and KvPoolFull; engine_options.h = EngineOptions; engine_state.h = BatchStats, SpecState, FloorState (CycleProf only declared). Header-only, layer L0 of the Engine split (progress/arch025-engine.DESIGN.md v3 S3); engine.h includes the three last, where their text stood. Isolated: tests/iso/server.engine_types (header-only manifest; the test links spec.policy because SpecState's CycleCost array calls CycleCost::reset)",
+   "paths": [
+    "src/server/engine_common.h",
+    "src/server/engine_options.h",
+    "src/server/engine_state.h"
+   ],
+   "lands_on": "arch025-engine (leg 2, S3)",
+   "steps": [
+    "cpu_iso_server_engine_types",
+    "cpu_server",
+    "cpu_pins",
+    "cpu_engine_split",
+    "cpu_member_order",
+    "golden_swift",
+    "golden_moe",
+    "srv_mt_precise",
+    "srv_mt_precise_moe",
+    "srv_balance",
+    "srv_fast",
+    "srv_cache_precise",
+    "srv_cache_balance"
+   ],
+   "gpus": {
+    "golden_swift": 2,
+    "golden_moe": 2,
+    "srv_mt_precise": 2,
+    "srv_mt_precise_moe": 2,
+    "srv_balance": 2,
+    "srv_fast": 2,
+    "srv_cache_precise": 1,
+    "srv_cache_balance": 1
+   },
+   "callers": "rdeps",
+   "manual": [
+    "whirl-iso-server-engine-types-tests (alias values and types, KvPoolFull type and text, every EngineOptions default, BatchStats / SpecState / FloorState starts == the a17493b text)",
+    "V-move: scratch/a25_engine/s3/apply_s3.py --check (the moved blocks equal the a17493b text byte for byte; line multiset: only engine_internal.h's old head comment lost) and s3/hdr_alone.py (each header compiles alone and twice with the product flags)",
+    "V-obj: objeq of every product object against the a17493b build (expected all identical: types only)"
+   ]
+  },
+  "server.drafter_ctx": {
+   "id": "N4-S4",
+   "desc": "the DFlash2 drafter context of a slot (src/server/engine_drafter.h; arch025-engine S4, moved verbatim out of engine.h and engine_decode.cpp): struct DrafterCtx with draftRoom (the draft rows a slot keeps room for: MTP n_draft, DFlash2 block - 1, else 0), dflReset (the context restarts at a restore / reuse point), dflIngest (the captured target features of a forward / verify into the slot's context; counts dfl_gap) and dflReady (DFlash2 drafts once the run ends at pos and is warm). Owns nothing: references bst_ / m_ / opt_ (core.shared, same names); Engine holds it as dc_, the last member (destroyed first, trivial destructor). Header-only (inline), layer L1 of the Engine split (progress/arch025-engine.DESIGN.md v3 S4). Isolated: tests/iso/server.drafter_ctx (header-only manifest; test double tests/iso/fake_server_model.h records dflashTrim / dflashIngest)",
+   "paths": [
+    "src/server/engine_drafter.h"
+   ],
+   "lands_on": "arch025-engine (leg 2, S4)",
+   "steps": [
+    "cpu_iso_server_drafter_ctx",
+    "cpu_server",
+    "cpu_pins",
+    "cpu_engine_split",
+    "cpu_member_order",
+    "golden_swift",
+    "golden_moe",
+    "srv_mt_precise",
+    "srv_mt_precise_moe",
+    "srv_balance",
+    "srv_fast",
+    "srv_cache_precise",
+    "srv_cache_balance"
+   ],
+   "gpus": {
+    "golden_swift": 2,
+    "golden_moe": 2,
+    "srv_mt_precise": 2,
+    "srv_mt_precise_moe": 2,
+    "srv_balance": 2,
+    "srv_fast": 2,
+    "srv_cache_precise": 1,
+    "srv_cache_balance": 1
+   },
+   "callers": "rdeps",
+   "manual": [
+    "whirl-iso-server-drafter-ctx-tests (draftRoom's three cases, dflReset's guard / trim / range, dflIngest's guards and captured / partly / not captured plans with dfl_gap counting, dflReady's guard and warm-up; expected values written out) and the 9 s4-dfl-* mutants of tools/impact/mutations.json",
+    "V-move: scratch/a25_engine/s4/apply_s4.py --check (the declarations and bodies equal the 7ad196c text byte for byte, each definition line mapped back; line multiset: every lost / added line explained) and s4/hdr_alone.py",
+    "V-text: tools/impact/revtext.py --rules scratch/a25_engine/s4/revtext_rules_s4.json (DrafterCtx:: -> Engine::, dc_. -> '', inline dropped; 3 allowed member declarations)",
+    "V-obj: objeq against the 7ad196c build: the engine TUs differ (symbol Engine:: -> DrafterCtx::, inline / COMDAT copies, sizeof(Engine) + 24), every other product object identical"
+   ]
+  },
+  "server.slot_output": {
+   "id": "N4-S5",
+   "desc": "a slot's output (src/server/engine_output.{h,cpp}; arch025-engine S5, moved verbatim out of engine.cpp / engine.h, Engine member functions -> free functions): emit (one token into the slot's batch; the end-of-turn / end-of-text token, unless ignore_eos, or max_tokens ends the request), flushOut (the batch through the slot's response writer StreamState::push; a matched stop string ends the request: done, stopped_str, n_after_stop; the batch is reset) and writeError (logs the error, writes errorResponse to the job's connection and flushes it). The only Engine state used is the chat tokens: emit takes const chat::ChatTokens& ct_ (core.shared, same name) as its first parameter. Not inline (the decode cycle and the prefill called them across TUs before the move, and still do). Layer L1 of the Engine split (progress/arch025-engine.DESIGN.md v3 S5). Isolated: tests/iso/server.slot_output (StreamState::push is a recording double in the test program: link seam)",
+   "paths": [
+    "src/server/engine_output.cpp",
+    "src/server/engine_output.h"
+   ],
+   "lands_on": "arch025-engine (leg 2, S5)",
+   "steps": [
+    "cpu_iso_server_slot_output",
+    "cpu_server",
+    "cpu_pins",
+    "cpu_engine_split",
+    "cpu_member_order",
+    "golden_swift",
+    "golden_moe",
+    "srv_mt_precise",
+    "srv_mt_precise_moe",
+    "srv_balance",
+    "srv_fast",
+    "srv_cache_precise",
+    "srv_cache_balance"
+   ],
+   "gpus": {
+    "golden_swift": 2,
+    "golden_moe": 2,
+    "srv_mt_precise": 2,
+    "srv_mt_precise_moe": 2,
+    "srv_balance": 2,
+    "srv_fast": 2,
+    "srv_cache_precise": 1,
+    "srv_cache_balance": 1
+   },
+   "callers": "rdeps",
+   "manual": [
+    "whirl-iso-server-slot-output-tests (emit: end-of-turn / end-of-text stop, ignore_eos, append, max_tokens; flushOut: the exact batch handed to the response writer, the stop-string end, the reset; writeError: the errorResponse text then one flush, no connection) and the s5-out-* mutants of tools/impact/mutations.json",
+    "V-move: scratch/a25_engine/s5/apply_s5.py --check (the bodies equal the 6d004b6 text byte for byte with the 3 definition lines mapped back; line multiset: every lost / added line explained) and s5/hdr_alone.py",
+    "V-text: tools/impact/revtext.py --rules scratch/a25_engine/s5/revtext_rules_s5.json (the free definition lines mapped back to Engine::f, emit(ct_, -> emit()",
+    "V-obj: objeq against the 6d004b6 build: engine.cpp / engine_decode.cpp / engine_prefill.cpp differ (member -> free symbols, this -> &ct_ / no this), engine_output.cpp is new, every other product object identical (scratch/a25_engine/s5/objeq_prediction.txt)"
    ]
   },
   "server.cycle_prof": {

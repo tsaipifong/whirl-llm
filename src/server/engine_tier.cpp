@@ -80,7 +80,7 @@ bool Engine::tryRestore(Slot& sl, Job& job) {
     if (!tb_.tier()) return false;
     if (!job.params.cache_prompt || opt_.no_prefix_cache) return false;
     const std::span<const std::uint32_t> toks = job.tokens;
-    const std::uint32_t nd_max = draftRoom();
+    const std::uint32_t nd_max = dc_.draftRoom();
     if (toks.size() + nd_max + 2 >= ctxForNew() || toks.size() + nd_max + 2 >= static_cast<std::uint64_t>(pool_.pages()) * kv_page)
         return false;
     const auto mt = tb_.restoreMatch(sl, toks);
@@ -116,7 +116,7 @@ bool Engine::tryRestore(Slot& sl, Job& job) {
 TierBridge::RestoreSteps Engine::restoreSteps(Slot& sl) {
     TierBridge::RestoreSteps s;
     s.drop_cache = [this, &sl] { dropCache(sl); };
-    s.drafter_reset = [this, &sl](std::uint32_t n_tok) { dflReset(sl, n_tok); };
+    s.drafter_reset = [this, &sl](std::uint32_t n_tok) { dc_.dflReset(sl, n_tok); };
     s.share = [this, &sl](Ckpt& c, std::uint64_t entry_id) {
         createSpe(sl, sl.cache_tokens, c.pos, c.kind, std::nullopt, &c, entry_id);
     };

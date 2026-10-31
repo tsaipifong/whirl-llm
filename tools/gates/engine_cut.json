@@ -1,0 +1,1398 @@
+{
+ "_doc": "arch025-engine design v3: the cut. layer: an edge (call or data use) may only point to a LOWER layer, to the module itself, or to core.shared (Engine-owned state used by >= 3 component modules, handed to each component by a per-member reference listed in modules[m].refs). Every other member is OWNED by one module (data) even when Engine holds it at its declared position ('placed state', DESIGN 2.5). Checked by graph3.py; census3.py reads classes / holders / aliases / free_funcs / files / users.",
+ "modules": {
+  "core.shared": {
+   "layer": 0,
+   "funcs": [],
+   "data": [
+    "m_",
+    "ops_",
+    "ct_",
+    "opt_",
+    "ctx_",
+    "owner_",
+    "ck_",
+    "spec_",
+    "sb_",
+    "slots_",
+    "bst_",
+    "vram_probe_",
+    "pool_",
+    "ps_",
+    "tb_",
+    "vis_"
+   ]
+  },
+  "server.job_queue": {
+   "layer": 1,
+   "funcs": [
+    "nextJobId",
+    "submitAndWait",
+    "beginBuilding",
+    "endBuilding",
+    "stop",
+    "runOnLoop",
+    "runLoopCalls",
+    "abortQueued"
+   ],
+   "data": [
+    "q_mutex_",
+    "q_cond_",
+    "queue_",
+    "n_active_",
+    "n_building_",
+    "next_id_",
+    "stop_",
+    "loop_calls_",
+    "tier_wake_",
+    "wake_seq_"
+   ],
+   "refs": [
+    "slots_"
+   ]
+  },
+  "server.slot_output": {
+   "layer": 1,
+   "funcs": [
+    "emit",
+    "flushOut",
+    "writeError"
+   ],
+   "data": [],
+   "free_funcs": [
+    "emit",
+    "flushOut",
+    "writeError"
+   ],
+   "files": [
+    "server/engine_output.cpp"
+   ],
+   "_doc": "S5 (arch025-engine-s5, 2026-10-30): free functions in server/engine_output.{h,cpp}; emit takes ct_ (core.shared) as its first parameter under the member's name. The .cpp is listed so it is an engine file (every namespace-level definition in it is an entry, a #define in it is a finding: selftest N6b)",
+   "refs": [
+    "ct_"
+   ]
+  },
+  "server.drafter_ctx": {
+   "layer": 1,
+   "funcs": [
+    "dflReset",
+    "dflIngest",
+    "dflReady",
+    "draftRoom"
+   ],
+   "data": [],
+   "refs": [
+    "bst_",
+    "m_",
+    "opt_"
+   ]
+  },
+  "server.slot_cache": {
+   "layer": 2,
+   "funcs": [
+    "saveCkpt",
+    "dropCache",
+    "freePages",
+    "type:SlotEvictor",
+    "evictFor",
+    "takePage",
+    "cowPages",
+    "ensurePages",
+    "dropSpe",
+    "createSpe",
+    "attachSpe",
+    "waitsForSys",
+    "pagesFor",
+    "poolAvailable",
+    "initPool",
+    "kvTokBytes"
+   ],
+   "data": [
+    "kv_arrays_",
+    "stat_spe_new_",
+    "stat_spe_hits_",
+    "stat_spe_tok_",
+    "stat_spe_evict_",
+    "stat_unshare_",
+    "stat_evictions_",
+    "conv_bytes_",
+    "ssm_bytes_"
+   ],
+   "refs": [
+    "ck_",
+    "m_",
+    "ops_",
+    "opt_",
+    "pool_",
+    "ps_",
+    "slots_",
+    "tb_"
+   ]
+  },
+  "server.governor": {
+   "layer": 3,
+   "funcs": [
+    "setGovernor",
+    "govTick",
+    "govApply",
+    "govAllIdle",
+    "govFreeable",
+    "govFreeCache",
+    "govRestoreCache",
+    "govResize",
+    "govDrain",
+    "govPublish",
+    "governorJson",
+    "ctxForNew",
+    "monoS"
+   ],
+   "data": [
+    "gov_",
+    "gov_margin_",
+    "gov_plan_",
+    "gov_pending_",
+    "gov_hold_",
+    "spe_parked_",
+    "gov_parked_",
+    "gov_ram_mb_",
+    "gov_vram_total_",
+    "gov_grow_denied_logged_",
+    "gov_restored_",
+    "gov_resize_before_",
+    "gov_resize_delta_",
+    "ctx_new_",
+    "gov_warn_",
+    "gov_last_",
+    "gov_json_",
+    "ctx_pub_",
+    "vram_others_"
+   ],
+   "free_funcs": [
+    "monoS"
+   ],
+   "refs": [
+    "ck_",
+    "ctx_",
+    "m_",
+    "ops_",
+    "opt_",
+    "owner_",
+    "pool_",
+    "ps_",
+    "slots_",
+    "tb_",
+    "vram_probe_"
+   ]
+  },
+  "server.vram_watch": {
+   "layer": 4,
+   "funcs": [
+    "setVramProbe",
+    "vramNote",
+    "vramIdleTick"
+   ],
+   "data": [
+    "vram_watch_",
+    "vram_idle_next_",
+    "vram_idle_s_",
+    "vram_warn_",
+    "vram_mu_",
+    "vram_last_",
+    "vram_spill_",
+    "vram_last_t_"
+   ],
+   "refs": [
+    "owner_",
+    "vram_probe_"
+   ]
+  },
+  "server.slot_end": {
+   "layer": 5,
+   "funcs": [
+    "releaseSlot",
+    "failSlot",
+    "finishJob",
+    "reapDisconnected"
+   ],
+   "data": [
+    "last_reap_"
+   ],
+   "refs": [
+    "m_",
+    "ops_",
+    "opt_",
+    "sb_",
+    "slots_",
+    "tb_",
+    "vis_"
+   ]
+  },
+  "server.prefill": {
+   "layer": 6,
+   "funcs": [
+    "chunkLen",
+    "floorProtected",
+    "maybeSplitCkpt",
+    "prefillStep",
+    "prefillGroup",
+    "finishPrefill",
+    "runPrefill",
+    "noteFloor"
+   ],
+   "data": [
+    "rcx_",
+    "fl_",
+    "prefill_tok_cum_"
+   ],
+   "refs": [
+    "bst_",
+    "ct_",
+    "m_",
+    "ops_",
+    "opt_",
+    "pool_",
+    "ps_",
+    "sb_",
+    "slots_",
+    "spec_"
+   ]
+  },
+  "server.spec_cycle": {
+   "layer": 7,
+   "funcs": [
+    "decodeCycle",
+    "type:Cycle",
+    "relaxes",
+    "verifyRoom",
+    "dropOutOfRoom",
+    "draftLimits",
+    "ngramDrafts",
+    "dflashDrafts",
+    "mtpDrafts",
+    "layoutBatch",
+    "draftSampling",
+    "enqueueVerify",
+    "sampleRows",
+    "trainCycle",
+    "cycleStats",
+    "acceptSlot",
+    "finishCycle",
+    "pickDrafts",
+    "relaxRepeats",
+    "splitDrafts",
+    "draftCap"
+   ],
+   "data": [
+    "spec_on_"
+   ],
+   "refs": [
+    "bst_",
+    "ct_",
+    "ctx_",
+    "m_",
+    "ops_",
+    "opt_",
+    "sb_",
+    "slots_",
+    "spec_"
+   ]
+  },
+  "server.slot_start": {
+   "layer": 7,
+   "funcs": [
+    "startJob"
+   ],
+   "data": [
+    "ids_",
+    "crlf_norm_"
+   ],
+   "refs": [
+    "ck_",
+    "ct_",
+    "ctx_",
+    "m_",
+    "ops_",
+    "opt_",
+    "pool_",
+    "ps_",
+    "sb_",
+    "slots_",
+    "spec_",
+    "tb_",
+    "vis_"
+   ]
+  },
+  "server.tier_glue": {
+   "layer": 8,
+   "funcs": [
+    "attachTier",
+    "waitsForTier",
+    "prefetchFor",
+    "tryRestore",
+    "pollRestores",
+    "restoreSteps",
+    "tierTick",
+    "flushTierOnStop"
+   ],
+   "data": [],
+   "refs": [
+    "ops_",
+    "opt_",
+    "pool_",
+    "ps_",
+    "slots_",
+    "tb_"
+   ]
+  },
+  "server.engine": {
+   "layer": 10,
+   "funcs": [
+    "Engine",
+    "~Engine",
+    "allocState",
+    "allocStateMeasured",
+    "attachVision",
+    "visionConfig",
+    "owner",
+    "modulesOwned",
+    "health",
+    "facts",
+    "options",
+    "setCtx",
+    "setNumerics",
+    "setStartup",
+    "setKvSsdMode",
+    "ctxPublished",
+    "tokenizer",
+    "model",
+    "stats",
+    "statsShared",
+    "storeConfig",
+    "bridgeConfig",
+    "type:StateMem"
+   ],
+   "data": [
+    "tok_"
+   ],
+   "free_funcs": [
+    "storeConfig",
+    "bridgeConfig"
+   ]
+  },
+  "server.scheduler": {
+   "layer": 9,
+   "funcs": [
+    "runLoop",
+    "idleWait",
+    "admitQueued",
+    "startAdmitted",
+    "logBatchStats"
+   ],
+   "data": [
+    "last_tick_"
+   ],
+   "refs": [
+    "bst_",
+    "m_",
+    "opt_",
+    "owner_",
+    "pool_",
+    "ps_",
+    "slots_",
+    "spec_",
+    "tb_",
+    "vis_",
+    "vram_probe_"
+   ]
+  },
+  "server.slot": {
+   "layer": 0,
+   "funcs": [
+    "parkSlotCkpts"
+   ],
+   "data": [],
+   "free_funcs": [
+    "parkSlotCkpts"
+   ],
+   "_doc": "leg 1 module (engine_slot.{h,cpp}); its free function is tracked wherever it is defined",
+   "refs": []
+  }
+ },
+ "core_categories": {
+  "_doc": "leg-end categories of server.engine; mutually exclusive (graph3 always checks), shapes checked with --core",
+  "special": [
+   "Engine",
+   "~Engine"
+  ],
+  "startup": [
+   "allocState",
+   "allocStateMeasured",
+   "attachVision",
+   "setCtx",
+   "setNumerics",
+   "setStartup",
+   "setKvSsdMode"
+  ],
+  "accessor": [
+   "visionConfig",
+   "owner",
+   "options",
+   "tokenizer",
+   "model"
+  ],
+  "report": [
+   "facts",
+   "health",
+   "stats",
+   "statsShared",
+   "modulesOwned"
+  ],
+  "forwarder_public": [
+   "ctxPublished",
+   "Engine.attachTier",
+   "Engine.initPool",
+   "Engine.setVramProbe",
+   "Engine.setGovernor",
+   "Engine.governorJson",
+   "Engine.nextJobId",
+   "Engine.submitAndWait",
+   "Engine.beginBuilding",
+   "Engine.endBuilding",
+   "Engine.stop",
+   "Engine.runOnLoop",
+   "Engine.runLoop"
+  ],
+  "helper": [
+   "storeConfig",
+   "bridgeConfig"
+  ]
+ },
+ "hot": [
+  "acceptSlot",
+  "emit",
+  "flushOut",
+  "dflIngest",
+  "relaxes",
+  "relaxRepeats",
+  "sampleRows",
+  "decodeCycle",
+  "draftLimits",
+  "ngramDrafts",
+  "dflashDrafts",
+  "mtpDrafts",
+  "layoutBatch",
+  "draftSampling",
+  "enqueueVerify",
+  "trainCycle",
+  "cycleStats",
+  "finishCycle",
+  "dropOutOfRoom",
+  "verifyRoom",
+  "draftRoom",
+  "dflReady",
+  "pickDrafts",
+  "splitDrafts",
+  "draftCap",
+  "ensurePages",
+  "takePage",
+  "prefillStep",
+  "prefillGroup",
+  "chunkLen"
+ ],
+ "header_inline": [
+  "dflReset",
+  "dflIngest",
+  "dflReady",
+  "draftRoom",
+  "kvTokBytes",
+  "ctxForNew"
+ ],
+ "_doc_header_inline": "functions that stay inline in their module's header (they are inline today: engine.h, or inlined in their callers' TU in the c1ca7ce objects, inline_check.py)",
+ "rewrites": {
+  "_doc": "planned body changes that change a use (each is a design step with its own proof): function -> {old member: new member}",
+  "govPublish": {
+   "vram_mu_": "gov_mu_"
+  },
+  "governorJson": {
+   "vram_mu_": "gov_mu_"
+  }
+ },
+ "new_data": {
+  "_doc": "planned members (allowed to be missing until the step that adds them)",
+  "gov_mu_": "server.governor",
+  "jq_": "server.job_queue",
+  "dc_": "server.drafter_ctx",
+  "sc_": "server.slot_cache",
+  "cnt_": "server.slot_cache",
+  "gst_": "server.governor",
+  "gv_": "server.governor",
+  "vst_": "server.vram_watch",
+  "vw_": "server.vram_watch",
+  "se_": "server.slot_end",
+  "pf_": "server.prefill",
+  "cyc_": "server.spec_cycle",
+  "ss_": "server.slot_start",
+  "tg_": "server.tier_glue",
+  "sch_": "server.scheduler"
+ },
+ "outside_writers": {
+  "_doc": "writes to a module's own data from another module, measured at c1ca7ce (census3). leg_end = what remains after the encapsulation steps S10b / S12b / S9b (DESIGN 4): the constructor statements stay in Engine's constructor in their order (rule A); allocState / setVramProbe are startup installers (DESIGN 2.6 table)",
+  "now": [
+   "Engine:conv_bytes_",
+   "Engine:crlf_norm_",
+   "Engine:ctx_pub_",
+   "Engine:fl_",
+   "Engine:ids_",
+   "Engine:ssm_bytes_",
+   "admitQueued:n_active_",
+   "admitQueued:queue_",
+   "allocState:spec_on_",
+   "attachTier:q_cond_",
+   "attachTier:tier_wake_",
+   "attachTier:wake_seq_",
+   "idleWait:q_cond_",
+   "idleWait:q_mutex_",
+   "idleWait:tier_wake_",
+   "logBatchStats:fl_",
+   "reapDisconnected:q_cond_",
+   "reapDisconnected:queue_",
+   "releaseSlot:n_active_",
+   "releaseSlot:q_cond_",
+   "runLoop:q_cond_",
+   "setCtx:ctx_pub_",
+   "setVramProbe:vram_others_",
+   "startAdmitted:n_active_",
+   "startAdmitted:queue_",
+   "vramNote:gov_warn_"
+  ],
+  "leg_end": [
+   "Engine:conv_bytes_",
+   "Engine:crlf_norm_",
+   "Engine:ctx_pub_",
+   "Engine:fl_",
+   "Engine:ids_",
+   "Engine:ssm_bytes_",
+   "allocState:spec_on_",
+   "setVramProbe:vram_others_"
+  ],
+  "_doc_s0": "S0 re-measure (A1): now adds the lock-protocol writes (q_cond_.notify_all / wait_for, q_mutex_ through WH_UNLOCK_HELD) outside job_queue; leg_end is unchanged: they move behind JobQueue methods (review3 C3, leg 3 design)",
+  "_doc_s0d": "S0d (AST census): Engine:ids_ - the constructor's rcx_{opt_.model_name, tok_, ids_} binds ResponseCtx's IdGen& (an aggregate reference member, S0c review R10 shape); present at c1ca7ce too",
+  "_doc_s4": "S4 (arch025-engine-s4, 2026-10-30) listed 7 `<entry>:dc_` rows here (calls of DrafterCtx's non-const methods dflReset / dflIngest on the holder dc_). The s0b merge (main session, 2026-10-31) removed them: the N4-emut2 census counts a non-const call h.f( on a cut holder whose methods use only their own members through this-> as a call edge (census holder_call), not a write of the holder; what the methods write (m_, bst_) stays under shared_writers. engine.h `DrafterCtx dc_{bst_, m_, opt_}` binds bst_ to a BatchStats& member, so Engine is a writer of bst_ (shared_writers now / leg_end; both analyzers, progress/arch025-engine.emut2.REVIEW.md:14)"
+ },
+ "engine_members_final": [
+  "m_",
+  "ops_",
+  "tok_",
+  "ct_",
+  "opt_",
+  "ctx_",
+  "owner_",
+  "ck_",
+  "spec_",
+  "fl_",
+  "sb_",
+  "spec_on_",
+  "conv_bytes_",
+  "ssm_bytes_",
+  "slots_",
+  "jq_",
+  "ids_",
+  "rcx_",
+  "bst_",
+  "vram_probe_",
+  "vram_others_",
+  "vst_",
+  "prefill_tok_cum_",
+  "crlf_norm_",
+  "gst_",
+  "ctx_pub_",
+  "kv_arrays_",
+  "pool_",
+  "last_tick_",
+  "last_reap_",
+  "ps_",
+  "tb_",
+  "cnt_",
+  "vis_",
+  "dc_",
+  "sc_",
+  "gv_",
+  "vw_",
+  "se_",
+  "pf_",
+  "cyc_",
+  "ss_",
+  "tg_",
+  "sch_"
+ ],
+ "classes": {
+  "_doc": "component class -> module; Engine is implicit (server.engine, plus every entry the cut assigns)",
+  "JobQueue": "server.job_queue",
+  "DrafterCtx": "server.drafter_ctx",
+  "SlotPages": "server.slot_cache",
+  "SlotPagesCounters": "server.slot_cache",
+  "GovState": "server.governor",
+  "GovernorGlue": "server.governor",
+  "VramState": "server.vram_watch",
+  "VramWatch": "server.vram_watch",
+  "SlotEnd": "server.slot_end",
+  "PrefillPhase": "server.prefill",
+  "SpecCycle": "server.spec_cycle",
+  "SlotStart": "server.slot_start",
+  "TierGlue": "server.tier_glue",
+  "Scheduler": "server.scheduler"
+ },
+ "holders": {
+  "_doc": "member object name -> class (calls h.f( resolve to the class's entries; rule: a component's reference to a core.shared member keeps that member's name)",
+  "jq_": "JobQueue",
+  "dc_": "DrafterCtx",
+  "sc_": "SlotPages",
+  "cnt_": "SlotPagesCounters",
+  "gst_": "GovState",
+  "gv_": "GovernorGlue",
+  "vst_": "VramState",
+  "vw_": "VramWatch",
+  "se_": "SlotEnd",
+  "pf_": "PrefillPhase",
+  "cyc_": "SpecCycle",
+  "ss_": "SlotStart",
+  "tg_": "TierGlue",
+  "sch_": "Scheduler"
+ },
+ "aliases": {
+  "_doc": "planned renames: qualified definition -> cut entry",
+  "GovernorGlue::tick": "govTick"
+ },
+ "new_funcs": {
+  "_doc": "planned functions (S-steps of DESIGN 4); allowed to be missing until written",
+  "govActive": "server.governor",
+  "govSetWarn": "server.governor",
+  "govReduced": "server.governor",
+  "govCtxPublished": "server.governor",
+  "govPublishCtx": "server.governor",
+  "jqHealth": "server.job_queue",
+  "jqAdmit": "server.job_queue",
+  "jqStartAdmitted": "server.job_queue",
+  "jqRelease": "server.job_queue",
+  "jqReap": "server.job_queue",
+  "jqTierWake": "server.job_queue",
+  "vramHealth": "server.vram_watch",
+  "cacheCounters": "server.slot_cache",
+  "floorLogPeriod": "server.prefill",
+  "floorOn": "server.prefill",
+  "Engine.attachTier": "server.engine",
+  "Engine.initPool": "server.engine",
+  "Engine.setVramProbe": "server.engine",
+  "Engine.setGovernor": "server.engine",
+  "Engine.governorJson": "server.engine",
+  "Engine.nextJobId": "server.engine",
+  "Engine.submitAndWait": "server.engine",
+  "Engine.beginBuilding": "server.engine",
+  "Engine.endBuilding": "server.engine",
+  "Engine.stop": "server.engine",
+  "Engine.runOnLoop": "server.engine",
+  "Engine.runLoop": "server.engine"
+ },
+ "users": [
+  "server/server_main.cpp"
+ ],
+ "core_shapes": {
+  "_doc": "statements = ';'-separated parts of the body; forbid = regex on the body",
+  "accessor": {
+   "max_statements": 1,
+   "forbid": [
+    "\\bfor\\b",
+    "\\bwhile\\b",
+    "\\bif\\b",
+    "Lock\\b"
+   ]
+  },
+  "forwarder_public": {
+   "max_statements": 1,
+   "forbid": [
+    "\\bfor\\b",
+    "\\bwhile\\b",
+    "\\bif\\b",
+    "Lock\\b"
+   ]
+  },
+  "report": {
+   "max_lines": 30,
+   "forbid": [
+    "\\bwhile\\b",
+    "Lock\\b",
+    "\\block\\(",
+    "\\bsleep"
+   ]
+  },
+  "startup": {
+   "max_lines": 30,
+   "forbid": [
+    "\\bwhile\\b",
+    "Lock\\b"
+   ]
+  },
+  "special": {
+   "max_lines": 45
+  },
+  "helper": {
+   "max_lines": 15,
+   "forbid": [
+    "\\bwhile\\b"
+   ]
+  }
+ },
+ "core_exceptions": {
+  "_doc": "core data uses that stay at leg end (graph3 --core); each with its reason (DESIGN 2.6)",
+  "allocState:spec_on_": "two-phase construction: allocState sizes the buffers and sets spec_on_ once, before runLoop; spec_cycle only reads it afterwards"
+ },
+ "shared_writers": {
+  "_doc": "writers of each core.shared member, measured at c1ca7ce by engine_split_census.py (S0: assignments, non-const method calls, non-const reference / pointer bindings, arguments that are not provably by value / const&); a writer not listed fails. leg_end = now",
+  "now": {
+   "bst_": [
+    "Engine",
+    "acceptSlot",
+    "cycleStats",
+    "dflIngest",
+    "dflashDrafts",
+    "idleWait",
+    "logBatchStats",
+    "prefillGroup",
+    "prefillStep",
+    "runLoop"
+   ],
+   "ck_": [
+    "Engine",
+    "allocState",
+    "govFreeCache",
+    "govRestoreCache",
+    "saveCkpt",
+    "startJob"
+   ],
+   "ct_": [
+    "Engine"
+   ],
+   "ctx_": [
+    "Engine",
+    "setCtx"
+   ],
+   "m_": [
+    "Engine",
+    "acceptSlot",
+    "allocState",
+    "attachSpe",
+    "createSpe",
+    "cycleStats",
+    "dflIngest",
+    "dflReset",
+    "dflashDrafts",
+    "draftSampling",
+    "dropSpe",
+    "enqueueVerify",
+    "finishJob",
+    "finishPrefill",
+    "freePages",
+    "govDrain",
+    "govResize",
+    "idleWait",
+    "layoutBatch",
+    "maybeSplitCkpt",
+    "model",
+    "prefillGroup",
+    "prefillStep",
+    "sampleRows",
+    "startJob"
+   ],
+   "ops_": [
+    "Engine",
+    "acceptSlot",
+    "allocStateMeasured",
+    "createSpe",
+    "dropSpe",
+    "finishJob",
+    "finishPrefill",
+    "freePages",
+    "govDrain",
+    "sampleRows",
+    "startJob"
+   ],
+   "opt_": [
+    "Engine",
+    "allocState",
+    "govRestoreCache",
+    "setCtx",
+    "setKvSsdMode",
+    "setNumerics",
+    "setStartup"
+   ],
+   "owner_": [
+    "Engine",
+    "modulesOwned",
+    "runLoop"
+   ],
+   "pool_": [
+    "Engine",
+    "attachSpe",
+    "attachTier",
+    "cowPages",
+    "createSpe",
+    "dropSpe",
+    "ensurePages",
+    "freePages",
+    "govDrain",
+    "govFreeCache",
+    "govResize",
+    "initPool",
+    "startJob",
+    "takePage",
+    "tierTick"
+   ],
+   "ps_": [
+    "Engine",
+    "allocState",
+    "attachSpe",
+    "attachTier",
+    "attachVision",
+    "createSpe",
+    "evictFor",
+    "govDrain",
+    "govFreeCache",
+    "govResize",
+    "govRestoreCache",
+    "prefetchFor",
+    "saveCkpt",
+    "startAdmitted",
+    "startJob",
+    "waitsForSys",
+    "waitsForTier"
+   ],
+   "sb_": [
+    "acceptSlot",
+    "allocState",
+    "finishPrefill",
+    "sampleRows",
+    "startJob"
+   ],
+   "slots_": [
+    "allocState",
+    "evictFor",
+    "govDrain",
+    "govFreeCache",
+    "govResize",
+    "govRestoreCache",
+    "pollRestores",
+    "prefetchFor",
+    "prefillGroup",
+    "reapDisconnected",
+    "runLoop",
+    "runPrefill",
+    "startAdmitted",
+    "startJob",
+    "tierTick",
+    "waitsForSys",
+    "waitsForTier"
+   ],
+   "spec_": [
+    "Engine",
+    "acceptSlot",
+    "cycleStats",
+    "idleWait",
+    "layoutBatch",
+    "mtpDrafts",
+    "pickDrafts",
+    "runPrefill",
+    "startJob",
+    "trainCycle"
+   ],
+   "tb_": [
+    "Engine",
+    "attachSpe",
+    "attachTier",
+    "cowPages",
+    "createSpe",
+    "dropSpe",
+    "failSlot",
+    "finishJob",
+    "flushTierOnStop",
+    "freePages",
+    "idleWait",
+    "pollRestores",
+    "prefetchFor",
+    "releaseSlot",
+    "saveCkpt",
+    "startJob",
+    "tierTick",
+    "tryRestore"
+   ],
+   "vis_": [
+    "attachVision",
+    "idleWait",
+    "releaseSlot",
+    "runLoop",
+    "startJob"
+   ],
+   "vram_probe_": [
+    "setVramProbe"
+   ]
+  },
+  "leg_end": {
+   "bst_": [
+    "Engine",
+    "acceptSlot",
+    "cycleStats",
+    "dflIngest",
+    "dflashDrafts",
+    "idleWait",
+    "logBatchStats",
+    "prefillGroup",
+    "prefillStep",
+    "runLoop"
+   ],
+   "ck_": [
+    "Engine",
+    "allocState",
+    "govFreeCache",
+    "govRestoreCache",
+    "saveCkpt",
+    "startJob"
+   ],
+   "ct_": [
+    "Engine"
+   ],
+   "ctx_": [
+    "Engine",
+    "setCtx"
+   ],
+   "m_": [
+    "Engine",
+    "acceptSlot",
+    "allocState",
+    "attachSpe",
+    "createSpe",
+    "cycleStats",
+    "dflIngest",
+    "dflReset",
+    "dflashDrafts",
+    "draftSampling",
+    "dropSpe",
+    "enqueueVerify",
+    "finishJob",
+    "finishPrefill",
+    "freePages",
+    "govDrain",
+    "govResize",
+    "idleWait",
+    "layoutBatch",
+    "maybeSplitCkpt",
+    "model",
+    "prefillGroup",
+    "prefillStep",
+    "sampleRows",
+    "startJob"
+   ],
+   "ops_": [
+    "Engine",
+    "acceptSlot",
+    "allocStateMeasured",
+    "createSpe",
+    "dropSpe",
+    "finishJob",
+    "finishPrefill",
+    "freePages",
+    "govDrain",
+    "sampleRows",
+    "startJob"
+   ],
+   "opt_": [
+    "Engine",
+    "allocState",
+    "govRestoreCache",
+    "setCtx",
+    "setKvSsdMode",
+    "setNumerics",
+    "setStartup"
+   ],
+   "owner_": [
+    "Engine",
+    "modulesOwned",
+    "runLoop"
+   ],
+   "pool_": [
+    "Engine",
+    "attachSpe",
+    "attachTier",
+    "cowPages",
+    "createSpe",
+    "dropSpe",
+    "ensurePages",
+    "freePages",
+    "govDrain",
+    "govFreeCache",
+    "govResize",
+    "initPool",
+    "startJob",
+    "takePage",
+    "tierTick"
+   ],
+   "ps_": [
+    "Engine",
+    "allocState",
+    "attachSpe",
+    "attachTier",
+    "attachVision",
+    "createSpe",
+    "evictFor",
+    "govDrain",
+    "govFreeCache",
+    "govResize",
+    "govRestoreCache",
+    "prefetchFor",
+    "saveCkpt",
+    "startAdmitted",
+    "startJob",
+    "waitsForSys",
+    "waitsForTier"
+   ],
+   "sb_": [
+    "acceptSlot",
+    "allocState",
+    "finishPrefill",
+    "sampleRows",
+    "startJob"
+   ],
+   "slots_": [
+    "allocState",
+    "evictFor",
+    "govDrain",
+    "govFreeCache",
+    "govResize",
+    "govRestoreCache",
+    "pollRestores",
+    "prefetchFor",
+    "prefillGroup",
+    "reapDisconnected",
+    "runLoop",
+    "runPrefill",
+    "startAdmitted",
+    "startJob",
+    "tierTick",
+    "waitsForSys",
+    "waitsForTier"
+   ],
+   "spec_": [
+    "Engine",
+    "acceptSlot",
+    "cycleStats",
+    "idleWait",
+    "layoutBatch",
+    "mtpDrafts",
+    "pickDrafts",
+    "runPrefill",
+    "startJob",
+    "trainCycle"
+   ],
+   "tb_": [
+    "Engine",
+    "attachSpe",
+    "attachTier",
+    "cowPages",
+    "createSpe",
+    "dropSpe",
+    "failSlot",
+    "finishJob",
+    "flushTierOnStop",
+    "freePages",
+    "idleWait",
+    "pollRestores",
+    "prefetchFor",
+    "releaseSlot",
+    "saveCkpt",
+    "startJob",
+    "tierTick",
+    "tryRestore"
+   ],
+   "vis_": [
+    "attachVision",
+    "idleWait",
+    "releaseSlot",
+    "runLoop",
+    "startJob"
+   ],
+   "vram_probe_": [
+    "setVramProbe"
+   ]
+  },
+  "_doc_s0b": "S0b (S0 review act-on 1): model:m_ (Engine::model() returns ServerModel& = a non-const reference accessor) and startAdmitted:slots_ (std::span<Slot>(slots_) handed to ps_.pickSlot = a writable view) are conservative writes the S0b census sees; they were there at c1ca7ce too (same census on scratch/a25_engine/s0/base_c1 and base_abe)",
+  "_doc_s0d": "S0d (AST census, tools/gates/engine_split_ast.py): Engine:ops_ (in-class sb_{m_, ops_} binds SampleBuffers' Backend&), attachSpe:m_ (m_.mapPages, non-const ServerModel method), idleWait/runLoop:vis_ (vis_.idle(), non-const), startJob:vis_ (vis_.prepare(), non-const), startJob:ck_ (ck_.load(const Ckpt&), non-const CkptStore method; the text census took 'load' for std::atomic::load) - writes by declared type the text rules missed, present at c1ca7ce / abe3512 too",
+  "_doc_s0g": "S0g (strict pointee rule, decisions.tsv ADR candidate 2026-10-30): layoutBatch:spec_ - cy.p = spec_.prof.get() keeps the profiler pointer (non-const pointee) in the cycle state; govDrain / freePages / dropSpe:m_ - m_.stream() (a hipStream_t, a pointer with a non-const pointee) passed to ops_.streamSync / streamWaitEvent; attachSpe:tb_ - tb_.tier()->find(..) is a non-const TierStore method reached through the pointer tb_.tier() returns. Present on c1ca7ce / abe3512 / 7ad196c alike."
+ },
+ "_doc_engine_members_final": "E3 (graph3 --core): Engine's data members at leg end, in declaration order; placed state stays at its c1ca7ce position (DESIGN 2.5)",
+ "_doc_s0": "S0 (2026-10-29): generated by scratch/a25_engine/s0/gen_cut_s0.py from cut_v3.json; the architecture part is pinned by tests/pins/engine_cut_arch.sha256 (engine_split_check.py --pin-check, review3 C2)",
+ "unresolved_ok": [
+  "_doc: S0b (S0 review act-on 2): every unresolved call of the census, exactly (a new one, or a listed one that is gone, is a finding). Measured on c1ca7ce, abe3512 and d6e83ed+S0 (the same 4): calls whose receiver is a member of an untracked class whose method has a tracked entry's name; PrefixStore::attachTier / PagePool::stats are not Engine's",
+  "attachTier: ps_.attachTier(  (also a method of an untracked class)",
+  "flushTierOnStop: pool_.stats(  (also a method of an untracked class)",
+  "idleWait: pool_.stats(  (also a method of an untracked class)",
+  "stats: pool_.stats(  (also a method of an untracked class)"
+ ],
+ "callable_reads": {
+  "_doc": "S0d (S0c review consider 1): std::function data members whose call (const operator()) the AST census counts as a read; every other std::function member call is a write. Each target checked by hand: a lambda captured by copy, not mutable, called only on the runLoop thread (owner_.check); the targets call non-const backend methods (be->wddmMemInfo(), be->gpuOthers()) whose side effects the census does not see. A new std::function member is a write until it is listed here (inside the cut pin).",
+  "vram_probe_": "server_main.cpp:1653-1672 copy-capture lambda (wddmMemInfo); assigned only in setVramProbe",
+  "vram_others_": "server_main.cpp:1653-1672 copy-capture lambda (gpuOthers); assigned only in setVramProbe",
+  "gov_margin_": "server_main.cpp:1684 [&] lambda calling lm.budgetMargin; assigned only in setGovernor"
+ },
+ "text_write_ok": {
+  "_doc": "S0e (S0d review act-on 2): rows the text census calls a write and the AST census a read; every other such row is a finding (the cross-check fails closed when an AST rule misses a write). Key entry:member, text_why = the text rule's reason exactly; each checked at the source (c1ca7ce / abe3512 / 38c6ffc / 7ad196c trees: the same 8 rows). S0f: text_why is the row's WHOLE set of text reasons (a string, or a list when the text census gives several).",
+  "Engine:owner_": {
+   "text_why": "address taken",
+   "reason": "engine.cpp:90-93 ck_/pool_/ps_/tb_.setOwner(&owner_): setOwner(const EngineThread*) (ckpt_store.h:51, page_pool.h:53, prefix_store.h:123, tier_bridge.h:85)"
+  },
+  "modulesOwned:owner_": {
+   "text_why": "address taken",
+   "reason": "engine.h:244-245 compares ownerThread() == &owner_ (a const method; pointer compared)"
+  },
+  "Engine:ct_": {
+   "text_why": "argument 0 of ps_()",
+   "reason": "engine.cpp:57 ps_(ct_, ...): PrefixStore(const chat::ChatTokens&, const Config&) (prefix_store.h:121)"
+  },
+  "Engine:ctx_": {
+   "text_why": "argument 0 of store()",
+   "reason": "engine.cpp:89 ctx_pub_.store(ctx_, ...): std::atomic<uint32_t>::store takes the value"
+  },
+  "allocState:opt_": {
+   "text_why": [
+    "argument 0 of alloc()",
+    "argument 0 of resize()"
+   ],
+   "reason": "engine.cpp:110-122 slots_.resize(opt_.parallel) / ckpts.resize(opt_.n_ck) / spes().resize(opt_.n_spe) and sb_.alloc(opt_.parallel, opt_.relax.on, ...): sizes / flags by value"
+  },
+  "govRestoreCache:opt_": {
+   "text_why": "argument 0 of resize()",
+   "reason": "engine_gov.cpp:206 sl.ckpts.resize(opt_.n_ck): size by value"
+  },
+  "facts:tok_": {
+   "text_why": "address taken",
+   "reason": "engine.cpp:151 f.tok = &tok_ in a const method; EngineFacts::tok is const Tokenizer* (engine_api.h:68)"
+  },
+  "finishPrefill:rcx_": {
+   "text_why": "address taken",
+   "reason": "engine_prefill.cpp:289 sl.st.cx = &rcx_; StreamState::cx is const ResponseCtx* (stream.h:60)"
+  }
+ },
+ "emut_read_ok": {
+  "_doc": "arch025-emut2 (PLAN N4-emut2): rows clang's ExprMutationAnalyzer (tools/gates/emut) calls a write and the Python analyzer a read; the census counts every such (entry, member) pair as a write (writes = clang UNION Python) unless it is pinned here. Key entry:member; clang_why = the WHOLE set of clang reasons of the pair (positions dropped, engine_split_emut.norm_why); a pin with another set does not apply, a pin that no longer occurs is a finding. Initial set = the cross-check's class (d) (analyzer conservative / false positive, the Python analyzer proves the read from types or a measured list; progress/arch025-emut.HANDOFF.md), each class checked at the source.",
+  "Engine:tok_": {
+   "clang_why": [
+    "write: InitListExpr `{opt_.model_name, tok_, ids_}`"
+   ],
+   "class": "d init-list into const references",
+   "reason": "engine.cpp:57 rcx_{opt_.model_name, tok_, ids_}: ResponseCtx binds const references (Python: 'const use (InitListExpr)')"
+  },
+  "allocState:opt_": {
+   "clang_why": [
+    "write: CallExpr `logI(\"decode: relaxed draft acceptance (relaxacc, fast): greedy top-{} with p >= {:.2f} p_max; sampl...`"
+   ],
+   "class": "d log.h formatter",
+   "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
+  },
+  "attachTier:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "draftCap:opt_": {
+   "clang_why": [
+    "write: CXXOperatorCallExpr `opt_.batch_drafts[std::min(A, gdn_max_seg)]`"
+   ],
+   "class": "d non-const operator[] overload, result only read",
+   "reason": "std::array / vector operator[] on a non-const object picks the non-const overload; the result is bound to a const& or passed by value / const& (Python: 'const object bound to / passed', 'read (value)'), engine_decode.cpp:85-292, 655"
+  },
+  "endBuilding:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "facts:tok_": {
+   "clang_why": [
+    "write: UnaryOperator `&tok_`"
+   ],
+   "class": "d address into a const pointer",
+   "reason": "&owner_ compared with const EngineThread* (engine.h:244-245) / f.tok = &tok_ where EngineFacts::tok is const Tokenizer* (engine.cpp:151; text_write_ok facts:tok_); the analyzer counts any & as a write unless a const NoOp cast follows"
+  },
+  "govPublish:gov_": {
+   "clang_why": [
+    "write: CXXOperatorCallExpr `gov_->`"
+   ],
+   "class": "d non-const operator-> overload, const methods called",
+   "reason": "gov_ (std::optional / unique_ptr of MemGovernor): operator-> on a non-const object, then only const methods (reduced(), config(), shrinks(), grows(), ctxNew()) (Python: 'handle to const'); engine_gov.cpp:58-69, 337-365, engine_vram.cpp:86"
+  },
+  "govPublish:vram_mu_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(vram_mu_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "govTick:gov_ram_mb_": {
+   "clang_why": [
+    "write: CallExpr `logI(\"memory governor: RAM tier kept at {} MiB (untouched: it is pinned system RAM, not VRAM, and do...`"
+   ],
+   "class": "d log.h formatter",
+   "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
+  },
+  "governorJson:vram_mu_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(vram_mu_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "health:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "health:vram_mu_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(vram_mu_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "modulesOwned:owner_": {
+   "clang_why": [
+    "write: UnaryOperator `&owner_`"
+   ],
+   "class": "d address into a const pointer",
+   "reason": "&owner_ compared with const EngineThread* (engine.h:244-245) / f.tok = &tok_ where EngineFacts::tok is const Tokenizer* (engine.cpp:151; text_write_ok facts:tok_); the analyzer counts any & as a write unless a const NoOp cast follows"
+  },
+  "ngramDrafts:spec_": {
+   "clang_why": [
+    "write: CXXOperatorCallExpr `spec_.dtiming[std::min<std::size_t>(cy.A, gdn_max_seg)]`",
+    "write: CXXOperatorCallExpr `spec_.timing[std::min<std::size_t>(cy.A, gdn_max_seg)]`"
+   ],
+   "class": "d non-const operator[] overload, result only read",
+   "reason": "std::array / vector operator[] on a non-const object picks the non-const overload; the result is bound to a const& or passed by value / const& (Python: 'const object bound to / passed', 'read (value)'), engine_decode.cpp:85-292, 655"
+  },
+  "options:opt_": {
+   "clang_why": [
+    "write: ReturnStmt `return opt_`; returned by options"
+   ],
+   "class": "d const accessor return (analyzer false positive)",
+   "reason": "a const method returning const T& of the member (engine.h: owner() const / options() const / tokenizer() const): AsNonConstRefReturn assumes a NoOp cast to const that a const method's member does not have (ExprMutationAnalyzer.cpp:483-489; emut selftest e13_)"
+  },
+  "owner:owner_": {
+   "clang_why": [
+    "write: ReturnStmt `return owner_`; returned by owner"
+   ],
+   "class": "d const accessor return (analyzer false positive)",
+   "reason": "a const method returning const T& of the member (engine.h: owner() const / options() const / tokenizer() const): AsNonConstRefReturn assumes a NoOp cast to const that a const method's member does not have (ExprMutationAnalyzer.cpp:483-489; emut selftest e13_)"
+  },
+  "reapDisconnected:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "releaseSlot:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "runLoop:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`",
+    "write: CXXConstructExpr `lw(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "runOnLoop:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "setVramProbe:vram_mu_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(vram_mu_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "startAdmitted:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `g(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "startJob:ctx_": {
+   "clang_why": [
+    "write: CallExpr `logW(\"req {} | prompt of {} tokens does not fit the context per request of {} tokens (lowered from {...`",
+    "write: CallExpr `logW(\"req {} | prompt of {} tokens does not fit the context per request of {} tokens ({})\", job.id, ...`"
+   ],
+   "class": "d log.h formatter",
+   "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
+  },
+  "startJob:opt_": {
+   "clang_why": [
+    "write: CallExpr `logW(\"req {} | prompt of {} tokens does not fit the context per request of {} tokens ({})\", job.id, ...`"
+   ],
+   "class": "d log.h formatter",
+   "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
+  },
+  "stop:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "submitAndWait:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  },
+  "tokenizer:tok_": {
+   "clang_why": [
+    "write: ReturnStmt `return tok_`; returned by tokenizer"
+   ],
+   "class": "d const accessor return (analyzer false positive)",
+   "reason": "a const method returning const T& of the member (engine.h: owner() const / options() const / tokenizer() const): AsNonConstRefReturn assumes a NoOp cast to const that a const method's member does not have (ExprMutationAnalyzer.cpp:483-489; emut selftest e13_)"
+  },
+  "vramIdleTick:vram_idle_next_": {
+   "clang_why": [
+    "write: CXXConstructExpr `vram_idle_next_`; returned by vramIdleTick"
+   ],
+   "class": "d copied into std::optional",
+   "reason": "engine_vram.cpp:95 return vram_idle_next_; the return type is std::optional<time_point> by value (Python: 'copied into std::optional'); the analyzer counts the converting constructor's const& as a non-const reference"
+  },
+  "vramNote:gov_": {
+   "clang_why": [
+    "write: CXXOperatorCallExpr `gov_->`"
+   ],
+   "class": "d non-const operator-> overload, const methods called",
+   "reason": "gov_ (std::optional / unique_ptr of MemGovernor): operator-> on a non-const object, then only const methods (reduced(), config(), shrinks(), grows(), ctxNew()) (Python: 'handle to const'); engine_gov.cpp:58-69, 337-365, engine_vram.cpp:86"
+  },
+  "vramNote:vram_mu_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(vram_mu_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
+  }
+ }
+}

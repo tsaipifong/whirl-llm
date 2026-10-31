@@ -1,5 +1,5 @@
 // A minimal server::ServerModel for the isolation test programs of the engine components that hold a ServerModel&
-// (server.sample_buffers, server.image_embeddings; arch025-lane1 leg 8). Header only, no tokenizer, no GGUF: the
+// (server.sample_buffers, server.image_embeddings; arch025-lane1 leg 8; server.cycle_prof, server.drafter_ctx). Header only, no tokenizer, no GGUF: the
 // server tests' MockModel needs a real Tokenizer (lib whirl), which these programs must not link. The config has
 // n_vocab / n_embd as given; logits / hidden rows live in device::NullBackend memory (host addresses); topkRows is the
 // host reference of tests/server/mock_backend.cpp (MockModel::topkRows). Every other call does nothing.
@@ -114,6 +114,21 @@ public:
         prof_ver = {};
     }
     const char* profileClassName(std::size_t i) const override { return i < prof_names.size() ? prof_names[i] : "?"; }
+
+    // DFlash2 drafter (arch025-engine S4, server.drafter_ctx test): settable dflashMaxDrafts / captureN (0 by default,
+    // as ServerModel's own defaults); dflashTrim / dflashIngest are recorded in call order
+    std::uint32_t dfl_max_drafts = 0, capture_n = 0;
+    struct DflCall {
+        char kind;  // 't' dflashTrim(s, keep), 'i' dflashIngest(s, row0, n, pos0)
+        std::uint32_t s, a, b, c;
+    };
+    std::vector<DflCall> dfl_calls;
+    std::uint32_t dflashMaxDrafts() const override { return dfl_max_drafts; }
+    std::uint32_t captureN() const override { return capture_n; }
+    void dflashIngest(std::uint32_t s, std::uint32_t row0, std::uint32_t n, std::uint32_t pos0) override {
+        dfl_calls.push_back({'i', s, row0, n, pos0});
+    }
+    void dflashTrim(std::uint32_t s, std::uint32_t keep) override { dfl_calls.push_back({'t', s, keep, 0, 0}); }
 
 private:
     template <class T>

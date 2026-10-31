@@ -1016,6 +1016,22 @@
    "protocol"
   ],
   [
+   "server.drafter_ctx",
+   "contract.server"
+  ],
+  [
+   "server.drafter_ctx",
+   "model.core"
+  ],
+  [
+   "server.drafter_ctx",
+   "server.engine_types"
+  ],
+  [
+   "server.drafter_ctx",
+   "server.slot"
+  ],
+  [
    "server.engine",
    "accept_policy"
   ],
@@ -1113,6 +1129,14 @@
   ],
   [
    "server.engine",
+   "server.drafter_ctx"
+  ],
+  [
+   "server.engine",
+   "server.engine_types"
+  ],
+  [
+   "server.engine",
    "server.image_embeddings"
   ],
   [
@@ -1122,6 +1146,10 @@
   [
    "server.engine",
    "server.slot"
+  ],
+  [
+   "server.engine",
+   "server.slot_output"
   ],
   [
    "server.engine",
@@ -1154,6 +1182,54 @@
   [
    "server.engine",
    "vision"
+  ],
+  [
+   "server.engine_types",
+   "accept_policy"
+  ],
+  [
+   "server.engine_types",
+   "cache.prefix"
+  ],
+  [
+   "server.engine_types",
+   "chat"
+  ],
+  [
+   "server.engine_types",
+   "common.base"
+  ],
+  [
+   "server.engine_types",
+   "file:src/server/decode_floor.h"
+  ],
+  [
+   "server.engine_types",
+   "model.types"
+  ],
+  [
+   "server.engine_types",
+   "prefill.plan"
+  ],
+  [
+   "server.engine_types",
+   "protocol"
+  ],
+  [
+   "server.engine_types",
+   "sampling"
+  ],
+  [
+   "server.engine_types",
+   "server.slot"
+  ],
+  [
+   "server.engine_types",
+   "spec.policy"
+  ],
+  [
+   "server.engine_types",
+   "tier.kv"
   ],
   [
    "server.image_embeddings",
@@ -1246,6 +1322,22 @@
   [
    "server.slot",
    "tier_bridge"
+  ],
+  [
+   "server.slot_output",
+   "file:src/server/log.h"
+  ],
+  [
+   "server.slot_output",
+   "prefill.plan"
+  ],
+  [
+   "server.slot_output",
+   "protocol"
+  ],
+  [
+   "server.slot_output",
+   "server.slot"
   ],
   [
    "server.startup",

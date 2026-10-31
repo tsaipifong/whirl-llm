@@ -1,0 +1,8 @@
+# arch025 S0b server launch-table ignore list (launch_table.py --ignore-file / work_equal.py --ignore-file), SERVER runs only.
+# Carried over from arch024-S0b / S0b2 (progress\arch024-S0b2.HANDOFF.md (3)A, scratch\s0b2\launch_hh_*_fd.txt):
+#   get_rows_q8_0: its argument digest hashes the raw address of the token embedding in pinned host memory
+#   (loader.cpp matHost -> hip::hostMalloc, hip_runtime.cpp:213-222 has no launchlog::onAlloc). A launch-log tool
+#   defect, not a time-dependent kernel; still unfixed in arch025-base. Drop this line once hostMalloc registers.
+# The timing-driven MTP draft count (engine.cpp pickDrafts on timing_, Ngram choose) changes the count of EVERY kernel
+# row, so it cannot be listed here; mt_equiv_rules.py classifies such runs by the per-request MTP / n-gram log lines.
+^get_rows_q8_0\s
