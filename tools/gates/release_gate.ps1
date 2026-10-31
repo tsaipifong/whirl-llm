@@ -323,7 +323,15 @@ AddStep "cpu_step_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $r
 #                fail it (a few minutes; needs the HIP SDK clang-cl, no GPU)
 # They reuse the HIP code objects of -Build (same tree) for a new build directory. WHIRL_GATE_QUIET_WAIT: a local script that
 # waits while a GPU measurement holds the machine (passed on as WHIRL_QUIET_WAIT; build_cfg.bat runs it before compiling).
-$safetyEnv = @{ WHIRL_PYTHON = $py; WHIRL_KERNELS_FROM = $Build; WHIRL_QUIET_WAIT = $env:WHIRL_GATE_QUIET_WAIT }
+# arch025-procopt3 (PLAN 9.33 / 9.33b): dev / integration runs build cpu_asan / cpu_tsa in the persistent cache (cpu_analyze
+# gets the same mode but always builds clean in its tree: "mode clean (cpu_analyze never uses the cache, PLAN 9.33b ...)")
+# (safety_step.ps1 -Mode cache: content-synced mirror + persistent build dirs + deps check; verdict "mode incremental" /
+# "mode clean-cache (...)"); strict / release runs (the same test as "Retry" below: -Strict, WHIRL_GATE_STRICT=1, tags
+# gate_r9700 / gate_8060s) keep the clean in-tree build ("mode clean"). WHIRL_SAFETY_MODE=clean|cache overrides for dev runs.
+$safetyStrict = $Strict -or ($env:WHIRL_GATE_STRICT -eq "1") -or ($Tag -match '^gate_(r9700|8060s)$')
+$safetyMode = if ($safetyStrict) { "clean" } elseif ($env:WHIRL_SAFETY_MODE -in @("clean", "cache")) { $env:WHIRL_SAFETY_MODE } else { "cache" }
+# 9.33b: the step environment drops every WHIRL_* but WHIRL_GATE_* (below), so the cache variables ride here ($null = unset)
+$safetyEnv = @{ WHIRL_PYTHON = $py; WHIRL_KERNELS_FROM = $Build; WHIRL_QUIET_WAIT = $env:WHIRL_GATE_QUIET_WAIT; WHIRL_SAFETY_MODE = $safetyMode; WHIRL_SAFETY_CACHE_CLEAN = $env:WHIRL_SAFETY_CACHE_CLEAN; WHIRL_SAFETY_CACHE = $env:WHIRL_SAFETY_CACHE; WHIRL_SAFETY_SYNC_FROM = $env:WHIRL_SAFETY_SYNC_FROM }
 $safetyPs = Join-Path $repo "tools\safety\safety_step.ps1"
 AddStep "cpu_safety_selftest" $false @($pwsh, "-NoProfile", "-File", $safetyPs, "-Kind", "selftest") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^cpu safety selftest: ok") } $safetyEnv
 AddStep "cpu_asan" $false @($pwsh, "-NoProfile", "-File", $safetyPs, "-Kind", "asan", "-Gguf", $SW, "-GgufMoe", $MX) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^cpu asan: ok") } $safetyEnv

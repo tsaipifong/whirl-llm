@@ -176,6 +176,49 @@ with tempfile.TemporaryDirectory() as td:
     # the machine time of the run (--run's cpu_s / gpu_s) is both tries: the first try's seconds of FLAKY and retried FAIL rows
     ft = tc.first_try_seconds(f)
     check("first-try seconds of FLAKY and 'retry also failed' rows", ft == {"cpu_iso_tier_kv": 300, "cpu_asan": 800}, ft)
+import csv  # noqa: E402
+import re  # noqa: E402
+import time  # noqa: E402
+# 13c. arch025-procopt3 (PLAN 9.32): seconds measured inside a 9.24 parallel section (loaded wall clock, several steps at once)
+# are kept apart from serial seconds. A summary whose header says "parallel: N group(s), M CPU steps, -Jobs K" ran each run of
+# >= 2 consecutive par steps (cpu_sampling_iso, cpu_iso_* except cpu_iso_includes; release_gate.ps1 $parRx) in parallel; a lone
+# par step between serial ones ran serially. median_s = serial seconds only; median_par_s / n_par / jobs = the parallel ones;
+# a step with only parallel samples falls back to its parallel median (n = 0 says so).
+with tempfile.TemporaryDirectory() as td:
+    fp = os.path.join(td, "p_summary.txt")
+    open(fp, "w").write("release gate p on 8060s (gfx1151), models ...; retry: CPU steps once (dev); heavy-CPU lock on; parallel: 1 group(s), 3 CPU steps, -Jobs 4\n"
+                        "PASS cpu_tests              exit   0      5 s  ok\n"
+                        "PASS cpu_iso_alpha          exit   0    100 s  iso check: ok\n"
+                        "PASS cpu_iso_beta           exit   0     90 s  iso check: ok\n"
+                        "PASS cpu_sampling_iso       exit   0     80 s  ok\n"
+                        "PASS cpu_iso_includes       exit   0      7 s  ok\n"
+                        "PASS cpu_asan               exit   0    600 s  ok\n"
+                        "PASS cpu_iso_lone           exit   0     30 s  ok\n"
+                        "release gate p: PASS (7 steps)\n")
+    time.sleep(0.05)
+    fs = os.path.join(td, "s_summary.txt")
+    open(fs, "w").write("release gate s on 8060s (gfx1151), models ...; retry: CPU steps once (dev); heavy-CPU lock on; parallel: off (-Jobs 1)\n"
+                        "PASS cpu_iso_alpha          exit   0     40 s  iso check: ok\n"
+                        "PASS cpu_tests              exit   0      3 s  ok\n"
+                        "release gate s: PASS (2 steps)\n")
+    rg = open(os.path.join(os.path.dirname(os.path.abspath(tc.__file__)), "release_gate.ps1"), encoding="utf-8").read()
+    mrx = re.search(r"^\$parRx = '([^']+)'", rg, re.M)
+    check("9.32 PAR_RX is release_gate.ps1's $parRx", bool(mrx) and mrx.group(1) == tc.PAR_RX.pattern, mrx and mrx.group(1))
+    ps = tc.parallel_steps(fp)
+    check("9.32 parallel steps of a summary: the consecutive par run only", ps == ({"cpu_iso_alpha", "cpu_iso_beta", "cpu_sampling_iso"}, 4), ps)
+    check("9.32 no parallel note / parallel off: no parallel steps", tc.parallel_steps(fs) == (set(), 0), tc.parallel_steps(fs))
+    out = os.path.join(td, "times.tsv")
+    tc.refresh_times([td], out)
+    t = tc.load_times(out)
+    check("9.32 serial median ignores parallel seconds", t.get(("8060s", "cpu_iso_alpha")) == 40 and t.get(("8060s", "cpu_tests")) == 4, t)
+    check("9.32 a lone par step between serial steps is serial", t.get(("8060s", "cpu_iso_lone")) == 30, t)
+    rows = {(r["device"], r["step"]): r for r in csv.DictReader(open(out, encoding="utf-8"), delimiter="\t")}
+    ra, rb = rows.get(("8060s", "cpu_iso_alpha"), {}), rows.get(("8060s", "cpu_iso_beta"), {})
+    check("9.32 parallel seconds in their own columns", ra.get("n") == "1" and ra.get("median_par_s") == "100" and ra.get("n_par") == "1"
+          and ra.get("jobs") == "4", ra)
+    check("9.32 only-parallel step: falls back to the parallel median, n = 0", t.get(("8060s", "cpu_iso_beta")) == 90 and rb.get("n") == "0"
+          and rb.get("n_par") == "1", rb)
+    check("9.32 serial-only step: empty parallel columns", rows.get(("8060s", "cpu_asan"), {}).get("n_par") == "0", rows.get(("8060s", "cpu_asan")))
 # 14. --run: one gate call per GPU, R9700 then 8060S, CPU steps once (first call), per-GPU CPU checks on both, tag
 # change_<id>_<dev>, summary + ledger; a running whirl process refuses (exit 2). release_gate is faked (no GPU).
 with tempfile.TemporaryDirectory() as td:
