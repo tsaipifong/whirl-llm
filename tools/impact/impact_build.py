@@ -68,7 +68,7 @@ PATHS = {
                           "metric": "tg", "desc": "sampling and speculative sampling"},
     "server.loop":       {"roots": ["Engine::runLoop", "Engine::submitAndWait"], "metric": None, "depth": 0,
                           "desc": "engine scheduler loop / admission"},
-    "cache.prefix":      {"roots": ["PrefixStore::cacheMatch", "PrefixStore::speMatch", "Engine::saveCkpt", "CkptStore::save", "CkptStore::load", "Engine::createSpe", "Engine::attachSpe",
+    "cache.prefix":      {"roots": ["PrefixStore::cacheMatch", "PrefixStore::speMatch", "SlotPages::saveCkpt", "CkptStore::save", "CkptStore::load", "SlotPages::createSpe", "SlotPages::attachSpe",
                                     "PrefixCacheImpl::matchSlot", "PrefixCacheImpl::matchShared", "PrefixCacheImpl::ckptSlotFor",
                                     "Engine::maybeSplitCkpt"],
                           "metric": "agent", "desc": "in-VRAM prefix cache: checkpoints, shared system prompts, page COW"},
