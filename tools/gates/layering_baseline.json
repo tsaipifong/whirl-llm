@@ -236,14 +236,6 @@
    "hip.runtime"
   ],
   [
-   "engine_gov",
-   "file:src/server/log.h"
-  ],
-  [
-   "engine_gov",
-   "server.engine"
-  ],
-  [
    "env_snapshot",
    "config.settings"
   ],
@@ -1137,6 +1129,10 @@
   ],
   [
    "server.engine",
+   "server.governor"
+  ],
+  [
+   "server.engine",
    "server.image_embeddings"
   ],
   [
@@ -1234,6 +1230,30 @@
   [
    "server.engine_types",
    "tier.kv"
+  ],
+  [
+   "server.governor",
+   "common.tsa"
+  ],
+  [
+   "server.governor",
+   "file:src/server/log.h"
+  ],
+  [
+   "server.governor",
+   "mem.governor"
+  ],
+  [
+   "server.governor",
+   "mem.wddm_watch"
+  ],
+  [
+   "server.governor",
+   "server.slot_cache"
+  ],
+  [
+   "server.governor",
+   "threads"
   ],
   [
    "server.image_embeddings",
@@ -1337,10 +1357,6 @@
   ],
   [
    "server.slot_cache",
-   "model.core"
-  ],
-  [
-   "server.slot_cache",
    "page_pool"
   ],
   [
@@ -1350,10 +1366,6 @@
   [
    "server.slot_cache",
    "server.engine_types"
-  ],
-  [
-   "server.slot_cache",
-   "spec.rules"
   ],
   [
    "server.slot_output",

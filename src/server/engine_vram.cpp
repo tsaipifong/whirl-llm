@@ -62,7 +62,7 @@ std::string Engine::vramNote() {
     vram_last_t_ = Clock::now();
     // v0.2.2.2: the memory governor decides first; its actions run at the next safe point of the loop (govApply), and the
     // spill warning is logged after them (the warning comes last)
-    govTick(s);
+    gv_.govTick(s);
     if (vram_warn_) {
         const double now_s = std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
         if (const auto ev = vram_watch_.check(s, now_s)) {
@@ -70,7 +70,7 @@ std::string Engine::vramNote() {
                 std::string t = ev->text;
                 if (vram_others_)
                     if (const auto o = vram_others_()) t += wddmwatch::othersNote(*o);
-                if (gov_) gov_warn_ = t;
+                if (gv_.govActive()) gv_.govSetWarn(t);
                 else logW("{}", t);
             } else {
                 logI("{}", ev->text);
@@ -83,7 +83,7 @@ std::string Engine::vramNote() {
         vram_spill_ = vram_warn_ && vram_watch_.spilling();
     }
     // while the governor has reduced something, idle samples every 5 s (recovery, the re-allocation when idle)
-    const double idle_s = gov_ && gov_->reduced() ? std::min(vram_idle_s_, 5.0) : vram_idle_s_;
+    const double idle_s = gv_.govReduced() ? std::min(vram_idle_s_, 5.0) : vram_idle_s_;
     vram_idle_next_ = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(idle_s));
     return wddmwatch::format(s, vram_watch_.baseline());
 }

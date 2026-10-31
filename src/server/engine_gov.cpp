@@ -10,8 +10,11 @@
 // Written for WHIRL. Moved out of engine.cpp (arch024 S9) with the same rules, order and log lines. Prior art:
 // progress/arch024-S9.PRIOR_ART.md (llama.cpp ggml_backend_dev_memory behind the device interface; vLLM profiles
 // once at startup, no runtime governor).
+//
+// arch025-engine S8 (module server.governor): the definitions are GovernorGlue's (src/server/engine_gov.h), bodies verbatim;
+// F14: governorJson / govPublish lock gov_mu_ (GovState's own lock for gov_json_) instead of the vram watch's vram_mu_.
 
-#include "engine.h"
+#include "server/engine_gov.h"
 
 #include "log.h"
 
@@ -33,7 +36,7 @@ constexpr double kMiB = 1048576.0;
 double monoS() { return std::chrono::duration<double>(Clock::now().time_since_epoch()).count(); }
 }  // namespace
 
-void Engine::setGovernor(const memgov::Config& c, std::function<std::uint64_t(std::uint64_t)> margin, std::uint64_t ram_tier_mb,
+void GovernorGlue::setGovernor(const memgov::Config& c, std::function<std::uint64_t(std::uint64_t)> margin, std::uint64_t ram_tier_mb,
                          std::uint64_t vram_total) {
     owner_.check("Engine::setGovernor");
     gov_.emplace(c);
@@ -46,12 +49,12 @@ void Engine::setGovernor(const memgov::Config& c, std::function<std::uint64_t(st
     govPublish();
 }
 
-std::string Engine::governorJson() {
-    whirl::MutexLock lk(vram_mu_);
+std::string GovernorGlue::governorJson() {
+    whirl::MutexLock lk(gov_mu_);
     return gov_json_;
 }
 
-void Engine::govPublish() {
+void GovernorGlue::govPublish() {
     if (!gov_) return;
     memgov::Status st;
     st.on = true;
@@ -69,17 +72,17 @@ void Engine::govPublish() {
     st.grows = gov_->grows();
     st.last_action = gov_last_;
     ctx_pub_.store(ctxForNew(), std::memory_order_relaxed);
-    whirl::MutexLock lk(vram_mu_);
+    whirl::MutexLock lk(gov_mu_);
     gov_json_ = memgov::statusJson(st);
 }
 
-bool Engine::govAllIdle() const {
+bool GovernorGlue::govAllIdle() const {
     for (const Slot& sl : slots_)
         if (sl.phase != Phase::idle || sl.job != nullptr || sl.restore != nullptr) return false;
     return true;
 }
 
-std::uint64_t Engine::govFreeable() const {
+std::uint64_t GovernorGlue::govFreeable() const {
     std::uint64_t b = 0;
     bool pf = false;
     for (const Slot& sl : slots_) {
@@ -90,7 +93,7 @@ std::uint64_t Engine::govFreeable() const {
     return b;
 }
 
-void Engine::govTick(const wddmwatch::Sample& s) {
+void GovernorGlue::govTick(const wddmwatch::Sample& s) {
     owner_.check("Engine::govTick");
     if (!gov_ || !s.ok || s.local_budget == 0) return;
     memgov::Input in;
@@ -125,7 +128,7 @@ void Engine::govTick(const wddmwatch::Sample& s) {
     gov_pending_ = true;
 }
 
-void Engine::govDrain() {
+void GovernorGlue::govDrain() {
     owner_.check("Engine::govDrain");
     // tier IO that reads or writes the pool or the checkpoint buffers: spills (device -> pinned copies on the tier stream)
     for (Slot& sl : slots_) {
@@ -142,7 +145,7 @@ void Engine::govDrain() {
     if (tb_.tier() != nullptr) ops_.streamSync(tb_.tier()->stream());
 }
 
-void Engine::govFreeCache(bool park) {
+void GovernorGlue::govFreeCache(bool park) {
     owner_.check("Engine::govFreeCache");
     std::size_t n_sl = 0, n_pages = 0, n_spe = 0, n_park = 0;
     std::uint64_t ck_bytes = 0;
@@ -190,7 +193,7 @@ void Engine::govFreeCache(bool park) {
     gov_last_ = std::format("freed cache: {} slot(s), {} shared, {} pages, {:.0f} MiB checkpoint buffers", n_sl, n_spe, n_pages, ck_bytes / kMiB);
 }
 
-void Engine::govRestoreCache() {
+void GovernorGlue::govRestoreCache() {
     owner_.check("Engine::govRestoreCache");
     gov_restored_ = 0;
     if (gov_parked_ == 0) return;
@@ -236,7 +239,7 @@ void Engine::govRestoreCache() {
          opt_.n_spe > 0 ? " and the shared prefix checkpoints" : "");
 }
 
-bool Engine::govResize(std::uint32_t tokens, bool shrink) {
+bool GovernorGlue::govResize(std::uint32_t tokens, bool shrink) {
     owner_.check("Engine::govResize");
     const std::uint32_t old = pool_.pages() * kv_page;
     if (tokens == old) return false;
@@ -298,7 +301,7 @@ bool Engine::govResize(std::uint32_t tokens, bool shrink) {
     return true;
 }
 
-void Engine::govApply() {
+void GovernorGlue::govApply() {
     owner_.check("Engine::govApply");
     if (!gov_ || !gov_pending_) return;
     gov_pending_ = false;

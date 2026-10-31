@@ -443,31 +443,41 @@ def selftest(work):
     # S0b (S0 review act-on 4, scratch/a25_engine/s0review/rt_new): in-class initializers / member types were not compared
     hh = "server/engine.h"
     hs = open(os.path.join(REPO, "src", hh), encoding="utf-8").read()
+    # arch025-engine S8: the governor members moved into GovState (server/engine_gov.h); a member anchor is looked up in
+    # the header that has it (exactly one of these)
+    def mhdr(line):
+        for r in ("server/engine.h", "server/engine_gov.h"):
+            fp = os.path.join(REPO, "src", r)
+            if os.path.exists(fp) and open(fp, encoding="utf-8").read().count(line) == 1: return r
+        return None
+    gh = mhdr("    bool gov_hold_ = false;") or hh
+    gs = open(os.path.join(REPO, "src", gh), encoding="utf-8").read()
     for old, new, nm in (("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", "an in-class initializer changed (vram_idle_s_ 60 -> 30)"),
                          ("    bool gov_hold_ = false;", "    bool gov_hold_ = true;", "an in-class initializer changed (gov_hold_ false -> true)"),
                          ("    std::uint32_t ctx_new_ = 0xffffffffu;", "    std::uint16_t ctx_new_ = 0xffffffffu;", "a member type changed (ctx_new_ uint32 -> uint16)")):
-        if hs.count(old) == 1: case(nm, hs.replace(old, new, 1), {}, 1, rel=hh)
+        r_ = mhdr(old)
+        if r_: case(nm, open(os.path.join(REPO, "src", r_), encoding="utf-8").read().replace(old, new, 1), {}, 1, rel=r_)
         else: cases.append((nm + ": anchor", False))
     if hs.count("    double vram_idle_s_ = 60.0;") == 1:
         case("the initializer change listed in allowed_diffs (control)", hs.replace("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", 1),
              {"allowed_diffs": [{"entry": "member:vram_idle_s_", "old": "60.0", "new": "30.0", "why": "selftest"}]}, 0, rel=hh)
     # ---- revtextfix (S0 review C-6 = S0b review C-4) ----
-    if hs.count("    double vram_idle_s_ = 60.0;") == 1 and hs.count("    bool gov_hold_ = false;") == 1:
+    if hs.count("    double vram_idle_s_ = 60.0;") == 1 and gs.count("    bool gov_hold_ = false;") == 1:
         # allowed_diffs match whole tokens: `16` is not a token of `160.0` (the old joined-string replace made 160.0 -> 60.0)
         case("A1 an allowed_diff that is not on a token boundary (16 -> 6 inside 160.0)", hs.replace("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 160.0;", 1),
              {"allowed_diffs": [{"entry": "member:vram_idle_s_", "old": "6", "new": "16", "why": "selftest"}]}, 1, rel=hh,
              expect=r"^  DIFF member:vram_idle_s_ ")
         # entry "*" would apply `false -> true` once in every member entry (S0b review C-4): a rules error now
-        case("A2 an allowed_diff with entry * is a rules error", hs.replace("    bool gov_hold_ = false;", "    bool gov_hold_ = true;", 1),
-             {"allowed_diffs": [{"entry": "*", "old": "false", "new": "true", "why": "selftest"}]}, 2, rel=hh,
+        case("A2 an allowed_diff with entry * is a rules error", gs.replace("    bool gov_hold_ = false;", "    bool gov_hold_ = true;", 1),
+             {"allowed_diffs": [{"entry": "*", "old": "false", "new": "true", "why": "selftest"}]}, 2, rel=gh,
              expect=r"^revtext: rules error: allowed_diffs\[0\]: entry \['\*'\] is a wildcard")
-        case("A3 an allowed_diff naming a list of entries (control)", hs.replace("    bool gov_hold_ = false;", "    bool gov_hold_ = true;", 1),
-             {"allowed_diffs": [{"entry": ["member:gov_hold_"], "old": "false", "new": "true", "why": "selftest"}]}, 0, rel=hh)
+        case("A3 an allowed_diff naming a list of entries (control)", gs.replace("    bool gov_hold_ = false;", "    bool gov_hold_ = true;", 1),
+             {"allowed_diffs": [{"entry": ["member:gov_hold_"], "old": "false", "new": "true", "why": "selftest"}]}, 0, rel=gh)
         # a new data member only in the new tree (it was never looked at)
-        nm_ = hs.replace("    bool gov_hold_ = false;", "    bool gov_hold_ = false;\n    int extra_s_ = 0;", 1)
-        case("N6 a new member only in the new tree", nm_, {}, 1, rel=hh, expect=r"^  NEW member:extra_s_: only in the new tree")
+        nm_ = gs.replace("    bool gov_hold_ = false;", "    bool gov_hold_ = false;\n    int extra_s_ = 0;", 1)
+        case("N6 a new member only in the new tree", nm_, {}, 1, rel=gh, expect=r"^  NEW member:extra_s_: only in the new tree")
         case("N7 the new member declared in rules.added (control)", nm_,
-             {"added": {"member:extra_s_": {"equals": "int extra_s_ = 0;", "why": "selftest"}}}, 0, rel=hh)
+             {"added": {"member:extra_s_": {"equals": "int extra_s_ = 0;", "why": "selftest"}}}, 0, rel=gh)
     else:
         cases.append(("A/N member anchors", False))
     dm = re.search(re.escape(DC) + r"\n((?:    [^\n]*\n)+)\}\n", src)
@@ -485,9 +495,14 @@ def selftest(work):
              expect=r"^  ADDED dropCache2: the body is not the declared text")
         case("N4 rules.added planned for a name not in the cut's new_funcs", cp,
              {"added": {"dropCache2": {"planned": True, "why": "selftest"}}}, 1, expect=r"^  ADDED dropCache2: planned, but the cut")
-        ga = src.replace(whole, whole + "\nbool Engine::govActive() const {\n    return gov_hold_;\n}\n", 1)
-        case("N5 rules.added planned for govActive (in the cut's new_funcs) (control)", ga,
-             {"added": {"govActive": {"planned": True, "why": "selftest"}}}, 0, expect=r", 1 added entries as declared\)")
+        # arch025-engine S8: govActive is real now; the control takes a planned new_funcs name no file of the tree defines yet
+        alltxt = "".join(open(os.path.join(dp, f), encoding="utf-8", errors="replace").read()
+                         for dp, _, fs in os.walk(os.path.join(REPO, "src")) for f in fs if f.endswith((".h", ".cpp")))
+        pl = next(k for k in sorted(json.load(open(cut, encoding="utf-8")).get("new_funcs", {}))
+                  if not k.startswith("_") and "." not in k and not re.search(r"\b" + re.escape(k) + r"\b", alltxt))
+        ga = src.replace(whole, whole + f"\nbool Engine::{pl}() const {{\n    return false;\n}}\n", 1)
+        case(f"N5 rules.added planned for {pl} (in the cut's new_funcs) (control)", ga,
+             {"added": {pl: {"planned": True, "why": "selftest"}}}, 0, expect=r", 1 added entries as declared\)")
         # renames are one to one: two new entries onto one old entry was a silent dict overwrite (with the name rule the
         # copy passed as "identical")
         case("R1 renames a copy onto the old entry it was copied from", cp,

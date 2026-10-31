@@ -31,7 +31,8 @@
 #     e., holder_.x, Engine::x); a function is called when its name is followed by `(` and the receiver is none,
 #     this, e, Engine, a tracked class, or a holder object (cut["holders"]); `C::f` / `&C::f` without a call also
 #     counts. Every `#define` in an engine file, every `#define` anywhere in src/ whose replacement names a tracked
-#     data member or class, and every `friend` in a tracked class body is a FINDING (exit 2).
+#     data member or class, and every `friend` in a tracked class body is a FINDING (exit 2) - except (arch025-engine
+#     S8) `friend class X;` naming a tracked class of the same module (GovState -> GovernorGlue; friends.txt).
 #  R3 support: writes are recorded per entry for every data member (graph3 checks them against the cut's writer lists).
 # Outputs: members.tsv, funcs.tsv (+ column 'def' = the qualified definition), files.txt, findings.txt, census3.json.
 # Exit: 0 clean, 2 findings (the census itself is complete; graph3 still runs), 1 crash.
@@ -52,6 +53,7 @@ LISTED = set(f for m, v in cut["modules"].items() for f in v.get("files", []))
 KW = {"if", "for", "while", "switch", "return", "sizeof", "catch", "static_assert", "decltype", "alignof", "noexcept",
       "defined", "new", "delete", "throw", "operator", "assert"}
 findings = []
+friends = []   # arch025-engine S8: the allowed same-module friends (friends.txt)
 
 
 def strip(s):
@@ -207,6 +209,14 @@ def parse_class(cname, rel, hs, a):
                 while s.startswith(acc):
                     access = acc[:-1]; s = s[len(acc):].strip()
             if s.startswith("friend"):
+                # arch025-engine S8: `friend class X;` where X is a tracked class of the SAME module (GovState's own logic
+                # class GovernorGlue, both server.governor: the state stays private to the module, DESIGN v3 1.5 A1) is
+                # allowed and listed in friends.txt; every other friend (another module's class, Engine, a function) is
+                # still a finding
+                mf = re.fullmatch(r"friend (?:class|struct) (\w+)", s)
+                if mf and cname in CLASSES and CLASSES.get(mf.group(1)) == CLASSES[cname]:
+                    friends.append(f"{cname} -> {mf.group(1)} ({CLASSES[cname]}, {rel}:{ln})")
+                    continue
                 findings.append(f"friend in tracked class {cname} ({rel}:{ln}): {s[:80]}")
                 continue
             # rt3 (rt2 review act-on 1): every declaration statement that is not a data member is a class_decls row
@@ -1093,6 +1103,7 @@ missing = sorted(n for n in declared if n not in have and n not in ("Engine", "o
 for n in missing:
     findings.append(f"declared in a tracked class, no body found: {n}")
 open(os.path.join(OUT, "findings.txt"), "w", encoding="utf-8").write("\n".join(findings) + ("\n" if findings else ""))
+open(os.path.join(OUT, "friends.txt"), "w", encoding="utf-8").write("\n".join(friends) + ("\n" if friends else ""))
 open(os.path.join(OUT, "writes.tsv"), "w", encoding="utf-8").write("entry\tmember\twhy\tcontext\n" + "\n".join(wlog) + "\n")
 open(os.path.join(OUT, "unresolved.txt"), "w", encoding="utf-8").write("\n".join(sorted(set(unresolved))) + "\n")
 print(f"unresolved calls (unresolved.txt; each must be in the cut's unresolved_ok): {len(set(unresolved))}")

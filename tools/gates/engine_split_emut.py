@@ -109,6 +109,10 @@ WIDER = [
     ("std::function call (cut callable_reads)", r"^std::function member called"),
     ("rvalue / move", r"\(rvalue\)|^rvalue result|^cast to an rvalue reference"),
     ("accessor caller (returned handle followed)", r"^through ~?\w+\(\)"),
+    # arch025-engine S8: engine_split_ast.py's CXXCtorInitializer rule (a reference member bound to the member in a
+    # constructor's member-initializer list, GovernorGlue's `gov_(g.gov_)`): ExprMutationAnalyzer does not follow a
+    # mem-initializer, the Python rule keeps it a write (what is written later through the reference is attributed by name)
+    ("reference member bound in a constructor initializer", r"^bound to a non-const reference member$"),
 ]
 
 
@@ -235,6 +239,11 @@ def selftest():
     case("U7", "(b) loaded pointer (m_.stream() passed on): known", "m_" in o and not f)
     pw = {"on_gov_": [("std::function member called (not in the cut's callable_reads)", 0, "server/engine.cpp")]}
     case("U8", "(b) std::function call: known", not judge("runLoop", pw, {}, {}, tof)[2])
+    pw = {"gov_": [("bound to a non-const reference member", 0, "server/engine_gov.h")]}
+    o, r, f, u = judge("GovernorGlue", pw, {}, {}, tof)
+    case("U8r", "(b) S8: a reference member bound in a constructor initializer: a write, class known", "gov_" in o and not f)
+    pw = {"gov_": [("bound to a non-const reference member (via x)", 0, "server/engine_gov.h")]}
+    case("U8s", "(b) S8: the rule matches that exact reason only", len(judge("GovernorGlue", pw, {}, {}, tof)[2]) == 1)
     pw = {"x_": [("assignment", i_x, "server/engine.cpp")]}
     o, r, f, u = judge("runLoop", pw, {}, {}, tof)
     case("U9", "(b) Python 'assignment' to x_ itself that clang calls a read: still a write AND a finding", "x_" in o and len(f) == 1)

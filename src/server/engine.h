@@ -65,6 +65,7 @@
 #include "server/engine_drafter.h"   // DrafterCtx (arch025-engine S4, module server.drafter_ctx)
 #include "server/engine_output.h"    // emit, flushOut, writeError (arch025-engine S5, module server.slot_output)
 #include "server/engine_pages.h"     // SlotPagesCounters, SlotPages (arch025-engine S6 / S7, module server.slot_cache)
+#include "server/engine_gov.h"       // GovState, GovernorGlue (arch025-engine S8, module server.governor)
 
 namespace whirl::server {
 
@@ -131,7 +132,7 @@ public:
     void setCtx(std::uint32_t c) {
         ctx_ = c;
         opt_.ctx = c;
-        ctx_pub_.store(c, std::memory_order_relaxed);
+        gv_.govPublishCtx(c);
     }
     void setNumerics(std::string j) { opt_.numerics_json = std::move(j); }
     void setStartup(std::string j, std::string ctx_note) {
@@ -157,7 +158,7 @@ public:
     void setGovernor(const memgov::Config& c, std::function<std::uint64_t(std::uint64_t)> margin, std::uint64_t ram_tier_mb,
                      std::uint64_t vram_total = 0);
     std::string governorJson() override;
-    std::uint32_t ctxPublished() const override { return ctx_pub_.load(std::memory_order_relaxed); }
+    std::uint32_t ctxPublished() const override { return gv_.govCtxPublished(); }
     const Tokenizer& tokenizer() const { return tok_; }
     ServerModel& model() { return m_; }
 
@@ -226,17 +227,7 @@ private:
     // idle: one sample a minute so /health and the spill-over line stay current; returns the next due time
     std::optional<TimePoint> vramIdleTick();
     void abortQueued(whirl::UniqueLock& lk) WH_REQUIRES(q_mutex_);
-    // v0.2.2.2 memory governor
-    void govTick(const wddmwatch::Sample& s);   // after each sample: decide (and log the decisions)
-    void govApply();                            // at a safe point of runLoop (no forward in flight): act
-    bool govAllIdle() const;
-    std::uint64_t govFreeable() const;
-    void govFreeCache(bool park);
-    void govRestoreCache();
-    bool govResize(std::uint32_t tokens, bool shrink);
-    void govDrain();
-    void govPublish();
-    std::uint32_t ctxForNew() const { return std::min(ctx_, ctx_new_); }
+    // v0.2.2.2 memory governor: gst_ / gv_ (arch025-engine S8, module server.governor)
 
     ServerModel& m_;
     device::Backend& ops_;
@@ -281,24 +272,10 @@ private:
     bool vram_spill_ WH_GUARDED_BY(vram_mu_) = false;
     std::vector<std::uint32_t> crlf_norm_;
     TimePoint vram_last_t_{};  // last probe sample
-    // v0.2.2.2 memory governor (main thread; gov_json_ under vram_mu_)
-    std::optional<memgov::Governor> gov_;
-    std::function<std::uint64_t(std::uint64_t)> gov_margin_;
-    memgov::Plan gov_plan_;
-    bool gov_pending_ = false;
-    bool gov_hold_ = false;       // new requests queue (a smaller pool waits for the running ones)
-    bool spe_parked_ = false;     // shared prefix checkpoint buffers freed
-    std::uint64_t gov_parked_ = 0;  // checkpoint VRAM freed (to restore)
-    std::uint64_t gov_ram_mb_ = 0;
-    std::uint64_t gov_vram_total_ = 0;
-    bool gov_grow_denied_logged_ = false;
-    std::uint64_t gov_restored_ = 0;  // checkpoint bytes the last govRestoreCache allocated
-    std::uint64_t gov_resize_before_ = 0;  // local usage read right before the last re-allocation
-    std::int64_t gov_resize_delta_ = 0;    // bytes it added (> 0) or freed (< 0)
-    std::uint32_t ctx_new_ = 0xffffffffu;  // context per request for new requests (governor); running requests keep ctx_
-    std::string gov_warn_;        // the spill warning, logged after the governor's actions
-    std::string gov_last_;
-    std::string gov_json_ WH_GUARDED_BY(vram_mu_);
+    // v0.2.2.2 memory governor (arch025-engine S8, module server.governor): the former members gov_ .. gov_json_, here
+    // (where gov_ was) and in that order, plus gov_mu_ (F14: gov_json_ under its own lock, no longer vram_mu_); private,
+    // reached only through gv_ (DESIGN v3 2.5)
+    GovState gst_;
     std::atomic<std::uint32_t> ctx_pub_{0};
     // host tiers (the tier itself: tb_.tier())
     std::vector<KvArr> kv_arrays_;
@@ -326,6 +303,10 @@ private:
     // ck_ .. tb_, slot_cache's placed state kv_arrays_ / conv_bytes_ / ssm_bytes_ / cnt_ (here, where they were) and
     // dc_; after dc_, the last member, destroyed first, trivial destructor (DESIGN v3 2.5)
     SlotPages sc_{ck_, m_, ops_, opt_, pool_, ps_, slots_, tb_, kv_arrays_, conv_bytes_, ssm_bytes_, cnt_, dc_};
+    // the memory governor's logic (arch025-engine S8, module server.governor): references only - core.shared ck_ .. vram_probe_,
+    // the governor's placed state vram_others_ / ctx_pub_ (here, where they were), sc_ and gst_'s members; after sc_, the
+    // last member, destroyed first, trivial destructor (DESIGN v3 2.5)
+    GovernorGlue gv_{ck_, ctx_, m_, ops_, opt_, owner_, pool_, ps_, slots_, tb_, vram_probe_, vram_others_, ctx_pub_, sc_, gst_};
 };
 
 }  // namespace whirl::server

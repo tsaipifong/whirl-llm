@@ -134,6 +134,16 @@ void Engine::initPool() {
     sc_.initPool();
 }
 
+// the memory governor (arch025-engine S8): GovernorGlue gv_ (module server.governor)
+void Engine::setGovernor(const memgov::Config& c, std::function<std::uint64_t(std::uint64_t)> margin, std::uint64_t ram_tier_mb,
+                         std::uint64_t vram_total) {
+    gv_.setGovernor(c, std::move(margin), ram_tier_mb, vram_total);
+}
+
+std::string Engine::governorJson() {
+    return gv_.governorJson();
+}
+
 // the vision settings of the prefix store + the image embeddings (here, not in engine_vision.cpp: that file must not
 // include engine.h, or server.image_embeddings and server.engine include each other)
 void Engine::attachVision(const VisionConfig& vc) {
@@ -227,7 +237,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.job = &job;
     sl.last_used = ps_.cache().touch();
     // (v0.2.2.2: ctxForNew = the context per request, lowered by the memory governor for new requests only)
-    const std::uint32_t ctx_new = ctxForNew();
+    const std::uint32_t ctx_new = gv_.ctxForNew();
     if (N + nd_max + 2 >= ctx_new || static_cast<std::uint64_t>(N) + nd_max + 2 >= static_cast<std::uint64_t>(pool_.pages()) * kv_page) {
         if (ctx_new < ctx_ && N + nd_max + 2 < ctx_)
             logW("req {} | prompt of {} tokens does not fit the context per request of {} tokens (lowered from {} by the memory "
@@ -614,7 +624,7 @@ void Engine::runLoop() {
     for (;;) {
         const TimePoint tl0 = Clock::now();
         // v0.2.2.2 memory governor: its pending actions (safe here: no forward in flight)
-        govApply();
+        gv_.govApply();
         // ---- admit
         std::uint32_t n_busy = 0;
         for (const Slot& sl : slots_)
@@ -736,7 +746,7 @@ bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
         if (vram_probe_) {
             WH_UNLOCK_HELD(lk, q_mutex_);
             vram_due = vramIdleTick();
-            govApply();
+            gv_.govApply();
             WH_RELOCK_HELD(lk, q_mutex_);
             if (!queue_.empty() || stop_) continue;
         }
@@ -792,10 +802,10 @@ bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
     bst_.t0 = Clock::now();
     // v0.2.2.2: the governor sees the budget before the first request after an idle period (one probe sample,
     // ~0.3 ms) when the last sample is older than 5 s, so a pool that must shrink does so before the request runs
-    if (gov_ && vram_probe_ && msSince(vram_last_t_) > 5000.0) {
+    if (gv_.govActive() && vram_probe_ && msSince(vram_last_t_) > 5000.0) {
         WH_UNLOCK_HELD(lk, q_mutex_);
         (void)vramNote();
-        govApply();
+        gv_.govApply();
         WH_RELOCK_HELD(lk, q_mutex_);
     }
     return false;
@@ -809,10 +819,10 @@ std::vector<Job*> Engine::admitQueued(std::uint32_t n_busy) {
     // v0.2.2.2 memory governor: parked slots take no request; while a smaller pool waits for the running requests,
     // none is admitted (they queue)
     std::size_t admit_cap = slots_.size();
-    if (gov_) {
+    if (gv_.govActive()) {
         std::size_t n_parked = 0;
         for (const Slot& sl : slots_) n_parked += sl.parked ? 1 : 0;
-        admit_cap = gov_hold_ && n_busy > 0 ? n_busy : slots_.size() - n_parked;
+        admit_cap = gv_.govHolding() && n_busy > 0 ? n_busy : slots_.size() - n_parked;
     }
     while (qi < queue_.size() && n_busy + admit.size() < admit_cap) {
         // item S: a new session whose system message another request is

@@ -134,6 +134,14 @@ public:
     // as before)
     std::uint32_t pool_pages = 0, seq_pages = 0;
     std::vector<server::KvArr> kv_arrs;
+    // KV pool re-allocation (arch025-engine S8, server.governor test: govResize): off by default = the interface default
+    // (false, nothing changes); on: the pool becomes tokens / kv_page pages (the arrays stay, sized by the test for the most)
+    bool resize_ok = false;
+    bool resizePool(std::uint32_t tokens) override {
+        if (!resize_ok) return false;
+        pool_pages = tokens / qwen35::kv_page;
+        return true;
+    }
 
 private:
     template <class T>
