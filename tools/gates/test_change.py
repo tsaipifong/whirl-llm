@@ -371,33 +371,75 @@ TIMING_DEFAULTS = {
 }
 
 
+# arch025-procopt3 (PLAN 9.32): the steps a summary ran inside a 9.24 parallel section. release_gate.ps1 writes no per-row marker
+# (rows stay identical to a serial run), only the header note "parallel: N group(s), M CPU steps, -Jobs K"; the sections are the
+# runs of >= 2 consecutive par steps in row order (= -List order), par = release_gate.ps1 $parRx (keep the two in step).
+PAR_RX = re.compile(r"^cpu_(sampling_iso|iso_(?!includes$)\w+)$")
+PAR_NOTE = re.compile(r"parallel: (\d+) group\(s\), (\d+) CPU steps, -Jobs (\d+)")
+
+
+def parallel_steps(path):
+    """({steps run in a parallel section}, jobs) of a release_gate summary; (set(), 0) for a serial run or an old summary"""
+    try:
+        lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return set(), 0
+    m = PAR_NOTE.search(lines[0]) if lines else None
+    if not m:
+        return set(), 0
+    out, cur = set(), []
+    for st in [r.group(2) for r in map(ROW.match, lines[1:]) if r] + [None]:
+        if st and PAR_RX.match(st):
+            cur.append(st)
+            continue
+        if len(cur) >= 2:
+            out.update(cur)
+        cur = []
+    if len(out) != int(m.group(2)):
+        print(f"refresh_times: {path}: header says {m.group(2)} parallel CPU steps, rows give {len(out)} (counted as parallel anyway)")
+    return out, int(m.group(3))
+
+
 def refresh_times(roots, out_path, keep=5):
-    """median of the newest `keep` PASS durations per (device, step) over every release-gate summary under roots"""
+    """median of the newest `keep` PASS durations per (device, step) over every release-gate summary under roots; seconds from a
+    parallel section (9.32) go to median_par_s / n_par / jobs, never into median_s (a step with no serial sample falls back to its
+    parallel median, n = 0)"""
     files = []
     for r in roots:
         files += glob.glob(os.path.join(r, "**", "*_summary.txt"), recursive=True)
-    seen = {}
+    seen, par = {}, {}
     for f in sorted(set(files), key=lambda p: os.path.getmtime(p), reverse=True):
         s = parse_summary(f)
         if not s:
             continue
         _, dev, rows = s
+        pset, jobs = parallel_steps(f)
         for v, st, sec in rows:
             if v not in ("PASS", "FLAKY"):  # FLAKY: the passing retry = one clean run of the step (9.28)
                 continue
-            seen.setdefault((dev, st), []).append((sec, f))
+            if st in pset:
+                par.setdefault((dev, st), []).append((sec, f, jobs))
+            else:
+                seen.setdefault((dev, st), []).append((sec, f))
     rows = []
-    for (dev, st), xs in sorted(seen.items()):
-        xs = xs[:keep]
-        rows.append([dev, st, int(statistics.median([x[0] for x in xs])), len(xs), xs[0][1]])
+    for key in sorted(set(seen) | set(par)):
+        dev, st = key
+        xs, ps = seen.get(key, [])[:keep], par.get(key, [])[:keep]
+        pmed = int(statistics.median([x[0] for x in ps])) if ps else ""
+        pjobs = ps[0][2] if ps else ""
+        if xs:
+            rows.append([dev, st, int(statistics.median([x[0] for x in xs])), len(xs), xs[0][1], pmed, len(ps), pjobs])
+        else:
+            rows.append([dev, st, pmed, 0, ps[0][1] + " (parallel section only)", pmed, len(ps), pjobs])
+    have = set(seen) | set(par)
     for dev in DEVICES:
         for st, (sec, src) in TIMING_DEFAULTS.items():
-            if (dev, st) not in seen:
-                rows.append([dev, st, sec, 0, src])
+            if (dev, st) not in have:
+                rows.append([dev, st, sec, 0, src, "", 0, ""])
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh, delimiter="\t", lineterminator="\n")
-        w.writerow(["device", "step", "median_s", "n", "newest_source"])
+        w.writerow(["device", "step", "median_s", "n", "newest_source", "median_par_s", "n_par", "jobs"])
         w.writerows(rows)
     return len(rows), len(files)
 
