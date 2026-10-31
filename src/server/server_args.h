@@ -113,6 +113,12 @@ std::optional<std::string> kvSsdDir(std::uint64_t ssd_gb, std::string_view mode,
     }
     return ssd_dir;
 }
+// arch025-lpath (3): the SSD directory the tier may use, given the identity of this program's file (tier::exeIdentity):
+// an identity of 0 (the size / date could not be read) is the same value for every such build, so an SSD entry of another
+// build would look like this one's: no directory then, and *warn is the log line (WARN) the server prints. exe_path is
+// platform::proc::exePath() in UTF-8. With no directory, or an identity, nothing changes and *warn stays empty.
+std::optional<std::string> ssdDirForExeId(const std::optional<std::string>& ssd_dir, std::uint64_t exe_id, std::string_view exe_path,
+                                          std::string* warn);
 // Whether the host tiers start: on when they were set up (tier_made) and the backend's KV rows per token (page_row) are
 // the bytes per token the tier layout assumes; layout_unknown (a warning, tierLayoutWarn) when a RAM tier was asked for
 // and they differ; else off.

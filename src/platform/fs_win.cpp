@@ -229,6 +229,30 @@ std::wstring longPathForm(const std::wstring& path) {
     return path;
 }
 
+std::wstring shortPathForm(const std::wstring& path) {
+    constexpr std::size_t kLegacyMax = 248;  // as longPathForm
+    std::wstring plain;
+    const auto lower = [](wchar_t c) { return static_cast<wchar_t>(c | 0x20); };
+    if (path.size() >= 8 && path.compare(0, 4, L"\\\\?\\") == 0 && lower(path[4]) == L'u' && lower(path[5]) == L'n' &&
+        lower(path[6]) == L'c' && path[7] == L'\\')
+        plain = L"\\\\" + path.substr(8);  // \\?\UNC\server\share -> \\server\share
+    else if (path.size() >= 7 && path.compare(0, 4, L"\\\\?\\") == 0 && lower(path[4]) >= L'a' && lower(path[4]) <= L'z' &&
+             path[5] == L':' && path[6] == L'\\')
+        plain = path.substr(4);  // \\?\C:\dir -> C:\dir
+    else
+        return path;  // \\?\Volume{..}, \\.\device, a plain path: not ours to change
+    if (plain.size() >= kLegacyMax || plain.find(L'/') != std::wstring::npos) return path;  // would not open / not normalised
+    return plain;
+}
+
+std::wstring longPathFormDir(const std::wstring& dir, std::size_t reserve) {
+    if (dir.empty()) return dir;
+    const std::wstring probe = dir + L"\\" + std::wstring(reserve, L'x');
+    const std::wstring lp = longPathForm(probe);
+    if (lp == probe || lp.size() < reserve + 2) return dir;
+    return lp.substr(0, lp.size() - reserve - 1);
+}
+
 bool allocatedSize(const wchar_t* path, std::uint64_t* bytes) {
     DWORD hi = 0;
     const DWORD lo = GetCompressedFileSizeW(path, &hi);

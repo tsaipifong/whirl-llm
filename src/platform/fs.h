@@ -125,5 +125,13 @@ bool utf8ToWideStrict(std::string_view s, std::wstring* out);
 // \\?\UNC\server\share\...). A process that is not long-path aware (no manifest, or LongPathsEnabled = 0, the Windows
 // default) cannot open a path past MAX_PATH in the normal form.
 std::wstring longPathForm(const std::wstring& path);
+// arch025-lpath (1): the inverse, for display and for joining: a \\?\X:\... path (or \\?\UNC\server\share\...) whose
+// plain form is shorter than 248 characters comes back as the plain form (what the same program started without the
+// prefix reports); a longer one, and every other path, comes back unchanged. No Win32 call.
+std::wstring shortPathForm(const std::wstring& path);
+// arch025-lpath (2): the form of a DIRECTORY under which files with names of up to `reserve` characters are made: the
+// long-path form when dir + a backslash + a name of `reserve` characters needs it (longPathForm of that path, the name
+// taken off again), else dir unchanged. A directory of 230 characters can be opened itself, its files cannot.
+std::wstring longPathFormDir(const std::wstring& dir, std::size_t reserve);
 
 }  // namespace whirl::platform::fs

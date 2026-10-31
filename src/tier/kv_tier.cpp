@@ -323,7 +323,9 @@ void Tier::start(const Config& cfg_in, const Layout& lay_in, std::uint64_t finge
     lay = lay_in;
     fingerprint_ = fingerprint;
     if (cfg.ssd_dir) {
-        std::wstring dw = utf8ToWide(*cfg.ssd_dir);
+        // arch025-lpath (2): the long-path form of the directory when its files (<16 hex>-<16 hex>.wkv, whirl.lock) need it;
+        // one form for the lock, the listing and every entry file. A directory of up to 198 characters is unchanged.
+        std::wstring dw = pfs::longPathFormDir(utf8ToWide(*cfg.ssd_dir), 48);
         std::error_code ec;
         std::filesystem::create_directories(std::filesystem::path(dw), ec);
         // one server per directory: a second one (same fingerprint) would take
@@ -1132,9 +1134,9 @@ void Tier::endRestore(Restore* r) {
 // ---- SSD ----------------------------------------------------------------------------
 
 std::wstring Tier::filePath(std::uint64_t id) const {
-    const std::string s = *cfg.ssd_dir + fmt("\\%016llx-%016llx.wkv", static_cast<unsigned long long>(fingerprint_),
-                                             static_cast<unsigned long long>(id));
-    return utf8ToWide(s);
+    const std::string s = fmt("\\%016llx-%016llx.wkv", static_cast<unsigned long long>(fingerprint_), static_cast<unsigned long long>(id));
+    // arch025-lpath (2): under the directory in the form Tier::start chose (utf8ToWide(dir) + name == utf8ToWide(dir + name))
+    return (ssd_dir_w_ ? *ssd_dir_w_ : utf8ToWide(*cfg.ssd_dir)) + utf8ToWide(s);
 }
 
 // ---- block dedup bookkeeping ----------------------------------------------------------

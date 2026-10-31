@@ -968,6 +968,54 @@ static void testLongLogLine(NullBackend& ops, const fs::path& base) {
     fs::remove_all(dir, ec);
 }
 
+// arch025-lpath (2): --kv-ssd-dir longer than MAX_PATH. The directory is given in the plain form (as a user types it) and
+// this test exe is not long-path aware (no manifest), as a product exe is when LongPathsEnabled = 0: the tier's lock file,
+// listing and entry files must reach the directory anyway (platform::fs::longPathFormDir), not switch the SSD tier off
+// ("cannot lock the SSD directory") nor lose the entries.
+static void testSsdLongDir(NullBackend& ops, const fs::path& base) {
+    std::error_code ec;
+    const std::wstring base_w = fs::absolute(base).lexically_normal().make_preferred().wstring();
+    const std::wstring top = L"\\\\?\\" + base_w + L"\\" + std::wstring(100, L's');
+    std::wstring xdir = L"\\\\?\\" + base_w;
+    while (xdir.size() - 4 < 300) xdir += L"\\" + std::wstring(100, L's');
+    fs::remove_all(top, ec);
+    fs::create_directories(xdir, ec);
+    CHECK(!ec);
+    const fs::path plain = xdir.substr(4);
+    CHECK(plain.wstring().size() > 260);
+    SsdEnv env{plain};
+    const std::uint64_t fp = hashStr(0xcbf29ce484222325ull, "model-long-dir");
+    const std::uint32_t nck = 2, pages = 7;
+    DevSlot src(ops, nck, pages);
+    src.fill(7);
+    const auto toks = makeTokens(1700, 21);
+    std::vector<std::string> logs;
+    {
+        auto t = Tier::create(ops, 32ull << 20, 5, 0);
+        t->log_fn = [&](std::string_view s) { logs.emplace_back(s); };
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        if (!t->hasSsd())
+            for (const std::string& l : logs) std::printf("  D7-follow-up (2): %s\n", l.c_str());
+        CHECK(t->hasSsd());
+        Entry* e = spill(*t, src, toks);
+        CHECK(e != nullptr);
+        if (e) {
+            CHECK(tickIdle(*t));
+            CHECK(e->ssd.has_value());
+            CHECK(fs::exists(entryFile(fs::path(xdir), fp, e->id)));  // the entry file is in the long directory
+            CHECK(t->ssdEntries() == 1);
+        }
+    }
+    {
+        // a second start finds the entry again (listing and open by the same path form)
+        auto t = Tier::create(ops, 32ull << 20, 5, 0);
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        CHECK(t->hasSsd());
+        CHECK(t->ssdEntries() == 1);
+    }
+    fs::remove_all(top, ec);
+}
+
 static void testRamTierSize() {
     constexpr std::uint64_t G = 1ull << 30;
     const auto sz = [](std::uint64_t total, std::uint64_t avail, std::uint64_t floor_mb = 8192) {
@@ -4925,6 +4973,11 @@ int main(int argc, char** argv) {
         std::printf("-- %s\n", "testLongLogLine");
         const TestClean tc_(ops, "testLongLogLine");
         testLongLogLine(ops, dir);
+    }
+    if (want("testSsdLongDir")) {
+        std::printf("-- %s\n", "testSsdLongDir");
+        const TestClean tc_(ops, "testSsdLongDir");
+        testSsdLongDir(ops, dir / L"lpath_ssd");
     }
     if (want("testEvictPolicy")) {
         std::printf("-- %s\n", "testEvictPolicy");

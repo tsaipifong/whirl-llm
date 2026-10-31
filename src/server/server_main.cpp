@@ -1533,11 +1533,10 @@ void ServerRun::startTier() {
             // arch025-d7 (D7.1, X4 K7): exe identity 0 is the same value for every build whose identity cannot be read,
             // so an SSD entry of another build (other numerics) would look like this build's: no SSD tier then (no
             // read, write or clean-up of the directory); the RAM tier never outlives the process and stays on.
-            if (tc.ssd_dir && tier::exeIdentity() == 0) {
-                logW("kv tier: cannot read the size / date of this program's file ({}); SSD tier off (an SSD cache entry "
-                     "of another WHIRL build could not be told apart)",
-                     narrow(platform::proc::exePath()));
-                tc.ssd_dir.reset();
+            {  // (server::ssdDirForExeId, module server.args, arch025-lpath: the branch is tested in server-args)
+                std::string exe_warn;
+                tc.ssd_dir = ssdDirForExeId(tc.ssd_dir, tier::exeIdentity(), narrow(platform::proc::exePath()), &exe_warn);
+                if (!exe_warn.empty()) logW("{}", exe_warn);
             }
             // the wake hook must be in place before the IO thread starts
             engine->attachTier(tier_pre.get());

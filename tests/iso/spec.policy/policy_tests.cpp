@@ -36,6 +36,18 @@ void testDraftVocab() {
 void testExeDirectory() {
     const std::string d = exeDirectory();
     ISO_CHECK(!d.empty());
+    // arch025-lpath (1): GetModuleFileNameW returns the path as the program was started; started through a \\?\ path
+    // the folder must read the same as when it is started through the plain path (it shows in the draft-vocabulary
+    // line and is joined with file names), unless the plain form would be a path a program cannot open (>= 248)
+    ISO_CHECK(exeDirectoryOf(L"C:\\whirl\\whirl-server.exe") == "C:\\whirl");
+    ISO_CHECK(exeDirectoryOf(L"\\\\?\\C:\\whirl\\whirl-server.exe") == "C:\\whirl");
+    ISO_CHECK(exeDirectoryOf(L"\\\\?\\UNC\\srv\\share\\w\\x.exe") == "\\\\srv\\share\\w");
+    ISO_CHECK(exeDirectoryOf(L"\\\\srv\\share\\w\\x.exe") == "\\\\srv\\share\\w");
+    ISO_CHECK(exeDirectoryOf(L"") == "");
+    const std::wstring seg(120, L'q');
+    const std::wstring longdir = L"C:\\" + seg + L"\\" + seg + L"\\" + seg;
+    const std::string q120(120, 'q');
+    ISO_CHECK(exeDirectoryOf(L"\\\\?\\" + longdir + L"\\x.exe") == "\\\\?\\C:\\" + q120 + "\\" + q120 + "\\" + q120);
 }
 
 void testMtpDefaults() {
