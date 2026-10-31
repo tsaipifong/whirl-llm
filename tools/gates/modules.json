@@ -1049,8 +1049,8 @@
   },
   "kernels.gdn": {
      "id": "N5/N14",
-     "desc": "kernel family gdn: Gated DeltaNet: decode fusions, per-token / chunked / WMMA / strix prefill, sequential scan (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
-     "paths": ["kernels/fused_decode.hip", "kernels/gdn_*.hip", "kernels/gfx1151/fused_decode.hip", "kernels/gfx1151/gdn*.hip", "kernels/shared/fused_decode_rmsnorm_q8.h", "kernels/shared/gdn_prefill_gdn_conv_seq.h", "kernels/shared/gdn_seq_gdn_conv_par.h"],
+     "desc": "kernel family gdn: Gated DeltaNet: decode fusions, GDN beta/alpha projection entries (gdn_ab.hip), per-token / chunked / WMMA / strix prefill, sequential scan (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "paths": ["kernels/fused_decode.hip", "kernels/gdn_*.hip", "kernels/gfx1151/fused_decode.hip", "kernels/gfx1151/gdn*.hip", "kernels/shared/fused_decode_rmsnorm_q8.h", "kernels/shared/gdn_ab_entries.h", "kernels/shared/gdn_prefill_gdn_conv_seq.h", "kernels/shared/gdn_seq_gdn_conv_par.h"],
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_swift_balance", "seq_swift_precise"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_swift_balance": 2, "seq_swift_precise": 2},
@@ -1067,8 +1067,8 @@
   },
   "kernels.attn": {
      "id": "N5/N14",
-     "desc": "kernel family attn: paged KV (kv_store), decode / split / prefill attention, attn_ws4 (gfx1151); argmax rides in misc_kv_argmax.hip (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
-     "paths": ["kernels/attn*.hip", "kernels/misc_kv_argmax.hip", "kernels/gfx1151/attn*.hip", "kernels/shared/attn_attn_combine.h", "kernels/shared/attn_attn_decode_entry.h", "kernels/shared/attn_attn_prep.h", "kernels/shared/attn_attn_wsplit1.h", "kernels/shared/attn_dq_nw.h", "kernels/shared/attn_kv_page.h", "kernels/shared/attn_prefill_kp_kv_dq_rows.h", "kernels/shared/attn_set_rpos.h", "kernels/shared/misc_kv_argmax_kv_store.h", "kernels/gfx1151/attn_ws4_index.h"],
+     "desc": "kernel family attn: paged KV (kv_store), decode / split / prefill attention, attn_ws4 (gfx1151); argmax rides in misc_kv_argmax.hip (both sets) (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "paths": ["kernels/attn*.hip", "kernels/misc_kv_argmax.hip", "kernels/gfx1151/misc_kv_argmax.hip", "kernels/gfx1151/attn*.hip", "kernels/shared/attn_attn_combine.h", "kernels/shared/attn_attn_decode_entry.h", "kernels/shared/attn_attn_prep.h", "kernels/shared/attn_attn_wsplit1.h", "kernels/shared/attn_dq_nw.h", "kernels/shared/attn_kv_page.h", "kernels/shared/attn_prefill_kp_kv_dq_rows.h", "kernels/shared/attn_set_rpos.h", "kernels/shared/misc_kv_argmax_kv_store.h", "kernels/gfx1151/attn_ws4_index.h"],
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise", "srv_mt_precise"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_moe_precise": 2, "srv_mt_precise": 2},
@@ -1077,7 +1077,7 @@
   "kernels.moe": {
      "id": "N5/N14",
      "desc": "kernel family moe: mixture of experts: route, gather, expert GEMV / GEMM, MXFP4 experts, precise f32 experts (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
-     "paths": ["kernels/moe*.hip", "kernels/gfx1151/moe.hip", "kernels/shared/moe_moe_bm.h", "kernels/shared/moe_moe_logits_f32.h", "kernels/shared/moe_moe_route.h"],
+     "paths": ["kernels/moe*.hip", "kernels/gfx1151/moe.hip", "kernels/shared/moe_moe_bm.h", "kernels/shared/moe_logits_f32.h", "kernels/shared/moe_moe_route.h"],
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_moe_precise", "st_moe_balance", "st_moe_fast"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2},

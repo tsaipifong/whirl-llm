@@ -1,4 +1,4 @@
-// WHIRL device code (gfx1151 / RDNA 3.5): Gated DeltaNet (per token, chunked prefill, sequential scan), kv_store, argmax.
+// WHIRL device code (gfx1151 / RDNA 3.5): Gated DeltaNet (per token, chunked prefill, sequential scan).
 // SPDX-License-Identifier: Apache-2.0
 // Ported from this project's research prototype (its gfx1151 kernel source). Not
 // self-contained: included in order by kernels/gfx1151/whirl_kernels_gfx1151.hip.
@@ -330,8 +330,3 @@ extern "C" __global__ void __launch_bounds__(256)
 // Causal conv over a token block, parallel over (channel, token): the first
 // d_conv-1 taps before the block come from the rolling state.
 #include "shared/gdn_seq_gdn_conv_par.h"  // also in the gfx1201 set (kernels/gdn_seq.hip)
-
-// Write n_tok new K/V rows into the (paged) cache: row t at logical position
-// pos[0] + t (single sequence) or pos[t] (batched rows, kvbase). One block
-// per row; row % 32 == 0 (whole waves per q8 scale group).
-#include "shared/misc_kv_argmax_kv_store.h"  // also in the gfx1201 set (kernels/misc_kv_argmax.hip)

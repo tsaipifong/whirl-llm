@@ -37,6 +37,7 @@
 #include "misc_probe_requant.hip"  // WMMA probes, Q6_K -> Q4_K requant
 #include "draft_d2.hip"            // 2-bit MTP draft head
 #include "sample_pick.hip"         // token tables, greedy / draft picks
+#include "gdn_ab.hip"              // GDN beta/alpha projection entries (gdn family; before moe.hip: code object unchanged)
 #include "moe.hip"                 // mixture of experts
 #include "sample_cand.hip"         // sampling candidates
 #include "gemm_fp8.hip"            // MXFP4 x fp8 GEMM

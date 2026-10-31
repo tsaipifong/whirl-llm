@@ -509,10 +509,6 @@
   ],
   [
    "kernels.gdn",
-   "kernels.attn"
-  ],
-  [
-   "kernels.gdn",
    "kernels.norm"
   ],
   [
