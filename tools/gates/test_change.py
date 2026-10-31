@@ -324,7 +324,9 @@ def gate_steps(device, repo=REPO):
     return rows
 
 
-ROW = re.compile(r"^(PASS|FAIL)\s+(\S+)\s+exit\s+-?\d+\s+(\d+) s\b")
+# arch025-procopt2 (PLAN 9.28): FLAKY rows (release_gate 9.21 retry) too; their seconds column is the passing retry's (the
+# first try's seconds follow "| first try:" and are not read: a failed try is a crash or a cap, not the step's length)
+ROW = re.compile(r"^(PASS|FAIL|FLAKY)\s+(\S+)\s+exit\s+-?\d+\s+(\d+) s\b")
 HDR = re.compile(r"^release gate (\S+) on (r9700|8060s) ")
 
 
@@ -341,6 +343,24 @@ def parse_summary(path):
         return None
     rows = [(m.group(1), m.group(2), int(m.group(3))) for m in map(ROW.match, lines[1:]) if m]
     return h.group(1), h.group(2), rows
+
+
+FIRST_TRY = re.compile(r"\bfirst try: exit\s+-?\d+\s+(\d+) s\b")
+
+
+def first_try_seconds(path):
+    """{step: seconds of its failed first try} of a release_gate summary (9.21 retry rows: FLAKY "| first try: ..." and FAIL
+    "| retry also failed (first try: ...)"). A run's machine time is the row's seconds plus these (9.28)."""
+    try:
+        lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return {}
+    out = {}
+    for l in lines[1:]:
+        m, f = ROW.match(l), FIRST_TRY.search(l)
+        if m and f:
+            out[m.group(2)] = int(f.group(1))
+    return out
 
 
 # TIMING_REFERENCE.md rows for steps that no stored summary has (incremental builds; cited there with their source)
@@ -363,7 +383,7 @@ def refresh_times(roots, out_path, keep=5):
             continue
         _, dev, rows = s
         for v, st, sec in rows:
-            if v != "PASS":
+            if v not in ("PASS", "FLAKY"):  # FLAKY: the passing retry = one clean run of the step (9.28)
                 continue
             seen.setdefault((dev, st), []).append((sec, f))
     rows = []
@@ -1116,10 +1136,12 @@ def run_plan(p, a):
         summ = os.path.join(work, dev, f"{tag}_summary.txt")
         s = parse_summary(summ)
         rows = s[2] if s else []
+        ft = first_try_seconds(summ) if s else {}  # 9.28: a retried step cost both tries
         runs.append({"device": dev, "tag": tag, "exit": rc, "wall_s": round(time.time() - t0), "summary": summ if s else None,
-                     "cpu_s": sum(x[2] for x in rows if x[1].startswith(("cpu_", "kl_"))),
-                     "gpu_s": sum(x[2] for x in rows if not x[1].startswith(("cpu_", "kl_"))),
-                     "failed": [x[1] for x in rows if x[0] == "FAIL"]})
+                     "cpu_s": sum(x[2] + ft.get(x[1], 0) for x in rows if x[1].startswith(("cpu_", "kl_"))),
+                     "gpu_s": sum(x[2] + ft.get(x[1], 0) for x in rows if not x[1].startswith(("cpu_", "kl_"))),
+                     "failed": [x[1] for x in rows if x[0] == "FAIL"],
+                     "flaky": [x[1] for x in rows if x[0] == "FLAKY"]})
         print(f"test_change: {dev}: exit {rc}, {len(rows)} row(s), failed {runs[-1]['failed']}", flush=True)
         if rc == 2:
             break
