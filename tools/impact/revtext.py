@@ -446,26 +446,30 @@ def selftest(work):
     # arch025-engine S8: the governor members moved into GovState (server/engine_gov.h); a member anchor is looked up in
     # the header that has it (exactly one of these)
     def mhdr(line):
-        for r in ("server/engine.h", "server/engine_gov.h"):
+        for r in ("server/engine.h", "server/engine_gov.h", "server/engine_vram.h"):   # S9: + VramState
             fp = os.path.join(REPO, "src", r)
             if os.path.exists(fp) and open(fp, encoding="utf-8").read().count(line) == 1: return r
         return None
     gh = mhdr("    bool gov_hold_ = false;") or hh
     gs = open(os.path.join(REPO, "src", gh), encoding="utf-8").read()
+    vh = mhdr("    double vram_idle_s_ = 60.0;") or hh   # S9: VramState (engine_vram.h)
+    vs = open(os.path.join(REPO, "src", vh), encoding="utf-8").read()
     for old, new, nm in (("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", "an in-class initializer changed (vram_idle_s_ 60 -> 30)"),
                          ("    bool gov_hold_ = false;", "    bool gov_hold_ = true;", "an in-class initializer changed (gov_hold_ false -> true)"),
                          ("    std::uint32_t ctx_new_ = 0xffffffffu;", "    std::uint16_t ctx_new_ = 0xffffffffu;", "a member type changed (ctx_new_ uint32 -> uint16)")):
         r_ = mhdr(old)
         if r_: case(nm, open(os.path.join(REPO, "src", r_), encoding="utf-8").read().replace(old, new, 1), {}, 1, rel=r_)
         else: cases.append((nm + ": anchor", False))
-    if hs.count("    double vram_idle_s_ = 60.0;") == 1:
-        case("the initializer change listed in allowed_diffs (control)", hs.replace("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", 1),
-             {"allowed_diffs": [{"entry": "member:vram_idle_s_", "old": "60.0", "new": "30.0", "why": "selftest"}]}, 0, rel=hh)
+    if vs.count("    double vram_idle_s_ = 60.0;") == 1:
+        case("the initializer change listed in allowed_diffs (control)", vs.replace("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", 1),
+             {"allowed_diffs": [{"entry": "member:vram_idle_s_", "old": "60.0", "new": "30.0", "why": "selftest"}]}, 0, rel=vh)
+    else:
+        cases.append(("the initializer change listed in allowed_diffs (control): anchor", False))
     # ---- revtextfix (S0 review C-6 = S0b review C-4) ----
-    if hs.count("    double vram_idle_s_ = 60.0;") == 1 and gs.count("    bool gov_hold_ = false;") == 1:
+    if vs.count("    double vram_idle_s_ = 60.0;") == 1 and gs.count("    bool gov_hold_ = false;") == 1:
         # allowed_diffs match whole tokens: `16` is not a token of `160.0` (the old joined-string replace made 160.0 -> 60.0)
-        case("A1 an allowed_diff that is not on a token boundary (16 -> 6 inside 160.0)", hs.replace("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 160.0;", 1),
-             {"allowed_diffs": [{"entry": "member:vram_idle_s_", "old": "6", "new": "16", "why": "selftest"}]}, 1, rel=hh,
+        case("A1 an allowed_diff that is not on a token boundary (16 -> 6 inside 160.0)", vs.replace("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 160.0;", 1),
+             {"allowed_diffs": [{"entry": "member:vram_idle_s_", "old": "6", "new": "16", "why": "selftest"}]}, 1, rel=vh,
              expect=r"^  DIFF member:vram_idle_s_ ")
         # entry "*" would apply `false -> true` once in every member entry (S0b review C-4): a rules error now
         case("A2 an allowed_diff with entry * is a rules error", gs.replace("    bool gov_hold_ = false;", "    bool gov_hold_ = true;", 1),

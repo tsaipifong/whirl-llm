@@ -1153,6 +1153,10 @@
   ],
   [
    "server.engine",
+   "server.vram_watch"
+  ],
+  [
+   "server.engine",
    "spec.engine"
   ],
   [
@@ -1517,11 +1521,27 @@
   ],
   [
    "server.vram_watch",
+   "common.tsa"
+  ],
+  [
+   "server.vram_watch",
    "file:src/server/log.h"
   ],
   [
    "server.vram_watch",
-   "server.engine"
+   "mem.wddm_watch"
+  ],
+  [
+   "server.vram_watch",
+   "protocol"
+  ],
+  [
+   "server.vram_watch",
+   "server.governor"
+  ],
+  [
+   "server.vram_watch",
+   "threads"
   ],
   [
    "spec.engine",

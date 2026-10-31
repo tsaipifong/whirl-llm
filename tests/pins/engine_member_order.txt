@@ -17,13 +17,15 @@
 # | gst_ (S8) | GovState (the former members gov_ .. gov_json_, verbatim, in order, + gov_mu_) | each member's own (optional<Governor>, std::function, Plan, strings; gov_mu_ trivial) | the group sits where gov_ was (S8); flattened as gst_.<member>, same order | nothing moves past another member: the 17 members keep their relative order and their place between crlf_norm_ / vram_last_t_ and ctx_pub_; gov_mu_ is new and last (row above) |
 # | gov_json_ (S8 F14) | std::string, WH_GUARDED_BY(gov_mu_) (was vram_mu_) | memory only | not moved (only its guard annotation changed) | ~GovState runs with no lock held; the annotation is compile-time only |
 # | gv_ (new in S8) | GovernorGlue (32 references: core.shared ck_ .. vram_probe_, vram_others_, ctx_pub_, SlotPages&, gst_'s 18 members) | trivial (references only; static_assert in tests/iso/server.governor) | added last, after sc_ (S8) | destroyed first; no destructor reads it, it owns nothing (gst_ / ctx_pub_ / vram_others_ stay where they were); every member before it keeps its order (offsets after the governor block +80: gov_mu_) |
+# | vst_ (S9) | VramState (the former members vram_watch_ .. vram_last_t_ without prefill_tok_cum_ / crlf_norm_, verbatim, in order) | each member's own (wddmwatch::Watch, Sample; vram_mu_ trivial; the rest trivial) | the group sits where vram_watch_ was (S9); flattened as vst_.<member>, same relative order | the 8 members keep their relative order and their place between vram_others_ and gst_; only prefill_tok_cum_ / crlf_norm_ (memory only, row above) now follow the group |
+# | vw_ (new in S9) | VramWatch (12 references: core.shared owner_ / vram_probe_, vram_others_, GovernorGlue&, vst_'s 8 members) | trivial (references only; static_assert in tests/iso/server.vram_watch) | added last, after gv_ (S9) | destroyed first; no destructor reads it, it owns nothing (vst_ / vram_others_ / gv_ stay where they were); gv_ (trivial) is now destroyed after it |
 # Stored callbacks that capture `this` (review3 C4): today they capture Engine; after the split they capture a
 # component (sc_ / dc_ / tg_), which is declared after vis_ and destroyed FIRST, while tb_ / the Tier outlive it.
 # | callback | stored in | captures (today -> after split) | lifetime rule |
 # | t->setWake([this]{..}) engine_tier.cpp:29 | Tier (outlives Engine) | Engine -> jq_ (JobQueue) | ~Engine must clear the wake (H1 / F13) before jq_ goes; C3 test |
 # | s.drop_cache / s.drafter_reset / s.share = [this, &sl] engine_tier.cpp:118-120 | TierBridge::RestoreSteps (stack of a restore) | Engine -> sc_ / dc_ | used only inside tb_.tryRestore called from the loop; no restore runs at ~Engine (stopIo before ~Engine) |
 # | tb_.flushOnStop([this]{ tierTick(); }) engine_tier.cpp:177 | call argument (not stored after return) | Engine -> tg_ | runs inside stop() before ~Engine; C3 test triggers flushOnStop before the reset |
-groups: BatchStats SampleBuffers ImageEmbeddings SpecState FloorState SlotPagesCounters GovState
+groups: BatchStats SampleBuffers ImageEmbeddings SpecState FloorState SlotPagesCounters GovState VramState
 m_
 ops_
 tok_
@@ -90,16 +92,16 @@ bst_.dfl_cold
 bst_.dfl_gap
 vram_probe_
 vram_others_
-vram_watch_
-vram_idle_next_
-vram_idle_s_
+vst_.vram_watch_
+vst_.vram_idle_next_
+vst_.vram_idle_s_
+vst_.vram_warn_
+vst_.vram_mu_
+vst_.vram_last_
+vst_.vram_spill_
+vst_.vram_last_t_
 prefill_tok_cum_
-vram_warn_
-vram_mu_
-vram_last_
-vram_spill_
 crlf_norm_
-vram_last_t_
 gst_.gov_
 gst_.gov_margin_
 gst_.gov_plan_
@@ -148,3 +150,4 @@ vis_.rel_pending_
 dc_
 sc_
 gv_
+vw_

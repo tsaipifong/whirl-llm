@@ -144,6 +144,12 @@ std::string Engine::governorJson() {
     return gv_.governorJson();
 }
 
+// the video memory watch (arch025-engine S9): VramWatch vw_ (module server.vram_watch)
+void Engine::setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn, std::optional<wddmwatch::Sample> base,
+                          wddmwatch::Config cfg, bool startup_warned, std::function<std::optional<wddmwatch::Others>()> others) {
+    vw_.setVramProbe(std::move(probe), warn, std::move(base), std::move(cfg), startup_warned, std::move(others));
+}
+
 // the vision settings of the prefix store + the image embeddings (here, not in engine_vision.cpp: that file must not
 // include engine.h, or server.image_embeddings and server.engine include each other)
 void Engine::attachVision(const VisionConfig& vc) {
@@ -178,12 +184,7 @@ Engine::Health Engine::health() {
         h.queued = queue_.size();
         h.slots = slots_.size();
     }
-    whirl::MutexLock lk(vram_mu_);
-    h.vram_ok = vram_last_.ok;
-    h.vram_spill = vram_spill_;
-    h.vram_local = vram_last_.local_usage;
-    h.vram_budget = vram_last_.local_budget;
-    h.vram_shared = vram_last_.nonlocal_usage;
+    vw_.vramHealth(h);
     return h;
 }
 
@@ -525,7 +526,7 @@ void Engine::finishJob(Slot& sl) {
          "tok",
          job.id, sl.id, fin.reason, sl.st.gone ? " (client disconnected)" : "", n_out, fin.reason_len, fin.content_len,
          fin.n_tools, sl.cache_tokens.size());
-    if (const std::string vram = vramNote(); !vram.empty()) logI("req {} | slot {} | {}", job.id, sl.id, vram);
+    if (const std::string vram = vw_.vramNote(); !vram.empty()) logI("req {} | slot {} | {}", job.id, sl.id, vram);
     releaseSlot(sl);
     // item G: copy the idle slot's new content to the host tier (async)
     try {
@@ -592,7 +593,7 @@ void Engine::logBatchStats(bool force) {
                                     ? std::format(", {:.2f} literal drafts/cycle (DFlash2 / n-gram)", static_cast<double>(bst_.lit_drafts) / cyc)
                                     : std::string();
         // WDDM-LOG: this process's video memory at the same cadence (issues #5 / #6)
-        const std::string vram = vramNote();
+        const std::string vram = vw_.vramNote();
         logI("batch | slots busy {}/{} (decode {}, prefill {}) | {} cycles, {:.2f} slots/cycle, {:.2f} rows/cycle, {:.2f} "
              "drafts/cycle{} | aggregate tg {:.1f} tok/s, prefill {:.0f} tok/s over {:.1f} s{}{}",
              n_dec + n_pf, slots_.size(), n_dec, n_pf, bst_.cycles, static_cast<double>(bst_.slots) / cyc,
@@ -745,7 +746,7 @@ bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
         std::optional<TimePoint> vram_due;
         if (vram_probe_) {
             WH_UNLOCK_HELD(lk, q_mutex_);
-            vram_due = vramIdleTick();
+            vram_due = vw_.vramIdleTick();
             gv_.govApply();
             WH_RELOCK_HELD(lk, q_mutex_);
             if (!queue_.empty() || stop_) continue;
@@ -802,9 +803,9 @@ bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
     bst_.t0 = Clock::now();
     // v0.2.2.2: the governor sees the budget before the first request after an idle period (one probe sample,
     // ~0.3 ms) when the last sample is older than 5 s, so a pool that must shrink does so before the request runs
-    if (gv_.govActive() && vram_probe_ && msSince(vram_last_t_) > 5000.0) {
+    if (gv_.govActive() && vram_probe_ && msSince(vw_.vramLastSample()) > 5000.0) {
         WH_UNLOCK_HELD(lk, q_mutex_);
-        (void)vramNote();
+        (void)vw_.vramNote();
         gv_.govApply();
         WH_RELOCK_HELD(lk, q_mutex_);
     }

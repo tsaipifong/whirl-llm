@@ -28,7 +28,9 @@ MUTATIONS = [
      "[&]() WH_REQUIRES(q_mutex_) { return wake_seq_ != wake_seq0; }",
      "[&] { return wake_seq_ != wake_seq0; }",
      r"reading variable 'wake_seq_' requires holding mutex 'q_mutex_'"),
-    ("engine-health-vram-unlocked", "src/server/engine.cpp",
+    # arch025-engine S9: health's vram_mu_ lock and reads are VramWatch::vramHealth (engine_vram.cpp, verbatim); vram_last_ /
+    # vram_spill_ are VramWatch references guarded by its vram_mu_ reference: the annotation must still bind there
+    ("engine-health-vram-unlocked", "src/server/engine_vram.cpp",
      "    whirl::MutexLock lk(vram_mu_);\n    h.vram_ok = vram_last_.ok;",
      "    h.vram_ok = vram_last_.ok;",
      r"reading variable 'vram_last_' requires holding mutex 'vram_mu_'"),
@@ -41,8 +43,8 @@ MUTATIONS = [
      "[&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });\n        } else {",
      r"reading variable 'queue_' requires holding mutex 'q_mutex_'"),
     ("engine-idlewait-relock-dropped", "src/server/engine.cpp",
-     "            vram_due = vramIdleTick();\n            gv_.govApply();\n            WH_RELOCK_HELD(lk, q_mutex_);\n",
-     "            vram_due = vramIdleTick();\n            gv_.govApply();\n",
+     "            vram_due = vw_.vramIdleTick();\n            gv_.govApply();\n            WH_RELOCK_HELD(lk, q_mutex_);\n",
+     "            vram_due = vw_.vramIdleTick();\n            gv_.govApply();\n",
      r"reading variable 'queue_' requires holding mutex 'q_mutex_'"),
     ("engine-runloopcalls-relock-dropped", "src/server/engine_queue.cpp",
      "    for (auto& f : calls) f();\n    WH_RELOCK_HELD(lk, q_mutex_);\n",
@@ -58,6 +60,10 @@ MUTATIONS = [
      "    whirl::MutexLock lk(gov_mu_);\n    gov_json_ = memgov::statusJson(st);\n",
      "    gov_json_ = memgov::statusJson(st);\n",
      r"writing variable 'gov_json_' requires holding mutex 'gov_mu_'"),
+    ("vram-note-unlocked", "src/server/engine_vram.cpp",
+     "        whirl::MutexLock lk(vram_mu_);\n        vram_last_ = s;\n        vram_spill_ = vram_warn_ && vram_watch_.spilling();\n",
+     "        vram_last_ = s;\n        vram_spill_ = vram_warn_ && vram_watch_.spilling();\n",
+     r"writing variable 'vram_last_' requires holding mutex 'vram_mu_'"),
     # not Tier::submit: clang's analysis does not see the access in `(c ? q_reads_ : q_writes_).push_back(j)` (a guarded member
     # reached through ?: is not checked; arch025-Q4 HANDOFF "known gaps"), so removing that lock is not caught
     ("tier-pendingread-unlocked", "src/tier/kv_tier.cpp",

@@ -66,6 +66,7 @@
 #include "server/engine_output.h"    // emit, flushOut, writeError (arch025-engine S5, module server.slot_output)
 #include "server/engine_pages.h"     // SlotPagesCounters, SlotPages (arch025-engine S6 / S7, module server.slot_cache)
 #include "server/engine_gov.h"       // GovState, GovernorGlue (arch025-engine S8, module server.governor)
+#include "server/engine_vram.h"      // VramState, VramWatch (arch025-engine S9, module server.vram_watch)
 
 namespace whirl::server {
 
@@ -222,10 +223,7 @@ private:
     // FR-SRV P2-2: queued / running requests whose client disconnected end (slot freed)
     void reapDisconnected();
     void logBatchStats(bool force);
-    // samples the WDDM probe (warns through vram_watch_); "" without a probe
-    std::string vramNote();
-    // idle: one sample a minute so /health and the spill-over line stay current; returns the next due time
-    std::optional<TimePoint> vramIdleTick();
+    // WDDM-LOG video memory watch: vst_ / vw_ (arch025-engine S9, module server.vram_watch)
     void abortQueued(whirl::UniqueLock& lk) WH_REQUIRES(q_mutex_);
     // v0.2.2.2 memory governor: gst_ / gv_ (arch025-engine S8, module server.governor)
 
@@ -262,16 +260,12 @@ private:
     // WDDM-LOG: runtime video memory watch (setVramProbe)
     std::function<wddmwatch::Sample()> vram_probe_;
     std::function<std::optional<wddmwatch::Others>()> vram_others_;
-    wddmwatch::Watch vram_watch_;
-    TimePoint vram_idle_next_{};    // next idle sample (once a minute while no request runs)
-    double vram_idle_s_ = 60.0;
+    // the watch's state (arch025-engine S9, module server.vram_watch): the former members vram_watch_ .. vram_last_t_,
+    // here (where vram_watch_ was) and in that order; private, reached only through vw_. prefill_tok_cum_ and
+    // crlf_norm_, which stood between them, follow it (DESIGN v3 2.5)
+    VramState vst_;
     std::uint64_t prefill_tok_cum_ = 0;  // all slots, since start (DecodeWatch: was another request prefilling)
-    bool vram_warn_ = false;
-    whirl::Mutex vram_mu_;  // vram_last_ / vram_spill_ for health() (HTTP threads)
-    wddmwatch::Sample vram_last_ WH_GUARDED_BY(vram_mu_);
-    bool vram_spill_ WH_GUARDED_BY(vram_mu_) = false;
     std::vector<std::uint32_t> crlf_norm_;
-    TimePoint vram_last_t_{};  // last probe sample
     // v0.2.2.2 memory governor (arch025-engine S8, module server.governor): the former members gov_ .. gov_json_, here
     // (where gov_ was) and in that order, plus gov_mu_ (F14: gov_json_ under its own lock, no longer vram_mu_); private,
     // reached only through gv_ (DESIGN v3 2.5)
@@ -307,6 +301,10 @@ private:
     // the governor's placed state vram_others_ / ctx_pub_ (here, where they were), sc_ and gst_'s members; after sc_, the
     // last member, destroyed first, trivial destructor (DESIGN v3 2.5)
     GovernorGlue gv_{ck_, ctx_, m_, ops_, opt_, owner_, pool_, ps_, slots_, tb_, vram_probe_, vram_others_, ctx_pub_, sc_, gst_};
+    // the video memory watch's logic (arch025-engine S9, module server.vram_watch): references only - core.shared owner_ /
+    // vram_probe_, the governor's placed state vram_others_, gv_ and vst_'s members; after gv_, the last member, destroyed
+    // first, trivial destructor (DESIGN v3 2.5)
+    VramWatch vw_{owner_, vram_probe_, vram_others_, gv_, vst_};
 };
 
 }  // namespace whirl::server

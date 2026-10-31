@@ -578,7 +578,7 @@ void Engine::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acce
         sl.last_log_t = Clock::now();
         // WDDM-LOG: a sharp drop against the request's early speed; the spill is named as the likely
         // cause only while one is seen (vram_watch_ state from the last status-line sample)
-        if (const auto ev = sl.dec_watch.report(sl.n_gen, el, sl.cycles, vram_warn_ && vram_watch_.spilling(), prefill_tok_cum_)) {
+        if (const auto ev = sl.dec_watch.report(sl.n_gen, el, sl.cycles, vw_.vramSpilling(), prefill_tok_cum_)) {
             if (ev->warn) logW("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
             else logI("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
         }

@@ -5,8 +5,11 @@
 //
 // Written for WHIRL. Moved verbatim out of engine_gov.cpp (arch025-N4d / N10 engine_gov split; before that out of
 // engine.cpp, arch024 S9).
+//
+// arch025-engine S9 (module server.vram_watch): the definitions are VramWatch's (src/server/engine_vram.h), bodies
+// verbatim; vramHealth is engine.cpp health's vram_mu_ lock and five reads, verbatim.
 
-#include "engine.h"
+#include "server/engine_vram.h"
 
 #include "log.h"
 
@@ -16,7 +19,7 @@
 
 namespace whirl::server {
 
-void Engine::setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn, std::optional<wddmwatch::Sample> base,
+void VramWatch::setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn, std::optional<wddmwatch::Sample> base,
                           wddmwatch::Config cfg, bool startup_warned, std::function<std::optional<wddmwatch::Others>()> others) {
     owner_.check("Engine::setVramProbe");
     vram_probe_ = std::move(probe);
@@ -56,7 +59,7 @@ void Engine::setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn, s
     vram_idle_next_ = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(vram_idle_s_));
 }
 
-std::string Engine::vramNote() {
+std::string VramWatch::vramNote() {
     if (!vram_probe_) return {};
     const wddmwatch::Sample s = vram_probe_();
     vram_last_t_ = Clock::now();
@@ -88,11 +91,20 @@ std::string Engine::vramNote() {
     return wddmwatch::format(s, vram_watch_.baseline());
 }
 
-std::optional<TimePoint> Engine::vramIdleTick() {
+std::optional<TimePoint> VramWatch::vramIdleTick() {
     owner_.check("Engine::vramIdleTick");
     if (!vram_probe_) return std::nullopt;
     if (Clock::now() >= vram_idle_next_) (void)vramNote();  // logs only a spill warning / the spill-over line
     return vram_idle_next_;
+}
+
+void VramWatch::vramHealth(EngineApi::Health& h) {
+    whirl::MutexLock lk(vram_mu_);
+    h.vram_ok = vram_last_.ok;
+    h.vram_spill = vram_spill_;
+    h.vram_local = vram_last_.local_usage;
+    h.vram_budget = vram_last_.local_budget;
+    h.vram_shared = vram_last_.nonlocal_usage;
 }
 
 }  // namespace whirl::server
