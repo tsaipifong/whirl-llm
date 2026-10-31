@@ -39,7 +39,7 @@ int cmdDflashCheck(const Args& a) {
     if (a.pos.size() < 3) throw std::runtime_error("dflash-check: usage: whirl dflash-check MODEL.gguf DRAFT.gguf REFDIR");
     gguf::File f = gguf::File::open(a.pos[0]);
     selectDevice(a, nullptr);
-    Loaded L = loadModel(a, f, 4096);
+    Loaded L = loadModel(a, f, *whirl::model::openArch(f).am, 4096);  // through the architecture module (arch025-cli2, N15d)
     q::Model& m = *L.model;
     const gguf::File df = gguf::File::open(a.pos[1]);
     q::LoadStats ds;

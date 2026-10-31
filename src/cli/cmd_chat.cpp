@@ -91,7 +91,8 @@ int cmdChat(const Args& a) {
     const std::string* logits_out = a.get("--out");
 
     gguf::File f = gguf::File::open(path);
-    const q::Config cfg = whirl::model::openArch(f).cfg;  // the architecture module, as whirl-server (arch025-N15d)
+    const whirl::model::OpenedArch oa = whirl::model::openArch(f);  // the architecture module, as whirl-server (arch025-N15d)
+    const q::Config& cfg = oa.cfg;
     std::string dev_line;
     selectDevice(a, &dev_line);
     out(fmt("whirl gguf: %s\n  arch %s  layers %u (attn every %u)  embd %u  ff %u  vocab %u\n", path.c_str(), cfg.archName(), cfg.n_layer, cfg.interval,
@@ -164,7 +165,7 @@ int cmdChat(const Args& a) {
 
     const bool ctx_given = a.get("--ctx") != nullptr || envU32("MAX_CTX").has_value();
     bool use_dflash = logits_out == nullptr && wantDFlash(a, f);
-    Loaded L = loadModel(a, f, opt.max_ctx, ctx_given, static_cast<u32>(ids.size()) + opt.max_tokens, use_dflash);
+    Loaded L = loadModel(a, f, *oa.am, opt.max_ctx, ctx_given, static_cast<u32>(ids.size()) + opt.max_tokens, use_dflash);
     opt.max_ctx = L.model->max_ctx;  // precise: may be lowered to what f16 KV fits
     q::Model& model = *L.model;
     {

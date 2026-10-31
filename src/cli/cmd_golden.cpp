@@ -62,7 +62,7 @@ const char* k_golden_pair_b = "請用繁體中文說明 TCP 三向交握的過�
 // text (its own reply then repeats the prompt, so n-gram drafts really run: the runner fails the case
 // when ng_cycles is 0). The suite single's prompt has no repetition (its n-gram case never drafts).
 int goldenSingle(const Args& a, const gguf::File& f, const Tok& tok, u32 n_dec, bool ngram_only = false) {
-    Loaded L = loadModel(a, f, 8192);
+    Loaded L = loadModel(a, f, *whirl::model::openArch(f).am, 8192);  // through the architecture module (arch025-cli2, N15d)
     q::Model& m = *L.model;
     {
         std::string log;

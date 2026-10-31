@@ -234,7 +234,9 @@ struct Loaded {
 // build_model.cpp
 int selectDevice(const Args& a, std::string* info_line);
 whirl::numerics::Request modeRequest(const Args& a);
-Loaded loadModel(const Args& a, const gguf::File& f, u32 max_ctx, bool ctx_explicit = true, u32 min_ctx = 0, bool no_mtp = false);
+// am: the GGUF's architecture module (model::openArch(f).am); the model is loaded through it, as whirl-server (arch025-cli2, N15d)
+Loaded loadModel(const Args& a, const gguf::File& f, const whirl::model::ArchModule& am,
+                 u32 max_ctx, bool ctx_explicit = true, u32 min_ctx = 0, bool no_mtp = false);
 void loadLog(q::Model& m, const q::LoadStats& stats);
 
 // common.cpp

@@ -23,7 +23,7 @@ int cmdSelftest(const Args& a) {
     if (a.pos.empty()) throw std::runtime_error("selftest: missing MODEL.gguf");
     gguf::File f = gguf::File::open(a.pos[0]);
     selectDevice(a, nullptr);
-    Loaded L = loadModel(a, f, 4096);
+    Loaded L = loadModel(a, f, *whirl::model::openArch(f).am, 4096);  // through the architecture module (arch025-cli2, N15d)
     q::Model& m = *L.model;
     hip::memset(m.scratch().h, 0, 4ull * m.max_batch * m.cfg.n_embd);
     hip::memset(m.scratch().ffn_g, 0, 4ull * m.max_batch * m.scratch().ff_scratch);
