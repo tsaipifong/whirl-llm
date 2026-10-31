@@ -388,6 +388,9 @@ MUT = [
      ["@PINWRITE", "@ROW:nosha"], r"^engine cut pin: REVIEW ROW INVALID .*does not name the pin sha256"),
     ("P8c", "a row whose report's reviewer is the author (self-review)", [], lambda c: c["outside_writers"]["now"].append("runLoop:gov_json_"),
      ["@PINWRITE", "@ROW:self"], r"^engine cut pin: REVIEW ROW INVALID .*is the author \(no self-review\)"),
+    ("P8f", "s0b-merge review consider-1: the reviewer is one of the authors of a composite author column (main-session+step-agent)", [],
+     lambda c: c["outside_writers"]["now"].append("runLoop:gov_json_"), ["@PINWRITE", "@ROW:selfco"],
+     r"^engine cut pin: REVIEW ROW INVALID .*is the author \(no self-review\) \[one of the authors main-session\+step-agent\]"),
     ("P8d", "a row whose review column says pending (the S0b row shape)", [], lambda c: c["outside_writers"]["now"].append("runLoop:gov_json_"),
      ["@PINWRITE", "@ROW:pending"], r"^engine cut pin: REVIEW ROW INVALID .*says pending"),
     ("P8e", "control: the same cut edit with a valid row (report names the sha, reviewer != author) passes", [],
@@ -620,9 +623,11 @@ def one(item):
                 kind = g[5:]
                 sha = hashlib.sha256(open(pin, "rb").read().replace(b"\r\n", b"\n")).hexdigest()
                 rp = os.path.join(d, "REVIEW.md")
-                body = {"nosha": "reviewer: rev-agent\nlooked at the cut\n", "self": f"pin sha256: {sha}\nreviewer: step-agent\n"}
+                body = {"nosha": "reviewer: rev-agent\nlooked at the cut\n", "self": f"pin sha256: {sha}\nreviewer: step-agent\n",
+                        "selfco": f"pin sha256: {sha}\nreviewer: main-session\n"}   # revtextfix: a co-author reviews
                 open(rp, "w", encoding="utf-8").write(body.get(kind, f"pin sha256: {sha}\nreviewer: rev-agent\n"))
-                row = {"xx": f"{sha}\tx\tx", "pending": f"{sha}\t{rp} (review pending)\tcut edit\tstep-agent"}.get(
+                row = {"xx": f"{sha}\tx\tx", "pending": f"{sha}\t{rp} (review pending)\tcut edit\tstep-agent",
+                       "selfco": f"{sha}\t{rp} (main-session)\tcut edit\tmain-session+step-agent"}.get(
                     kind, f"{sha}\t{rp} (rev-agent)\tcut edit\tstep-agent")
                 txt = txt.rstrip("\n") + "\n" + row + "\n"
             open(ledger, "w", encoding="utf-8").write(txt)
@@ -728,7 +733,17 @@ def git_cases(sha):
     return out
 
 
+GIT_IDS = {f"G{i}" for i in range(1, 7)}   # git_cases() (G1..G6)
+
+
 def main():
+    # arch025-revtextfix (s0b-merge review consider-2): an unknown --only id ran only the baselines and said "1/1 as expected"
+    known = {m[0] for m in MUT} | GIT_IDS | {"A1", "A2"} | {f"B{i}" for i in range(len(bases))}
+    unknown = sorted(ONLY - known)
+    if unknown:
+        print(f"engine split selftest: unknown --only id(s): {', '.join(unknown)} (known: {len(known)} ids, e.g. "
+              f"{', '.join(sorted(known)[:8])} ...): usage error")
+        return 2
     os.makedirs(WORK, exist_ok=True)
     os.makedirs(BASESNAP, exist_ok=True)
     sha = setup_ledger()
