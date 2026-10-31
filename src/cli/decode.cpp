@@ -306,7 +306,7 @@ DecodeResult dflashDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prom
     u32 next = first;
     u32 p = n_prompt;  // position of `next`
     const u32 max_d = !model.fusedDecode() ? 1 : std::min<u32>(model.dfr->block - 1, q::max_ng_drafts);
-    u32 ng_max = opt.ngram_max > 0 ? std::min(opt.ngram_max, q::max_ng_drafts) : q::max_ng_drafts;
+    u32 ng_max = q::ngramDraftsShown(opt.ngram_max);  // the server's n-gram draft cap (module spec.policy, arch025-cli2)
     if (!model.fusedDecode()) ng_max = 1;
     {
         // a recurrent-state snapshot set per draft row: take them if they fit in free VRAM with
