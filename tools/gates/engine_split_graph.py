@@ -264,10 +264,15 @@ if "--core" in args:
             if re.search(bad_re, body): cb.append(f"{f} ({c}): body matches forbidden /{bad_re}/")
         if rule.get("max_lines") is not None and rows[f]["lines"] > rule["max_lines"]:
             cb.append(f"{f} ({c}): {rows[f]['lines']} lines > {rule['max_lines']}")
-    # core reads / writes no component-owned data (the constructor / destructor are the assembly point: exempt)
+    # core reads / writes no component-owned data (the constructor / destructor are the assembly point: exempt).
+    # arch025-engclose (S16): a component holder (cut `holders`: jq_, sc_, gv_, vw_ ...) used by a core function is the
+    # assembly's call into that component (`gv_.govCtxPublished()`, `jq_.jqHealth(h)`): the call is a call edge, checked
+    # with the call edges; the holder itself is no data (component classes are not copyable / assignable)
+    hold = {k for k in cut.get("holders", {}) if not k.startswith("_")}
     for (a, b), kinds in sorted(edges.items()):
         if a != "server.engine" or b == "core.shared": continue
         for w in sorted(kinds.get("data", ())):
+            if w.split(":")[1] in hold: continue
             if w.split(":")[0] not in ("Engine", "~Engine") and w not in cut.get("core_exceptions", {}):
                 cb.append(f"core uses {b} data: {w}")
     # E3: Engine's data members are exactly engine_members_final, in that order

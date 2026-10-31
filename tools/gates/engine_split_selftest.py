@@ -77,6 +77,8 @@ ENG = "server.engine"
 # is gone fails the whole selftest with one line naming the role, not ~100 ANCHOR FAIL lines). A later step that moves a
 # role function changes the one ROLES row (and checks the role's rule below still holds), not the cases.
 #   role: (class, function, module the cut must give it, kind, why this function)
+#   arch025-engclose: since S10b / S11-S15b the @LOW / @WR functions are the FIXTURE's inline Engine bodies (below), kind
+#   "body" (a non-const in-class body in a header); check_roles reads them in the fixture tree (WORK/F0).
 #   @LOW  rule "a low module's body reaching up" (viol(LM, ..)): a non-const Engine member of the lowest module that still
 #         has Engine members (job_queue, layer 1; every target module of these cases is higher). abortQueued has no Slot
 #         parameter: the edits start with PRE_SL (a local Slot& sl, no member use; control LOWc shows it is neutral).
@@ -89,13 +91,76 @@ ENG = "server.engine"
 #         server.engine; S16 keeps it as the forwarder). Was ctxForNew until S8 moved it into GovernorGlue. The written
 #         members are job_queue's (rp_ / rh_ / vp_ / queue_), so the writer must not be job_queue. M1 (an inline body
 #         reading a HIGHER module's data) needs a low module and declares its own inline method (m1Peek, job_queue).
-ROLES = {"@LOW": ("Engine", "abortQueued", JQ, "def"), "@WR": ("Engine", "finishJob", SE, "def"),
+ROLES = {"@LOW": ("Engine", "abortQueued", JQ, "body"), "@WR": ("Engine", "finishJob", SE, "body"),
          "@SPD": ("SlotPages", "dropCache", SC, "def"), "@KC": ("Engine", "ctxPublished", ENG, "inline")}
 LOW, WRR, SPD, KC = "@LOW", "@WR", "@SPD", "@KC"
 A = "@A@"   # in an edit's new text: the role's anchor (its definition head line / the inline head up to '{ ')
 LF, WF, KF = ROLES[LOW][1], ROLES[WRR][1], ROLES[KC][1]
 LM = ROLES[LOW][2]
 PRE_SL = "    Slot* sel = nullptr; Slot& sl = *sel; (void)sl;\n"
+
+
+# arch025-engclose FIXTURE (see the header of scratch/a25_engclose/st_fixture.py and the HANDOFF): the pre-S10 shapes for
+# the mutant trees of the first base. Inline Engine bodies named like the moved entries (assigned by name: abortQueued ->
+# job_queue, finishJob -> slot_end, runLoop -> scheduler) and shadow members with job_queue's names. B0f proves it neutral.
+FIX_PRIV = "private:\n    ServerModel& m_;\n"
+FIX_BODIES = ("private:\n"
+              "    // engine_split_selftest FIXTURE (never in the product tree)\n"
+              "    void abortQueued(whirl::UniqueLock& lk) {\n        (void)lk;\n    }\n"
+              "    void finishJob(Slot& sl) {\n        (void)sl;\n    }\n"
+              "    whirl::Mutex q_mutex_;\n    std::deque<Job*> queue_;\n    std::uint32_t n_active_ = 0;\n    bool stop_ = false;\n"
+              "    ServerModel& m_;\n")
+FIX_RUNL_OLD = "    void runLoop() { sch_.runLoop(); }\n"
+RUNL_H = "    void runLoop() {\n"
+# the body sits at the class end (in-class bodies are parsed in order; see pass 2 in the HANDOFF), the declaration stays
+FIX_RUNL_DECL = "    // FIXTURE: runLoop is the last member function of the class (parsed after the cases' accessors)\n"
+FIX_CLASS_END = "                   cyc_, ss_, tg_};\n};\n"
+FIX_END_MARK = "        sch_.runLoop();\n    }\n};\n"
+FIX_CLASS_END_NEW = "                   cyc_, ss_, tg_};\n\npublic:\n" + RUNL_H + FIX_END_MARK
+FIX_STOP = "    bool stop_ = false;\n"
+FIX_INC = '#include "engine_api.h"\n'
+FIX_PIN_QM = {"runLoop:q_mutex_": {"clang_why": ["write: CXXConstructExpr `lk(q_mutex_)`"], "class": "d lock guard",
+                                   "reason": "FIXTURE: the pre-S10 cut pin of runLoop's lock guard (the real one is runLoop#:q_mutex_)"}}
+CLASS_ENGINE = "class Engine final : public EngineApi {\n"
+DTOR = "Engine::~Engine() {\n"
+
+
+def apply_fixture(srcdir):
+    p = os.path.join(srcdir, "server", "engine.h")
+    t = open(p, encoding="utf-8").read()
+    if t.count(FIX_PRIV) != 1 or t.count(FIX_RUNL_OLD) != 1 or t.count(FIX_CLASS_END) != 1:
+        raise SystemExit("engine split selftest: FIXTURE anchors missing in " + p + " (re-anchor FIX_PRIV / FIX_RUNL_OLD / FIX_CLASS_END)")
+    t = t.replace(FIX_PRIV, FIX_BODIES).replace(FIX_RUNL_OLD, FIX_RUNL_DECL).replace(FIX_CLASS_END, FIX_CLASS_END_NEW)
+    open(p, "w", encoding="utf-8").write(t)
+
+
+def map_fixture_edits(edits):
+    """the pre-S10 anchors -> the FIXTURE: (engine.cpp, runLoop) -> the fixture's runLoop body (engine.h, class end),
+    (engine.cpp, startJob) -> SlotStart::startJob; text before an anchor -> namespace scope after class Engine; a role
+    edit on an #include -> engine.h's includes; a role body that calls startJob -> its Engine declaration.
+    Returns (edits, extra cut pins)."""
+    out, pins = [], {}
+    for rel, old, new in edits:
+        if rel == EC and old == RUNL:
+            pre, post = new.split(RUNL, 1) if RUNL in new else ("", new)
+            if "#define" in pre:   # N6: the macro must stay in engine.cpp (its finding names that file)
+                out.append((EC, DTOR, pre + DTOR + post)); continue
+            out.append((EH, RUNL_H, RUNL_H + post))
+            if pre: out.append((EH, CLASS_ENGINE, pre + CLASS_ENGINE))   # a declaration the body uses: before the class
+            if "MutexLock lk(q_mutex_)" in post: pins.update(FIX_PIN_QM)
+        elif rel == EC and old == STARTJ:
+            out.append((STARTJ_NOW[0], STARTJ_NOW[1], STARTJ_NOW[1] + new[len(STARTJ):]))
+        elif rel in (LOW, WRR) and old is not None and old.startswith("#include"):
+            out.append((EH, FIX_INC, FIX_INC + new[len(old):]))
+        elif rel in (LOW, WRR) and old is None and A in new and not new.startswith(A):
+            pre, post = new.split(A, 1)
+            out.append((rel, None, A + post))
+            out.append((EH, FIX_END_MARK, FIX_END_MARK + pre))
+        else:
+            out.append((rel, old, new))
+        if rel in (LOW, WRR) and "startJob(" in (new or ""):
+            out.append((EH, FIX_STOP, FIX_STOP + "    bool startJob(Slot& sl, Job& job);  // FIXTURE: SlotStart's since S14\n"))
+    return out, pins
 
 
 def find_role(srcdir, role):
@@ -105,6 +170,9 @@ def find_role(srcdir, role):
     if kind == "def":
         rx = re.compile(r"^[^\n;{}]*\b" + re.escape(cls) + "::" + re.escape(fn) + r"\([^\n;]*\)[^\n;]*\{\n", re.M)
         exts = (".cpp",)
+    elif kind == "body":   # arch025-engclose: a non-const in-class body `    void f(...) {` (the FIXTURE's)
+        rx = re.compile(r"^[ \t]+[\w:<>,&* ]+[ \t&*]" + re.escape(fn) + r"\([^\n;]*\)[ \t]*\{\n", re.M)
+        exts = (".h",)
     else:
         # S8 (S7st review consider-1): only inside the body of `class <cls>` / `struct <cls>`; `&` return types, `override`
         rx = re.compile(r"^[ \t]+[\w:<>,& ]+[ \t&]" + re.escape(fn) + r"\(\)[ \t]*const[ \t]*(?:override[ \t]*)?\{ ", re.M)
@@ -265,6 +333,8 @@ def _E(code, pre=""):
 # closed) an 'AST / emut write outside every census entry' finding, which would hide H1 / H7
 ED = "server/engine_drafter.h"
 STARTJ = "bool Engine::startJob(Slot& sl, Job& job) {\n"
+# arch025-engclose: startJob is SlotStart's (S14, engine_start.cpp; it holds dc_): the STARTJ edits map there
+STARTJ_NOW = (os.path.join("server", "engine_start.cpp").replace(os.sep, "/"), "bool SlotStart::startJob(Slot& sl, Job& job) {\n")
 _DCA = "    const EngineOptions& opt_;\n"
 _DCX = ("    int gap_ = 0;\n    void dflTouch(int n) { gap_ += n; }\n    void dflClear() { DrafterCtx c{*this}; c.gap_ = 0; *this = c; }\n"
         "    int dflGap() const { return gap_; }\n    DrafterCtx& operator=(const DrafterCtx& o) { (void)o; return *this; }\n")
@@ -677,6 +747,11 @@ def one(job):
     base = bases[bi]
     if any(rel == EH and old == HOLD for rel, old, _ in edits) or any(SHADOW_RX.search(new or "") for _, _, new in edits):
         edits = [(EH, GST, SHADOW)] + list(edits)   # S8: the pre-S8 Engine governor members (SHADOW above)
+    fix_pins = {}
+    if bi == 0: edits, fix_pins = map_fixture_edits(edits)   # arch025-engclose: the FIXTURE's anchors
+    if fix_pins:
+        _ce = cut_edit
+        cut_edit = lambda c, _ce=_ce: (c.setdefault("emut_read_ok", {}).update(fix_pins), _ce(c) if _ce else None)
     if wdir != mid: what = f"{what} [work dir {wdir}]"
     d = os.path.join(WORK, wdir)
     if os.path.isdir(d): shutil.rmtree(d)
@@ -684,6 +759,7 @@ def one(job):
     for sub in ("src", "include"):
         if os.path.isdir(os.path.join(base, sub)):
             shutil.copytree(os.path.join(base, sub), os.path.join(d, sub))
+    if bi == 0: apply_fixture(os.path.join(d, "src"))   # arch025-engclose: the pre-S10 shapes (FIXTURE)
     tools = HERE
     if any(rel.startswith("TOOL:") for rel, _, _ in edits):   # S0b: a copy of the checker tools, one of them edited
         tools = os.path.join(d, "tools", "gates")
@@ -860,7 +936,12 @@ def main():
               f"{', '.join(sorted(known)[:8])} ...): usage error")
         return 2
     # s7st: every anchor role must exist once in the first base and sit in the module its rule needs (one line per role)
-    bad = check_roles(os.path.join(bases[0], "src"), json.load(open(CUT, encoding="utf-8")))
+    f0 = os.path.join(WORK, "F0")   # arch025-engclose: the first base + the FIXTURE (roles live there; B0f below)
+    if os.path.isdir(f0): shutil.rmtree(f0)
+    for sub_ in ("src", "include"):
+        if os.path.isdir(os.path.join(bases[0], sub_)): shutil.copytree(os.path.join(bases[0], sub_), os.path.join(f0, sub_))
+    apply_fixture(os.path.join(f0, "src"))
+    bad = check_roles(os.path.join(f0, "src"), json.load(open(CUT, encoding="utf-8")))
     if bad:
         for b in bad: print(f"anchor role {b}")
         print(f"engine split selftest: {len(bad)} anchor role(s) missing - FAIL (re-anchor the role in ROLES, not the cases)")
@@ -874,11 +955,12 @@ def main():
         print(out.strip()); print("engine split selftest: CRASH (no emut.exe)"); return 3
     os.environ["WHIRL_EMUT"] = out.strip().splitlines()[-1][len("emut: "):]
     res = []
-    for i, b in enumerate(bases):   # baselines
+    for i, b in enumerate(bases + [f0]):   # baselines (arch025-engclose: the last one is B0f, the FIXTURE tree)
         rc, out = run([PY, "-I", os.path.join(HERE, "engine_split_check.py"), "--root", b, "--work", os.path.join(WORK, f"B{i}"), "--pin", PIN,
                        "--reviews", LEDGER, "--base-dir", BASESNAP])
         ok = rc == 0 and "engine split check: ok" in out
-        res.append((f"B{i}", "PASS" if ok else "FAIL", f"B{i} baseline {b}\n   rc={rc}: {out.strip().splitlines()[-1] if out.strip() else ''} -> {'PASS' if ok else 'FAIL (false positive)'}"))
+        bid = f"B{i}" if i < len(bases) else "B0f"
+        res.append((bid, "PASS" if ok else "FAIL", f"{bid} baseline {b}\n   rc={rc}: {out.strip().splitlines()[-1] if out.strip() else ''} -> {'PASS' if ok else 'FAIL (false positive)'}"))
     with ThreadPoolExecutor(JOBS) as ex:
         res += list(ex.map(one, [(w, m) for w, m in zip(WDIRS, MUT) if not ONLY or m[0] in ONLY]))
     res += [g for g in git_cases(sha) if not ONLY or g[0] in ONLY]
