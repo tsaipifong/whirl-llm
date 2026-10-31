@@ -26,11 +26,29 @@
 # and the step FAILS. Environment: WHIRL_PYTHON (python), WHIRL_KERNELS_FROM (HIP code objects for a new build dir, e.g. the gated
 # build\Release of this tree), WHIRL_QUIET_WAIT (a local script build_cfg.bat runs before compiling); release_gate sets them.
 # Exit 0 only with the ok verdict.
+#
+# -Mode (arch025-procopt3, PLAN 9.33; default WHIRL_SAFETY_MODE, else clean). Every verdict line says which mode ran:
+#   clean        the build dirs under this tree (build-asan / build-analyze / build-tsa) as before; release_gate uses it for
+#                strict / release runs (-Strict, tags gate_r9700 / gate_8060s)
+#   cache        tools/safety/safety_cache.py: the tree is synced by CONTENT into one stable mirror (<parent of the tree>\safety_cache\src,
+#                or WHIRL_SAFETY_CACHE\src) whose build-<kind> dirs persist across worktrees; only changed files get a new mtime, so
+#                ninja (mtime + recorded header deps + command-line hash) rebuilds what a change reaches. A new or changed key (build
+#                scripts, cmake / ninja / MSVC / clang-cl / HIP SDK versions, toolchain env) wipes the dir: "mode clean-cache (why)";
+#                same key: "mode incremental". After the build safety_cache.py depscheck must pass (msvc_deps_prefix present, no
+#                unparsed /showIncludes note, every TU with a project include has recorded deps); if it fails, the key is dropped
+#                (next run clean-cache) and an incremental run FAILS. Only asan and tsa use the cache (PLAN 9.33b): there the
+#                build is the cost and the findings come from running the build. cpu_analyze always builds clean in the tree
+#                ("mode clean (cpu_analyze never uses the cache, PLAN 9.33b ...)"): its findings are the per-TU SARIF files, which an
+#                incremental build keeps from older compiles, and the incremental analyze lost 6 of 22 warning keys in every round
+#                (scratch\a25_procopt3\DONE_measure3). The cache is used by one step at a time (an
+#                exclusive handle on <root>\LOCK, released when this process ends); busy -> this run builds in the tree ("mode clean
+#                (cache busy)"). WHIRL_SAFETY_CACHE_CLEAN=1 forces clean-cache.
 param(
     [Parameter(Mandatory)][ValidateSet("asan", "analyze", "selftest", "tsa")][string]$Kind,
     [string]$Gguf = "",
     [string]$GgufMoe = "",
-    [int]$CapMin = 0
+    [int]$CapMin = 0,
+    [ValidateSet("", "clean", "cache")][string]$Mode = ""
 )
 $ErrorActionPreference = "Stop"
 $here = $PSScriptRoot
@@ -38,6 +56,62 @@ $repo = (Resolve-Path (Join-Path $here "..\..")).Path
 $py = if ($env:WHIRL_PYTHON) { $env:WHIRL_PYTHON } else { "python" }
 $env:WHIRL_PYTHON = $py
 $t0 = Get-Date
+if (-not $Mode) { $Mode = if ($env:WHIRL_SAFETY_MODE -in @("clean", "cache")) { $env:WHIRL_SAFETY_MODE } else { "clean" } }
+$modeNote = "mode clean (in-tree build-$Kind)"
+$cacheMode = ""
+$cacheLock = $null
+if ($Mode -eq "cache" -and $Kind -eq "analyze") {
+    $modeNote = "mode clean (cpu_analyze never uses the cache, PLAN 9.33b: an incremental /analyze lost 6 of 22 warning keys; in-tree build-analyze)"
+}
+if ($Mode -eq "cache" -and $Kind -in @("asan", "tsa")) {
+    $cacheRoot = if ($env:WHIRL_SAFETY_CACHE) { $env:WHIRL_SAFETY_CACHE } else { Join-Path (Split-Path $repo -Parent) "safety_cache" }
+    New-Item -ItemType Directory -Force $cacheRoot | Out-Null
+    try { $cacheLock = [System.IO.File]::Open((Join-Path $cacheRoot "LOCK"), "OpenOrCreate", "ReadWrite", "None") } catch { $cacheLock = $null }
+    if (-not $cacheLock) {
+        $modeNote = "mode clean (cache busy: $cacheRoot\LOCK held by another safety step; in-tree build-$Kind)"
+    } else {
+        $mirror = Join-Path $cacheRoot "src"
+        # WHIRL_SAFETY_SYNC_FROM (measurement / test only): sync another tree (e.g. a copy with an older commit's sources) instead
+        $syncFrom = if ($env:WHIRL_SAFETY_SYNC_FROM) { $env:WHIRL_SAFETY_SYNC_FROM } else { $repo }
+        if ($env:WHIRL_SAFETY_SYNC_FROM) { Write-Host "   cache: WHIRL_SAFETY_SYNC_FROM: syncing $syncFrom (not this tree)" }
+        $so = @(& $py -I (Join-Path $here "safety_cache.py") sync $syncFrom $mirror 2>&1 | ForEach-Object { "$_" })
+        $sc = $LASTEXITCODE
+        $so | ForEach-Object { "   cache: $_" }
+        if ($sc -ne 0) {
+            $modeNote = "mode clean (cache sync failed rc=$sc; in-tree build-$Kind)"
+        } else {
+            $pa = @("prepare", $Kind, $mirror) + @(if ($env:WHIRL_SAFETY_CACHE_CLEAN -eq "1") { "--clean" })
+            $po = @(& $py -I (Join-Path $mirror "tools\safety\safety_cache.py") @pa 2>&1 | ForEach-Object { "$_" })
+            $pc = $LASTEXITCODE
+            $po | ForEach-Object { "   cache: $_" }
+            $pm = [regex]::Match(($po -join "`n"), "(?m)^mode (clean-cache|incremental) \((.*)\)$")
+            if ($pc -ne 0 -or -not $pm.Success) {
+                $modeNote = "mode clean (cache prepare failed rc=$pc; in-tree build-$Kind)"
+            } else {
+                $cacheMode = $pm.Groups[1].Value
+                $copied = [regex]::Match(($so -join "`n"), "(\d+) copied").Groups[1].Value
+                $modeNote = "mode $cacheMode ($($pm.Groups[2].Value -replace '; key \w+$', ''); $copied file(s) changed; $mirror\build-$Kind)"
+                # from here on the mirror is the tree: its own copies of these scripts build in its build-<kind>
+                $repo = $mirror
+                $here = Join-Path $mirror "tools\safety"
+            }
+        }
+    }
+}
+Write-Host "safety step $Kind`: $modeNote"
+
+function DepsCheck([string]$b) {
+    # cache mode only: are the header dependencies ninja recorded usable? (memory whirl-build-header-deps-broken)
+    if (-not $cacheMode) { return "" }
+    $do = @(& $py -I (Join-Path $here "safety_cache.py") depscheck $b $repo (Join-Path $b "logs\build.log") 2>&1 | ForEach-Object { "$_" })
+    $dc = $LASTEXITCODE
+    $do | ForEach-Object { "   cache: $_" } | Write-Host
+    if ($dc -eq 0) { return "" }
+    & $py -I (Join-Path $here "safety_cache.py") forget $Kind $repo | Out-Null
+    if ($cacheMode -eq "incremental") { return "header deps not usable in an incremental run (cache key dropped: the next run is clean-cache)" }
+    Write-Host "   cache: deps check failed after a clean-cache build: findings stand (full build), key dropped so the next run is clean again"
+    return ""
+}
 
 function RunCapped([string]$bat, [string[]]$batArgs, [int]$capMin, [string]$what) {
     # cmd /c "<bat> args": the bat writes its own logs; this only waits with a cap and kills its own tree on overrun
@@ -61,7 +135,7 @@ function Rc([string]$f) {
 
 if ($Kind -eq "selftest") {
     $bad = 0
-    $tests = @(@("test_asan_check.py"), @("test_analyze_check.py"), @("tsa\test_tsa_check.py"), @("asan_check.py", "sites", $repo),
+    $tests = @(@("test_asan_check.py"), @("test_analyze_check.py"), @("tsa\test_tsa_check.py"), @("test_safety_cache.py"),@("asan_check.py", "sites", $repo),
                @("analyze_check.py", "reasons", (Join-Path $here "analyze_baseline.txt"), (Join-Path $here "analyze_whitelist.tsv")))
     foreach ($t in $tests) {
         $o = @(& $py -I (Join-Path $here $t[0]) @($t | Select-Object -Skip 1) 2>&1 | ForEach-Object { "$_" })
@@ -89,13 +163,14 @@ if ($Kind -eq "asan") {
     if ($CapMin -le 0) { $CapMin = 37 }
     $B = Join-Path $repo "build-asan"
     $ok = RunCapped (Join-Path $here "run_asan.bat") @($Gguf, $GgufMoe) $CapMin "run_asan.bat"
+    $dp = DepsCheck $B
     if (Test-Path (Join-Path $B "logs\steps.log")) { Get-Content (Join-Path $B "logs\steps.log") | ForEach-Object { "   $_" } }
     $o = @(& $py -I (Join-Path $here "asan_check.py") check $B $repo 2>&1 | ForEach-Object { "$_" })
     $c = $LASTEXITCODE
     $o | ForEach-Object { "$_" }
     $min = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
-    if ($ok -and $c -eq 0) { Write-Output "cpu asan: ok ($min min; $(($o[-1]) -replace '^asan check: ok ', ''))"; exit 0 }
-    Write-Output "cpu asan: FAIL ($min min$(if (-not $ok) { '; time cap hit' }))"
+    if ($ok -and $c -eq 0 -and -not $dp) { Write-Output "cpu asan: ok ($modeNote; $min min; $(($o[-1]) -replace '^asan check: ok ', ''))"; exit 0 }
+    Write-Output "cpu asan: FAIL ($modeNote; $min min$(if (-not $ok) { '; time cap hit' })$(if ($dp) { "; $dp" }))"
     exit 1
 }
 
@@ -105,6 +180,7 @@ if ($Kind -eq "tsa") {
     if ($CapMin -le 0) { $CapMin = 7 }
     $B = Join-Path $repo "build-tsa"
     $ok = RunCapped (Join-Path $here "tsa\run_tsa_build.bat") @($B) $CapMin "run_tsa_build.bat"
+    $dp = DepsCheck $B
     $o = @(& $py -I (Join-Path $here "tsa\tsa_check.py") verdict $B 2>&1 | ForEach-Object { "$_" })
     $c = $LASTEXITCODE
     $ml = Join-Path $B "logs\mutate.log"
@@ -113,8 +189,8 @@ if ($Kind -eq "tsa") {
     if (Test-Path $bl) { Get-Content $bl | Where-Object { $_ -match "Wthread-safety|FAILED:" } | Select-Object -First 20 | ForEach-Object { "   build: $_" } }
     $o | ForEach-Object { "$_" }
     $min = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
-    if ($ok -and $c -eq 0) { Write-Output "cpu tsa: ok ($min min; $(($o[-1]) -replace '^tsa verdict: ok ', ''))"; exit 0 }
-    Write-Output "cpu tsa: FAIL ($min min$(if (-not $ok) { '; time cap hit' }); $(($o[-1]) -replace '^tsa verdict: ', ''))"
+    if ($ok -and $c -eq 0 -and -not $dp) { Write-Output "cpu tsa: ok ($modeNote; $min min; $(($o[-1]) -replace '^tsa verdict: ok ', ''))"; exit 0 }
+    Write-Output "cpu tsa: FAIL ($modeNote; $min min$(if (-not $ok) { '; time cap hit' })$(if ($dp) { "; $dp" }); $(($o[-1]) -replace '^tsa verdict: ', ''))"
     exit 1
 }
 
@@ -142,6 +218,6 @@ $fo | ForEach-Object { "   fault proof: $_" }
 if ($fc -ne 0) { $bad += "injected-fault proof failed (PROOF rc=$fc): see $F\proof.log" }
 $min = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
 $gs = @(Get-Content $gl -ErrorAction SilentlyContinue | Where-Object { $_ -match "^analyze: " } | Select-Object -First 1)
-if ($bad.Count -eq 0) { Write-Output "cpu analyze: ok ($min min; $($gs -join '') ; whitelist reasons ok; fault proof clean PASS / 3 NEW / same key NEW x1)"; exit 0 }
-Write-Output "cpu analyze: FAIL ($min min; $($bad -join '; '))"
+if ($bad.Count -eq 0) { Write-Output "cpu analyze: ok ($modeNote; $min min; $($gs -join '') ; whitelist reasons ok; fault proof clean PASS / 3 NEW / same key NEW x1)"; exit 0 }
+Write-Output "cpu analyze: FAIL ($modeNote; $min min; $($bad -join '; '))"
 exit 1
