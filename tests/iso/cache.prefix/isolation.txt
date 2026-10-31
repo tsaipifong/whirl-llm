@@ -1,0 +1,22 @@
+# ARCH-1 8.5 isolation check of cache.prefix (arch025-n8b1, PLAN N8 batch 1): the prefix cache (src/cache/prefix_cache.cpp: slot / shared / tier-entry matching, eviction, supersede rules), built alone with its own cases
+# (tests/cache/prefix_cache_cases.inc: moved verbatim out of the one program whirl-cache-tests (tests/cache/cache_tests.cpp), which still runs them in the same
+# order). Declared dependencies: none: the tier is the test's MockTier (tests/cache/mock_tier.h), so a call into the KV host tier (tier.kv) is LNK2019. The cross-module cases stay in tests/iso/cache (cpu_iso_cache).
+# Format: tests/sampling/isolation.txt.
+module    cache.prefix
+exe       whirl-iso-cache-prefix-tests
+mutate    src/cache/prefix_cache.cpp
+mutsym    hip
+mutsym    engine
+mutsym    model
+mutsym    tier
+mutsym    now
+# module sources
+src       src/cache/prefix_cache.cpp
+# headers (include closure of the files above)
+hdr       src/cache/prefix_cache.h
+# test program
+testsrc   tests/iso/cache.prefix/cache_prefix_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
+testhdr   tests/cache/mock_tier.h
+testhdr   tests/cache/prefix_cache_cases.inc

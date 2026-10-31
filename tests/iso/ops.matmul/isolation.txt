@@ -1,0 +1,27 @@
+# ARCH-1 8.5 isolation check of ops.matmul (arch025-n8b1, PLAN N8 batch 1): the matmul / GEMV / GEMM path choice (src/ops/matmul.cpp), built alone with its own cases
+# (tests/ops/ops_matmul_cases.inc: moved verbatim out of the one program whirl-ops-tests (tests/ops/ops_tests.cpp), which still runs them in the same
+# order). Declared dependencies: none: kernels_abi.h / gguf.h / hip.h types only (no HIP call). The cross-module cases stay in tests/iso/ops (cpu_iso_ops).
+# Format: tests/sampling/isolation.txt.
+module    ops.matmul
+exe       whirl-iso-ops-matmul-tests
+mutate    src/ops/matmul.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/ops/matmul.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/ops/matmul.h
+# test program
+testsrc   tests/iso/ops.matmul/ops_matmul_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
+testhdr   tests/ops/ops_fakes.h
+testhdr   tests/ops/ops_mat.h
+testhdr   tests/ops/ops_matmul_cases.inc

@@ -1,0 +1,52 @@
+# ARCH-1 8.5 isolation check of cache.fingerprint (arch025-n8b1, PLAN N8 batch 1): the KV-tier fingerprint (src/cache/fingerprint.cpp), built alone with its own cases
+# (tests/cache/fingerprint_cases.inc: moved verbatim out of the one program whirl-cache-tests (tests/cache/cache_tests.cpp), which still runs them in the same
+# order). Declared dependencies: tier.kv (kv_tier.cpp: hashStr; with the null backend it is built against), platform env / fs / proc / args, lib whirl's util, numerics (the bit-affecting plan) and dump. The cross-module cases stay in tests/iso/cache (cpu_iso_cache).
+# Format: tests/sampling/isolation.txt.
+module    cache.fingerprint
+exe       whirl-iso-cache-fingerprint-tests
+mutate    src/cache/fingerprint.cpp
+mutsym    hip
+mutsym    engine
+mutsym    model
+define    WHIRL_ISO_NO_SOURCE_TREE
+# module sources
+src       src/cache/fingerprint.cpp
+# declared dependency sources
+src       src/tier/kv_tier.cpp
+src       src/device/null_backend.cpp
+src       src/platform/env_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/proc_win.cpp
+src       src/platform/args_win.cpp
+src       src/common/util.cpp
+src       src/common/numerics.cpp
+src       src/common/dump.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/dump.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/numerics.h
+hdr       include/whirl/small_helpers.h
+hdr       include/whirl/thread_annotations.h
+hdr       include/whirl/uma_mem.h
+hdr       src/cache/fingerprint.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/tier/evict_policy.h
+hdr       src/tier/idle_flush.h
+hdr       src/tier/kv_tier.h
+# test program
+testsrc   tests/iso/cache.fingerprint/cache_fingerprint_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
+testhdr   tests/cache/fingerprint_cases.inc
+testhdr   tests/cache/fingerprint_env_names.inc
+testhdr   tests/test_env.h

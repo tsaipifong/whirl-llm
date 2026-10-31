@@ -949,27 +949,39 @@
   ],
   [
    "release",
-   "gguf"
-  ],
-  [
-   "release",
-   "hip.mem"
-  ],
-  [
-   "release",
    "hip.runtime"
   ],
   [
-   "release",
-   "model.core"
+   "release.main",
+   "common.base"
   ],
   [
-   "release",
+   "release.main",
+   "gguf"
+  ],
+  [
+   "release.main",
+   "hip.mem"
+  ],
+  [
+   "release.main",
+   "hip.runtime"
+  ],
+  [
+   "release.main",
+   "model.types"
+  ],
+  [
+   "release.main",
    "platform.console"
   ],
   [
-   "release",
+   "release.main",
    "platform.net"
+  ],
+  [
+   "release.main",
+   "release"
   ],
   [
    "sampling",

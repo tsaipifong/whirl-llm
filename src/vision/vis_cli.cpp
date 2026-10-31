@@ -182,4 +182,22 @@ int cliVisEncode(std::span<const std::string> args) {
     return 0;
 }
 
+// The whirl-vis executable's main() (arch025-n8b2: moved verbatim from vis_main.cpp, which keeps a one-line main that calls this,
+// the llama.cpp tools/server/main.cpp pattern; so a test can run it: tests/vision/vision_tests.cpp testVisMain).
+int visMain(int argc, char** argv) {
+    // restrictToSelected lists the GPUs by starting this exe as `<exe> --whirl-gpu-probe` (s8-719 root719b vis_fixed)
+    if (argc == 2 && std::strcmp(argv[1], whirl::gpusel::k_probe_arg) == 0) return whirl::gpusel::probeMain();
+    if (argc < 2 || std::strcmp(argv[1], "vis-encode") != 0) {
+        std::printf("usage: whirl-vis vis-encode MMPROJ.gguf IMAGE [OUT.f32] [--reps N] [--mode auto|resident|stream]\n");
+        return 2;
+    }
+    std::vector<std::string> args(argv + 2, argv + argc);
+    try {
+        return whirl::vision::cliVisEncode(args);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "whirl-vis: %s\n", e.what());
+        return 1;
+    }
+}
+
 }  // namespace whirl::vision

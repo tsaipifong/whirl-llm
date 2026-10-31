@@ -13,7 +13,7 @@
 #include "whirl/gguf.h"
 #include "whirl/hip.h"
 #include "whirl/hip_runtime_loader.h"
-#include "whirl/model.h"
+#include "model/qwen35/model_error.h"  // qwen35::ModelError only (arch025-n8b2: was whirl/model.h, the composition root)
 #include "whirl/uma_mem.h"
 #include "whirl/version.h"
 

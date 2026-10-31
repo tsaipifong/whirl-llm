@@ -51,6 +51,9 @@ hdr       src/tier/kv_tier.h
 # test program
 testsrc   tests/cache/cache_tests.cpp
 testhdr   tests/cache/fingerprint_env_names.inc
+# arch025-n8b1: the cases moved verbatim into these two files (each also built alone by tests/iso/cache.prefix|cache.fingerprint/)
+testhdr   tests/cache/fingerprint_cases.inc
+testhdr   tests/cache/prefix_cache_cases.inc
 testhdr   tests/cache/mock_tier.h
 testhdr   tests/test_check.h
 testhdr   tests/test_env.h

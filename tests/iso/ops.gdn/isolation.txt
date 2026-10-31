@@ -1,0 +1,32 @@
+# ARCH-1 8.5 isolation check of ops.gdn (arch025-n8b1, PLAN N8 batch 1): the DeltaNet choice (src/ops/gdn.cpp), built alone with its own cases
+# (tests/ops/ops_gdn_cases.inc: moved verbatim out of the one program whirl-ops-tests (tests/ops/ops_tests.cpp), which still runs them in the same
+# order). Declared dependencies: ops.act (act.cpp: chooseH16Out, chooseActCommon, gdnAbFusable) and ops.matmul (matmul.cpp, through act.cpp). The cross-module cases stay in tests/iso/ops (cpu_iso_ops).
+# Format: tests/sampling/isolation.txt.
+module    ops.gdn
+exe       whirl-iso-ops-gdn-tests
+mutate    src/ops/gdn.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/ops/gdn.cpp
+# declared dependency sources
+src       src/ops/act.cpp
+src       src/ops/matmul.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/ops/act.h
+hdr       include/whirl/ops/gdn.h
+hdr       include/whirl/ops/matmul.h
+# test program
+testsrc   tests/iso/ops.gdn/ops_gdn_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
+testhdr   tests/ops/ops_fakes.h
+testhdr   tests/ops/ops_mat.h
+testhdr   tests/ops/ops_gdn_cases.inc

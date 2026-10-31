@@ -33,3 +33,12 @@ hdr       kernels/gfx1151/attn_ws4_index.h
 # test program
 testsrc   tests/ops/ops_tests.cpp
 testhdr   tests/test_check.h
+# arch025-n8b1: the per-module cases moved verbatim into these files (each also built alone by tests/iso/ops.<module>/)
+testhdr   tests/ops/ops_fakes.h
+testhdr   tests/ops/ops_mat.h
+testhdr   tests/ops/ops_act_cases.inc
+testhdr   tests/ops/ops_attention_cases.inc
+testhdr   tests/ops/ops_gdn_cases.inc
+testhdr   tests/ops/ops_matmul_cases.inc
+testhdr   tests/ops/ops_moe_cases.inc
+testhdr   tests/ops/ops_mtp_cases.inc
