@@ -1,12 +1,402 @@
 {
  "_doc": "arch025-n11 (PLAN N11): GPU mutation evidence for test_change.py's core-module step sets. One row per mutant x card (newest row counts): verdict (KILLED / SURVIVED / BUILD-FAIL / CAP / GATE-ERROR / NOT-RUN / DEVICE-MISMATCH) and killed_by (the release_gate GPU step that FAILed where the control PASSed). Rows are appended by `python tools/gates/test_change.py --add-kill-records kill_r9700.tsv kill_8060s.tsv --source ...` (gpumut.ps1 output); never write step sets here: test_change.core_step_sets computes them (every catalog mutant of the module on both cards, >= min_mutants KILLED per card, no survivor; set = killers + always). `--core-steps-report` prints the result. docs/dev/testing.md 'Core modules'.",
- "always": ["golden_swift", "golden_moe"],
+ "always": [
+  "golden_swift",
+  "golden_moe"
+ ],
  "min_mutants": 2,
  "require": {
-  "model.core": {"x12-f8-model-dtor": "X12 K8-2 / S11b D1: ~Model loses its explicit release order (src/model/loader.cpp, a model.core file); arch025-n11b: this is the killable form of the K8-2 class (a reordered Model member changes the release order of device memory): k8-2-model-member-order (include/whirl/model.h) is equivalent on this tree because ~Model fixes the order explicitly (its catalog argument)"}
+  "model.core": {
+   "x12-f8-model-dtor": "X12 K8-2 / S11b D1: ~Model loses its explicit release order (src/model/loader.cpp, a model.core file); arch025-n11b: this is the killable form of the K8-2 class (a reordered Model member changes the release order of device memory): k8-2-model-member-order (include/whirl/model.h) is equivalent on this tree because ~Model fixes the order explicitly (its catalog argument)"
+  }
  },
  "evidence": [
-  {"id": "device-hip-copy-short-64", "module": "device.hip", "card": "r9700", "verdict": "KILLED", "killed_by": "srv_tier_verify", "date": "2026-10-21T10:49", "source": "arch4 GPU mutation run (progress/arch4_mutations.tsv:12, progress/arch4.log:20): srv_tier_verify FAIL after 379 s, 35 lines differ; not a core module (src/device/* is a CORE_GLOBS path of no evidenced module)"},
-  {"id": "ops-precise-rule-allows-all-gpu", "module": "ops.matmul", "card": "r9700", "verdict": "KILLED", "killed_by": "golden_swift", "date": "2026-10-22T11:12", "source": "arch6 GPU mutation run (progress/arch6_mutations.tsv:2, progress/ARCH6_R9700_RESULTS.md:127): golden_swift DIFF swift/precise_single 34 of 43 lines; not a core module"}
+  {
+   "id": "device-hip-copy-short-64",
+   "module": "device.hip",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "srv_tier_verify",
+   "date": "2026-10-21T10:49",
+   "source": "arch4 GPU mutation run (progress/arch4_mutations.tsv:12, progress/arch4.log:20): srv_tier_verify FAIL after 379 s, 35 lines differ; not a core module (src/device/* is a CORE_GLOBS path of no evidenced module)"
+  },
+  {
+   "id": "ops-precise-rule-allows-all-gpu",
+   "module": "ops.matmul",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-22T11:12",
+   "source": "arch6 GPU mutation run (progress/arch6_mutations.tsv:2, progress/ARCH6_R9700_RESULTS.md:127): golden_swift DIFF swift/precise_single 34 of 43 lines; not a core module"
+  },
+  {
+   "id": "hiprt-slot-wrong-symbol",
+   "module": "hip.runtime",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "st_swift_balance",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "hiprt-order-reversed",
+   "module": "hip.runtime",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "hiprt-fallback-on-broken-local",
+   "module": "hip.runtime",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "hiprt-missing-symbol-ignored",
+   "module": "hip.runtime",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "n3-dump-rot",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "n3-dump-mode",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "n3-req-auto",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "n3-fd-q4",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "n3-kvname-q8h",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "m1-state-order",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "m2-loader-nofix",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "m3-tune-order",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "m3-subset-pick",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "m3-subset-kv",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "m3-subset-restore",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "m3-scratch-fd",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "m3-scratch-order",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "m5-names-moe",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "st_moe_precise",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "m5-names-drop",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "st_moe_precise",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "m5-config-moe",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "st_swift_balance",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "m6-gemvr-row",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "pl4-wait-abandoned",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "x12-f8-model-dtor",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "n8-kt-common-wq8-gfx1201",
+   "module": "kernels.common",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "kt_full",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "n11b-kt-common-warpsum",
+   "module": "kernels.common",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "kt_full",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_r9700.tsv)"
+  },
+  {
+   "id": "hiprt-slot-wrong-symbol",
+   "module": "hip.runtime",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "st_swift_balance",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.part1_7.tsv)"
+  },
+  {
+   "id": "hiprt-order-reversed",
+   "module": "hip.runtime",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.part1_7.tsv)"
+  },
+  {
+   "id": "hiprt-fallback-on-broken-local",
+   "module": "hip.runtime",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.part1_7.tsv)"
+  },
+  {
+   "id": "hiprt-missing-symbol-ignored",
+   "module": "hip.runtime",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.part1_7.tsv)"
+  },
+  {
+   "id": "n3-dump-rot",
+   "module": "model.core",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.part1_7.tsv)"
+  },
+  {
+   "id": "n3-dump-mode",
+   "module": "model.core",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.part1_7.tsv)"
+  },
+  {
+   "id": "n3-req-auto",
+   "module": "model.core",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.part1_7.tsv)"
+  },
+  {
+   "id": "n3-kvname-q8h",
+   "module": "model.core",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_swift",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.tsv)"
+  },
+  {
+   "id": "m2-loader-nofix",
+   "module": "model.core",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "golden_moe",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.tsv)"
+  },
+  {
+   "id": "m3-scratch-fd",
+   "module": "model.core",
+   "card": "8060s",
+   "verdict": "SURVIVED",
+   "killed_by": "",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.tsv)"
+  },
+  {
+   "id": "m5-names-moe",
+   "module": "model.core",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "st_moe_precise",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.tsv)"
+  },
+  {
+   "id": "m5-names-drop",
+   "module": "model.core",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "st_moe_precise",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.tsv)"
+  },
+  {
+   "id": "m5-config-moe",
+   "module": "model.core",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "st_swift_balance",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.tsv)"
+  },
+  {
+   "id": "n8-kt-common-wq8-gfx1151",
+   "module": "kernels.common",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "kt_full",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.tsv)"
+  },
+  {
+   "id": "n11b-kt-common-warpsum",
+   "module": "kernels.common",
+   "card": "8060s",
+   "verdict": "KILLED",
+   "killed_by": "kt_full",
+   "date": "2026-10-30T17:26:23",
+   "source": "gpumut A -Mode first, tree wt_a25_n11b d36bc74, bins scratch/a25_n11b/gpumut_A (R9700 10-30 03:59; 8060S part 1 7 ids 10:19 + part 2 8 GPU ids 11:25) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_n11b\\gpumut_A\\kill_8060s.tsv)"
+  },
+  {
+   "id": "m1-state-order",
+   "module": "model.core",
+   "card": "r9700",
+   "verdict": "KILLED",
+   "killed_by": "alloc_seq",
+   "date": "2026-10-30T17:26:28",
+   "source": "alloc_seq kill check (scratch/a25_allocseq/DONE_kill_check: control ok 2/2, m1-state-order FAIL 2/2 cells, gfx1201; gpumut A bins; pins fa8dddf) (C:\\ClaudeWorkspace\\whirl-work\\scratch\\a25_allocseq\\kill_m1_r9700.tsv)"
+  }
  ]
 }
