@@ -9,7 +9,7 @@ CPU only, no GPU, no model.
 Manifests: tests/sampling/isolation.txt and tests/iso/<module>/isolation.txt (one per module; cmake/iso.cmake reads the
 same files). Kinds: module NAME, exe TARGET, lib TARGET (optional object-library name), mutate PATH (the source the
 mutants edit), mutinc top|end (where the include mutants put the line: after the first quoted include, the default, or
-at the end of the file), mutsym hip|log|now|engine|model|tier|archtable (link mutants), syslib X.lib, define NAME[=VALUE] (arch025-iso4: /D for
+at the end of the file), mutsym hip|log|now|engine|model|tier|archtable|fwdrun|fwdprefill (link mutants), syslib X.lib, define NAME[=VALUE] (arch025-iso4: /D for
 the module's sources and test program), sdkinc hip (arch025-iso4: the HIP SDK include/ after the staged tree), gen PATH, then src / hdr (module + declared dependencies)
 and testsrc / testhdr (test program only). Every file is copied into <work>/<module>/<case>/{mod,test} (leading src/
 include/ tests/ dropped); module sources are compiled with mod/ as the ONLY include path, the test with mod/ + test/, and
@@ -31,6 +31,8 @@ AND compile with the product flags (/I src /I include), which is what makes the 
        model  whirl::qwen35::loadOrTune     (src/model/tune.cpp, whirl_model: the model core, class Model)
        tier   whirl::tier::blockHash        (src/tier/kv_tier.cpp, whirl_tier_core: the KV host tier)
        archtable whirl::model::builtinArchs (src/model/qwen35/module.cpp, model.qwen35: the product architecture table)
+       fwdrun whirl::qwen35::Context::forward (src/model/qwen35/forward/run.cpp, forward.run; arch025-n8b3)
+       fwdprefill whirl::qwen35::Context::prefill (src/model/qwen35/forward/prefill.cpp, forward.prefill; arch025-n8b3)
   inline_<sym>         (header-only modules, arch025-iso4-fix) an uncalled inline function at the end of the header calls
                        the symbol                                                      -> isolated decl-link LNK2019
 Header-only modules also get the decl-link (arch025-iso4-fix): each hdr line is compiled alone by the ROCm clang-cl
@@ -93,6 +95,13 @@ SYMS = {
     "archtable": ("#include <span>\nnamespace whirl::model { struct ArchModule; const std::span<const ArchModule>& builtinArchs(); }"
                   "  // iso mutant: src/model/qwen35/module.cpp (model.qwen35)\n",
                   "(void)whirl::model::builtinArchs().size();"),
+    # arch025-n8b3: the forward drivers, for the per-file forward manifests below them: Context::forward (run.cpp,
+    # forward.run) for vision_rows / dispatch / attn / ffn / gdn, Context::prefill (prefill.cpp, forward.prefill, the top of
+    # the forward) for every other forward file. A forward source includes context.h (forward_internal.h).
+    "fwdrun": ("#include \"model/qwen35/context.h\"  // iso mutant: src/model/qwen35/forward/run.cpp (forward.run)\n",
+               "static_cast<whirl::qwen35::Context*>(nullptr)->forward({}, 0);"),
+    "fwdprefill": ("#include \"model/qwen35/context.h\"  // iso mutant: src/model/qwen35/forward/prefill.cpp (forward.prefill)\n",
+                   "static_cast<whirl::qwen35::Context*>(nullptr)->prefill({}, 0);"),
 }
 ENGINE_H = "server/engine.h"
 # sdkinc NAME -> (environment variables that name the SDK root, default root, include sub folder, the ONE folder of it that
@@ -690,6 +699,11 @@ def selftest():
     case("relative include from include/whirl",relative_engine("include/whirl/model_types.h") == "../../src/server/engine.h")
     case("relative include from src/sampling unchanged", relative_engine("src/sampling/x.cpp") == "../server/engine.h")
     case("relative include from src/server unchanged", relative_engine("src/server/x.cpp") == "../server/engine.h")
+    # arch025-n8b3: the forward-sibling link mutants (per-file forward manifests): a call into run.cpp / prefill.cpp from a file
+    # below them
+    case("call_fwdrun / call_fwdprefill mutants call the Context drivers",
+         "->forward(" in mutate("x", "call_fwdrun", "src/model/qwen35/forward/attn.cpp")
+         and "->prefill(" in mutate("x", "call_fwdprefill", "src/model/qwen35/forward/run.cpp"))
     lines.append(f"iso check selftest: {sum(res)}/{len(res)} as expected")
     return sum(res), len(res), lines
 
