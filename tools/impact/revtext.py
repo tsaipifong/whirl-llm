@@ -34,6 +34,11 @@ rules (JSON; keys starting with "_" are comments, any other unknown key is a rul
                     use it only for code the step writes new, the review reads it (the text is not checked)
         e.g. S6: "added": {"noteSpeNew": {"equals": "stat_spe_new_ += 1;", "sig": "void noteSpeNew()", "why": "the former statement of createSpe"}}
         An in-class entry starts at its first code character (census, rt2), so `is` works on a one-line inline method.
+        rt3: every declaration statement of a tracked class is an entry (census class_decls.tsv): `decl:<name>` a
+        member function declaration without a body (default arguments, virtual / override / const), `member:<name>` a
+        static constexpr data member, `decl:enum:<X>`, `decl:using:<X>`, `decl:fwd:<X>`, `decl:static_assert`; their
+        equals is the whole declaration statement (no sig), like a member's. The sig split is bracket-aware (`n = {}`,
+        `noexcept(T{})`, `: a_{0} {`), and tokens after the body's `}` (other than `;`) fail.
   "allowed_diffs": [{"entry": "<entry>" | ["<entry>", ...], "old": "<token text>", "new": "<token text>", "why": "..."}]
         a difference left after the rules: in each named entry the first whole-token run equal to `new` is put back
         to `old` (once per entry), then the entry is compared again. The entry must be named: "*" or any wildcard is a
@@ -90,7 +95,22 @@ def census(tree, out, cut):
     for l in list(open(md, encoding="utf-8"))[1:]:
         c, n, f, ln, a0, a1 = l.rstrip("\n").split("\t")
         rows.setdefault("member:" + n, []).append((f, int(ln), -1, f"decl {c}::{n} @{a0}:{a1}"))
+    # rt3 (rt2 review act-on 1): every other declaration statement of a tracked class is an entry too - a member function
+    # declaration without a body "decl:<name>" (default arguments, virtual / override / const / = delete), a static
+    # constexpr data member "member:<name>", "decl:enum:<X>", "decl:using:<X>", "decl:fwd:<X>", "decl:static_assert";
+    # they were in no entry (rt2's in-class start dropped even the line before an entry that used to carry them)
+    cd = os.path.join(out, "class_decls.tsv")
+    if not os.path.exists(cd):
+        raise SystemExit(f"revtext: census of {tree} wrote no class_decls.tsv (old census?): FAIL")
+    for l in list(open(cd, encoding="utf-8"))[1:]:
+        c, e, f, ln, a0, a1 = l.rstrip("\n").split("\t")
+        rows.setdefault(e, []).append((f, int(ln), -1, f"decl {c}::{e} @{a0}:{a1}"))
     return rows
+
+
+def is_decl(k):
+    """rt3: entries compared as one whole declaration statement (members, body-less declarations)"""
+    return k.startswith(("member:", "decl:"))
 
 
 def body_text(tree, rows):
@@ -152,9 +172,9 @@ def check_rules(rules):
         if k in ren: raise RulesError(f"{k!r} is in both added and renames")
         # rt2 (S6 review act-on 1): equals on a function compares its body AND its signature (the tokens before the
         # body brace: return type, name, parameters, qualifiers); before, a function's equals was body-only
-        if "sig" in v and not ("equals" in v and not k.startswith("member:")):
+        if "sig" in v and not ("equals" in v and not is_decl(k)):
             raise RulesError(f"added[{k!r}]: sig belongs to a function's equals (is compares all tokens; a member's equals is its whole declaration)")
-        if "equals" in v and not k.startswith("member:") and (not isinstance(v.get("sig"), str) or not tokens(v["sig"])):
+        if "equals" in v and not is_decl(k) and (not isinstance(v.get("sig"), str) or not tokens(v["sig"])):
             raise RulesError(f"added[{k!r}]: a function's equals needs sig (the tokens before the body brace, e.g. 'std::uint64_t speNew() const')")
     for i, ad in enumerate(rules.get("allowed_diffs", [])):
         ents = ad.get("entry")
@@ -211,18 +231,43 @@ def body_tokens(tt, name):
     return None if sb is None else sb[1]
 
 
+def _close(tt, x, op, cl):
+    """index of the token closing the op at tt[x], or None"""
+    d = 0
+    for y in range(x, len(tt)):
+        d += (tt[y] == op) - (tt[y] == cl)
+        if d == 0: return y
+    return None
+
+
 def sig_body(tt, name):
-    """rt2: (the tokens before the body brace = the signature, the tokens inside the body braces) of function `name`"""
+    """rt2: (the signature = the tokens before the body brace, the tokens inside the body braces, the tokens after the
+    body's closing brace) of function `name`, or None.
+    rt3 (rt2 review consider-1): bracket-aware - the parameter list is matched as a whole (`n = {}` defaults), brackets
+    after it are skipped (`noexcept(T{})`, `-> decltype(T{})`), and in a member initializer list a `{` right after a
+    name or `>` is that member's initializer (`X() : a_{0}, b_{1} { body }`), not the body."""
     short = name.split("::")[-1]
     for i in range(len(tt) - 1):
         if tt[i] == short and tt[i + 1] == "(":
-            j = next((x for x in range(i, len(tt)) if tt[x] == "{"), None)
-            if j is None: return None
-            d = 0
-            for x in range(j, len(tt)):
-                d += (tt[x] == "{") - (tt[x] == "}")
-                if d == 0: return tt[:j], tt[j + 1:x]
-            return None
+            x = _close(tt, i + 1, "(", ")")
+            if x is None: return None
+            x += 1; pd = 0; init = False
+            while x < len(tt):
+                t = tt[x]
+                if t in ("(", "["): pd += 1
+                elif t in (")", "]"): pd -= 1
+                elif pd == 0 and t == ":": init = True
+                elif pd == 0 and t == "{":
+                    if init and (re.match(r"\w", tt[x - 1]) or tt[x - 1] == ">"):
+                        y = _close(tt, x, "{", "}")
+                        if y is None: return None
+                        x = y + 1; continue
+                    break
+                x += 1
+            if x >= len(tt): return None
+            e = _close(tt, x, "{", "}")
+            if e is None: return None
+            return tt[:x], tt[x + 1:e], tt[e + 1:]
     return None
 
 
@@ -302,12 +347,14 @@ def run(old, new, rules, cut, work, ro=None):
         parts = [r for r in rn[k] if "in-class initializer" not in r[3]]
         if "is" in spec:
             got, want, what = tt, tokens(spec["is"]), "all tokens"
-        elif k.startswith("member:"):
+        elif is_decl(k):
             got, want, what = tt, tokens(spec["equals"]), "declaration"
         elif len(parts) != 1:
             bad.append(f"ADDED {k}: {len(parts)} census parts (overloads?): use is, not equals"); continue
         else:
             sb = sig_body(tt, k)
+            if sb is not None and sb[2] and sb[2] != [";"]:   # rt3 (consider-1): the body must close the entry
+                bad.append(f"ADDED {k}: tokens after the body: [{' '.join(sb[2][:12])}]"); continue
             if sb is not None and sb[0] != tokens(spec["sig"]):   # rt2: the signature (return type, parameters, const)
                 g, want = sb[0], tokens(spec["sig"])
                 j = next((i for i, (x, y) in enumerate(zip(want, g)) if x != y), min(len(want), len(g)))
