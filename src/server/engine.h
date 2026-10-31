@@ -177,19 +177,6 @@ public:
     Stats statsShared() const override;
 
 private:
-    // the KV pages and checkpoints of the slots: sc_ (arch025-engine S7, module server.slot_cache)
-    // request lifecycle
-    // the prefill phase: pf_ (arch025-engine S12, module server.prefill)
-    // the decode / speculative cycle and its phases: cyc_ (arch025-engine S13, module server.spec_cycle)
-    // runLoop's phases in call order (arch025-E2: extracted verbatim)
-    // host tiers (the spill half, the span lists and the idle / shutdown flush: tb_)
-    // the scheduler's part of a restore (whether the request fits, the slot's pages and phase, startJob); the tier
-    // part is TierBridge's (arch024-S7)
-    // shutdown: tb_.flushOnStop over tierTick, then the tier line
-    // the end of a request: se_ (arch025-engine S11, module server.slot_end)
-    // WDDM-LOG video memory watch: vst_ / vw_ (arch025-engine S9, module server.vram_watch)
-    // v0.2.2.2 memory governor: gst_ / gv_ (arch025-engine S8, module server.governor)
-
     ServerModel& m_;
     device::Backend& ops_;
     const Tokenizer& tok_;
@@ -209,11 +196,6 @@ private:
     // the request queue (arch025-engine S10, module server.job_queue): the former members q_mutex_ .. loop_calls_ and
     // tier_wake_ / wake_seq_, here (where q_mutex_ was) and in that order
     JobQueue jq_{slots_};
-    // the loop / release / tier paths still read and write the queue state under the old names until the scheduler,
-    // slot_end and tier_glue modules take their parts
-    whirl::Mutex& q_mutex_ = jq_.q_mutex_;
-    std::deque<Job*>& queue_ = jq_.queue_;
-    std::uint32_t& n_active_ = jq_.n_active_;
     IdGen ids_;         // response / tool-call ids and default sampling seeds (one stream)
     ResponseCtx rcx_;   // what each slot's StreamState reads (model id, tokenizer, ids_)
     // batch statistics (arch025-N4c: the former stat_t0_ .. stat_dfl_gap_)
@@ -249,39 +231,18 @@ private:
     // vision: image embeddings (cache by content hash), per-slot image maps, idle release; arch025-N4b: the former
     // members vis_cfg_ .. vis_rel_pending_, here (the last members) and in that order
     ImageEmbeddings vis_{m_, ops_};
-    // DFlash2 drafter context of a slot (arch025-engine S4, module server.drafter_ctx): references to bst_, m_, opt_
-    // only; the last member, destroyed first, trivial destructor (DESIGN v3 2.5)
+    // the components (arch025-engine S4-S15b, one module each: drafter_ctx, slot_cache, governor, vram_watch, slot_end,
+    // prefill, spec_cycle, slot_start, tier_glue, scheduler): references only - core.shared members, placed state and
+    // the components declared before them; after vis_ in this order, destroyed first, trivial destructors (DESIGN v3 2.5)
     DrafterCtx dc_{bst_, m_, opt_};
-    // KV pages and checkpoints of the slots (arch025-engine S7, module server.slot_cache): references only - core.shared
-    // ck_ .. tb_, slot_cache's placed state kv_arrays_ / conv_bytes_ / ssm_bytes_ / cnt_ (here, where they were) and
-    // dc_; after dc_, the last member, destroyed first, trivial destructor (DESIGN v3 2.5)
     SlotPages sc_{ck_, m_, ops_, opt_, pool_, ps_, slots_, tb_, kv_arrays_, conv_bytes_, ssm_bytes_, cnt_, dc_};
-    // the memory governor's logic (arch025-engine S8, module server.governor): references only - core.shared ck_ .. vram_probe_,
-    // the governor's placed state vram_others_ / ctx_pub_ (here, where they were), sc_ and gst_'s members; after sc_, the
-    // last member, destroyed first, trivial destructor (DESIGN v3 2.5)
     GovernorGlue gv_{ck_, ctx_, m_, ops_, opt_, owner_, pool_, ps_, slots_, tb_, vram_probe_, vram_others_, ctx_pub_, sc_, gst_};
-    // the video memory watch's logic (arch025-engine S9, module server.vram_watch): references only - core.shared owner_ /
-    // vram_probe_, the governor's placed state vram_others_, gv_ and vst_'s members; after gv_, the last member, destroyed
-    // first, trivial destructor (DESIGN v3 2.5)
     VramWatch vw_{owner_, vram_probe_, vram_others_, gv_, vst_};
-    // the end of a request (arch025-engine S11, module server.slot_end): references only - core.shared members, the
-    // queue state of jq_, sc_, vw_ and the placed state last_reap_; after vw_, the last member, trivial destructor
     SlotEnd se_{m_, ops_, opt_, sb_, sc_, slots_, tb_, vis_, vw_, last_reap_, jq_};
-    // the prefill phase (arch025-engine S12, module server.prefill): references only - core.shared members, n_building_
-    // of jq_, dc_, sc_, se_ and the placed state fl_ / prefill_tok_cum_; after se_, the last member, trivial destructor
     PrefillPhase pf_{m_, ops_, ct_, opt_, spec_, fl_, sb_, slots_, bst_, prefill_tok_cum_, ps_, dc_, sc_, se_, jq_, pool_, rcx_};
-    // the decode / speculative cycle (arch025-engine S13, module server.spec_cycle): references only - core.shared
-    // members, dc_, se_ and the placed state spec_on_ / prefill_tok_cum_; after pf_, the last member, trivial destructor
     SpecCycle cyc_{m_, ops_, ct_, opt_, ctx_, spec_, sb_, spec_on_, slots_, bst_, prefill_tok_cum_, dc_, se_, sc_, vw_};
-    // the start of a request (arch025-engine S14, module server.slot_start): references only - core.shared members, dc_,
-    // sc_, gv_, pf_ and the placed state ids_ / crlf_norm_; after cyc_, the last member, trivial destructor
     SlotStart ss_{m_, ops_, ct_, opt_, ctx_, ck_, spec_, sb_, slots_, ids_, crlf_norm_, pool_, ps_, tb_, vis_, dc_, sc_, gv_, pf_};
-    // the scheduler's side of the host tiers (arch025-engine S15, module server.tier_glue): references only - core.shared
-    // members, the queue state of jq_, dc_, se_ and ss_; after ss_, the last member, trivial destructor
     TierGlue tg_{ops_, opt_, slots_, pool_, ps_, tb_, dc_, se_, ss_, jq_, sc_, gv_};
-    // the scheduler (arch025-engine S15b, module server.scheduler): runLoop and its phases; references only - core.shared
-    // members, the queue state of jq_, every component above and the placed state last_tick_; the last member, trivial
-    // destructor
     Scheduler sch_{m_, opt_, owner_, spec_, slots_, bst_, vram_probe_, pool_, last_tick_, ps_, tb_, vis_, sc_, gv_, vw_, jq_, se_, pf_,
                    cyc_, ss_, tg_};
 };

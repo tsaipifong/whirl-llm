@@ -20,14 +20,17 @@ import sys
 
 # name, source (repo-relative), exact text to find, its replacement, a regex the compiler output of the mutant must match
 MUTATIONS = [
+    # arch025-engine S10 / S10b: stop and runLoopCalls are JobQueue's (engine_queue.cpp); the loop bodies (runLoop,
+    # idleWait) are Scheduler's in engine_sched.cpp (S15b / S16): they lock jq_.q_mutex_ and read the queue state through
+    # references guarded by it, so the compiler names that lock
     ("engine-stop-unlocked", "src/server/engine_queue.cpp",
-     "void Engine::stop() {\n    whirl::MutexLock lk(q_mutex_);\n    stop_ = true;",
-     "void Engine::stop() {\n    stop_ = true;",
+     "void JobQueue::stop() {\n    whirl::MutexLock lk(q_mutex_);\n    stop_ = true;",
+     "void JobQueue::stop() {\n    stop_ = true;",
      r"writing variable 'stop_' requires holding mutex 'q_mutex_'"),
-    ("engine-wait-predicate-unannotated", "src/server/engine.cpp",
-     "[&]() WH_REQUIRES(q_mutex_) { return wake_seq_ != wake_seq0; }",
+    ("engine-wait-predicate-unannotated", "src/server/engine_sched.cpp",
+     "[&]() WH_REQUIRES(jq_.q_mutex_) { return wake_seq_ != wake_seq0; }",
      "[&] { return wake_seq_ != wake_seq0; }",
-     r"reading variable 'wake_seq_' requires holding mutex 'q_mutex_'"),
+     r"reading variable 'wake_seq_' requires holding mutex 'jq_\.q_mutex_'"),
     # arch025-engine S9: health's vram_mu_ lock and reads are VramWatch::vramHealth (engine_vram.cpp, verbatim); vram_last_ /
     # vram_spill_ are VramWatch references guarded by its vram_mu_ reference: the annotation must still bind there
     ("engine-health-vram-unlocked", "src/server/engine_vram.cpp",
@@ -38,14 +41,14 @@ MUTATIONS = [
     # so their bodies are analysed (they were WH_NO_THREAD_SAFETY_ANALYSIS after arch025-E2, where a dropped relock passed;
     # the predicate lambdas are checked either way): a dropped predicate annotation, a dropped relock and an unbalanced
     # runLoopCalls must fail
-    ("engine-idlewait-predicate-unannotated", "src/server/engine.cpp",
-     "[&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });\n        } else {",
+    ("engine-idlewait-predicate-unannotated", "src/server/engine_sched.cpp",
+     "[&]() WH_REQUIRES(jq_.q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });\n        } else {",
      "[&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });\n        } else {",
-     r"reading variable 'queue_' requires holding mutex 'q_mutex_'"),
-    ("engine-idlewait-relock-dropped", "src/server/engine.cpp",
-     "            vram_due = vw_.vramIdleTick();\n            gv_.govApply();\n            WH_RELOCK_HELD(lk, q_mutex_);\n",
+     r"reading variable 'queue_' requires holding mutex 'jq_\.q_mutex_'"),
+    ("engine-idlewait-relock-dropped", "src/server/engine_sched.cpp",
+     "            vram_due = vw_.vramIdleTick();\n            gv_.govApply();\n            WH_RELOCK_HELD(lk, jq_.q_mutex_);\n",
      "            vram_due = vw_.vramIdleTick();\n            gv_.govApply();\n",
-     r"reading variable 'queue_' requires holding mutex 'q_mutex_'"),
+     r"reading variable 'queue_' requires holding mutex 'jq_\.q_mutex_'"),
     ("engine-runloopcalls-relock-dropped", "src/server/engine_queue.cpp",
      "    for (auto& f : calls) f();\n    WH_RELOCK_HELD(lk, q_mutex_);\n",
      "    for (auto& f : calls) f();\n",

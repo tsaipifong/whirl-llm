@@ -107,12 +107,7 @@ void SlotEnd::releaseSlot(Slot& sl) {
     Job* job = sl.job;
     if (!job) return;
     vis_.done(sl.id, job->vis.get());
-    {
-        whirl::MutexLock lk(q_mutex_);
-        job->done = true;
-        n_active_ -= 1;
-        q_cond_.notify_all();
-    }
+    jq_.jqRelease(job);
     sl.job = nullptr;
     sl.phase = Phase::idle;
 }
@@ -144,21 +139,7 @@ void SlotEnd::failSlot(Slot& sl, const std::string& err) {
 void SlotEnd::reapDisconnected() {
     if (msSince(last_reap_) < 50) return;
     last_reap_ = Clock::now();
-    {
-        // queued: dropped without a response (nobody reads it)
-        whirl::MutexLock lk(q_mutex_);
-        for (std::size_t i = 0; i < queue_.size();) {
-            Job* job = queue_[i];
-            if (job->w == nullptr || job->w->alive()) {
-                ++i;
-                continue;
-            }
-            logW("req {} | client disconnected while queued; request dropped", job->id);
-            queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(i));
-            job->done = true;
-            q_cond_.notify_all();
-        }
-    }
+    jq_.jqReap();
     for (Slot& sl : slots_) {
         if (sl.job == nullptr || sl.job->w == nullptr || sl.st.gone) continue;
         if (sl.phase != Phase::prefill && sl.phase != Phase::decode) continue;

@@ -1,8 +1,9 @@
 // Server engine, the request queue (arch025-engine S10, module server.job_queue): the queue state (the former Engine
 // members q_mutex_ .. wake_seq_, in that order) and the methods the connection threads call (submitAndWait,
-// beginBuilding / endBuilding, nextJobId, stop, runOnLoop) plus the loop's runLoopCalls / abortQueued. q_mutex_
-// guards the queue state. Engine keeps references under the old names until the scheduler / slot_end / tier_glue
-// modules take their parts (DESIGN v3 L1).
+// beginBuilding / endBuilding, nextJobId, stop, runOnLoop, jqHealth) plus every write of the queue state by the other
+// modules (S10b: runLoopCalls / abortQueued / jqAdmit / jqTierWakeClear with the caller's lock, jqStartAdmitted /
+// jqRelease / jqReap / jqTierWake take it themselves). q_mutex_ guards the queue state; the scheduler names it
+// jq_.q_mutex_ (DESIGN v3 L1, 4 S10 / S10b).
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
@@ -33,8 +34,18 @@ public:
     void endBuilding();
     void stop();
     void runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout);
+    void jqHealth(EngineApi::Health& h);  // Engine::health: the q_mutex_ lock and the active / queued / slots reads
+
+    // the loop's queue steps (Scheduler, with jq_.q_mutex_ held; arch025-engine S10b, bodies verbatim)
     void runLoopCalls(whirl::UniqueLock& lk) WH_REQUIRES(q_mutex_);
     void abortQueued(whirl::UniqueLock& lk) WH_REQUIRES(q_mutex_);
+    void jqAdmit(std::size_t qi, std::vector<Job*>& admit) WH_REQUIRES(q_mutex_);  // admitQueued: queue_[qi] starts
+    void jqTierWakeClear() WH_REQUIRES(q_mutex_) { tier_wake_ = false; }  // idleWait
+    // the same, taking the lock themselves
+    void jqStartAdmitted(Job* job, std::size_t& n_requeued);  // startAdmitted: back to the queue (item T3)
+    void jqRelease(Job* job);  // releaseSlot: the request is done, one active less
+    void jqReap();             // reapDisconnected: queued requests whose client disconnected are dropped
+    void jqTierWake();         // attachTier: the tier IO thread's wake callback
 
     // the queue state (Engine's loop, release and tier paths read and write it under q_mutex_)
     whirl::Mutex q_mutex_;

@@ -35,7 +35,7 @@ public:
              TierBridge& tb, DrafterCtx& dc, SlotEnd& se, SlotStart& ss, JobQueue& jq, SlotPages& sc,
              GovernorGlue& gv)
         : ops_(ops), opt_(opt), slots_(slots), pool_(pool), ps_(ps), tb_(tb), dc_(dc), se_(se), ss_(ss),
-          q_mutex_(jq.q_mutex_), q_cond_(jq.q_cond_), tier_wake_(jq.tier_wake_), wake_seq_(jq.wake_seq_), sc_(sc), gv_(gv) {}
+          jq_(jq), sc_(sc), gv_(gv) {}
     TierGlue(const TierGlue&) = delete;
     TierGlue& operator=(const TierGlue&) = delete;
 
@@ -63,10 +63,7 @@ private:
     DrafterCtx& dc_;
     SlotEnd& se_;
     SlotStart& ss_;
-    whirl::Mutex& q_mutex_;
-    std::condition_variable& q_cond_;
-    bool& tier_wake_;
-    std::uint64_t& wake_seq_;
+    JobQueue& jq_;  // the tier wake (jqTierWake, arch025-engine S10b)
     SlotPages& sc_;
     GovernorGlue& gv_;
 };

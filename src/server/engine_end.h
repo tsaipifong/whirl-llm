@@ -33,7 +33,7 @@ public:
             std::vector<Slot>& slots, TierBridge& tb, ImageEmbeddings& vis, VramWatch& vw, TimePoint& last_reap,
             JobQueue& jq)
         : m_(m), ops_(ops), opt_(opt), sb_(sb), sc_(sc), slots_(slots), tb_(tb), vis_(vis), vw_(vw),
-          last_reap_(last_reap), q_mutex_(jq.q_mutex_), q_cond_(jq.q_cond_), queue_(jq.queue_), n_active_(jq.n_active_) {}
+          last_reap_(last_reap), jq_(jq) {}
     SlotEnd(const SlotEnd&) = delete;
     SlotEnd& operator=(const SlotEnd&) = delete;
 
@@ -54,10 +54,7 @@ private:
     ImageEmbeddings& vis_;
     VramWatch& vw_;
     TimePoint& last_reap_;
-    whirl::Mutex& q_mutex_;
-    std::condition_variable& q_cond_;
-    std::deque<Job*>& queue_;
-    std::uint32_t& n_active_;
+    JobQueue& jq_;  // the queue's side of a request end (jqRelease / jqReap, arch025-engine S10b)
 };
 
 }  // namespace whirl::server

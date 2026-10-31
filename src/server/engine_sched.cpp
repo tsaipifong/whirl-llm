@@ -71,7 +71,7 @@ void Scheduler::runLoop() {
         std::uint32_t n_busy = 0;
         for (const Slot& sl : slots_)
             if (sl.phase != Phase::idle) ++n_busy;
-        whirl::UniqueLock lk(q_mutex_);
+        whirl::UniqueLock lk(jq_.q_mutex_);
         runLoopCalls(lk);
         if (stop_ && n_busy == 0) {
             abortQueued(lk);
@@ -140,8 +140,8 @@ void Scheduler::runLoop() {
             // burst gather / host-tier restore: poll again in 1 ms, sooner when a
             // request is queued, a connection finishes building one, or the tier
             // IO thread reports progress
-            whirl::UniqueLock lw(q_mutex_);
-            q_cond_.wait_for(lw, std::chrono::milliseconds(1), [&]() WH_REQUIRES(q_mutex_) { return wake_seq_ != wake_seq0; });
+            whirl::UniqueLock lw(jq_.q_mutex_);
+            q_cond_.wait_for(lw, std::chrono::milliseconds(1), [&]() WH_REQUIRES(jq_.q_mutex_) { return wake_seq_ != wake_seq0; });
         }
         if (opt_.loop_log && (!act.empty() || restoring || pf != nullptr)) {
             const TimePoint tl4 = Clock::now();
@@ -161,11 +161,11 @@ void Scheduler::runLoop() {
 // let a dropped relock or a guarded read after the unlock pass; the wait predicates are lambdas, checked either way)
 bool Scheduler::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
     if (was_busy) {
-        WH_UNLOCK_HELD(lk, q_mutex_);
+        WH_UNLOCK_HELD(lk, jq_.q_mutex_);
         logBatchStats(true);
         if (spec_.prof) spec_.prof->print(m_);
         was_busy = false;
-        WH_RELOCK_HELD(lk, q_mutex_);
+        WH_RELOCK_HELD(lk, jq_.q_mutex_);
     }
     // idle: tier background work is polled; otherwise sleep until a
     // request arrives or the tier IO thread wakes us
@@ -177,24 +177,24 @@ bool Scheduler::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
         }
         if (stop_) {
             abortQueued(lk);
-            WH_UNLOCK_HELD(lk, q_mutex_);
+            WH_UNLOCK_HELD(lk, jq_.q_mutex_);
             flushTierOnStop();
-            WH_RELOCK_HELD(lk, q_mutex_);
+            WH_RELOCK_HELD(lk, jq_.q_mutex_);
             runLoopCalls(lk);
             return true;
         }
         // WDDM-LOG: /health "vram" and the spill-over line stay current while idle (one sample a minute)
         std::optional<TimePoint> vram_due;
         if (vram_probe_) {
-            WH_UNLOCK_HELD(lk, q_mutex_);
+            WH_UNLOCK_HELD(lk, jq_.q_mutex_);
             vram_due = vw_.vramIdleTick();
             gv_.govApply();
-            WH_RELOCK_HELD(lk, q_mutex_);
+            WH_RELOCK_HELD(lk, jq_.q_mutex_);
             if (!queue_.empty() || stop_) continue;
         }
         if (tb_.tier() != nullptr) {
             const std::uint64_t seq = wake_seq_;
-            WH_UNLOCK_HELD(lk, q_mutex_);
+            WH_UNLOCK_HELD(lk, jq_.q_mutex_);
             tb_.idlePoll(n_building_.load() > 0);
             const bool busy = tierTick();
             if (busy) logged = false;
@@ -202,13 +202,13 @@ bool Scheduler::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
                 tb_.logStats(pool_.stats().cow_pages, pool_.stats().q_waits);
                 logged = true;
             }
-            WH_RELOCK_HELD(lk, q_mutex_);
+            WH_RELOCK_HELD(lk, jq_.q_mutex_);
             if (busy) {
                 // tier work in flight: polled every 5 ms, but a request (or the
                 // tier IO thread) ends the wait at once (a sleep here delayed a
                 // request by up to one Windows timer tick, 10-16 ms)
                 q_cond_.wait_for(lk, std::chrono::milliseconds(5),
-                                 [&]() WH_REQUIRES(q_mutex_) { return wake_seq_ != seq || !queue_.empty() || stop_ || !loop_calls_.empty(); });
+                                 [&]() WH_REQUIRES(jq_.q_mutex_) { return wake_seq_ != seq || !queue_.empty() || stop_ || !loop_calls_.empty(); });
                 continue;
             }
         }
@@ -216,15 +216,15 @@ bool Scheduler::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
         // (a timed wait on the queue condition, not a sleep: a request that arrives
         // meanwhile starts at once; the prototype slept 100 ms here)
         if (vis_.wakeNeeded()) {
-            WH_UNLOCK_HELD(lk, q_mutex_);
+            WH_UNLOCK_HELD(lk, jq_.q_mutex_);
             vis_.idle();
-            WH_RELOCK_HELD(lk, q_mutex_);
-            tier_wake_ = false;
+            WH_RELOCK_HELD(lk, jq_.q_mutex_);
+            jq_.jqTierWakeClear();
             if (queue_.empty() && !stop_)
-                q_cond_.wait_for(lk, std::chrono::milliseconds(100), [&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
+                q_cond_.wait_for(lk, std::chrono::milliseconds(100), [&]() WH_REQUIRES(jq_.q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
             continue;
         }
-        tier_wake_ = false;
+        jq_.jqTierWakeClear();
         std::optional<std::chrono::steady_clock::time_point> wake;
         if (tb_.tier() != nullptr) wake = tb_.tier()->nextWake();
         if (const auto idle_due = tb_.idleDue(); idle_due && (!wake || *idle_due < *wake)) wake = idle_due;  // TIER-IDLE
@@ -233,9 +233,9 @@ bool Scheduler::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
             // an SSD write is due at a known time, the periodic SSD expiry check, or the idle write: wake
             // then (re-checked every minute)
             const auto due = std::min(*wake + std::chrono::milliseconds(2), std::chrono::steady_clock::now() + std::chrono::seconds(60));
-            q_cond_.wait_until(lk, due, [&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
+            q_cond_.wait_until(lk, due, [&]() WH_REQUIRES(jq_.q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
         } else {
-            q_cond_.wait(lk, [&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
+            q_cond_.wait(lk, [&]() WH_REQUIRES(jq_.q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
         }
     }
     // a request arrived: the idle period ends, an idle write stops starting new entries (TIER-IDLE)
@@ -245,10 +245,10 @@ bool Scheduler::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
     // v0.2.2.2: the governor sees the budget before the first request after an idle period (one probe sample,
     // ~0.3 ms) when the last sample is older than 5 s, so a pool that must shrink does so before the request runs
     if (gv_.govActive() && vram_probe_ && msSince(vw_.vramLastSample()) > 5000.0) {
-        WH_UNLOCK_HELD(lk, q_mutex_);
+        WH_UNLOCK_HELD(lk, jq_.q_mutex_);
         (void)vw_.vramNote();
         gv_.govApply();
-        WH_RELOCK_HELD(lk, q_mutex_);
+        WH_RELOCK_HELD(lk, jq_.q_mutex_);
     }
     return false;
 }
@@ -291,9 +291,7 @@ std::vector<Job*> Scheduler::admitQueued(std::uint32_t n_busy) {
             }
             *pool_avail -= std::min(*pool_avail, need);
         }
-        admit.push_back(queue_[qi]);
-        queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(qi));
-        n_active_ += 1;
+        jq_.jqAdmit(qi, admit);
     }
     return admit;
 }
@@ -304,10 +302,7 @@ void Scheduler::startAdmitted(const std::vector<Job*>& admit) {
         // item T3: admitted together with a request whose restore just
         // started on the same prefix: back to the queue, wait for it
         if (waitsForTier(*job)) {
-            whirl::MutexLock g(q_mutex_);
-            queue_.insert(queue_.begin() + static_cast<std::ptrdiff_t>(n_requeued), job);
-            ++n_requeued;
-            n_active_ -= 1;
+            jq_.jqStartAdmitted(job, n_requeued);
             continue;
         }
         Slot& sl = *ps_.pickSlot(std::span<Slot>(slots_), job->tokens,

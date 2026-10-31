@@ -1,6 +1,7 @@
 // Server engine, the request queue (arch025-N4e, from engine.cpp): stop, the test hook runOnLoop, submitAndWait /
-// endBuilding for the connection threads, abortQueued at shutdown and the disconnected-client reaper. q_mutex_ guards
-// the queue state (engine.h).
+// endBuilding for the connection threads, jqHealth, and the queue steps of the other modules (arch025-engine S10b:
+// runLoopCalls, abortQueued, jqAdmit, jqStartAdmitted, jqRelease, jqReap, jqTierWake). q_mutex_ guards the queue
+// state (engine_queue.h).
 // SPDX-License-Identifier: Apache-2.0
 
 #include "engine.h"
@@ -69,6 +70,69 @@ void JobQueue::runLoopCalls(whirl::UniqueLock& lk) {
     WH_RELOCK_HELD(lk, q_mutex_);
 }
 
+void JobQueue::abortQueued(whirl::UniqueLock& lk) {
+    // shutting down: queued requests are answered 503
+    for (Job* job : queue_) {
+        const std::string r = errorResponse(503, "server is shutting down");
+        if (job->w) {
+            job->w->write(r);
+            job->w->flush();
+        }
+        job->done = true;
+    }
+    queue_.clear();
+    q_cond_.notify_all();
+    (void)lk;
+}
+
+// admitQueued (engine_sched.cpp): queue_[qi] starts this iteration (q_mutex_ held by the caller)
+void JobQueue::jqAdmit(std::size_t qi, std::vector<Job*>& admit) {
+    admit.push_back(queue_[qi]);
+    queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(qi));
+    n_active_ += 1;
+}
+
+// startAdmitted (engine_sched.cpp, item T3): back to the queue, behind the ones requeued before it
+void JobQueue::jqStartAdmitted(Job* job, std::size_t& n_requeued) {
+    whirl::MutexLock g(q_mutex_);
+    queue_.insert(queue_.begin() + static_cast<std::ptrdiff_t>(n_requeued), job);
+    ++n_requeued;
+    n_active_ -= 1;
+}
+
+// releaseSlot (engine_end.cpp): the request is done, one active request less
+void JobQueue::jqRelease(Job* job) {
+    whirl::MutexLock lk(q_mutex_);
+    job->done = true;
+    n_active_ -= 1;
+    q_cond_.notify_all();
+}
+
+// reapDisconnected (engine_end.cpp): queued requests whose client disconnected
+void JobQueue::jqReap() {
+    // queued: dropped without a response (nobody reads it)
+    whirl::MutexLock lk(q_mutex_);
+    for (std::size_t i = 0; i < queue_.size();) {
+        Job* job = queue_[i];
+        if (job->w == nullptr || job->w->alive()) {
+            ++i;
+            continue;
+        }
+        logW("req {} | client disconnected while queued; request dropped", job->id);
+        queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(i));
+        job->done = true;
+        q_cond_.notify_all();
+    }
+}
+
+// attachTier (engine_tier.cpp): the tier IO thread's wake callback
+void JobQueue::jqTierWake() {
+    whirl::MutexLock lk(q_mutex_);
+    tier_wake_ = true;
+    ++wake_seq_;
+    q_cond_.notify_all();
+}
+
 void JobQueue::submitAndWait(Job& job) {
     whirl::UniqueLock lk(q_mutex_);
     if (stop_) {
@@ -97,6 +161,14 @@ void JobQueue::submitAndWait(Job& job) {
     q_cond_.wait(lk, [&] { return job.done; });
 }
 
+// Engine::health: the q_mutex_ lock and the three reads (arch025-engine S16, verbatim from engine.cpp)
+void JobQueue::jqHealth(EngineApi::Health& h) {
+    whirl::MutexLock lk(q_mutex_);
+    h.active = n_active_;
+    h.queued = queue_.size();
+    h.slots = slots_.size();
+}
+
 void JobQueue::endBuilding() {
     // a connection that did not queue a request (bad request, probe): a burst
     // gather waiting for it ends now
@@ -104,21 +176,6 @@ void JobQueue::endBuilding() {
     n_building_.fetch_sub(1);
     ++wake_seq_;
     q_cond_.notify_all();
-}
-
-void JobQueue::abortQueued(whirl::UniqueLock& lk) {
-    // shutting down: queued requests are answered 503
-    for (Job* job : queue_) {
-        const std::string r = errorResponse(503, "server is shutting down");
-        if (job->w) {
-            job->w->write(r);
-            job->w->flush();
-        }
-        job->done = true;
-    }
-    queue_.clear();
-    q_cond_.notify_all();
-    (void)lk;
 }
 
 }  // namespace whirl::server

@@ -178,12 +178,7 @@ EngineFacts Engine::facts() const {
 
 Engine::Health Engine::health() {
     Health h;
-    {
-        whirl::MutexLock lk(q_mutex_);
-        h.active = n_active_;
-        h.queued = queue_.size();
-        h.slots = slots_.size();
-    }
+    jq_.jqHealth(h);
     vw_.vramHealth(h);
     return h;
 }

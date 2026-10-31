@@ -26,12 +26,7 @@ void TierGlue::attachTier(tier::Tier* t) {
     pool_.setQuarantineStream(t ? t->stream() : nullptr);
     ps_.attachTier(t);
     if (t) {
-        t->setWake([this] {
-            whirl::MutexLock lk(q_mutex_);
-            tier_wake_ = true;
-            ++wake_seq_;
-            q_cond_.notify_all();
-        });
+        t->setWake([this] { jq_.jqTierWake(); });
         t->log_fn = [](std::string_view msg) { logI("{}", msg); };
     }
 }
