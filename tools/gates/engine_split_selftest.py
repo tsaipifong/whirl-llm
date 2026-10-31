@@ -47,18 +47,30 @@ BASESNAP = os.path.join(WORK, "ledger", "base")                     # S0c: base 
 # trees before S5 (X13 runs on the leg-1 tree given as the second base).
 EMIT = "bool emit(const chat::ChatTokens& ct_, Slot& sl, std::uint32_t t) {\n"
 EMIT_OLD = "bool Engine::emit(Slot& sl, std::uint32_t t) {\n"
-GOVT = "void Engine::govTick(const wddmwatch::Sample& s) {\n"
+# arch025-engine S8: govTick is GovernorGlue's (engine_gov.cpp); its declaration is in engine_gov.h (EGH)
+GOVT = "void GovernorGlue::govTick(const wddmwatch::Sample& s) {\n"
 GOVT_DECL = "    void govTick(const wddmwatch::Sample& s);   // after each sample: decide (and log the decisions)\n"
 EMIT_DECL = "bool emit(const chat::ChatTokens& ct_, Slot& sl, std::uint32_t t);\n"
 RUNL = "void Engine::runLoop() {\n"
 HOLD = "    bool gov_hold_ = false;"
+# arch025-engine S8: the governor members live in GovState (private, engine_gov.h); the cases that read / write them as
+# Engine data (or anchor on HOLD) get the pre-S8 Engine declarations back, after `GovState gst_;` (where they were):
+# their code text and the name-based rule they test stay as they were. GovState itself cannot be reached from outside
+# server.governor at all (the compiler, DESIGN v3 1.5 A1), so these shapes are now only reachable through a new Engine
+# member of that name - which is what the shadow is.
+GST = "    GovState gst_;\n"
+SHADOW = (GST + "    bool gov_pending_ = false;\n" + HOLD + "\n    std::string gov_warn_;\n    std::string gov_last_;\n"
+          "    std::string gov_json_;\n")
+SHADOW_RX = re.compile(r"\bgov_(?:pending|hold|warn|last|json)_\b")
 EH, EC, EP, EG = "server/engine.h", "server/engine.cpp", "server/engine_pages.cpp", "server/engine_gov.cpp"
+EGH = "server/engine_gov.h"
 EO, EOH = "server/engine_output.cpp", "server/engine_output.h"
 V = r"  <-- VIOLATION"
 SO, SE, SC, GV, SS, JQ = "server.slot_output", "server.slot_end", "server.slot_cache", "server.governor", "server.slot_start", "server.job_queue"
 SPC = "server.spec_cycle"
+ENG = "server.engine"
 
-# arch025-engine-s7st: anchor ROLES. Until S7 about 117 mutants were anchored on the text of `void Engine::dropCache(Slot&
+# arch025-engine-s7st: anchor ROLES. Until S7 96 mutants (+1 new control = 97 cases) were anchored on the text of `void Engine::dropCache(Slot&
 # sl) {` (engine_pages.cpp) or Engine's kvTokBytes (engine.h); S7 moved both into SlotPages and every one ANCHOR FAILed.
 # A mutant edit now names a role (rel "@LOW" ...); the role is looked up in the tree by its census entry (class::function,
 # any server/ file; the inline role by its in-class head) when the mutant is made, and checked once at start (a role that
@@ -73,10 +85,12 @@ SPC = "server.spec_cycle"
 #         and is not their listed outside / shared writer: finishJob (slot_end, layer 5; drafter_ctx (H*) is lower).
 #   @SPD  X1 / X3: the body as SlotPages::dropCache (the class S7 made; the cases test data use by name through an
 #         undeclared gst_ / jq_ in the text census, so they keep that function).
-#   @KC   the header-inline const method (M1 inline data use; E1 / G* pointee writes in a const method): ctxForNew
-#         (governor, layer 3; written members are job_queue's, M1 reads spec_cycle's spec_on_, layer 7).
+#   @KC   a header-inline const method of class Engine (E1 / G* pointee writes in a const method): ctxPublished (core,
+#         server.engine; S16 keeps it as the forwarder). Was ctxForNew until S8 moved it into GovernorGlue. The written
+#         members are job_queue's (rp_ / rh_ / vp_ / queue_), so the writer must not be job_queue. M1 (an inline body
+#         reading a HIGHER module's data) needs a low module and declares its own inline method (m1Peek, job_queue).
 ROLES = {"@LOW": ("Engine", "abortQueued", JQ, "def"), "@WR": ("Engine", "finishJob", SE, "def"),
-         "@SPD": ("SlotPages", "dropCache", SC, "def"), "@KC": ("Engine", "ctxForNew", GV, "inline")}
+         "@SPD": ("SlotPages", "dropCache", SC, "def"), "@KC": ("Engine", "ctxPublished", ENG, "inline")}
 LOW, WRR, SPD, KC = "@LOW", "@WR", "@SPD", "@KC"
 A = "@A@"   # in an edit's new text: the role's anchor (its definition head line / the inline head up to '{ ')
 LF, WF, KF = ROLES[LOW][1], ROLES[WRR][1], ROLES[KC][1]
@@ -92,13 +106,21 @@ def find_role(srcdir, role):
         rx = re.compile(r"^[^\n;{}]*\b" + re.escape(cls) + "::" + re.escape(fn) + r"\([^\n;]*\)[^\n;]*\{\n", re.M)
         exts = (".cpp",)
     else:
-        rx = re.compile(r"^[ \t]+[\w:<>, ]+[ \t]+" + re.escape(fn) + r"\(\)[ \t]*const[ \t]*\{ ", re.M)
+        # S8 (S7st review consider-1): only inside the body of `class <cls>` / `struct <cls>`; `&` return types, `override`
+        rx = re.compile(r"^[ \t]+[\w:<>,& ]+[ \t&]" + re.escape(fn) + r"\(\)[ \t]*const[ \t]*(?:override[ \t]*)?\{ ", re.M)
         exts = (".h",)
     hits = []
     for f in sorted(os.listdir(sd)) if os.path.isdir(sd) else []:
         if f.endswith(exts):
             s = open(os.path.join(sd, f), encoding="utf-8").read()
-            hits += [("server/" + f, m.group(0)) for m in rx.finditer(s)]
+            if kind == "def":
+                hits += [("server/" + f, m.group(0)) for m in rx.finditer(s)]
+                continue
+            for cm in re.finditer(r"^(?:class|struct) " + re.escape(cls) + r"\b[^;{]*\{", s, re.M):
+                i, depth = cm.end(), 1
+                while depth and i < len(s):
+                    depth += {"{": 1, "}": -1}.get(s[i], 0); i += 1
+                hits += [("server/" + f, m.group(0)) for m in rx.finditer(s, cm.end(), i)]
     if len(hits) != 1 or open(os.path.join(srcdir, hits[0][0]), encoding="utf-8").read().count(hits[0][1]) != 1:
         return None, f"{len(hits)} definitions of {cls}::{fn} ({kind}) in {sd}"
     return hits[0]
@@ -110,6 +132,21 @@ def check_roles(srcdir, cut):
         rel, a = find_role(srcdir, role)
         if rel is None: bad.append(f"{role} {cls}::{fn}: {a}")
         elif fn not in cut["modules"].get(mod, {}).get("funcs", []): bad.append(f"{role} {cls}::{fn}: not in {mod}.funcs of the cut")
+    # S8 (S7st review consider-2): the premises the ROLES comment states, read from the cut
+    lay = {m: v.get("layer", 99) for m, v in cut["modules"].items()}
+    ow_ = set(cut["outside_writers"]["now"]) | set(cut["outside_writers"]["leg_end"])
+    sw_ = {w for k in ("now", "leg_end") for m, ws in cut["shared_writers"][k].items() for w in ws if m in ("bst_", "ps_", "opt_", "slots_")}
+    if not all(lay[ROLES[LOW][2]] < lay[m] for m in (GV, SC, SE, SS, SPC) if m in lay):
+        bad.append(f"{LOW}: {ROLES[LOW][2]} is not below every target module of its cases")
+    wf, wm = ROLES[WRR][1], ROLES[WRR][2]
+    for m in ("stop_", "queue_", "n_active_", "rp_", "dc_", "gov_pending_"):
+        if f"{wf}:{m}" in ow_: bad.append(f"{WRR} {wf}: listed outside writer of {m}")
+    if wf in sw_: bad.append(f"{WRR} {wf}: listed shared writer of bst_ / ps_ / opt_ / slots_")
+    if not lay[wm] > lay["server.drafter_ctx"]: bad.append(f"{WRR} {wf}: {wm} is not above server.drafter_ctx")
+    kf, km = ROLES[KC][1], ROLES[KC][2]
+    if km == JQ: bad.append(f"{KC} {kf}: job_queue owns the members its cases write")
+    for m in ("rp_", "rh_", "vp_", "queue_"):
+        if f"{kf}:{m}" in ow_: bad.append(f"{KC} {kf}: listed outside writer of {m}")
     return bad
 
 
@@ -179,15 +216,15 @@ CLANG_ERR_OK = {
     "M3": "Engine::vramNote2 defined, not declared (tests unassigned entries / engine files)",
     "N7": "SlotOutput::emit of an undeclared class (tests unassigned entries, text census)",
     "N7b": "SlotOutput::emit of an undeclared class (tests aliases / unassigned)",
-    "N8": "GovernorGlue::tick of an undeclared class (tests the call graph govTick -> startJob, text census)",
+    "N8": "GovernorGlue::tick, not declared in GovernorGlue (S8 made the class; tests the call graph govTick -> startJob, text census)",
     "U4": "sl.job->stats() - Job has no stats() (tests the unresolved-call finding, a text rule)",
     "X1": "SlotPages::dropCache reads an undeclared gst_ (s7st: the real SlotPages of S7; tests data use by name, text census)",
-    "X2": "GovernorGlue::tick of an undeclared class (tests the call graph, text census)",
+    "X2": "GovernorGlue::tick, not declared in GovernorGlue, ss_ undeclared (S8 made the class; tests the call graph, text census)",
     "X3": "SlotPages::dropCache writes an undeclared jq_ (s7st: the real SlotPages of S7; tests jq_.stop_ by name, text census)",
     "X4": "Helper::emit of an undeclared class (tests unassigned)",
-    "X9": "GovState undeclared in a new file (tests the engine-header user finding)",
-    "X9b": "GovState undeclared in a new file (tests unassigned)",
-    "X9c": "GovState undeclared in a new file (tests data use by name, text census)",
+    "X9": "GovState's gov_hold_ is private (S8; before: GovState undeclared) in a new file (tests the engine-header user finding)",
+    "X9b": "GovState's gov_hold_ is private (S8; before: undeclared) in a new file (tests unassigned)",
+    "X9c": "GovState's gov_hold_ is private (S8; before: undeclared) in a new file (tests data use by name, text census)",
 }
 
 
@@ -255,12 +292,11 @@ def _OWSW(fd):
 
 _F2 = "{ const std::string s = std::format(\"{}\", gov_last_); (void)s; }"
 
-ENG = "server.engine"
 # (id, what, edits [(rel, old|None|"APPEND", new)], cut_edit(dict)->None or None, extra graph args, expected regex, base index)
 MUT = [
-    ("M1", "inline body in engine.h (s7st: ctxForNew, governor) reads a higher module's data (spec_cycle's spec_on_; was kvTokBytes / gov_hold_)",
-     [(KC, None, A + "if (spec_on_) {} ")],
-     None, [], viol(ROLES[KC][2], SPC, "data", KF + ":spec_on_")),
+    ("M1", "inline body in engine.h reads a higher module's data: m1Peek (job_queue, S8; was ctxForNew / kvTokBytes) reads spec_cycle's spec_on_",
+     [(EH, GST, GST + "    bool m1Peek() const { if (spec_on_) {} return false; }\n")],
+     lambda c: c["modules"][JQ]["funcs"].append("m1Peek"), ["--no-pin"], viol(JQ, SPC, "data", "m1Peek:spec_on_")),
     ("M2", "constructor body writes governor data", [(EC, "    fl_.epoch = Clock::now();\n", "    fl_.epoch = Clock::now();\n    gov_pending_ = true;\n")],
      None, [], ow("Engine:gov_pending_")),
     ("M3", "a definition in a file not named engine_*", [("server/vram_watch.cpp", None, '#include "engine.h"\nnamespace whirl::server {\nvoid Engine::vramNote2() { gov_warn_.clear(); }\n}\n')],
@@ -282,10 +318,10 @@ MUT = [
     ("N7b", "N7 with the cut 'fixed': SlotOutput::emit added to slot_output (alias -> emit): the upward call still fails",
      [(EO, EMIT, "bool SlotOutput::emit(Slot& sl, std::uint32_t t) {\n    if (t == 1u) finishJob(sl);\n"), (EOH, EMIT_DECL, "")],
      lambda c: c["aliases"].update({"SlotOutput::emit": "emit"}), ["--no-pin"], viol(SO, SE, "call", "emit->finishJob")),
-    ("N8", "govTick becomes GovernorGlue::tick and calls startJob", [(EG, GOVT, "void GovernorGlue::tick(const wddmwatch::Sample& s) {\n    (void)startJob(*slots_.data(), *slots_[0].job);\n"), (EH, GOVT_DECL, "")],
+    ("N8", "govTick becomes GovernorGlue::tick and calls startJob", [(EG, GOVT, "void GovernorGlue::tick(const wddmwatch::Sample& s) {\n    (void)startJob(*slots_.data(), *slots_[0].job);\n"), (EGH, GOVT_DECL, "")],
      None, [], viol(GV, SS, "call", "govTick->startJob")),
     ("X1", "SlotPages::dropCache reads gst_.gov_hold_", [(SPD, None, A + "    if (gst_.gov_hold_) return;\n")], None, [], viol(SC, GV, "data", "dropCache:gov_hold_")),
-    ("X2", "GovernorGlue::tick calls ss_.startJob", [(EG, GOVT, "void GovernorGlue::tick(const wddmwatch::Sample& s) {\n    (void)ss_.startJob(*slots_.data(), *slots_[0].job);\n"), (EH, GOVT_DECL, "")], None, [], viol(GV, SS, "call", "govTick->startJob")),
+    ("X2", "GovernorGlue::tick calls ss_.startJob", [(EG, GOVT, "void GovernorGlue::tick(const wddmwatch::Sample& s) {\n    (void)ss_.startJob(*slots_.data(), *slots_[0].job);\n"), (EGH, GOVT_DECL, "")], None, [], viol(GV, SS, "call", "govTick->startJob")),
     ("X3", "SlotPages::dropCache writes jq_.stop_", [(SPD, None, A + "    jq_.stop_ = true;\n")], None, [], ow("dropCache:stop_")),
     ("X4", "body moves to an undeclared class Helper::emit", [(EO, EMIT, "bool Helper::emit(Slot& sl, std::uint32_t t) {\n"), (EOH, EMIT_DECL, "")], None, [], unas("Helper::emit")),
     ("X5", "finishJob writes bst_ (core.shared)", [(WRR, None, A + "    bst_ = BatchStats{};\n")], None, [], sw(WF + ":bst_")),
@@ -497,6 +533,15 @@ MUT = [
     ("F9", "read: by-value auto accessor const auto h = holdVal()",
      [(EH, HOLD, HOLD + "\n    auto holdVal() { return gov_hold_; }"), (EC, RUNL, RUNL + "    { const auto h = holdVal(); (void)h; }\n")],
      lambda c: c["new_funcs"].update({"holdVal": GV}), ["--no-pin"], r"(?#OK)^engine split check: ok"),
+    # arch025-engine S8: the census friend rule (a friend in a tracked class is a finding unless it names a tracked class of
+    # the same module: GovState -> GovernorGlue, both server.governor)
+    ("FR1", "S8: GovState befriends SlotPages (another module, server.slot_cache): a finding",
+     [(EGH, "    friend class GovernorGlue;  // server.governor's own logic (DESIGN v3 1.5 A1: no other class reaches these)\n", "    friend class GovernorGlue;  // server.governor's own logic (DESIGN v3 1.5 A1: no other class reaches these)\n    friend class SlotPages;\n")], None, [], fnd("friend in tracked class GovState")),
+    ("FR2", "S8: GovState befriends a function: a finding",
+     [(EGH, "    friend class GovernorGlue;  // server.governor's own logic (DESIGN v3 1.5 A1: no other class reaches these)\n", "    friend class GovernorGlue;  // server.governor's own logic (DESIGN v3 1.5 A1: no other class reaches these)\n    friend bool peekGov(const GovState& g);\n")], None, [], fnd("friend in tracked class GovState")),
+    ("FR3", "S8: GovernorGlue (same module) befriends Engine: a finding",
+     [(EGH, "    GovernorGlue(const GovernorGlue&) = delete;\n", "    friend class Engine;\n    GovernorGlue(const GovernorGlue&) = delete;\n")], None, [],
+     fnd("friend in tracked class GovernorGlue")),
     # S0d's own probes
     ("D1", "S0d: a new std::function member (governor data) called in runLoop, not in callable_reads: a write",
      [(EH, HOLD, HOLD + "\n    std::function<void()> on_gov_;"), (EC, RUNL, RUNL + "    if (on_gov_) on_gov_();\n")],
@@ -538,7 +583,7 @@ MUT = [
      ["--no-pin"], fnd("cut text_write_ok entry no longer occurs (remove it): runLoop:stop_")),
     # --- S0e review (progress/arch025-engine.S0e.REVIEW.md act-on 1, consider 1 / 3; reviewer runner
     # scratch/a25_engine/s0e_review/runner/r_mut.py): pointee writes through a pointer member in a const method ---
-    ("E1", "pointer member rp_ (job_queue data), pointee written in the const method ctxForNew (slot_cache)",
+    ("E1", "pointer member rp_ (job_queue data), pointee written in the const inline method @KC (S8: ctxPublished, server.engine; was ctxForNew, governor)",
      [(EH, HOLD, HOLD + "\n    int* rp_ = nullptr;"), (KC, None, A + "*rp_ = 1; ")],
      lambda c: c["modules"][JQ]["data"].append("rp_"), ["--no-pin"], ow(KF + ":rp_")),
     ("E1c", "control: the same pointee write in the non-const finishJob",
@@ -611,10 +656,10 @@ MUT = [
 # s7st: the ids N1-N8 exist twice (review2 and the S0b review); both ran in WORK/<id> at the same time (S7 run: N3 CRASH,
 # its directory removed under it). The second case of an id gets its own directory WORK/<id>_2 (ids unchanged).
 _SEEN = {}
-WDIR = {}
+WDIRS = []   # S8: by MUT index (was a dict keyed by id(tuple), S7st review consider-3)
 for _m in MUT:
     _SEEN[_m[0]] = _SEEN.get(_m[0], 0) + 1
-    WDIR[id(_m)] = _m[0] + ("" if _SEEN[_m[0]] == 1 else f"_{_SEEN[_m[0]]}")
+    WDIRS.append(_m[0] + ("" if _SEEN[_m[0]] == 1 else f"_{_SEEN[_m[0]]}"))
 TOOL_PATHS = {"e8_judge.py": "bench/e8_judge.py", "abjudge.py": "bench/abjudge.py", "revtext.py": "impact/revtext.py"}
 
 
@@ -623,13 +668,17 @@ def run(cmd):
     return r.returncode, (r.stdout + r.stderr)
 
 
-def one(item):
+def one(job):
+    wdir, item = job   # S8 (S7st review consider-3): the work directory comes with the case (MUT index), not id(item)
     mid, what, edits, cut_edit, gargs, expect = item[:6]
     bi = item[6] if len(item) > 6 else 0
     if bi >= len(bases):
         return mid, "SKIP", f"{mid} {what}\n   needs --base #{bi + 1} -> SKIPPED (not counted)"
     base = bases[bi]
-    d = os.path.join(WORK, WDIR.get(id(item), mid))
+    if any(rel == EH and old == HOLD for rel, old, _ in edits) or any(SHADOW_RX.search(new or "") for _, _, new in edits):
+        edits = [(EH, GST, SHADOW)] + list(edits)   # S8: the pre-S8 Engine governor members (SHADOW above)
+    if wdir != mid: what = f"{what} [work dir {wdir}]"
+    d = os.path.join(WORK, wdir)
     if os.path.isdir(d): shutil.rmtree(d)
     os.makedirs(d)
     for sub in ("src", "include"):
@@ -831,7 +880,7 @@ def main():
         ok = rc == 0 and "engine split check: ok" in out
         res.append((f"B{i}", "PASS" if ok else "FAIL", f"B{i} baseline {b}\n   rc={rc}: {out.strip().splitlines()[-1] if out.strip() else ''} -> {'PASS' if ok else 'FAIL (false positive)'}"))
     with ThreadPoolExecutor(JOBS) as ex:
-        res += list(ex.map(one, [m for m in MUT if not ONLY or m[0] in ONLY]))
+        res += list(ex.map(one, [(w, m) for w, m in zip(WDIRS, MUT) if not ONLY or m[0] in ONLY]))
     res += [g for g in git_cases(sha) if not ONLY or g[0] in ONLY]
     # S0e: the AST rules' unit self-test (S0d review probes on a synthetic TU: act-on 1, 3, 4, consider 1, 2, 5)
     rc, out = (0, "") if ONLY and "A1" not in ONLY else run([PY, "-I", os.path.join(HERE, "engine_split_ast.py"), "--selftest"])

@@ -292,7 +292,7 @@ AddStep "cpu_step_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $r
 #   cpu_analyze  full MSVC /analyze rebuild; no warning beyond tools/safety/analyze_baseline.txt, every baseline key with file:line
 #                + reason (analyze_whitelist.tsv), the analyze_fault.bat proof (clean PASS, planted NEW, same key NEW x1)
 #   cpu_tsa      (Q4) clang-cl -Wthread-safety -Werror=thread-safety build of whirl_server_core + whirl_tier_core (build-tsa,
-#                include/whirl/thread_annotations.h) clean, and each of the 7 lock removals of tools/safety/tsa/tsa_check.py must
+#                include/whirl/thread_annotations.h) clean, and each of the 9 lock removals of tools/safety/tsa/tsa_check.py must
 #                fail it (a few minutes; needs the HIP SDK clang-cl, no GPU)
 # They reuse the HIP code objects of -Build (same tree) for a new build directory. WHIRL_GATE_QUIET_WAIT: a local script that
 # waits while a GPU measurement holds the machine (passed on as WHIRL_QUIET_WAIT; build_cfg.bat runs it before compiling).

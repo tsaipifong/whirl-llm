@@ -159,7 +159,10 @@
     "govPublish",
     "governorJson",
     "ctxForNew",
-    "monoS"
+    "monoS",
+    "GovState",
+    "GovernorGlue",
+    "govHolding"
    ],
    "data": [
     "gov_",
@@ -197,7 +200,8 @@
     "slots_",
     "tb_",
     "vram_probe_"
-   ]
+   ],
+   "_doc_s8": "S8 (arch025-engine-s8, 2026-10-31): class GovState (src/server/engine_gov.h; the former Engine members gov_ .. gov_json_ verbatim + the new gov_mu_; private, `friend class GovernorGlue` = the same module, the census friend rule allows only that) and class GovernorGlue (the functions of this module, engine_gov.cpp bodies verbatim; ctxForNew and the accessors govActive / govReduced / govHolding / govSetWarn / govCtxPublished / govPublishCtx header-inline). GovernorGlue holds references only, private, under the members' names: refs (core.shared), vram_others_ / ctx_pub_ (placed, Engine keeps them where they were), sc_ (server.slot_cache) and gst_'s members, bound in its constructor (entry GovernorGlue; GovState's entry = its in-class initializers). govHolding is new here (admitQueued read gov_hold_; no planned row named it); the planned rows govActive / govSetWarn / govReduced / govCtxPublished / govPublishCtx stay in new_funcs (realized, as Engine.initPool after S7; listing them in funcs as well would count them twice). F14: gov_json_ is guarded by gov_mu_."
   },
   "server.vram_watch": {
    "layer": 4,
@@ -533,7 +537,13 @@
   "speEvict",
   "unshares",
   "evictions",
-  "cacheCounters"
+  "cacheCounters",
+  "govActive",
+  "govReduced",
+  "govHolding",
+  "govSetWarn",
+  "govCtxPublished",
+  "govPublishCtx"
  ],
  "_doc_header_inline": "functions that stay inline in their module's header (they are inline today: engine.h, or inlined in their callers' TU in the c1ca7ce objects, inline_check.py)",
  "rewrites": {
@@ -572,8 +582,10 @@
    "Engine:ctx_pub_",
    "Engine:dc_",
    "Engine:fl_",
+   "Engine:gst_",
    "Engine:ids_",
    "Engine:kv_arrays_",
+   "Engine:sc_",
    "Engine:ssm_bytes_",
    "admitQueued:n_active_",
    "admitQueued:queue_",
@@ -594,13 +606,11 @@
    "releaseSlot:n_active_",
    "releaseSlot:q_cond_",
    "runLoop:q_cond_",
-   "setCtx:ctx_pub_",
    "setVramProbe:vram_others_",
    "startAdmitted:n_active_",
    "startAdmitted:queue_",
    "startJob:sc_",
-   "tryRestore:sc_",
-   "vramNote:gov_warn_"
+   "tryRestore:sc_"
   ],
   "leg_end": [
    "Engine:cnt_",
@@ -609,8 +619,10 @@
    "Engine:ctx_pub_",
    "Engine:dc_",
    "Engine:fl_",
+   "Engine:gst_",
    "Engine:ids_",
    "Engine:kv_arrays_",
+   "Engine:sc_",
    "Engine:ssm_bytes_",
    "allocState:spec_on_",
    "dropOutOfRoom:sc_",
@@ -624,7 +636,8 @@
   "_doc_s0": "S0 re-measure (A1): now adds the lock-protocol writes (q_cond_.notify_all / wait_for, q_mutex_ through WH_UNLOCK_HELD) outside job_queue; leg_end is unchanged: they move behind JobQueue methods (review3 C3, leg 3 design)",
   "_doc_s0d": "S0d (AST census): Engine:ids_ - the constructor's rcx_{opt_.model_name, tok_, ids_} binds ResponseCtx's IdGen& (an aggregate reference member, S0c review R10 shape); present at c1ca7ce too",
   "_doc_s4": "S4 (arch025-engine-s4, 2026-10-30) listed 7 `<entry>:dc_` rows here (calls of DrafterCtx's non-const methods dflReset / dflIngest on the holder dc_). The s0b merge (main session, 2026-10-31) removed them: the N4-emut2 census counts a non-const call h.f( on a cut holder whose methods use only their own members through this-> as a call edge (census holder_call), not a write of the holder; what the methods write (m_, bst_) stays under shared_writers. engine.h `DrafterCtx dc_{bst_, m_, opt_}` binds bst_ to a BatchStats& member, so Engine is a writer of bst_ (shared_writers now / leg_end; both analyzers, progress/arch025-engine.emut2.REVIEW.md:14)",
-  "_doc_s7": "S7 (arch025-engine-s7, 2026-10-31): (a) Engine:cnt_ / Engine:dc_ / Engine:kv_arrays_ - engine.h `SlotPages sc_{ck_, m_, ops_, opt_, pool_, ps_, slots_, tb_, kv_arrays_, conv_bytes_, ssm_bytes_, cnt_, dc_}` binds SlotPages's non-const reference members to slot_cache's placed state and to the drafter context (the constructor is the assembly point, DESIGN v3 2.6 rule A; the Engine:ids_ shape of rcx_). (b) <entry>:sc_ - the calls sc_.ensurePages (dropOutOfRoom engine_decode.cpp:135, prefillStep engine_prefill.cpp:68, prefillGroup :132, finishPrefill :218, tryRestore engine_tier.cpp:95) and sc_.cowPages (startJob engine.cpp:296, finishPrefill engine_prefill.cpp:217): their bodies build `SlotEvictor ev(*this, ...)` (PagePool's evictor calls back evictFor during the call), so the census holder_call rule (3) keeps the call a write of the holder; SlotPages owns no data (references only), what it writes through them is under shared_writers / its own data. They stay at leg end (the callers are those components' entries)."
+  "_doc_s7": "S7 (arch025-engine-s7, 2026-10-31): (a) Engine:cnt_ / Engine:dc_ / Engine:kv_arrays_ - engine.h `SlotPages sc_{ck_, m_, ops_, opt_, pool_, ps_, slots_, tb_, kv_arrays_, conv_bytes_, ssm_bytes_, cnt_, dc_}` binds SlotPages's non-const reference members to slot_cache's placed state and to the drafter context (the constructor is the assembly point, DESIGN v3 2.6 rule A; the Engine:ids_ shape of rcx_). (b) <entry>:sc_ - the calls sc_.ensurePages (dropOutOfRoom engine_decode.cpp:135, prefillStep engine_prefill.cpp:68, prefillGroup :132, finishPrefill :218, tryRestore engine_tier.cpp:95) and sc_.cowPages (startJob engine.cpp:296, finishPrefill engine_prefill.cpp:217): their bodies build `SlotEvictor ev(*this, ...)` (PagePool's evictor calls back evictFor during the call), so the census holder_call rule (3) keeps the call a write of the holder; SlotPages owns no data (references only), what it writes through them is under shared_writers / its own data. They stay at leg end (the callers are those components' entries).",
+  "_doc_s8": "S8 (arch025-engine-s8, 2026-10-31): Engine:gst_ / Engine:sc_ - engine.h `GovernorGlue gv_{ck_, ctx_, m_, ops_, opt_, owner_, pool_, ps_, slots_, tb_, vram_probe_, vram_others_, ctx_pub_, sc_, gst_}` binds GovernorGlue's constructor parameters GovState& / SlotPages& (the constructor is the assembly point, DESIGN v3 2.6 rule A; the S7 Engine:cnt_ / dc_ shape). Removed from now (the writes are gone, DESIGN v3 2.6): setCtx:ctx_pub_ (setCtx calls gv_.govPublishCtx) and vramNote:gov_warn_ (vramNote calls gv_.govSetWarn; DESIGN planned it for S9, S8 has to: gov_warn_ is private in GovState)."
  },
  "engine_members_final": [
   "m_",
@@ -1284,26 +1297,12 @@
    "class": "d non-const operator-> overload, const methods called",
    "reason": "gov_ (std::optional / unique_ptr of MemGovernor): operator-> on a non-const object, then only const methods (reduced(), config(), shrinks(), grows(), ctxNew()) (Python: 'handle to const'); engine_gov.cpp:58-69, 337-365, engine_vram.cpp:86"
   },
-  "govPublish:vram_mu_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(vram_mu_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
-  },
   "govTick:gov_ram_mb_": {
    "clang_why": [
     "write: CallExpr `logI(\"memory governor: RAM tier kept at {} MiB (untouched: it is pinned system RAM, not VRAM, and do...`"
    ],
    "class": "d log.h formatter",
    "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
-  },
-  "governorJson:vram_mu_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(vram_mu_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
   },
   "health:q_mutex_": {
    "clang_why": [
@@ -1434,13 +1433,6 @@
    "class": "d copied into std::optional",
    "reason": "engine_vram.cpp:95 return vram_idle_next_; the return type is std::optional<time_point> by value (Python: 'copied into std::optional'); the analyzer counts the converting constructor's const& as a non-const reference"
   },
-  "vramNote:gov_": {
-   "clang_why": [
-    "write: CXXOperatorCallExpr `gov_->`"
-   ],
-   "class": "d non-const operator-> overload, const methods called",
-   "reason": "gov_ (std::optional / unique_ptr of MemGovernor): operator-> on a non-const object, then only const methods (reduced(), config(), shrinks(), grows(), ctxNew()) (Python: 'handle to const'); engine_gov.cpp:58-69, 337-365, engine_vram.cpp:86"
-  },
   "vramNote:vram_mu_": {
    "clang_why": [
     "write: CXXConstructExpr `lk(vram_mu_)`"
@@ -1454,6 +1446,20 @@
    ],
    "class": "d non-const overload, result only read",
    "reason": "engine_pages.cpp:322 `for (const Spe& s : ps_.spes()) own(s.pages);` in the const SlotPages::poolAvailable: ps_ is now PrefixStore& (S7), so the non-const spes() overload (prefix_store.h:151) is picked; the result is bound to const Spe& and only read (Python: read). Until S7 the const Engine method picked the const overload (prefix_store.h:152); both return spes_."
+  },
+  "govPublish:gov_mu_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(gov_mu_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF); S8 (F14): the lock is gov_mu_, GovState's own (was vram_mu_)"
+  },
+  "govFreeable:ps_": {
+   "clang_why": [
+    "write: CXXMemberCallExpr `ps_.spes()`"
+   ],
+   "class": "d non-const overload, result only read",
+   "reason": "engine_gov.cpp:89 `b += ps_.spes().size() * ck_.bytes(false);` in the const GovernorGlue::govFreeable: ps_ is now PrefixStore& (S8), so the non-const spes() overload (prefix_store.h:151) is picked; only size() is read (Python: read). Until S8 the const Engine method picked the const overload (prefix_store.h:152); the S7 poolAvailable:ps_ shape."
   }
  }
 }

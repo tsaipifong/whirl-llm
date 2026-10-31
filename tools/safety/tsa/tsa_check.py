@@ -41,13 +41,23 @@ MUTATIONS = [
      "[&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });\n        } else {",
      r"reading variable 'queue_' requires holding mutex 'q_mutex_'"),
     ("engine-idlewait-relock-dropped", "src/server/engine.cpp",
-     "            vram_due = vramIdleTick();\n            govApply();\n            WH_RELOCK_HELD(lk, q_mutex_);\n",
-     "            vram_due = vramIdleTick();\n            govApply();\n",
+     "            vram_due = vramIdleTick();\n            gv_.govApply();\n            WH_RELOCK_HELD(lk, q_mutex_);\n",
+     "            vram_due = vramIdleTick();\n            gv_.govApply();\n",
      r"reading variable 'queue_' requires holding mutex 'q_mutex_'"),
     ("engine-runloopcalls-relock-dropped", "src/server/engine_queue.cpp",
      "    for (auto& f : calls) f();\n    WH_RELOCK_HELD(lk, q_mutex_);\n",
      "    for (auto& f : calls) f();\n",
      r"mutex 'q_mutex_' (is not held on every path|to be held at the end of function)"),
+    # arch025-engine S8 (F14): gov_json_ is guarded by GovState's own gov_mu_ (was vram_mu_); GovernorGlue reaches both through
+    # references under the same names (engine_gov.h), and the annotation must still bind there: removing either lock fails
+    ("gov-json-unlocked", "src/server/engine_gov.cpp",
+     "    whirl::MutexLock lk(gov_mu_);\n    return gov_json_;\n",
+     "    return gov_json_;\n",
+     r"reading variable 'gov_json_' requires holding mutex 'gov_mu_'"),
+    ("gov-publish-unlocked", "src/server/engine_gov.cpp",
+     "    whirl::MutexLock lk(gov_mu_);\n    gov_json_ = memgov::statusJson(st);\n",
+     "    gov_json_ = memgov::statusJson(st);\n",
+     r"writing variable 'gov_json_' requires holding mutex 'gov_mu_'"),
     # not Tier::submit: clang's analysis does not see the access in `(c ? q_reads_ : q_writes_).push_back(j)` (a guarded member
     # reached through ?: is not checked; arch025-Q4 HANDOFF "known gaps"), so removing that lock is not caught
     ("tier-pendingread-unlocked", "src/tier/kv_tier.cpp",

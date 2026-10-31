@@ -278,8 +278,9 @@ def selftest(root, groups, want, pin, origin, work):
     else:
         cases.append(("tb_ / ck_ anchors missing", False, ""))
     for old, new, nm in (("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", "vram_idle_s_"),
-                         ("    bool gov_hold_ = false;", "    bool gov_hold_ = true;", "gov_hold_"),
-                         ("    std::uint32_t ctx_new_ = 0xffffffffu;", "    std::uint16_t ctx_new_ = 0xffffu;", "ctx_new_")):
+                         # S8 moved gov_hold_ / ctx_new_ into GovState: the same two shapes (value, type) on Engine members
+                         ("    bool vram_warn_ = false;", "    bool vram_warn_ = true;", "vram_warn_"),
+                         ("    bool spec_on_ = false;", "    int spec_on_ = 0;", "spec_on_")):
         if eh.count(old) == 1:
             case(f"in-class declaration changed ({old.strip()} -> {new.strip()}), names / order unchanged: fails",
                  eh.replace(old, new, 1), 1, r"^member order: NO AUDIT ROW for " + nm + r" \(declaration changed")

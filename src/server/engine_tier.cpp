@@ -81,7 +81,7 @@ bool Engine::tryRestore(Slot& sl, Job& job) {
     if (!job.params.cache_prompt || opt_.no_prefix_cache) return false;
     const std::span<const std::uint32_t> toks = job.tokens;
     const std::uint32_t nd_max = dc_.draftRoom();
-    if (toks.size() + nd_max + 2 >= ctxForNew() || toks.size() + nd_max + 2 >= static_cast<std::uint64_t>(pool_.pages()) * kv_page)
+    if (toks.size() + nd_max + 2 >= gv_.ctxForNew() || toks.size() + nd_max + 2 >= static_cast<std::uint64_t>(pool_.pages()) * kv_page)
         return false;
     const auto mt = tb_.restoreMatch(sl, toks);
     if (!mt) return false;

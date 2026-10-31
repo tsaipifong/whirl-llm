@@ -2,23 +2,18 @@
 // eviction / copy-on-write over pool_, the shared prefix checkpoints over ps_, and the pool arithmetic of admission.
 // arch025-engine S7: these are SlotPages's (module server.slot_cache, engine_pages.h); only the definition lines changed
 // (Engine:: -> SlotPages::, SlotEvictor holds SlotPages&); initPool (from engine.cpp) is the last one.
+// arch025-engine S8 (N4-S7c, S7 review consider-3): the includes nothing here used (whirl/dflash_policy.h, spec/spec_rules.h,
+// <cmath> <cstring> <ctime> <future> <thread>) are gone, and with them two false layering edges.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "server/engine_pages.h"
 
 #include "cache/tier_adapter.h"
 #include "log.h"
-#include "whirl/dflash_policy.h"
-#include "spec/spec_rules.h"  // the speculative-decoding rules shared with the CLI (arch025-R12cli)
 
 #include <algorithm>
-#include <cmath>
-#include <cstring>
-#include <ctime>
 #include <limits>
-#include <future>
 #include <stdexcept>
-#include <thread>
 
 namespace whirl::server {
 

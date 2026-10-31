@@ -14,13 +14,16 @@
 # | gov_mu_ (new) | whirl::Mutex | trivial | last member of GovState (S8) | nobody holds it at ~Engine (C3) |
 # | dc_ (new in S4) | DrafterCtx (BatchStats&, ServerModel&, const EngineOptions&) | trivial (references only; static_assert in tests/iso/server.drafter_ctx) | added last, after vis_ (S4) | destroyed first; no destructor reads it, it owns nothing; no member before it moves (offsets unchanged) |
 # | sc_ (new in S7) | SlotPages (13 references: CkptStore&, ServerModel&, Backend&, const EngineOptions&, PagePool&, PrefixStore&, vector<Slot>&, TierBridge&, vector<KvArr>&, const uint64&, const uint64&, SlotPagesCounters&, DrafterCtx&) | trivial (references only; static_assert in tests/iso/server.slot_cache) | added last, after dc_ (S7) | destroyed first; no destructor reads it, it owns nothing (kv_arrays_ / conv_bytes_ / ssm_bytes_ / cnt_ stay where they were); no member before it moves (offsets unchanged) |
+# | gst_ (S8) | GovState (the former members gov_ .. gov_json_, verbatim, in order, + gov_mu_) | each member's own (optional<Governor>, std::function, Plan, strings; gov_mu_ trivial) | the group sits where gov_ was (S8); flattened as gst_.<member>, same order | nothing moves past another member: the 17 members keep their relative order and their place between crlf_norm_ / vram_last_t_ and ctx_pub_; gov_mu_ is new and last (row above) |
+# | gov_json_ (S8 F14) | std::string, WH_GUARDED_BY(gov_mu_) (was vram_mu_) | memory only | not moved (only its guard annotation changed) | ~GovState runs with no lock held; the annotation is compile-time only |
+# | gv_ (new in S8) | GovernorGlue (32 references: core.shared ck_ .. vram_probe_, vram_others_, ctx_pub_, SlotPages&, gst_'s 18 members) | trivial (references only; static_assert in tests/iso/server.governor) | added last, after sc_ (S8) | destroyed first; no destructor reads it, it owns nothing (gst_ / ctx_pub_ / vram_others_ stay where they were); every member before it keeps its order (offsets after the governor block +80: gov_mu_) |
 # Stored callbacks that capture `this` (review3 C4): today they capture Engine; after the split they capture a
 # component (sc_ / dc_ / tg_), which is declared after vis_ and destroyed FIRST, while tb_ / the Tier outlive it.
 # | callback | stored in | captures (today -> after split) | lifetime rule |
 # | t->setWake([this]{..}) engine_tier.cpp:29 | Tier (outlives Engine) | Engine -> jq_ (JobQueue) | ~Engine must clear the wake (H1 / F13) before jq_ goes; C3 test |
 # | s.drop_cache / s.drafter_reset / s.share = [this, &sl] engine_tier.cpp:118-120 | TierBridge::RestoreSteps (stack of a restore) | Engine -> sc_ / dc_ | used only inside tb_.tryRestore called from the loop; no restore runs at ~Engine (stopIo before ~Engine) |
 # | tb_.flushOnStop([this]{ tierTick(); }) engine_tier.cpp:177 | call argument (not stored after return) | Engine -> tg_ | runs inside stop() before ~Engine; C3 test triggers flushOnStop before the reset |
-groups: BatchStats SampleBuffers ImageEmbeddings SpecState FloorState SlotPagesCounters
+groups: BatchStats SampleBuffers ImageEmbeddings SpecState FloorState SlotPagesCounters GovState
 m_
 ops_
 tok_
@@ -97,23 +100,24 @@ vram_last_
 vram_spill_
 crlf_norm_
 vram_last_t_
-gov_
-gov_margin_
-gov_plan_
-gov_pending_
-gov_hold_
-spe_parked_
-gov_parked_
-gov_ram_mb_
-gov_vram_total_
-gov_grow_denied_logged_
-gov_restored_
-gov_resize_before_
-gov_resize_delta_
-ctx_new_
-gov_warn_
-gov_last_
-gov_json_
+gst_.gov_
+gst_.gov_margin_
+gst_.gov_plan_
+gst_.gov_pending_
+gst_.gov_hold_
+gst_.spe_parked_
+gst_.gov_parked_
+gst_.gov_ram_mb_
+gst_.gov_vram_total_
+gst_.gov_grow_denied_logged_
+gst_.gov_restored_
+gst_.gov_resize_before_
+gst_.gov_resize_delta_
+gst_.ctx_new_
+gst_.gov_warn_
+gst_.gov_last_
+gst_.gov_json_
+gst_.gov_mu_
 ctx_pub_
 kv_arrays_
 tier_wake_
@@ -143,3 +147,4 @@ vis_.snap0_
 vis_.rel_pending_
 dc_
 sc_
+gv_

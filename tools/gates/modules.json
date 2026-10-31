@@ -32,7 +32,7 @@
   ],
   "cxx": {"globs": ["src/*", "include/*", "tests/*", "tools/*"], "ext": [".cpp", ".h", ".hpp", ".inc", ".c", ".cc"],
           "steps": ["cpu_analyze", "cpu_safety_selftest"]},
-  "lifetime": {"modules": ["handles", "ckpt_store", "page_pool", "prefix_store", "tier_bridge", "tier.kv", "engine_gov", "threads"],
+  "lifetime": {"modules": ["handles", "ckpt_store", "page_pool", "prefix_store", "tier_bridge", "tier.kv", "server.governor", "threads"],
                "globs": ["src/device/*", "src/cache/*", "src/tier/*", "tests/safety/*"],
                "tokens": "\\bnew\\b|\\bdelete\\b|malloc|calloc|realloc|\\bfree\\s*\\(|_aligned_|unique_ptr|shared_ptr|weak_ptr|make_unique|make_shared|~\\w+\\s*\\(|\\.reset\\s*\\(|\\.release\\s*\\(|std::move|\\bswap\\b|std::optional|string_view|std::span|\\.data\\s*\\(|c_str\\s*\\(|emplace|push_back|resize\\s*\\(|reserve\\s*\\(|erase\\s*\\(|clear\\s*\\(|memcpy|memmove|memset|alloca|\\[\\s*\\w+\\s*[-+]",
                "steps": ["cpu_asan", "cpu_safety_selftest"]},
@@ -75,7 +75,7 @@
               "gpu": "pinned h2d / d2h GB/s by size and queue depth per GPU (R9700 over USB4, 8060S UMA: separate keys)"},
   "protocol": {"metrics": ["host.sched.request_ms (stream=0 vs stream=1)"], "work": "exact (no device work beyond the engine's)",
                "time": "distribution", "rel": "5%"},
-  "engine_gov": {"metrics": [], "note": "no host-bench suite yet (governor decisions are event driven); counters only via whirl-server-tests governor*"},
+  "server.governor": {"metrics": [], "note": "no host-bench suite yet (governor decisions are event driven); counters only via whirl-server-tests governor*"},
   "threads": {"metrics": ["host.sched.round_us_per_cycle"], "work": "exact", "time": "distribution", "rel": "5%",
               "budget": "engine host time per decode cycle (MockModel, free forward) <= 1 % of the fastest stored decode ms per token",
               "noise": "see sched: OS thread wake-up bound, judge by paired in-session A/B only"},
@@ -162,7 +162,7 @@
                "proof": {"refactor": ["exit_rule", "golden_exact", "host_work", "host_time", "server_log_scan", "startup_sizing"]}},
    "protocol": {"metrics": ["host.sched.request_ms"],
                 "proof": {"refactor": ["exit_rule", "golden_exact", "host_work", "host_time"]}},
-   "engine_gov": {"metrics": [], "metrics_none": "governor decisions are event driven; counters only via whirl-server-tests governor*",
+   "server.governor": {"metrics": [], "metrics_none": "governor decisions are event driven; counters only via whirl-server-tests governor*",
                   "proof": {"refactor": ["exit_rule", "server_log_scan", "startup_sizing"]}},
    "threads": {"metrics": ["host.sched.round_us_per_cycle"],
                "proof": {"refactor": ["exit_rule", "host_work", "host_time"]}},
@@ -407,17 +407,20 @@
    "gpus": {"srv_fs_swift": 1, "srv_fs_moe": 1, "golden_swift": 1},
    "manual": ["prompt token hash == S0: cpu_pins (tests/pins/check.ps1, arch024-S11c F-3) plus unit + server-tests (S11b P2: the hash alone misses an alias-table change)", "golden_swift stays until owner sign-off O1 (S11b: M6 files 3/3 caught on CPU)"]
   },
-  "engine_gov": {
-   "id": "M7", "desc": "memory governor glue (engine_gov.cpp; policy memgov::Governor unchanged)",
-   "paths": ["src/server/engine_gov.cpp"], "lands_on": "arch024 S9 (a214b6f)",
-   "steps": ["cpu_server", "srv_balance", "srv_gpu_select", "srv_kvram719"],
+  "server.governor": {
+   "id": "M7/N4-S8", "desc": "the v0.2.2.2 memory governor's state and glue (DESIGN v3 2.3 L3; src/server/engine_gov.{h,cpp}; policy memgov::Governor unchanged). arch024 S9 (M7, was module engine_gov): the glue in its own TU. arch025-engine S8: class GovState - the former Engine members gov_ .. gov_json_ verbatim plus gov_mu_ (F14: gov_json_ under its own lock, no longer the vram watch's vram_mu_), private, befriending only GovernorGlue; Engine holds it as gst_ where gov_ was. class GovernorGlue - the former Engine functions setGovernor / governorJson / govPublish / govAllIdle / govFreeable / govTick / govDrain / govFreeCache / govRestoreCache / govResize / govApply (bodies verbatim) and the header-inline ctxForNew, plus the accessors the other modules call (govActive / govReduced / govHolding / govSetWarn / govCtxPublished / govPublishCtx); references only (core.shared ck_ ctx_ m_ ops_ opt_ owner_ pool_ ps_ slots_ tb_ vram_probe_, the placed state vram_others_ / ctx_pub_, sc_, gst_'s members); Engine holds it as gv_, its last member. Isolated: tests/iso/server.governor (engine_gov.cpp with mem_governor.cpp, server.slot_cache and what it declares; FakeServerModel with a settable resizePool)",
+   "paths": ["src/server/engine_gov.cpp", "src/server/engine_gov.h"], "lands_on": "arch024 S9 (a214b6f); arch025-engine S8 (leg 3)",
+   "steps": ["cpu_iso_server_governor", "cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "srv_balance", "srv_gpu_select", "srv_kvram719"],
    "gpus": {"srv_balance": 1, "srv_gpu_select": 2, "srv_kvram719": 1},
-   "manual": ["whirl-server-tests governor / governor_restore / startup_adjust / vram_watch", "vram_hog scenario once", "P-size"]
+   "manual": ["whirl-server-tests governor / governor_restore / startup_adjust / vram_watch", "vram_hog scenario once", "P-size",
+              "whirl-iso-server-governor-tests (S8): initial state, setGovernor (ctx_new_, ctx_pub_, status JSON), ctx publish, govAllIdle / govFreeable, govFreeCache (idle slots only), govResize (refused / done), govTick + govApply (shrink while idle 8 -> 4 pages; admission held while a request runs), GovernorGlue layout (32 references, trivially destroyed, not copyable)",
+              "V-move: scratch/a25_engine/s8/apply_s8.py --check (engine_gov.cpp differs from 6871c14 only in the 11 definition lines, the 2 F14 lock lines, the include and a note; the moved declarations / members verbatim in engine_gov.h)",
+              "V-lock: cpu_tsa lock-removal mutants gov-json-unlocked / gov-publish-unlocked (tools/safety/tsa/tsa_check.py) fail the clang thread-safety build"]
   },
   "threads": {
    "id": "M8", "desc": "engine thread ownership checks",
    "paths": ["src/server/engine_thread.cpp", "src/server/engine_thread.h"], "lands_on": "arch024 S10 (1b17eb9)",
-   "steps": ["cpu_iso_threads", "cpu_server", "cpu_logscan_selftest"], "callers": ["ckpt_store", "page_pool", "prefix_store", "tier_bridge", "tier.kv", "engine_gov"],
+   "steps": ["cpu_iso_threads", "cpu_server", "cpu_logscan_selftest"], "callers": ["ckpt_store", "page_pool", "prefix_store", "tier_bridge", "tier.kv", "server.governor"],
    "manual": ["P-speed d5fc637 vs HEAD"]
   },
   "sampling": {
