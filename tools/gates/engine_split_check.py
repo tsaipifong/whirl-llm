@@ -121,8 +121,11 @@ def row_problem(q, sha):
     if sha not in txt: return f"review report {os.path.basename(rp)} does not name the pin sha256"
     m = re.search(r"(?mi)^[\s>*-]*reviewer:\s*([^\s,;(]+)", txt)
     if not m: return f"review report {os.path.basename(rp)} has no 'reviewer: <name>' line"
-    if m.group(1).strip().lower() == author.lower():
-        return f"reviewer {m.group(1)} is the author (no self-review)"
+    # arch025-revtextfix (s0b-merge review consider-1): the author column may name several authors
+    # ("main-session+arch025-engine-mfix", "a, b"); the reviewer must be none of them
+    authors = {a.strip().lower() for a in re.split(r"[+,]", author) if a.strip()}
+    if m.group(1).strip().lower() in authors:
+        return f"reviewer {m.group(1)} is the author (no self-review)" + ("" if len(authors) == 1 else f" [one of the authors {author}]")
     return None
 
 
