@@ -1,5 +1,5 @@
 // A minimal server::ServerModel for the isolation test programs of the engine components that hold a ServerModel&
-// (server.sample_buffers, server.image_embeddings; arch025-lane1 leg 8; server.cycle_prof, server.drafter_ctx). Header only, no tokenizer, no GGUF: the
+// (server.sample_buffers, server.image_embeddings; arch025-lane1 leg 8; server.cycle_prof, server.drafter_ctx, server.slot_cache). Header only, no tokenizer, no GGUF: the
 // server tests' MockModel needs a real Tokenizer (lib whirl), which these programs must not link. The config has
 // n_vocab / n_embd as given; logits / hidden rows live in device::NullBackend memory (host addresses); topkRows is the
 // host reference of tests/server/mock_backend.cpp (MockModel::topkRows). Every other call does nothing.
@@ -45,15 +45,15 @@ public:
     std::uint64_t convBytes() const override { return 0; }
     std::uint64_t ssmBytes() const override { return 0; }
     std::uint32_t curSeq() const override { return 0; }
-    std::uint32_t poolPages() const override { return 0; }
-    std::uint32_t seqPages() const override { return 0; }
+    std::uint32_t poolPages() const override { return pool_pages; }
+    std::uint32_t seqPages() const override { return seq_pages; }
     std::uint32_t maxBatch() const override { return qwen35::max_small_batch; }
     std::uint32_t snapSets() const override { return 0; }
     void ensureSnapshots(std::uint32_t) override {}
     bool gdnReplay() const override { return false; }
     bool fusedDecode() const override { return false; }
     bool canSegment() const override { return false; }
-    std::vector<server::KvArr> kvArrays() const override { return {}; }
+    std::vector<server::KvArr> kvArrays() const override { return kv_arrs; }
     void selectSeq(std::uint32_t) override {}
     void commitSeq(std::uint32_t) override {}
     void dropPending(std::uint32_t) override {}
@@ -129,6 +129,11 @@ public:
         dfl_calls.push_back({'i', s, row0, n, pos0});
     }
     void dflashTrim(std::uint32_t s, std::uint32_t keep) override { dfl_calls.push_back({'t', s, keep, 0, 0}); }
+
+    // KV pool (arch025-engine S7, server.slot_cache test: initPool, ensurePages): settable poolPages / seqPages / kvArrays (0 / none by default,
+    // as before)
+    std::uint32_t pool_pages = 0, seq_pages = 0;
+    std::vector<server::KvArr> kv_arrs;
 
 private:
     template <class T>
