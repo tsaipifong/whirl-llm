@@ -1,0 +1,23 @@
+# ARCH-1 8.5 isolation check of server.slot_cache (arch025-engine S6, DESIGN v3 section 4 S6 row; S7 adds SlotPages to the
+# same module): today a header-only module, so the boundary is the test program itself - it includes only the module's
+# header, built with that copy as the ONLY include path (tools/gates/iso_check.py header-only mode: `mutate` names an
+# hdr line). Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# module: src/server/engine_pages.h (class SlotPagesCounters: the shared prefix checkpoint / KV page counters, the former
+# Engine members stat_spe_new_ .. stat_evictions_, private, one write method per former write statement, six reads).
+# declared dependencies: none (the C++ standard library only). No engine, no HIP runtime, no test double.
+module    server.slot_cache
+exe       whirl-iso-server-slot-cache-tests
+mutate    src/server/engine_pages.h
+# the include mutants go at the end: server/engine.h includes engine_pages.h back (as "server/engine_pages.h", so the
+# shadow copy is the one it reaches), and a line at the top would see the module half-read
+mutinc    end
+mutsym    hip
+mutsym    engine
+mutsym    model
+mutsym    tier
+# module header
+hdr       src/server/engine_pages.h
+# test program
+testsrc   tests/iso/server.slot_cache/slot_cache_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
