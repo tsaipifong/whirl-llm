@@ -9,7 +9,8 @@ left must be listed in the rules' allowed_diffs; an entry missing in the new tre
 
   python -I tools/impact/revtext.py --old <tree> --new <tree> [--rules step_rules.json] [--cut tools/gates/engine_cut.json]
                                     [--work DIR]
-  python -I tools/impact/revtext.py --selftest [--work DIR]     fault cases on this repo's tree
+  python -I tools/impact/revtext.py --selftest [--work DIR] [--only REGEX]     fault cases on this repo's tree (--only: the
+                                    cases whose name matches, for red / green runs; acceptance is the full run)
 rules (JSON; keys starting with "_" are comments, any other unknown key is a rules error, exit 2):
   "replace": [[new_text, old_text], ...]   applied to the NEW text (comments already dropped), in order, left to right,
         non-overlapping, ON TOKEN BOUNDARIES (arch025-revtextfix, S0 review C-6): new_text is tokenized with the same
@@ -327,8 +328,11 @@ def selftest(work):
     # revtextfix: the old tree is this repo for every case: one census (the selftest took ~45 s a case with two)
     ro = census(REPO, os.path.join(work, "_old"), cut)
 
+    only = arg("--only")   # rt2: a regex on the case names (red / green runs of a few cases; the full run has no --only)
+
     def case(name, text, rules, want, extra=None, rel=eh, expect=None):
         """want = exit code; expect = a regex the run's output must match (the case is red for the right reason)"""
+        if only and not re.search(only, name): return
         d = tree(name, text, extra, rel)
         print(f"-- {name}")
         buf = io.StringIO()
@@ -402,10 +406,11 @@ def selftest(work):
         # new entries only in the new tree: a copy of a body into a new function, the old one left as it was
         case("N1 a new function only in the new tree (copy of dropCache as dropCache2)", cp, {}, 1,
              expect=r"^  NEW dropCache2: only in the new tree")
+        dsig = f"void {DCLS}::dropCache2(Slot& sl)"   # rt2: a function's equals declares its signature too
         case("N2 the copy declared in rules.added with its body (control)", cp,
-             {"added": {"dropCache2": {"equals": inner, "why": "selftest"}}}, 0, expect=r", 1 added entries as declared\)")
+             {"added": {"dropCache2": {"equals": inner, "sig": dsig, "why": "selftest"}}}, 0, expect=r", 1 added entries as declared\)")
         case("N3 rules.added with a body that is not the new body", cp,
-             {"added": {"dropCache2": {"equals": inner.split("\n")[0], "why": "selftest"}}}, 1,
+             {"added": {"dropCache2": {"equals": inner.split("\n")[0], "sig": dsig, "why": "selftest"}}}, 1,
              expect=r"^  ADDED dropCache2: the body is not the declared text")
         case("N4 rules.added planned for a name not in the cut's new_funcs", cp,
              {"added": {"dropCache2": {"planned": True, "why": "selftest"}}}, 1, expect=r"^  ADDED dropCache2: planned, but the cut")
@@ -438,6 +443,38 @@ def selftest(work):
         cases.append(("dropCache body anchor", False))
     case("K1 an unknown rules key (typo allowed_diff) is a rules error", src, {"allowed_diff": []}, 2,
          expect=r"^revtext: rules error: unknown key")
+    # ---- rt2 (S6 review act-on 1): added.equals compared only the body; the signature (return type, parameters,
+    # const) of a new function was never looked at (probe_ret / probe_par passed); `is` on a single-line inline method
+    # failed because the census started an in-class entry on the line before it ----
+    ph = "server/engine_pages.h"
+    ps = open(os.path.join(REPO, "src", ph), encoding="utf-8").read()
+    SN = "    std::uint64_t speNew() const { return stat_spe_new_; }\n"
+    if ps.count(SN) == 1:
+        def addl(line):   # a new inline method right after speNew (the line before it is speNew's)
+            return ps.replace(SN, SN + line + "\n", 1)
+        rok = "    std::uint64_t speNew2() const { return stat_spe_new_; }"
+        case("S1 a new read method declared with equals + sig (control)", addl(rok),
+             {"added": {"speNew2": {"equals": "return stat_spe_new_;", "sig": "std::uint64_t speNew2() const", "why": "selftest"}}}, 0,
+             rel=ph, expect=r", 1 added entries as declared\)")
+        case("S2 equals: the new method's return type narrowed (uint64 -> uint32)", addl(rok.replace("std::uint64_t", "std::uint32_t", 1)),
+             {"added": {"speNew2": {"equals": "return stat_spe_new_;", "sig": "std::uint64_t speNew2() const", "why": "selftest"}}}, 1,
+             rel=ph, expect=r"^  ADDED speNew2: the signature is not the declared text")
+        case("S3 equals: the new method's parameter type narrowed (uint32 -> uint16)",
+             addl("    void noteSpeTok2(std::uint16_t n) { stat_spe_tok_ += n; }"),
+             {"added": {"noteSpeTok2": {"equals": "stat_spe_tok_ += n;", "sig": "void noteSpeTok2(std::uint32_t n)", "why": "selftest"}}}, 1,
+             rel=ph, expect=r"^  ADDED noteSpeTok2: the signature is not the declared text")
+        case("S4 equals on a function without sig is a rules error", addl(rok),
+             {"added": {"speNew2": {"equals": "return stat_spe_new_;", "why": "selftest"}}}, 2,
+             rel=ph, expect=r"^revtext: rules error: added\['speNew2'\]: a function's equals needs sig")
+        case("I1 is on a single-line inline method (control: the census entry is that one line)",
+             addl("    void noteSpeNew2() { stat_spe_new_ += 1; }"),
+             {"added": {"noteSpeNew2": {"is": "void noteSpeNew2() { stat_spe_new_ += 1; }", "why": "selftest"}}}, 0,
+             rel=ph, expect=r", 1 added entries as declared\)")
+        case("I2 is on a single-line inline method whose return type changed", addl(rok.replace("std::uint64_t", "std::uint32_t", 1)),
+             {"added": {"speNew2": {"is": rok.strip(), "why": "selftest"}}}, 1,
+             rel=ph, expect=r"^  ADDED speNew2: the all tokens is not the declared text at token 2:")
+    else:
+        cases.append(("S/I speNew anchor", False))
     ok = all(g for _, g in cases)
     for n, g in cases: print(f"  {'ok  ' if g else 'FAIL'} {n}")
     print(f"revtext selftest: {sum(g for _, g in cases)}/{len(cases)} as expected")
