@@ -7,7 +7,11 @@
 #   pwsh tools/gates/release_gate.ps1 -Device r9700|8060s [-Build DIR] [-ExpectCommit SHA] [-Steps a,b,...]
 #                                     [-Work DIR] [-Tag NAME] [-InjectFail] [-List] [-LaunchLog DIR]
 #                                     [-Module name[,name]] [-ModulesFile PATH] (-ImpactRange A..B|worktree | -NoMapSteps)
-#                                     [-KlReport klgate_report.json] [-TaskAccuracy FILE|exp_id]
+#                                     [-KlReport klgate_report.json] [-TaskAccuracy FILE|exp_id] [-Strict] [-Jobs N]
+#
+# -Jobs N (arch025-procopt2, PLAN 9.24): the iso steps (cpu_sampling_iso, cpu_iso_*) of a dev / integration run run N at a
+# time (default WHIRL_GATE_JOBS, else 4; 1 = serial; strict runs are always serial); same rows / verdict / exit code as
+# serial. See "Parallel sections" below. The header line ends with "; parallel: ...".
 #
 # -KlReport / -TaskAccuracy (arch025-klguard): inputs of step kl_guard, the KL regression guard (not a veto; see the
 # step's comment). Its "WARN kl guard:" / "TODO task-accuracy:" / "TODO kl-guard:" lines are printed under the step's
@@ -39,8 +43,13 @@
 # DFlash2 hashes with drafts accepted); a step that does not run counts as failed. At the end a table of
 # all steps is printed and written to <Work>\<Tag>_summary.txt, plus PASS_<Tag> or FAIL_<Tag> (never
 # both, never a plain DONE).
-# Exit: 0 every selected step passed; 1 a step failed; 2 setup error (missing exe / model / text root,
-#       wrong commit, unknown step name, 0 steps selected).
+# arch025-procopt (PLAN 9.21): in a dev / integration run a failed CPU step is run once more; a pass on the retry is a
+# "FLAKY <step> ..." row, the verdict is "FLAKY (N steps passed, K only on a retry: ...)" with a FLAKY_<Tag> marker (never
+# PASS_<Tag>, never "PASS (N steps)") and a row in the flaky TSV. -Strict (or WHIRL_GATE_STRICT=1, or the default tag
+# gate_<device>) = no retry: release / rc runs. PLAN 9.20: heavy CPU steps hold the machine-wide heavy-CPU lock (see
+# "Heavy-CPU lock" below; WHIRL_GATE_CPU_LOCK). The header line ends with "; retry: ...; heavy-CPU lock ...".
+# Exit: 0 every selected step passed (FLAKY included: see the verdict); 1 a step failed; 2 setup error (missing exe /
+#       model / text root, wrong commit, unknown step name, 0 steps selected).
 #
 # Machine paths come from the environment (a local wrapper sets them; nothing here is machine specific):
 #   WHIRL_GATE_SWIFT   Swift-1.5 27B MXFP4-A GGUF (required: the dense model of every dense step)
@@ -90,7 +99,10 @@ param(
     [switch]$NoMapSteps,
     [string]$KlReport = "",      # step kl_guard: the tools/klgate/klgate.py --report of this exe on this GPU (regression guard)
     [string]$TaskAccuracy = "",  # step kl_guard: the task-accuracy result reference (file or KB exp_id) of this build's balance / fast
-    [string]$RuleCheck = ""
+    [string]$RuleCheck = "",
+    [switch]$Strict,             # arch025-procopt 9.21: no retry (release / rc runs); see "Retry" in the header
+    [string]$TestSteps = "",     # arch025-procopt: replace the step table with test steps (gate_flow_selftest.ps1 only)
+    [int]$Jobs = 0               # arch025-procopt2 9.24: par CPU steps at once (0 = WHIRL_GATE_JOBS, else 4; 1 = serial); see "Parallel sections"
 )
 # arch025-c2fu: set or REMOVE a process environment variable. pwsh 7.5+ (.NET 9+) keeps a variable DEFINED AS EMPTY for
 # [Environment]::SetEnvironmentVariable(k, $null) (PowerShell passes $null as "") and for (k, ""): a restore of an unset
@@ -138,7 +150,7 @@ $S = [System.Collections.Generic.List[object]]::new()
 # Such a step is still listed (-List prints "(not in this gate: <na>)" after it), so every check has a name the impact
 # map and modules.json can refer to; it is left out of the default selection, and naming it in -Steps is a setup error.
 function AddStep([string]$name, [bool]$gpu, [string[]]$cmd, [scriptblock]$rule, [hashtable]$envv = @{}, [string]$na = "") {
-    $S.Add([pscustomobject]@{ name = $name; gpu = $gpu; cmd = $cmd; rule = $rule; env = $envv; na = $na })
+    $S.Add([pscustomobject]@{ name = $name; gpu = $gpu; cmd = $cmd; rule = $rule; env = $envv; na = $na; heavy = $false; par = $false })
 }
 function ListLine($s) { "{0,-22} {1}{2}" -f $s.name, $(if ($s.gpu) { "GPU" } else { "CPU" }), $(if ($s.na) { "  (not in this gate: $($s.na))" } else { "" }) }
 $exit0 = { param($o, $c) $c -eq 0 }
@@ -486,6 +498,124 @@ AddStep "pkg_smoke" $true (@($pwsh, "-NoProfile", "-File", (Join-Path $repo "too
 # E2 must have run its cells (an "ok" with no E2_ cell is the R9700 n/a path, which this step does not take)
 AddStep "srv_env_e2" $true (EnvCmd "E2") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^env matrix: (ok \(.*\bE2_\d+ PASS|SKIP)") } @{} $(if ($Device -ne "8060s") { "8060s only (E2 is the UMA carve-out)" } else { "" })
 
+# arch025-procopt (PLAN 9.20): HEAVY CPU steps (they compile: own build dirs, mutant builds, a cmake configure) hold the
+# machine-wide heavy-CPU lock for their own duration, so two chains on this machine never run two of them at once (int7
+# 2026-10-30: 12 of 191 engine-split selftest cases died at process start, 0xC0000142 STATUS_DLL_INIT_FAILED, while
+# cpu_analyze ran; env61: cpu_tsa hit its cap under load and passed alone). Light steps never take it.
+$heavyRx = '^cpu_(safety_selftest|asan|analyze|tsa|cmake_modules|sampling_iso|iso_(?!includes$)\w+)$'
+foreach ($x in $S) { $x.heavy = [bool]($x.name -match $heavyRx) }
+# arch025-procopt2 (PLAN 9.24): PAR steps may run at the same time as each other (see "Parallel sections"). A whitelist, not a
+# blacklist: cpu_sampling_iso and cpu_iso_* (not cpu_iso_includes) = tools/gates/iso_check.py, one module each, everything it
+# writes is under its own --work (work_<step>: staged copies, objects, the _sdk copy) or a temporary file in the tree whose name
+# has the module and the case (iso_check.py product_compile: "_iso_mut_<module>_<case>"); it reads build\Release\generated and
+# the tree only. No exe of -Build, no port, no model. Steps with their own environment (env) or a GPU are never par.
+$parRx = '^cpu_(sampling_iso|iso_(?!includes$)\w+)$'
+foreach ($x in $S) { $x.par = (-not $x.gpu) -and ($x.env.Count -eq 0) -and [bool]($x.name -match $parRx) }
+# -TestSteps FILE (gate_flow_selftest.ps1 only): JSON [{name: "test_*", gpu, heavy, cmd: [exe, args...], rx}]; replaces the
+# whole step table (rule: exit 0 and a line matching rx); the summary header says TEST STEPS.
+$testNote = ""
+if ($TestSteps) {
+    $tsl = @(Get-Content -Raw $TestSteps | ConvertFrom-Json)
+    $S.Clear()
+    foreach ($t in $tsl) {
+        if ("$($t.name)" -notlike "test_*") { Write-Host "release gate -TestSteps: step name '$($t.name)' must start with test_"; exit 2 }
+        AddStep "$($t.name)" ([bool]$t.gpu) @($t.cmd | ForEach-Object { "$_" }) ([scriptblock]::Create("param(`$o, `$c) `$c -eq 0 -and (`$o -match '$("$($t.rx)" -replace "'", "''")')"))
+        $S[$S.Count - 1].heavy = [bool]$t.heavy
+        $S[$S.Count - 1].par = [bool]$t.par -and -not [bool]$t.gpu
+    }
+    $testNote = " TEST STEPS (-TestSteps, selftest only),"
+}
+# Heavy-CPU lock (9.20). The lock is the OPEN HANDLE of the lock file (FileShare.Read), the same protocol as the
+# workspace's GPU locks (progress\tools\gpu_lock.ps1, arch024-S13; Get-GpuLockState reads this file too): Windows closes
+# the handle however the holder ends, so a dead holder never leaves a held lock; the text "held pid N <start> <what>" is
+# information only ("free <ts> (last holder ...)" after a normal release). Waiters poll; nothing is ever killed. The wait
+# is printed, appended to the step log and put on the step's row ("| cpu lock: waited N s"); the step's seconds and any
+# cap inside the step start after the lock is taken. Timeout (as GNU sem --semaphore-timeout > 0): the step runs WITHOUT
+# the lock and its row says "cpu lock: timeout after N s (...), ran without the lock". While a step holds it,
+# WHIRL_CPU_LOCK_HELD is set for the step's processes: a nested gate / wrapper of that tree does not wait for its own
+# parent (an outer runner that holds the lock through progress\tools\cpu_lock_run.ps1 sets it the same way).
+#   WHIRL_GATE_CPU_LOCK            lock file; "off" = no lock. Unset: C:\ClaudeWorkspace\whirl-work\progress\state\
+#                                  cpu_heavy.lock when that folder exists (as the pyref python default above), else no lock
+#   WHIRL_GATE_CPU_LOCK_TIMEOUT_S  default 7200 (the longest heavy step, cpu_asan, took 1369 s in int7)
+#   WHIRL_GATE_CPU_LOCK_POLL_S     default 10
+$wsState = "C:\ClaudeWorkspace\whirl-work\progress\state"
+$cpuLock = $env:WHIRL_GATE_CPU_LOCK
+if (-not $cpuLock -and (Test-Path -LiteralPath $wsState)) { $cpuLock = Join-Path $wsState "cpu_heavy.lock" }
+if ($cpuLock -eq "off") { $cpuLock = "" }
+$cpuLockTimeoutS = if ($env:WHIRL_GATE_CPU_LOCK_TIMEOUT_S) { [int]$env:WHIRL_GATE_CPU_LOCK_TIMEOUT_S } else { 7200 }
+$cpuLockPollS = if ($env:WHIRL_GATE_CPU_LOCK_POLL_S) { [int]$env:WHIRL_GATE_CPU_LOCK_POLL_S } else { 10 }
+function Read-CpuLockText {
+    try {
+        $rd = [System.IO.File]::Open($cpuLock, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $sr = New-Object System.IO.StreamReader($rd); $tx = $sr.ReadToEnd().Trim(); $sr.Close(); return $tx
+    } catch { return "unreadable" }
+}
+# returns @{ h = open handle or $null; wait = seconds; note = row suffix }
+function Enter-CpuHeavyLock([string]$what) {
+    $w0 = Get-Date; $busy = $false; $holder = ""
+    while ($true) {
+        try {
+            $fs = [System.IO.File]::Open($cpuLock, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+            $b = [System.Text.Encoding]::ASCII.GetBytes("held pid $PID $(Get-Date -Format s) $what`n")
+            $fs.SetLength(0); $fs.Write($b, 0, $b.Length); $fs.Flush()
+            $ws = [int]((Get-Date) - $w0).TotalSeconds
+            if ($busy) { Write-Host "release gate: cpu lock: taken after $ws s ($what)"; return @{ h = $fs; wait = $ws; note = " | cpu lock: waited $ws s" } }
+            return @{ h = $fs; wait = 0; note = "" }
+        } catch [System.IO.IOException] {
+            $el = [int]((Get-Date) - $w0).TotalSeconds
+            if (-not $busy) { $busy = $true; $holder = Read-CpuLockText; Write-Host "release gate: cpu lock: busy ($holder), $what waiting (timeout $cpuLockTimeoutS s, lock $cpuLock)" }
+            if ($el -ge $cpuLockTimeoutS) {
+                Write-Host "release gate: cpu lock: timeout after $el s ($holder), $what runs WITHOUT the lock"
+                return @{ h = $null; wait = $el; note = " | cpu lock: timeout after $el s ($holder), ran without the lock" }
+            }
+            Start-Sleep -Seconds $cpuLockPollS
+        }
+    }
+}
+function Exit-CpuHeavyLock($h, [string]$what) {
+    if (-not $h) { return }
+    try { $b = [System.Text.Encoding]::ASCII.GetBytes("free $(Get-Date -Format s) (last holder pid $PID $what)`n"); $h.SetLength(0); $h.Write($b, 0, $b.Length); $h.Flush() } catch { }
+    $h.Close()
+}
+# Retry (9.21; Bazel --flaky_test_attempts=2 semantics, progress\arch025-procopt.PRIOR_ART.md): in a dev / integration run
+# a failed CPU step is run once more; a pass on the second try is a FLAKY row ("FLAKY <step> exit <rc> <s> s <marker> |
+# first try: exit <rc> <s> s <marker>"; the first try's log stays as <step>.try1.txt), the verdict is "FLAKY (N steps
+# passed, K only on a retry: ...)" (never "PASS (N steps)", which release/release_check.py requires), the marker file is
+# FLAKY_<Tag> (exit 0), and every FLAKY appends a row to the flaky TSV (date, tag, step, first-failure marker, log path)
+# for the main session to turn into a bug row. Two failures: FAIL "... | retry also failed (first try: ...)". GPU steps are
+# never retried (a GPU "flake" has been a real bug before: CB-FLAKE). STRICT (no retry, a failure is FAIL): -Strict,
+# WHIRL_GATE_STRICT=1, or the full release gate's default tag gate_<device>.
+#   WHIRL_GATE_FLAKY_TSV  default C:\ClaudeWorkspace\whirl-work\progress\state\flaky.tsv when that folder exists; "off" = none
+$strictRun = $Strict -or ($env:WHIRL_GATE_STRICT -eq "1") -or ($Tag -match '^gate_(r9700|8060s)$')
+$flakyTsv = $env:WHIRL_GATE_FLAKY_TSV
+if (-not $flakyTsv -and (Test-Path -LiteralPath $wsState)) { $flakyTsv = Join-Path $wsState "flaky.tsv" }
+if ($flakyTsv -eq "off") { $flakyTsv = "" }
+# Parallel sections (arch025-procopt2, PLAN 9.24; progress\arch025-procopt2.PRIOR_ART.md: CTest -j + RESOURCE_LOCK, Bazel
+# TEST_TMPDIR, CTest COST order). A run of CONSECUTIVE selected par steps (2 or more; in -List order cpu_sampling_iso and
+# every cpu_iso_*) is one section: up to -Jobs of its steps run at once, each in its own child pwsh
+# (tools/gates/gate_step_child.ps1: the same "& exe args *> <step>.txt" as a serial step) with its own WHIRL_TEST_TMP and
+# TMP / TEMP (<Work>\test_tmp\<step>). The section takes the heavy-CPU lock ONCE (the first row of the section carries the
+# wait) and its children run with WHIRL_CPU_LOCK_HELD; before each step starts, the quiet script runs (a GPU speed
+# measurement's QUIET_WANTED holds new starts; a running step goes on, as build_cfg.bat's check before compiling). Steps start
+# longest-first by the step-cost table (no entry = first). After the section the rows are made in -List order by the serial
+# code (rule, logs, server-log copy, row); a failed par step's retry (9.21) runs there, alone, as in a serial run. So the
+# summary rows, verdict, markers and exit code are the serial run's (seconds aside: a par step's seconds are its own wall
+# time under the section's load). Strict runs (release / rc) are always serial; GPU steps are never par.
+#   -Jobs N / WHIRL_GATE_JOBS  par steps at once (default 4: 16 cores and other agents' builds; 1 = serial)
+#   WHIRL_GATE_QUIET_WAIT      quiet script (also passed to the safety builds); unset: progress\tools\quiet_wait.ps1 of the
+#                              workspace when it exists; "off" = none
+#   WHIRL_GATE_COSTS           step-cost table (step<TAB>seconds; updated after each run from its passing rows); unset:
+#                              progress\state\gate_step_costs.tsv when that folder exists; "off" = list order
+$parJobs = if ($Jobs -gt 0) { $Jobs } elseif ($env:WHIRL_GATE_JOBS) { [int]$env:WHIRL_GATE_JOBS } else { 4 }
+if ($strictRun) { $parJobs = 1 }
+$quietScript = $env:WHIRL_GATE_QUIET_WAIT
+if (-not $quietScript) { $qd = "C:\ClaudeWorkspace\whirl-work\progress\tools\quiet_wait.ps1"; if (Test-Path -LiteralPath $qd) { $quietScript = $qd } }
+if ($quietScript -eq "off") { $quietScript = "" }
+$costTsv = $env:WHIRL_GATE_COSTS
+if (-not $costTsv -and (Test-Path -LiteralPath $wsState)) { $costTsv = Join-Path $wsState "gate_step_costs.tsv" }
+if ($costTsv -eq "off") { $costTsv = "" }
+$childPs = Join-Path $PSScriptRoot "gate_step_child.ps1"
+
 # -RuleCheck FILE (arch025-Q6, used by gate_steps_selftest.ps1): JSON [{step, exit, lines[], want: true|false}]; every case
 # runs the step's own rule on the planted output; prints "rule check: N/M as expected" and exits 0 when all match, 1 not,
 # 2 setup (unknown step). No exe, model or GPU.
@@ -656,11 +786,26 @@ if ($setup.Count -gt 0) { $setup | ForEach-Object { Write-Host "release gate set
 New-Item -ItemType Directory -Force $Work | Out-Null
 $logDir = Join-Path $Work $Tag
 New-Item -ItemType Directory -Force $logDir | Out-Null
-Remove-Item (Join-Path $Work "PASS_$Tag"), (Join-Path $Work "FAIL_$Tag") -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $Work "PASS_$Tag"), (Join-Path $Work "FAIL_$Tag"), (Join-Path $Work "FLAKY_$Tag") -ErrorAction SilentlyContinue
 $whirlTime = (Get-Item $exe["whirl"]).LastWriteTime.ToString("s")
 $qnote = if ($hasQ) { "optional Q4_K_M steps on" } else { "optional Q4_K_M steps off (WHIRL_GATE_DENSE unset)" }
 $mnote = if ($Module.Count -gt 0) { " module=$($Module -join ',') (dev-time module gate, not a release gate; steps $($sel.Count); map steps $(if ($NoMapSteps) { 'NOT added (-NoMapSteps)' } else { "from impact $ImpactRange" }))," } else { "" }
-$hdr = "release gate $Tag on $Device ($arch),$mnote models Swift + Ornith, $qnote`: tree $repo commit $head (dirty tracked files: $dirty), exe $Build (whirl.exe $whirlTime), $(Get-Date -Format s)"
+$rnote = if ($strictRun) { "retry: none (strict)" } else { "retry: CPU steps once (dev)" }
+$lnote = if ($cpuLock) { "heavy-CPU lock $cpuLock" } else { "heavy-CPU lock off" }
+# 9.24: the parallel sections of this selection (runs of >= 2 consecutive par steps)
+$segs = [System.Collections.Generic.List[object]]::new()
+$segOf = @{}
+if ($parJobs -gt 1) {
+    $cur = [System.Collections.Generic.List[object]]::new()
+    foreach ($x in @($sel) + @($null)) {
+        if ($x -and $x.par) { $cur.Add($x); continue }
+        if ($cur.Count -ge 2) { foreach ($y in $cur) { $segOf[$y.name] = $segs.Count }; $segs.Add(@($cur)) }
+        $cur = [System.Collections.Generic.List[object]]::new()
+    }
+}
+$pnote = if ($strictRun) { "parallel: off (strict)" } elseif ($parJobs -le 1) { "parallel: off (-Jobs 1)" } elseif ($segs.Count -eq 0) { "parallel: none (no run of 2+ par steps selected)" } else {
+    "parallel: $($segs.Count) group(s), $(@($segs | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum) CPU steps, -Jobs $parJobs" }
+$hdr = "release gate $Tag on $Device ($arch),$mnote$testNote models Swift + Ornith, $qnote`: tree $repo commit $head (dirty tracked files: $dirty), exe $Build (whirl.exe $whirlTime), $(Get-Date -Format s); $rnote; $lnote; $pnote"
 Write-Host $hdr
 $golden = Join-Path $repo "tests\golden"
 if ($InjectFail) {
@@ -679,7 +824,7 @@ if ($InjectFail) {
 # clean environment for the steps: no stray WHIRL_* (a WHIRL_MODE / WHIRL_KV in the shell would change
 # what is tested); restored at the end
 $saved = @{}
-foreach ($v in @(Get-ChildItem Env: | Where-Object { $_.Name -like "WHIRL_*" -and $_.Name -notlike "WHIRL_GATE_*" -and $_.Name -ne "WHIRL_R9700_LOCK_HELD" })) {
+foreach ($v in @(Get-ChildItem Env: | Where-Object { $_.Name -like "WHIRL_*" -and $_.Name -notlike "WHIRL_GATE_*" -and $_.Name -ne "WHIRL_R9700_LOCK_HELD" -and $_.Name -ne "WHIRL_CPU_LOCK_HELD" })) {
     $saved[$v.Name] = $v.Value; SetEnvOrRemove $v.Name $null
 }
 if (-not $env:AMD_LOG_LEVEL) { $env:AMD_LOG_LEVEL = "1" }
@@ -694,9 +839,78 @@ $env:WHIRL_TEST_TMP = $testTmp
 $lock = $env:WHIRL_GATE_LOCK_SCRIPT
 $rows = @()
 $notes = @()
+# 9.24: results of the par steps of a section that already ran: name -> @{ c = exit code; sec = wall seconds; note = lock note }
+$pre = @{}
+function Invoke-ParSection($seg) {
+    $names = @($seg | ForEach-Object { $_.name })
+    $what = "release gate $Tag/parallel $($names[0])..$($names[-1]) ($($names.Count) steps, -Jobs $parJobs)"
+    $plk = @{ h = $null; wait = 0; note = "" }
+    if (@($seg | Where-Object { $_.heavy }).Count -and $cpuLock -and -not $env:WHIRL_CPU_LOCK_HELD) { $plk = Enter-CpuHeavyLock $what }
+    $cost = @{}
+    if ($costTsv -and (Test-Path -LiteralPath $costTsv)) {
+        foreach ($l in @(Get-Content -LiteralPath $costTsv -ErrorAction SilentlyContinue)) { $p = "$l" -split "`t"; if ($p.Count -ge 2 -and $p[1] -match '^\d+$') { $cost[$p[0]] = [int]$p[1] } }
+    }
+    # CTest COST order: the longest known first, unknown before known, list order among equals
+    $order = @($seg | Sort-Object @{ e = { if ($cost.ContainsKey($_.name)) { $cost[$_.name] } else { [int]::MaxValue } }; Descending = $true }, @{ e = { [array]::IndexOf($names, $_.name) }; Descending = $false })
+    Write-Host "release gate: parallel section: $($names.Count) steps ($($names[0]) .. $($names[-1])), up to $parJobs at once"
+    $parDir = Join-Path $Work "par_$Tag"
+    New-Item -ItemType Directory -Force $parDir | Out-Null
+    $queue = [System.Collections.Generic.Queue[object]]::new()
+    foreach ($x in $order) { $queue.Enqueue($x) }
+    $run = @{}
+    $done = 0
+    $setHeld = $false
+    try {
+        if ($plk.h) { $env:WHIRL_CPU_LOCK_HELD = $what; $setHeld = $true }
+        while ($queue.Count -gt 0 -or $run.Count -gt 0) {
+            while ($queue.Count -gt 0 -and $run.Count -lt $parJobs) {
+                $x = $queue.Dequeue()
+                if ($quietScript) { & $pwsh -NoProfile -File $quietScript -Who "release gate $Tag/$($x.name)" 2>&1 | ForEach-Object { Write-Host "     $_" } }
+                $wd = Join-Path $Work "work_$($x.name)"
+                $tmpS = Join-Path $testTmp $x.name
+                New-Item -ItemType Directory -Force (Join-Path $tmpS "tmp") | Out-Null
+                $spec = Join-Path $parDir "$($x.name).json"
+                ConvertTo-Json -Depth 4 -InputObject @{
+                    cmd = @($x.cmd | ForEach-Object { $_ -replace "@WORK@", $wd -replace "@GOLDEN@", $golden }); log = (Join-Path $logDir "$($x.name).txt")
+                    env = @{ WHIRL_TEST_TMP = $tmpS; TMP = (Join-Path $tmpS "tmp"); TEMP = (Join-Path $tmpS "tmp") } } | Set-Content -LiteralPath $spec
+                $psi = [System.Diagnostics.ProcessStartInfo]::new($pwsh)
+                $psi.UseShellExecute = $false
+                foreach ($a in "-NoProfile", "-NonInteractive", "-File", $childPs, "-Spec", $spec) { $psi.ArgumentList.Add($a) }
+                $run[$x.name] = @{ p = [System.Diagnostics.Process]::Start($psi); t0 = Get-Date }
+            }
+            $fin = @($run.Keys | Where-Object { $run[$_].p.HasExited })
+            if ($fin.Count -eq 0) { Start-Sleep -Milliseconds 250; continue }
+            foreach ($k in $fin) {
+                $pr = $run[$k].p; $pr.WaitForExit()
+                $sec = ((Get-Date) - $run[$k].t0).TotalSeconds
+                $pre[$k] = @{ c = $pr.ExitCode; sec = $sec; note = "" }
+                $run.Remove($k); $done++
+                Write-Host ("     parallel: {0} finished, exit {1}, {2} s ({3}/{4})" -f $k, $pr.ExitCode, [int]$sec, $done, $names.Count)
+            }
+        }
+    } finally {
+        foreach ($k in @($run.Keys)) { try { $run[$k].p.Kill($true) } catch { } }   # only on an abort: this section's own children
+        if ($setHeld) { Remove-Item Env:WHIRL_CPU_LOCK_HELD -ErrorAction SilentlyContinue }
+        if ($plk.h) { Exit-CpuHeavyLock $plk.h $what }
+        Remove-Item -Recurse -Force $parDir -ErrorAction SilentlyContinue
+    }
+    if ($plk.note -and $pre.ContainsKey($names[0])) { $pre[$names[0]].note = $plk.note }
+}
 try {
     foreach ($s in $sel) {
-        $t0 = Get-Date
+      if ($segOf.ContainsKey($s.name) -and -not $pre.ContainsKey($s.name)) { Invoke-ParSection $segs[$segOf[$s.name]] }
+      $maxTry = if ($strictRun -or $s.gpu) { 1 } else { 2 }
+      $first = $null
+      for ($try = 1; $try -le $maxTry; $try++) {
+        # 9.20: a heavy step takes the machine-wide heavy-CPU lock first; $t0 starts after it (the wait is not step time)
+        $lk = @{ h = $null; wait = 0; note = "" }
+        $lkWhat = "release gate $Tag/$($s.name)"
+        # 9.24: the first try of a par step already ran in its section: take its exit code and seconds (the lock wait of the
+        # section is on its first step's row); a retry runs here, alone, as in a serial run
+        $pr = if ($try -eq 1 -and $pre.ContainsKey($s.name)) { $pre[$s.name] } else { $null }
+        if ($pr) { $lk.note = $pr.note }
+        elseif ($s.heavy -and $cpuLock -and -not $env:WHIRL_CPU_LOCK_HELD) { $lk = Enter-CpuHeavyLock $lkWhat }
+        $t0 = if ($pr) { (Get-Date).AddSeconds(-$pr.sec) } else { Get-Date }
         $wd = Join-Path $Work "work_$($s.name)"
         $cmd = @($s.cmd | ForEach-Object { $_ -replace "@WORK@", $wd -replace "@GOLDEN@", $golden })
         $log = Join-Path $logDir "$($s.name).txt"
@@ -710,6 +924,7 @@ try {
             # WHIRL_DEVICE / WHIRL_VRAM_LIMIT_MB / WHIRL_MODE), so the servers get the folder with --server-env
             if ($cmd[0] -eq $exe["whirl-server-gate"]) { $cmd += @("--server-env", "WHIRL_LAUNCH_LOG=$ld") }
         }
+        if ($pr) { $c = $pr.c } else {
         try {
             # hold the R9700 lock for this step only, in this process (a child pwsh in between lost the
             # server gate's output after its first Ctrl+C server stop)
@@ -724,15 +939,20 @@ try {
                 $env:WHIRL_R9700_LOCK_HELD = "release_gate-8060s"; $s8held = $true
             }
             try {
+                if ($lk.h) { $env:WHIRL_CPU_LOCK_HELD = $lkWhat }
                 & $cmd[0] @($cmd | Select-Object -Skip 1) *> $log
                 $c = $LASTEXITCODE
             } finally {
                 if ($held) { $held.Close(); Remove-Item Env:WHIRL_R9700_LOCK_HELD -ErrorAction SilentlyContinue }
                 if ($s8held) { Remove-Item Env:WHIRL_R9700_LOCK_HELD -ErrorAction SilentlyContinue }
+                if ($lk.h) { Exit-CpuHeavyLock $lk.h $lkWhat; $lk.h = $null; Remove-Item Env:WHIRL_CPU_LOCK_HELD -ErrorAction SilentlyContinue }
             }
         } catch {
             "release gate: step did not run: $_" | Add-Content $log
             $c = -1
+        } finally {
+            if ($lk.h) { Exit-CpuHeavyLock $lk.h $lkWhat; $lk.h = $null; Remove-Item Env:WHIRL_CPU_LOCK_HELD -ErrorAction SilentlyContinue }
+        }
         }
         foreach ($k in $s.env.Keys) { SetEnvOrRemove $k $null }
         Remove-Item Env:WHIRL_LAUNCH_LOG -ErrorAction SilentlyContinue
@@ -777,9 +997,32 @@ try {
         Remove-Item -Recurse -Force $wd -ErrorAction SilentlyContinue  # server gate work dirs (SSD tier files)
         $sec = [int]((Get-Date) - $t0).TotalSeconds
         $last = ($out | Where-Object { $_ -match "\S" -and $_ -notmatch "^:1:" } | Select-Object -Last 1)
-        $row = "{0,-4} {1,-22} exit {2,3}  {3,5} s  {4}{5}" -f ($(if ($ok) { "PASS" } else { "FAIL" })), $s.name, $c, $sec, "$last".Trim(), $wddmNote
+        # 9.20: the lock wait is logged on its own line in the step log (after the marker line was taken) and on the row
+        if ($lk.note) { "release gate:$($lk.note -replace '^ \|', '') (try $try)" | Add-Content $log }
+        if ($ok -or $try -ge $maxTry) { break }
+        # 9.21: first try failed and a retry is allowed: keep its log (and server logs) and run the step once more
+        $log1 = Join-Path $logDir "$($s.name).try1.txt"
+        Move-Item -LiteralPath $log -Destination $log1 -Force -ErrorAction SilentlyContinue
+        $keep1 = Join-Path $logDir "$($s.name)_server_logs"
+        if (Test-Path $keep1) { Move-Item -LiteralPath $keep1 -Destination "${keep1}_try1" -Force -ErrorAction SilentlyContinue }
+        $first = [pscustomobject]@{ c = $c; sec = $sec; last = "$last".Trim(); log = $log1; note = "$wddmNote$($lk.note)" }
+        Write-Host ("     {0}: first try failed (exit {1}, {2} s: {3}); running it once more (dev run; -Strict = no retry)" -f $s.name, $c, $sec, $first.last)
+      }
+        $tag4 = if (-not $ok) { "FAIL" } elseif ($first) { "FLAKY" } else { "PASS" }
+        $row = "{0,-4} {1,-22} exit {2,3}  {3,5} s  {4}{5}{6}" -f $tag4, $s.name, $c, $sec, "$last".Trim(), $wddmNote, $lk.note
+        if ($first) {
+            $ft = "first try: exit {0,3}  {1,5} s  {2}{3}" -f $first.c, $first.sec, $first.last, $first.note
+            $row += $(if ($ok) { " | $ft" } else { " | retry also failed ($ft)" })
+        }
         Write-Host $row
-        $rows += [pscustomobject]@{ ok = $ok; line = $row }
+        $rows += [pscustomobject]@{ ok = $ok; flaky = ($ok -and [bool]$first); name = $s.name; line = $row; sec = $sec }
+        if ($ok -and $first -and $flakyTsv) {
+            try {
+                if (-not (Test-Path -LiteralPath $flakyTsv)) { [System.IO.File]::WriteAllText($flakyTsv, "date`ttag`tstep`tfirst_failure`tlog`n") }
+                $fm = ("exit $($first.c): $($first.last)") -replace "[`t`r`n]", " "
+                [System.IO.File]::AppendAllText($flakyTsv, "$(Get-Date -Format s)`t$Tag`t$($s.name)`t$fm`t$($first.log)`n")
+            } catch { Write-Host "release gate: WARNING: could not append to $flakyTsv`: $_" }
+        }
         # arch025-klguard: the regression-guard warnings and the open TODOs (task accuracy, a guard not run) are printed
         # and kept in the summary (before the verdict line; release_check reads only the PASS / FAIL rows and the verdict)
         foreach ($wl in @($out | Where-Object { $_ -match "^(WARN kl guard|TODO task-accuracy|TODO kl-guard):" })) {
@@ -793,10 +1036,25 @@ try {
     foreach ($k in $saved.Keys) { SetEnvOrRemove $k $saved[$k] }
 }
 $nf = @($rows | Where-Object { -not $_.ok }).Count
-$verdict = if ($rows.Count -eq 0) { "FAIL (no step ran)" } elseif ($nf -gt 0) { "FAIL ($nf of $($rows.Count) steps failed)" } else { "PASS ($($rows.Count) steps)" }
+$fl = @($rows | Where-Object { $_.flaky } | ForEach-Object { $_.name })
+$verdict = if ($rows.Count -eq 0) { "FAIL (no step ran)" } elseif ($nf -gt 0) { "FAIL ($nf of $($rows.Count) steps failed)" } elseif ($fl.Count -gt 0) { "FLAKY ($($rows.Count) steps passed, $($fl.Count) only on a retry: $($fl -join ', '))" } else { "PASS ($($rows.Count) steps)" }
 $summary = @($hdr) + @($rows | ForEach-Object { $_.line }) + @($notes) + @("release gate $Tag`: $verdict")
 [System.IO.File]::WriteAllLines((Join-Path $Work "${Tag}_summary.txt"), [string[]]$summary)
+# 9.24: the step-cost table (start order of the next parallel section): this run's seconds of every step that passed
+# (a FLAKY step: its passing retry), the other entries kept; never fails the gate
+if ($costTsv) {
+    try {
+        $ct = [ordered]@{}
+        if (Test-Path -LiteralPath $costTsv) { foreach ($l in @(Get-Content -LiteralPath $costTsv)) { $p = "$l" -split "`t"; if ($p.Count -ge 2 -and $p[1] -match '^\d+$') { $ct[$p[0]] = $p[1] } } }
+        foreach ($x in @($rows | Where-Object { $_.ok })) { $ct[$x.name] = "$($x.sec)" }
+        $ctTmp = "$costTsv.$PID.tmp"
+        [System.IO.File]::WriteAllLines($ctTmp, [string[]]@($ct.Keys | ForEach-Object { "$_`t$($ct[$_])" }))
+        Move-Item -LiteralPath $ctTmp -Destination $costTsv -Force
+    } catch { Write-Host "release gate: WARNING: could not update $costTsv`: $_" }
+}
 Write-Host "release gate $Tag`: $verdict  (logs: $logDir)"
+# 9.21: a run whose steps all passed but some only on a retry writes FLAKY_<Tag> (never PASS_<Tag>) and exits 0
+if ($rows.Count -gt 0 -and $nf -eq 0 -and $fl.Count -gt 0) { "FLAKY $(Get-Date -Format s) $head $verdict" | Set-Content (Join-Path $Work "FLAKY_$Tag"); exit 0 }
 if ($rows.Count -gt 0 -and $nf -eq 0) { "PASS $(Get-Date -Format s) $head" | Set-Content (Join-Path $Work "PASS_$Tag"); exit 0 }
 "FAIL $(Get-Date -Format s) $head $verdict" | Set-Content (Join-Path $Work "FAIL_$Tag")
 exit 1

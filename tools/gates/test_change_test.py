@@ -156,6 +156,26 @@ with tempfile.TemporaryDirectory() as td:
     tc.refresh_times([td], out)
     t = tc.load_times(out)
     check("times PASS only", t.get(("8060s", "cpu_tests")) == 3 and ("8060s", "srv_balance") not in t, t)
+# 13b. arch025-procopt2 (PLAN 9.28): FLAKY rows of release_gate 9.21 ("FLAKY <step> exit <rc> <s> s <marker> | first try:
+# exit <rc> <s> s <marker>") are parsed; the step's cost is the PASSING retry's seconds (the row's own column: one clean run,
+# as a PASS row), never the failed first try's (a crash or a cap, not the step's length) nor their sum
+with tempfile.TemporaryDirectory() as td:
+    f = os.path.join(td, "y_summary.txt")
+    open(f, "w").write("release gate y on r9700 (gfx1201), models ...; retry: CPU steps once (dev); heavy-CPU lock off; parallel: off (-Jobs 1)\n"
+                       "PASS cpu_tests              exit   0      5 s  ok\n"
+                       "FLAKY cpu_iso_tier_kv        exit   0     40 s  iso check: ok (tier.kv, 6/6 cases as expected) | first try: exit   1    300 s  iso check: FAIL\n"
+                       "FAIL cpu_asan               exit   1    900 s  bad | retry also failed (first try: exit   1    800 s  bad)\n"
+                       "release gate y: FAIL (1 of 3 steps failed)\n")
+    s = tc.parse_summary(f)
+    check("summary parse FLAKY row (retry seconds)", s == ("y", "r9700", [("PASS", "cpu_tests", 5), ("FLAKY", "cpu_iso_tier_kv", 40), ("FAIL", "cpu_asan", 900)]), s)
+    out = os.path.join(td, "times.tsv")
+    tc.refresh_times([td], out)
+    t = tc.load_times(out)
+    check("times: a FLAKY step counts with its passing retry's seconds", t.get(("r9700", "cpu_iso_tier_kv")) == 40 and t.get(("r9700", "cpu_tests")) == 5
+          and t.get(("r9700", "cpu_asan")) == tc.TIMING_DEFAULTS["cpu_asan"][0], t)
+    # the machine time of the run (--run's cpu_s / gpu_s) is both tries: the first try's seconds of FLAKY and retried FAIL rows
+    ft = tc.first_try_seconds(f)
+    check("first-try seconds of FLAKY and 'retry also failed' rows", ft == {"cpu_iso_tier_kv": 300, "cpu_asan": 800}, ft)
 # 14. --run: one gate call per GPU, R9700 then 8060S, CPU steps once (first call), per-GPU CPU checks on both, tag
 # change_<id>_<dev>, summary + ledger; a running whirl process refuses (exit 2). release_gate is faked (no GPU).
 with tempfile.TemporaryDirectory() as td:

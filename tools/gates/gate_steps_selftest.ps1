@@ -13,6 +13,7 @@
 #      step's work dir (@WORK@); the repro (-LogPaths) must name its files inside -Work with those names, and a server log
 #      written there must be read by tools/gates/server_log_scan.ps1 -Step srv_kvram719 (PASS clean, FAIL on a planted
 #      WDDM line). C1b GPU 2026-10-27: the repro's own verdict was PASS on both cards but the scan found no server log.
+#   7. arch025-procopt: tools/gates/gate_flow_selftest.ps1 (the runner's heavy-CPU lock and retry / FLAKY rule, -Strict)
 #   pwsh tools/gates/gate_steps_selftest.ps1 [-Work DIR]
 # Last line "gate steps selftest: N/M as expected"; exit 0 all as expected, 1 not.
 param([string]$Work = "")
@@ -211,6 +212,10 @@ try {
         $sc = @(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "server_log_scan.ps1") -Dir $kw -Step "srv_kvram719" 2>&1 | ForEach-Object { "$_" }); $scc = $LASTEXITCODE
         Check "srv_kvram719: a planted WDDM line in the repro's server log FAILs the scan" ($scc -eq 1 -and ($sc -match "^server log scan: FAIL 1 line\(s\) matched \[wddm,owner,exit\]")) "exit ${scc}: $($sc | Select-Object -First 1)"
     }
+    # ---- 7. arch025-procopt (PLAN 9.20 / 9.21): the step runner's heavy-CPU lock and retry-once / FLAKY rule
+    $fo = @(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "gate_flow_selftest.ps1") -Work (Join-Path $Work "flow") 2>&1 | ForEach-Object { "$_" }); $fc = $LASTEXITCODE
+    $fo | Where-Object { $_ -match "^(ok|BAD) " } | ForEach-Object { Write-Host "     flow: $_" }
+    Check "gate flow selftest (heavy-CPU lock, retry / FLAKY, -Strict)" ($fc -eq 0 -and ($fo[-1] -match "^gate flow selftest: ([1-9]\d*)/\1 as expected$")) "exit ${fc}: $($fo | Select-Object -Last 3)"
 } finally {
     foreach ($v in $envKeep.Keys) { SetEnvOrRemove $v $envKeep[$v] }
     Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue

@@ -641,6 +641,31 @@ own and its declared dependencies' fragments only). Both run `--selftest` first.
 
 Isolation manifest include closure (CPU, seconds, no build): `cpu_iso_includes` (`tools/gates/iso_includes_check.py`: every quoted `#include` of a file a `tests/**/isolation.txt` stages must itself be staged; `--rev COMMIT` checks a commit read-only). Catches the merge that adds an include to a staged file without the manifest line before the ~1 min per module iso build (C1083) does.
 
+## <a id="gate-run"></a>How `release_gate.ps1` runs CPU steps: heavy-CPU lock, one retry, parallel sections
+
+- **Heavy-CPU lock.** Compiling CPU steps (`cpu_safety_selftest`, `cpu_asan`, `cpu_analyze`, `cpu_tsa`,
+  `cpu_cmake_modules`, `cpu_sampling_iso`, `cpu_iso_*` except `cpu_iso_includes`) hold one machine-wide lock
+  (`progress/state/cpu_heavy.lock` of the work tree when that folder exists; `WHIRL_GATE_CPU_LOCK` names another file,
+  `off` disables it). Another holder makes the step wait: the row says `cpu lock: waited N s`, the wait is not part of
+  the step's seconds, and after `WHIRL_GATE_CPU_LOCK_TIMEOUT_S` (default 7200) the step runs without the lock. Nothing
+  is ever killed. Children see `WHIRL_CPU_LOCK_HELD`, so a nested gate or wrapper does not wait for its own parent.
+- **One retry (dev and integration runs).** A failed CPU step runs once more; passing the second time gives a
+  `FLAKY <step> ... | first try: ...` row, the verdict `release gate <tag>: FLAKY (...)` and `FLAKY_<tag>` (never
+  `PASS`), and a row in `progress/state/flaky.tsv`. GPU steps are never retried. `-Strict`, `WHIRL_GATE_STRICT=1` and
+  the release tags `gate_r9700` / `gate_8060s` turn the retry off; `release/release_check.py` accepts only
+  `PASS (N steps)` anyway. `tools/gates/test_change.py` counts a FLAKY row's passing try as the step's length and both
+  tries as machine time.
+- **Parallel sections (`-Jobs N`, default 4; `WHIRL_GATE_JOBS`).** `cpu_sampling_iso` and the `cpu_iso_*` steps (one
+  contiguous block of `-List`) run up to N at a time through `tools/gates/gate_step_child.ps1`, longest first by the
+  last known seconds (`progress/state/gate_step_costs.tsv`). Each step keeps its own work folder and gets its own
+  `TMP` / `TEMP` / `WHIRL_TEST_TMP`; the section takes the heavy-CPU lock once; the quiet-window script runs before
+  each start; a failed step is retried after the section, alone. The summary rows are written after the section in
+  `-List` order, so rows, verdict and exit code are those of `-Jobs 1`. `-Jobs 1`, `-Strict` and the release tags run
+  everything serially; GPU steps are never parallel. Measured 2026-10-31 on 10 `cpu_iso_*` steps of the 8060S list
+  while two builds ran beside it: serial 3048 s, `-Jobs 4` 624 s, `-Jobs 8` 500 s, all `PASS (10 steps)`.
+  Step seconds from a parallel section are wall-clock seconds under that load; `test_change.py` still takes the median
+  over them and serial seconds together (open: PLAN 9.32).
+
 ## Change → required tests
 
 R9700 = gfx1201 and 8060S = gfx1151. G0 = the golden-hash gate above. Some tests in the table
