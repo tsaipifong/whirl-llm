@@ -565,6 +565,10 @@
   ],
   [
    "kernels.vision",
+   "kernels.common"
+  ],
+  [
+   "kernels.vision",
    "kernels.gemm"
   ],
   [

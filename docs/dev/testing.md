@@ -665,6 +665,12 @@ is an `#if defined(__GFX11__)` in the header. Expanded, the token sequence of th
 one before the merge (`clang -E -P`, whitespace only differs), and the code objects compare IDENTICAL. Header line 1 is
 a code line, its description at the end (clang -E -P whitespace). Changing one of these headers changes every kernel
 that includes it: the impact map's includer list (`tools/impact_map.json`) names them.
+Cross-set copies (gfx1201 `kernels/` and gfx1151 `kernels/gfx1151/`, arch025-sc11e) use the same rule, and some
+headers are file-scope definitions included at the old TU position (`gemv_mr_kw.h`, `gemv_q_qd.h`, `attn_dq4.h`).
+The per-set difference is a hook each set defines next to the #include: the activation-scale read (`GMR_X0` / `GQ_XD(e)`:
+gfx1201 `xd[e]`, gfx1151 packed scale words `xdv(xd + (e))`) or the block mapping (`ADQ_GRID`). A change to such a
+header changes both code objects. Check it with the preprocessed-TU compare of both architectures (and the vision TU for
+`block_sum.h`) before the code-object build.
 
 Isolation manifest include closure (CPU, seconds, no build): `cpu_iso_includes` (`tools/gates/iso_includes_check.py`: every quoted `#include` of a file a `tests/**/isolation.txt` stages must itself be staged; `--rev COMMIT` checks a commit read-only). Catches the merge that adds an include to a staged file without the manifest line before the ~1 min per module iso build (C1083) does.
 

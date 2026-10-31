@@ -5,7 +5,7 @@
             const int4 a0 = *(const int4 *)xt, a1 = *(const int4 *)(xt + 16);
             const int4 c0 = *(const int4 *)(xt + 32), c1 = *(const int4 *)(xt + 48);
             const float *xdt = xd + (size_t)t * (ncols / 32) + xi;
-            const float x0 = xdt[0], x1 = xdt[1];
+            const float x0 = GMR_X0, x1 = GMR_X1;  // the set's scale reads (gemv_mr_kw.h)
 #pragma unroll
             for (int r = 0; r < R; ++r) {
                 int s0 = dp4(lo[r][0], a0.x, 0);  // lo[0..3]: sub-block 2p bytes 0..15 (low -> a0, high -> a1)
@@ -29,7 +29,7 @@
         }
 
 // kernels/shared/gemv_mr_unit4_dot.h -- the token side of a 4-bit wide unit of the multi-row GEMV (IQ4_XS and
-// MXFP4 in kernels/gemv_mr.hip): for each of the NT tokens the int8 activations of sub-blocks 2p and 2p+1 and
+// MXFP4 in kernels/gemv_mr.hip; IQ4_XS of both kernel sets via gemv_mr_kw.h): for each of the NT tokens the int8 activations of sub-blocks 2p and 2p+1 and
 // their scales, the two 32-value integer dots per row and acc[r][t] += dl0 x0 s0 + dl1 x1 s1 (the canonical
 // MRD float expression). #included in MRD<QT_IQ4_XS>::step and MRD<QT_MXFP4>::step after the type's own
 // decode into lo / hi / dl0 / dl1; ADR-0005 / arch025-sc11d.

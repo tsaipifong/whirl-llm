@@ -64,20 +64,7 @@ __device__ __forceinline__ float warp_sum(float v) {
     return v;
 }
 
-__device__ float block_sum(float v) {
-    __shared__ float sh[32];
-    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
-    v = warp_sum(v);
-    __syncthreads();
-    if (lane == 0) sh[wid] = v;
-    __syncthreads();
-    const int nw = (blockDim.x + WARP - 1) / WARP;
-    v = (threadIdx.x < nw) ? sh[threadIdx.x] : 0.0f;
-    if (wid == 0) v = warp_sum(v);
-    if (threadIdx.x == 0) sh[0] = v;
-    __syncthreads();
-    return sh[0];
-}
+#include "../shared/block_sum.h"  // block_sum, as in the whirl code object (ADR-0005)
 
 __device__ __forceinline__ void lds_barrier() {
 #if defined(__GFX11__)
