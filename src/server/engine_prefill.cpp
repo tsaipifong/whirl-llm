@@ -21,7 +21,7 @@
 
 namespace whirl::server {
 
-std::size_t Engine::chunkLen(const Slot& sl) const {
+std::size_t PrefillPhase::chunkLen(const Slot& sl) const {
     const std::size_t cur = sl.reuse + sl.pf_off;
     const std::vector<std::uint32_t> imgs = ps_.imgSplits(sl.job->tokens);
     const std::size_t N = sl.job->tokens.size();
@@ -38,7 +38,7 @@ std::size_t Engine::chunkLen(const Slot& sl) const {
     return sched::execLen(N, sl.sys_split, sl.pf_split, imgs, cur, exec, stops, m_.maxBatch());
 }
 
-void Engine::maybeSplitCkpt(Slot& sl, DevPtr hid_row) {
+void PrefillPhase::maybeSplitCkpt(Slot& sl, DevPtr hid_row) {
     const std::size_t cur = sl.reuse + sl.pf_off;
     // item S: shared prefix checkpoints (a failure only loses the checkpoint)
     if (sl.on_sched && ((sl.sys_split > 0 && cur == sl.sys_split) || (sl.lcp_ck > 0 && cur == sl.lcp_ck) || (sl.img_ck > 0 && cur == sl.img_ck))) {
@@ -61,7 +61,7 @@ void Engine::maybeSplitCkpt(Slot& sl, DevPtr hid_row) {
     sc_.saveCkpt(sl, sl.pf_split, "think-open", opt_.use_mtp ? std::optional<DevPtr>(hid_row) : std::nullopt, std::nullopt);
 }
 
-void Engine::prefillStep(Slot& sl) {
+void PrefillPhase::prefillStep(Slot& sl) {
     Job& job = *sl.job;
     const std::span<const std::uint32_t> toks = std::span<const std::uint32_t>(job.tokens).subspan(sl.reuse);
     const std::size_t n = chunkLen(sl);
@@ -82,7 +82,7 @@ void Engine::prefillStep(Slot& sl) {
 
 // Returns the rows run (0 when nothing ran). row_budget caps the rows of the
 // whole forward; the oldest request's chunk always runs (decode floor).
-std::size_t Engine::prefillGroup(Slot& first, std::size_t row_budget) {
+std::size_t PrefillPhase::prefillGroup(Slot& first, std::size_t row_budget) {
     const std::size_t n0 = chunkLen(first);
     const std::size_t small_max = max_small_batch;
     auto solo = [&] {
@@ -191,7 +191,7 @@ std::size_t Engine::prefillGroup(Slot& first, std::size_t row_budget) {
     return static_cast<std::size_t>(r0);
 }
 
-void Engine::finishPrefill(Slot& sl) {
+void PrefillPhase::finishPrefill(Slot& sl) {
     Job& job = *sl.job;
     const std::span<const std::uint32_t> toks = job.tokens;
     const std::uint32_t N = sl.n_prompt;
@@ -313,7 +313,7 @@ void Engine::finishPrefill(Slot& sl) {
 // at full throughput. Arrival order does not matter otherwise: a conversation's
 // next turn that arrives while earlier subagent prompts prefill is protected too.
 // Empty when the floor is off or nothing is prefilling.
-std::vector<DecodeFloor::SlotTok> Engine::floorProtected() const {
+std::vector<DecodeFloor::SlotTok> PrefillPhase::floorProtected() const {
     std::vector<DecodeFloor::SlotTok> dec_toks;
     if (!fl_.floor.on()) return dec_toks;
     const double gather_ms = opt_.gather_ms > 0 ? opt_.gather_ms : 30.0;
@@ -335,7 +335,7 @@ std::vector<DecodeFloor::SlotTok> Engine::floorProtected() const {
 }
 
 // one prefill chunk (oldest request first), with the decode floor's budget
-void Engine::runPrefill(Slot* pf, bool& idle_wait, std::size_t& pf_rows, bool& floor_pf) {
+void PrefillPhase::runPrefill(Slot* pf, bool& idle_wait, std::size_t& pf_rows, bool& floor_pf) {
     // decode floor: the slots it protects this iteration
     const std::vector<DecodeFloor::SlotTok> dec_toks = floorProtected();
     if (fl_.floor.on() && dec_toks.empty()) fl_.floor.idle();
@@ -391,7 +391,7 @@ void Engine::runPrefill(Slot* pf, bool& idle_wait, std::size_t& pf_rows, bool& f
     }
 }
 
-void Engine::noteFloor(TimePoint tl2, TimePoint tl3, std::size_t pf_rows, bool floor_pf) {
+void PrefillPhase::noteFloor(TimePoint tl2, TimePoint tl3, std::size_t pf_rows, bool floor_pf) {
     // measurements: the cycle synchronizes the stream, so [tl2, now] covers
     // this iteration's prefill forward too
     const TimePoint te = Clock::now();
@@ -402,6 +402,14 @@ void Engine::noteFloor(TimePoint tl2, TimePoint tl3, std::size_t pf_rows, bool f
         if (sl.phase == Phase::decode) now_dec.push_back({sl.id, sl.reqId(), sl.n_gen});
     fl_.floor.noteCycle(cyc_ms, pf_rows > 0, now_dec);
     if (floor_pf && pf_rows > 0) fl_.floor.notePrefill(pf_rows, it_ms - std::min(fl_.floor.cycleMs(), 0.5 * it_ms));
+}
+
+// arch025-engine S12b: logBatchStats' decode floor line, verbatim (the floor state is prefill's)
+void PrefillPhase::floorLogPeriod() {
+    if (fl_.periods > 0)
+        logI("batch | decode floor: {} prefill forwards while decoding, {} decode cycles held prefill back", fl_.periods,
+             fl_.waits);
+    fl_.periods = fl_.waits = 0;
 }
 
 }  // namespace whirl::server

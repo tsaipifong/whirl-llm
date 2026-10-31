@@ -67,6 +67,13 @@
 #include "server/engine_pages.h"     // SlotPagesCounters, SlotPages (arch025-engine S6 / S7, module server.slot_cache)
 #include "server/engine_gov.h"       // GovState, GovernorGlue (arch025-engine S8, module server.governor)
 #include "server/engine_vram.h"      // VramState, VramWatch (arch025-engine S9, module server.vram_watch)
+#include "server/engine_queue.h"     // JobQueue (arch025-engine S10, module server.job_queue)
+#include "server/engine_end.h"       // SlotEnd (arch025-engine S11, module server.slot_end)
+#include "server/engine_prefill.h"   // PrefillPhase (arch025-engine S12, module server.prefill)
+#include "server/engine_cycle.h"     // SpecCycle (arch025-engine S13, module server.spec_cycle)
+#include "server/engine_start.h"     // SlotStart (arch025-engine S14, module server.slot_start)
+#include "server/engine_tierglue.h"  // TierGlue (arch025-engine S15, module server.tier_glue)
+#include "server/engine_sched.h"     // Scheduler (arch025-engine S15b, module server.scheduler)
 
 namespace whirl::server {
 
@@ -90,7 +97,7 @@ public:
     // ... and, once the model's KV pool exists, the page bookkeeping.
     void initPool();
     // Host tiers (optional; the Tier was created / started by the caller).
-    void attachTier(tier::Tier* t);
+    void attachTier(tier::Tier* t) { tg_.attachTier(t); }
     // Vision encoder (optional; after the KV pool exists): image_url parts become image tokens.
     void attachVision(const VisionConfig& vc);
     const VisionConfig& visionConfig() const { return vis_.config(); }
@@ -98,15 +105,17 @@ public:
     // Main loop (returns after stop()). On stop: queued requests get 503, the
     // running ones finish, idle slots spill to the RAM tier and pending RAM -> SSD
     // tier writes are flushed (bounded, shutdown_flush_ms), then it returns.
-    void runLoop();
-    void stop();
+    void runLoop() { sch_.runLoop(); }
+    void stop() { jq_.stop(); }
     // Tests (REVIEW-ARCH3 P2-1): run fn on the engine thread at the start of the next loop iteration, i.e. after the
     // job whose response the caller already received has finished, including its spill when that spill ran at once
     // (a deferred spill, spill_wanted, runs later in tierTick: not covered). Blocks until fn ran. Engine state (tier
     // entries, statistics) read inside fn is synchronized with the engine. Throws when the loop does not claim fn
     // within timeout (not started / stopped); fn is then cancelled and never runs, so it may capture the caller's
     // locals by reference (REVIEW-ARCH4 P3-5). Not used by the product.
-    void runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout = std::chrono::milliseconds(60000));
+    void runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout = std::chrono::milliseconds(60000)) {
+        jq_.runOnLoop(std::move(fn), timeout);
+    }
     // arch024 M8: the thread inside runLoop (none before / after it); the modules check their entry points against it
     const EngineThread& owner() const { return owner_; }
     // tests: every module checks against owner()
@@ -120,10 +129,10 @@ public:
     static constexpr std::uint64_t shutdown_flush_long_ms = 60000;
 
     // Connection threads (EngineApi)
-    std::uint64_t nextJobId() override { return next_id_.fetch_add(1); }
-    void submitAndWait(Job& job) override;
-    void beginBuilding() override { n_building_.fetch_add(1); }
-    void endBuilding() override;
+    std::uint64_t nextJobId() override { return jq_.nextJobId(); }
+    void submitAndWait(Job& job) override { jq_.submitAndWait(job); }
+    void beginBuilding() override { jq_.beginBuilding(); }
+    void endBuilding() override { jq_.endBuilding(); }
     Health health() override;
 
     // the HTTP layer's facts (EngineApi; taken once by HttpServer, after the setters below)
@@ -169,62 +178,16 @@ public:
 
 private:
     // the KV pages and checkpoints of the slots: sc_ (arch025-engine S7, module server.slot_cache)
-    bool waitsForTier(Job& job);
-    void prefetchFor(Job& job);
     // request lifecycle
-    bool startJob(Slot& sl, Job& job);
-    std::size_t chunkLen(const Slot& sl) const;
-    std::vector<DecodeFloor::SlotTok> floorProtected() const;
-    void maybeSplitCkpt(Slot& sl, DevPtr hid_row);
-    void prefillStep(Slot& sl);
-    std::size_t prefillGroup(Slot& first, std::size_t row_budget);
-    void finishPrefill(Slot& sl);
-    std::uint32_t pickDrafts(std::span<Slot* const> act);
-    bool relaxRepeats(const Slot& sl, std::span<const std::uint32_t> dr, std::uint32_t acc) const;
-    void decodeCycle(std::span<Slot* const> act_in);
-    // decodeCycle's phases in call order (arch025-E2: extracted verbatim). Cycle = the values one cycle passes from
-    // phase to phase (engine.cpp). sampleRows holds the cycle's one host sync (readCtl).
-    struct Cycle;
-    bool relaxes(const Cycle& cy, std::size_t k) const;
-    std::uint32_t verifyRoom(const Slot& sl, std::uint32_t lim) const;
-    void dropOutOfRoom(Cycle& cy, std::span<Slot* const> act_in);
-    void draftLimits(Cycle& cy);
-    void ngramDrafts(Cycle& cy);
-    void dflashDrafts(Cycle& cy);
-    void mtpDrafts(Cycle& cy);
-    void layoutBatch(Cycle& cy);
-    void draftSampling(Cycle& cy);
-    void enqueueVerify(Cycle& cy);
-    void sampleRows(Cycle& cy);
-    void trainCycle(Cycle& cy);
-    void cycleStats(Cycle& cy);
-    void acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acceptor);
-    void finishCycle(Cycle& cy);
+    // the prefill phase: pf_ (arch025-engine S12, module server.prefill)
+    // the decode / speculative cycle and its phases: cyc_ (arch025-engine S13, module server.spec_cycle)
     // runLoop's phases in call order (arch025-E2: extracted verbatim)
-    bool idleWait(whirl::UniqueLock& lk, bool& was_busy) WH_REQUIRES(q_mutex_);
-    std::vector<Job*> admitQueued(std::uint32_t n_busy) WH_REQUIRES(q_mutex_);  // q_mutex_ held by the caller
-    void startAdmitted(const std::vector<Job*>& admit);
-    void runPrefill(Slot* pf, bool& idle_wait, std::size_t& pf_rows, bool& floor_pf);
-    void noteFloor(TimePoint tl2, TimePoint tl3, std::size_t pf_rows, bool floor_pf);
-    void splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m);
-    std::uint32_t draftCap(std::uint32_t A);
-    void finishJob(Slot& sl);
     // host tiers (the spill half, the span lists and the idle / shutdown flush: tb_)
     // the scheduler's part of a restore (whether the request fits, the slot's pages and phase, startJob); the tier
     // part is TierBridge's (arch024-S7)
-    bool tryRestore(Slot& sl, Job& job);
-    void pollRestores();
-    bool tierTick();
-    TierBridge::RestoreSteps restoreSteps(Slot& sl);
     // shutdown: tb_.flushOnStop over tierTick, then the tier line
-    void flushTierOnStop();
-    void releaseSlot(Slot& sl);
-    void failSlot(Slot& sl, const std::string& err);
-    // FR-SRV P2-2: queued / running requests whose client disconnected end (slot freed)
-    void reapDisconnected();
-    void logBatchStats(bool force);
+    // the end of a request: se_ (arch025-engine S11, module server.slot_end)
     // WDDM-LOG video memory watch: vst_ / vw_ (arch025-engine S9, module server.vram_watch)
-    void abortQueued(whirl::UniqueLock& lk) WH_REQUIRES(q_mutex_);
     // v0.2.2.2 memory governor: gst_ / gv_ (arch025-engine S8, module server.governor)
 
     ServerModel& m_;
@@ -243,18 +206,16 @@ private:
     bool spec_on_ = false;
     std::uint64_t conv_bytes_ = 0, ssm_bytes_ = 0;
     std::vector<Slot> slots_;
-    // queue
-    whirl::Mutex q_mutex_;
-    std::condition_variable q_cond_;
-    std::deque<Job*> queue_ WH_GUARDED_BY(q_mutex_);
-    std::uint32_t n_active_ WH_GUARDED_BY(q_mutex_) = 0;
-    std::atomic<std::uint32_t> n_building_{0};
-    std::atomic<std::uint64_t> next_id_{1};
+    // the request queue (arch025-engine S10, module server.job_queue): the former members q_mutex_ .. loop_calls_ and
+    // tier_wake_ / wake_seq_, here (where q_mutex_ was) and in that order
+    JobQueue jq_{slots_};
+    // the loop / release / tier paths still read and write the queue state under the old names until the scheduler,
+    // slot_end and tier_glue modules take their parts
+    whirl::Mutex& q_mutex_ = jq_.q_mutex_;
+    std::deque<Job*>& queue_ = jq_.queue_;
+    std::uint32_t& n_active_ = jq_.n_active_;
     IdGen ids_;         // response / tool-call ids and default sampling seeds (one stream)
     ResponseCtx rcx_;   // what each slot's StreamState reads (model id, tokenizer, ids_)
-    bool stop_ WH_GUARDED_BY(q_mutex_) = false;
-    std::vector<std::function<void()>> loop_calls_ WH_GUARDED_BY(q_mutex_);  // runOnLoop (tests)
-    void runLoopCalls(whirl::UniqueLock& lk) WH_REQUIRES(q_mutex_);
     // batch statistics (arch025-N4c: the former stat_t0_ .. stat_dfl_gap_)
     BatchStats bst_;
     // WDDM-LOG: runtime video memory watch (setVramProbe)
@@ -273,8 +234,6 @@ private:
     std::atomic<std::uint32_t> ctx_pub_{0};
     // host tiers (the tier itself: tb_.tier())
     std::vector<KvArr> kv_arrays_;
-    bool tier_wake_ WH_GUARDED_BY(q_mutex_) = false;
-    std::uint64_t wake_seq_ WH_GUARDED_BY(q_mutex_) = 0;  // bumped by a queued request, a finished build, the tier IO thread
     PagePool pool_;  // KV pool pages (arch024 M3); here, where its quarantine was, so ~Engine destroys its events in
                      // the same order
     TimePoint last_tick_{};
@@ -305,6 +264,26 @@ private:
     // vram_probe_, the governor's placed state vram_others_, gv_ and vst_'s members; after gv_, the last member, destroyed
     // first, trivial destructor (DESIGN v3 2.5)
     VramWatch vw_{owner_, vram_probe_, vram_others_, gv_, vst_};
+    // the end of a request (arch025-engine S11, module server.slot_end): references only - core.shared members, the
+    // queue state of jq_, sc_, vw_ and the placed state last_reap_; after vw_, the last member, trivial destructor
+    SlotEnd se_{m_, ops_, opt_, sb_, sc_, slots_, tb_, vis_, vw_, last_reap_, jq_};
+    // the prefill phase (arch025-engine S12, module server.prefill): references only - core.shared members, n_building_
+    // of jq_, dc_, sc_, se_ and the placed state fl_ / prefill_tok_cum_; after se_, the last member, trivial destructor
+    PrefillPhase pf_{m_, ops_, ct_, opt_, spec_, fl_, sb_, slots_, bst_, prefill_tok_cum_, ps_, dc_, sc_, se_, jq_, pool_, rcx_};
+    // the decode / speculative cycle (arch025-engine S13, module server.spec_cycle): references only - core.shared
+    // members, dc_, se_ and the placed state spec_on_ / prefill_tok_cum_; after pf_, the last member, trivial destructor
+    SpecCycle cyc_{m_, ops_, ct_, opt_, ctx_, spec_, sb_, spec_on_, slots_, bst_, prefill_tok_cum_, dc_, se_, sc_, vw_};
+    // the start of a request (arch025-engine S14, module server.slot_start): references only - core.shared members, dc_,
+    // sc_, gv_, pf_ and the placed state ids_ / crlf_norm_; after cyc_, the last member, trivial destructor
+    SlotStart ss_{m_, ops_, ct_, opt_, ctx_, ck_, spec_, sb_, slots_, ids_, crlf_norm_, pool_, ps_, tb_, vis_, dc_, sc_, gv_, pf_};
+    // the scheduler's side of the host tiers (arch025-engine S15, module server.tier_glue): references only - core.shared
+    // members, the queue state of jq_, dc_, se_ and ss_; after ss_, the last member, trivial destructor
+    TierGlue tg_{ops_, opt_, slots_, pool_, ps_, tb_, dc_, se_, ss_, jq_, sc_, gv_};
+    // the scheduler (arch025-engine S15b, module server.scheduler): runLoop and its phases; references only - core.shared
+    // members, the queue state of jq_, every component above and the placed state last_tick_; the last member, trivial
+    // destructor
+    Scheduler sch_{m_, opt_, owner_, spec_, slots_, bst_, vram_probe_, pool_, last_tick_, ps_, tb_, vis_, sc_, gv_, vw_, jq_, se_, pf_,
+                   cyc_, ss_, tg_};
 };
 
 }  // namespace whirl::server

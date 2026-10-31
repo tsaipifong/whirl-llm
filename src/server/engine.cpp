@@ -229,7 +229,7 @@ Engine::Stats Engine::statsShared() const {
 // ---------------------------------------------------------------------------
 // request lifecycle
 
-bool Engine::startJob(Slot& sl, Job& job) {
+bool SlotStart::startJob(Slot& sl, Job& job) {
     const Params& p = job.params;
     const std::span<const std::uint32_t> toks = job.tokens;
     const std::uint32_t N = static_cast<std::uint32_t>(toks.size());
@@ -455,7 +455,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     return true;
 }
 
-void Engine::finishJob(Slot& sl) {
+void SlotEnd::finishJob(Slot& sl) {
     Job& job = *sl.job;
     const std::uint64_t E = m_.cfg().n_embd;
     const std::uint32_t N = sl.n_prompt;
@@ -538,7 +538,7 @@ void Engine::finishJob(Slot& sl) {
 
 // ---------------------------------------------------------------------------
 
-void Engine::releaseSlot(Slot& sl) {
+void SlotEnd::releaseSlot(Slot& sl) {
     if (sl.restore != nullptr && sl.phase != Phase::restore) tb_.finishTail(sl.id, sl, sl, true);
     Job* job = sl.job;
     if (!job) return;
@@ -553,7 +553,7 @@ void Engine::releaseSlot(Slot& sl) {
     sl.phase = Phase::idle;
 }
 
-void Engine::failSlot(Slot& sl, const std::string& err) {
+void SlotEnd::failSlot(Slot& sl, const std::string& err) {
     Job* job = sl.job;
     if (!job) return;
     if (sl.restore != nullptr && sl.phase != Phase::restore) tb_.finishTail(sl.id, sl, sl, true);
@@ -577,7 +577,7 @@ void Engine::failSlot(Slot& sl, const std::string& err) {
     releaseSlot(sl);
 }
 
-void Engine::logBatchStats(bool force) {
+void Scheduler::logBatchStats(bool force) {
     const double el = msSince(bst_.t0);
     if (!force && el < 5000) return;
     if (bst_.cycles > 0 || bst_.prefill_tok > 0) {
@@ -607,13 +607,10 @@ void Engine::logBatchStats(bool force) {
         logI("batch | segmented prefill: {} forwards, {} chunks ({:.2f} chunks/forward)", bst_.seg_batches, bst_.seg_chunks,
              static_cast<double>(bst_.seg_chunks) / static_cast<double>(bst_.seg_batches));
     bst_.prefill_tok = bst_.seg_batches = bst_.seg_chunks = 0;
-    if (fl_.periods > 0)
-        logI("batch | decode floor: {} prefill forwards while decoding, {} decode cycles held prefill back", fl_.periods,
-             fl_.waits);
-    fl_.periods = fl_.waits = 0;
+    pf_.floorLogPeriod();
 }
 
-void Engine::runLoop() {
+void Scheduler::runLoop() {
     // arch024 M8: this thread owns the engine state until runLoop returns (startup before it: no owner, allowed)
     struct Owned {
         EngineThread& o;
@@ -694,7 +691,7 @@ void Engine::runLoop() {
                 for (Slot* sl : act)
                     if (sl->phase == Phase::decode) failSlot(*sl, ex.what());
             }
-            if (fl_.floor.on()) noteFloor(tl2, tl3, pf_rows, floor_pf);
+            if (pf_.floorOn()) noteFloor(tl2, tl3, pf_rows, floor_pf);
         } else if (idle_wait || (restoring && pf == nullptr)) {
             // burst gather / host-tier restore: poll again in 1 ms, sooner when a
             // request is queued, a connection finishes building one, or the tier
@@ -718,7 +715,7 @@ void Engine::runLoop() {
 // arch025-tsaidle: the body unlocks and relocks the caller's lock through WH_UNLOCK_HELD / WH_RELOCK_HELD (they name
 // q_mutex_), so the body is checked by the analysis again, as inside runLoop before E2 (WH_NO_THREAD_SAFETY_ANALYSIS here
 // let a dropped relock or a guarded read after the unlock pass; the wait predicates are lambdas, checked either way)
-bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
+bool Scheduler::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
     if (was_busy) {
         WH_UNLOCK_HELD(lk, q_mutex_);
         logBatchStats(true);
@@ -813,7 +810,7 @@ bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
 }
 
 // the queued requests that start this iteration (q_mutex_ held by the caller)
-std::vector<Job*> Engine::admitQueued(std::uint32_t n_busy) {
+std::vector<Job*> Scheduler::admitQueued(std::uint32_t n_busy) {
     std::vector<Job*> admit;
     std::size_t qi = 0;
     std::optional<std::size_t> pool_avail;  // FR-SRV P2-3 (computed when a request is about to start)
@@ -857,7 +854,7 @@ std::vector<Job*> Engine::admitQueued(std::uint32_t n_busy) {
     return admit;
 }
 
-void Engine::startAdmitted(const std::vector<Job*>& admit) {
+void Scheduler::startAdmitted(const std::vector<Job*>& admit) {
     std::size_t n_requeued = 0;
     for (Job* job : admit) {
         // item T3: admitted together with a request whose restore just

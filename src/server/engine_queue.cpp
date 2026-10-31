@@ -22,13 +22,13 @@
 
 namespace whirl::server {
 
-void Engine::stop() {
+void JobQueue::stop() {
     whirl::MutexLock lk(q_mutex_);
     stop_ = true;
     q_cond_.notify_all();
 }
 
-void Engine::runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout) {
+void JobQueue::runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout) {
     auto done = std::make_shared<std::promise<void>>();
     // REVIEW-ARCH4 P3-5: 0 queued, 1 claimed by the loop, 2 cancelled by a timed-out caller. fn usually captures the
     // caller's locals by reference, so it may only run while the caller waits: the loop claims the call before
@@ -60,7 +60,7 @@ void Engine::runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeo
 
 // called with lk held; runs the queued test calls without the lock (unlocks / relocks through WH_UNLOCK_HELD /
 // WH_RELOCK_HELD, so the body is checked: arch025-tsaidle)
-void Engine::runLoopCalls(whirl::UniqueLock& lk) {
+void JobQueue::runLoopCalls(whirl::UniqueLock& lk) {
     if (loop_calls_.empty()) return;
     std::vector<std::function<void()>> calls;
     calls.swap(loop_calls_);
@@ -69,7 +69,7 @@ void Engine::runLoopCalls(whirl::UniqueLock& lk) {
     WH_RELOCK_HELD(lk, q_mutex_);
 }
 
-void Engine::reapDisconnected() {
+void SlotEnd::reapDisconnected() {
     if (msSince(last_reap_) < 50) return;
     last_reap_ = Clock::now();
     {
@@ -103,7 +103,7 @@ void Engine::reapDisconnected() {
     }
 }
 
-void Engine::submitAndWait(Job& job) {
+void JobQueue::submitAndWait(Job& job) {
     whirl::UniqueLock lk(q_mutex_);
     if (stop_) {
         // FR-SRV P3-1: shutting down (the loop may be flushing the tier, or gone): nobody would run
@@ -131,7 +131,7 @@ void Engine::submitAndWait(Job& job) {
     q_cond_.wait(lk, [&] { return job.done; });
 }
 
-void Engine::endBuilding() {
+void JobQueue::endBuilding() {
     // a connection that did not queue a request (bad request, probe): a burst
     // gather waiting for it ends now
     whirl::MutexLock lk(q_mutex_);
@@ -140,7 +140,7 @@ void Engine::endBuilding() {
     q_cond_.notify_all();
 }
 
-void Engine::abortQueued(whirl::UniqueLock& lk) {
+void JobQueue::abortQueued(whirl::UniqueLock& lk) {
     // shutting down: queued requests are answered 503
     for (Job* job : queue_) {
         const std::string r = errorResponse(503, "server is shutting down");

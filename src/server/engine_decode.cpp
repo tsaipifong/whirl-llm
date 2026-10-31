@@ -25,11 +25,11 @@ namespace whirl::server {
 // relaxacc repetition guard: would keeping draft dr[acc] (after sl.next and dr[0..acc)) end in
 // an n-gram already in the slot's recent tokens?
 // (the rule is shared with the CLI: spec::rules::relaxRepeats, src/spec/spec_rules.h)
-bool Engine::relaxRepeats(const Slot& sl, std::span<const std::uint32_t> dr, std::uint32_t acc) const {
+bool SpecCycle::relaxRepeats(const Slot& sl, std::span<const std::uint32_t> dr, std::uint32_t acc) const {
     return spec::rules::relaxRepeats(std::span<const std::uint32_t>(sl.cache_tokens), sl.next, dr, acc);
 }
 
-std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
+std::uint32_t SpecCycle::pickDrafts(std::span<Slot* const> act) {
     if (!opt_.use_mtp) return 0;
     const std::uint32_t A = static_cast<std::uint32_t>(act.size());
     std::uint32_t nd = draftCap(A);
@@ -57,7 +57,7 @@ std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
 
 // arch025-E2: decodeCycle's phases. Cycle holds the values one decode cycle passes from one phase to the next
 // (they were decodeCycle's locals; value-initialized per cycle, never kept across cycles).
-struct Engine::Cycle {
+struct SpecCycle::Cycle {
     std::uint64_t E = 0;
     TimePoint t_cycle0{};
     std::vector<Slot*> act;  // the slots with context room
@@ -92,20 +92,20 @@ struct Engine::Cycle {
 };
 
 // relaxacc (fast) applies to MTP drafts only: one rule for every site below (FR-DFL P2-3)
-bool Engine::relaxes(const Cycle& cy, std::size_t k) const {
+bool SpecCycle::relaxes(const Cycle& cy, std::size_t k) const {
     return whirl::dflash::relaxAppliesTo(static_cast<whirl::dflash::DraftKind>(cy.dsrc[k]), opt_.relax.on);
 }
 
 // the verify writes KV rows pos .. pos + drafts: stay inside the pages mapped
 // for the slot and the context
-std::uint32_t Engine::verifyRoom(const Slot& sl, std::uint32_t lim) const {
+std::uint32_t SpecCycle::verifyRoom(const Slot& sl, std::uint32_t lim) const {
     const std::uint64_t mapped = static_cast<std::uint64_t>(sl.pages.size()) * kv_page;
     const std::uint64_t a1 = mapped > static_cast<std::uint64_t>(sl.pos) + 1 ? mapped - (sl.pos + 1ull) : 0;
     const std::uint64_t a2 = spec::rules::ctxRoom(sl.pos, ctx_);
     return static_cast<std::uint32_t>(std::min({static_cast<std::uint64_t>(lim), a1, a2}));
 }
 
-void Engine::decodeCycle(std::span<Slot* const> act_in) {
+void SpecCycle::decodeCycle(std::span<Slot* const> act_in) {
     Cycle cy;
     const auto& cfg = m_.cfg();
     cy.E = cfg.n_embd;
@@ -128,7 +128,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     finishCycle(cy);
 }
 
-void Engine::dropOutOfRoom(Cycle& cy, std::span<Slot* const> act_in) {
+void SpecCycle::dropOutOfRoom(Cycle& cy, std::span<Slot* const> act_in) {
     // slots out of context room end here
     const std::uint32_t nd_room = dc_.draftRoom();
     for (Slot* sl : act_in) {
@@ -150,7 +150,7 @@ void Engine::dropOutOfRoom(Cycle& cy, std::span<Slot* const> act_in) {
     }
 }
 
-void Engine::draftLimits(Cycle& cy) {
+void SpecCycle::draftLimits(Cycle& cy) {
     // replay keeps no snapshot sets: the verify row budget is the only shared limit
     cy.snap_cap = m_.gdnReplay() ? spec_.vrows : std::min(qwen35::gdn_max_snap, m_.snapSets());
     // literal drafts (n-gram, DFlash2) per slot: the snapshot budget they had before CONC-8S
@@ -161,7 +161,7 @@ void Engine::draftLimits(Cycle& cy) {
     }
 }
 
-void Engine::ngramDrafts(Cycle& cy) {
+void SpecCycle::ngramDrafts(Cycle& cy) {
     const qwen35::DraftTiming& dtm = spec_.dtiming[std::min<std::size_t>(cy.A, gdn_max_seg)];
     if (opt_.ngram && (opt_.use_mtp || opt_.use_dflash)) {
         const std::uint32_t lim = spec::rules::ngramDraftCap(cy.lit_cap, spec_.vrows, cy.Au, opt_.ngram_max, m_.fusedDecode());
@@ -202,7 +202,7 @@ void Engine::ngramDrafts(Cycle& cy) {
     }
 }
 
-void Engine::dflashDrafts(Cycle& cy) {
+void SpecCycle::dflashDrafts(Cycle& cy) {
     // DFlash2 drafts for the slots without n-gram drafts (their time counts in the DFlash2 cycle time)
     cy.td0 = Clock::now();
     if (opt_.use_dflash && cy.dfl_lim > 0) {
@@ -227,7 +227,7 @@ void Engine::dflashDrafts(Cycle& cy) {
     }
 }
 
-void Engine::mtpDrafts(Cycle& cy) {
+void SpecCycle::mtpDrafts(Cycle& cy) {
     // MTP drafts for the other slots
     for (std::size_t k = 0; k < cy.A; ++k)
         if (cy.ng_n[k] == 0) cy.act_mtp.push_back(cy.act[k]);
@@ -284,7 +284,7 @@ void Engine::mtpDrafts(Cycle& cy) {
     }
 }
 
-void Engine::layoutBatch(Cycle& cy) {
+void SpecCycle::layoutBatch(Cycle& cy) {
     cy.tc0 = Clock::now();
     cy.pa = std::min<std::size_t>(cy.A, gdn_max_seg);
     cy.p = spec_.prof.get();
@@ -338,7 +338,7 @@ void Engine::layoutBatch(Cycle& cy) {
     }
 }
 
-void Engine::draftSampling(Cycle& cy) {
+void SpecCycle::draftSampling(Cycle& cy) {
     if (spec_on_ && cy.nd_max > 0) {
         // specsample: MTP slots of sampling requests draw their drafts from q by the target's race
         for (std::size_t k = 0; k < cy.A; ++k) {
@@ -358,7 +358,7 @@ void Engine::draftSampling(Cycle& cy) {
     }
 }
 
-void Engine::enqueueVerify(Cycle& cy) {
+void SpecCycle::enqueueVerify(Cycle& cy) {
     if (cy.nd_max > 0) {
         m_.setDraftCutoff(opt_.p_min, std::min(opt_.n_min, cy.nd_max));
         struct Reset {
@@ -378,7 +378,7 @@ void Engine::enqueueVerify(Cycle& cy) {
     if (cy.p) m_.profileStop();
 }
 
-void Engine::sampleRows(Cycle& cy) {
+void SpecCycle::sampleRows(Cycle& cy) {
     bool any_sampling = false, any_relax = false;
     cy.rk = opt_.relax.topk();
     for (std::size_t k = 0; k < cy.A; ++k) {
@@ -403,7 +403,7 @@ void Engine::sampleRows(Cycle& cy) {
     if (any_relax) ops_.download(sb_.relaxHost().data(), sb_.relaxDev(), sb_.relaxHost().size());
 }
 
-void Engine::trainCycle(Cycle& cy) {
+void SpecCycle::trainCycle(Cycle& cy) {
     // relaxacc: the kept tokens depend on which drafts were proposed, so the draft-count policy
     // must not see wall-clock times (run-to-run jitter would change the output). It sees a
     // deterministic cycle cost instead: a base per slot, + ngram_slope per extra verify row (the
@@ -457,7 +457,7 @@ void Engine::trainCycle(Cycle& cy) {
     }
 }
 
-void Engine::cycleStats(Cycle& cy) {
+void SpecCycle::cycleStats(Cycle& cy) {
     if (cy.p) {
         if (cy.p->events) m_.profileFlush(cy.pa);
         cy.p->cycles[cy.pa] += 1;
@@ -477,7 +477,7 @@ void Engine::cycleStats(Cycle& cy) {
     for (std::size_t k = 0; k < cy.A; ++k) bst_.lit_drafts += cy.ng_n[k];
 }
 
-void Engine::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acceptor) {
+void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acceptor) {
     Slot& sl = *cy.act[k];
     const std::int32_t* ctl = sb_.ctlHost().data() + static_cast<std::size_t>(sl.id) * qwen35::ctl_words;
     const std::uint32_t row0 = cy.row_of[k];
@@ -585,7 +585,7 @@ void Engine::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acce
     }
 }
 
-void Engine::finishCycle(Cycle& cy) {
+void SpecCycle::finishCycle(Cycle& cy) {
     if (cy.p) {
         std::uint64_t tk = 0;
         for (Slot* sl : cy.act) tk += sl->last_acc + 1;
@@ -607,7 +607,7 @@ void Engine::finishCycle(Cycle& cy) {
     }
 }
 
-void Engine::splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m) {
+void SpecCycle::splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m) {
     for (auto& x : nd_m) x = nd;
     if (opt_.slot_drafts != 1 || !opt_.mtp_auto || act.size() < 2 || nd == 0) return;
     const std::uint32_t cap = std::min(opt_.n_draft, qwen35::max_drafts);
@@ -616,7 +616,7 @@ void Engine::splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint
     splitDraftsByGain(std::span<const qwen35::DraftAccept* const>(acc.data(), act.size()), nd, rows, cap, nd_m);
 }
 
-std::uint32_t Engine::draftCap(std::uint32_t A) {
+std::uint32_t SpecCycle::draftCap(std::uint32_t A) {
     return slotDraftCap(opt_.batch_drafts[std::min(A, gdn_max_seg)], opt_.n_draft, m_.fusedDecode(), m_.gdnReplay(), A, spec_.vrows);
 }
 

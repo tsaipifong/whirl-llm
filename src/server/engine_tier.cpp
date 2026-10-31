@@ -21,7 +21,7 @@
 
 namespace whirl::server {
 
-void Engine::attachTier(tier::Tier* t) {
+void TierGlue::attachTier(tier::Tier* t) {
     tb_.attach(t);
     pool_.setQuarantineStream(t ? t->stream() : nullptr);
     ps_.attachTier(t);
@@ -36,7 +36,7 @@ void Engine::attachTier(tier::Tier* t) {
     }
 }
 
-bool Engine::waitsForTier(Job& job) {
+bool TierGlue::waitsForTier(Job& job) {
     if (!tb_.tier()) return false;
     if (!job.params.cache_prompt || opt_.no_prefix_cache) return false;
     const std::span<const std::uint32_t> toks = job.tokens;
@@ -58,7 +58,7 @@ bool Engine::waitsForTier(Job& job) {
     return false;
 }
 
-void Engine::prefetchFor(Job& job) {
+void TierGlue::prefetchFor(Job& job) {
     if (!tb_.tier()) return;
     if (job.pf_checked) return;
     job.pf_checked = true;
@@ -76,7 +76,7 @@ void Engine::prefetchFor(Job& job) {
 // ---------------------------------------------------------------------------
 // item G: host tiers
 
-bool Engine::tryRestore(Slot& sl, Job& job) {
+bool TierGlue::tryRestore(Slot& sl, Job& job) {
     if (!tb_.tier()) return false;
     if (!job.params.cache_prompt || opt_.no_prefix_cache) return false;
     const std::span<const std::uint32_t> toks = job.tokens;
@@ -113,7 +113,7 @@ bool Engine::tryRestore(Slot& sl, Job& job) {
 }
 
 // the Engine steps TierBridge calls inside a restore (in the order they always ran)
-TierBridge::RestoreSteps Engine::restoreSteps(Slot& sl) {
+TierBridge::RestoreSteps TierGlue::restoreSteps(Slot& sl) {
     TierBridge::RestoreSteps s;
     s.drop_cache = [this, &sl] { sc_.dropCache(sl); };
     s.drafter_reset = [this, &sl](std::uint32_t n_tok) { dc_.dflReset(sl, n_tok); };
@@ -123,7 +123,7 @@ TierBridge::RestoreSteps Engine::restoreSteps(Slot& sl) {
     return s;
 }
 
-void Engine::pollRestores() {
+void TierGlue::pollRestores() {
     if (!tb_.tier()) return;
     for (Slot& sl : slots_) {
         if (!sl.restore) continue;
@@ -152,7 +152,7 @@ void Engine::pollRestores() {
 }
 
 // the tier's background work (TierBridge::tick), then the page pool's quarantine and the deferred spills
-bool Engine::tierTick() {
+bool TierGlue::tierTick() {
     if (!tb_.tier()) return false;
     bool busy = tb_.tick();
     if (!pool_.quarantineEmpty()) {
@@ -173,7 +173,7 @@ bool Engine::tierTick() {
 }
 
 // Shutdown (stop()): the bounded tier flush (TierBridge::flushOnStop), then the tier line
-void Engine::flushTierOnStop() {
+void TierGlue::flushTierOnStop() {
     tb_.flushOnStop([this] { return tierTick(); });
     tb_.logStats(pool_.stats().cow_pages, pool_.stats().q_waits);
 }
