@@ -64,6 +64,7 @@
 #include "server/engine_state.h"    // BatchStats, SpecState, FloorState
 #include "server/engine_drafter.h"   // DrafterCtx (arch025-engine S4, module server.drafter_ctx)
 #include "server/engine_output.h"    // emit, flushOut, writeError (arch025-engine S5, module server.slot_output)
+#include "server/engine_pages.h"     // SlotPagesCounters (arch025-engine S6, module server.slot_cache)
 
 namespace whirl::server {
 
@@ -336,8 +337,9 @@ private:
     PrefixStore ps_;
     // host tier bridge, spill half (arch024 M5): after ps_ and kv_arrays_ (it keeps references to both)
     TierBridge tb_;
-    std::uint64_t stat_spe_new_ = 0, stat_spe_hits_ = 0, stat_spe_tok_ = 0, stat_spe_evict_ = 0, stat_unshare_ = 0;
-    std::uint64_t stat_evictions_ = 0;
+    // shared prefix checkpoint / KV page counters (arch025-engine S6, module server.slot_cache): the former members
+    // stat_spe_new_ .. stat_evictions_, here (where they were) and in that order (DESIGN v3 2.5)
+    SlotPagesCounters cnt_;
     // vision: image embeddings (cache by content hash), per-slot image maps, idle release; arch025-N4b: the former
     // members vis_cfg_ .. vis_rel_pending_, here (the last members) and in that order
     ImageEmbeddings vis_{m_, ops_};

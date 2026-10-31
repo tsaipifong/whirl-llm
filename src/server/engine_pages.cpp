@@ -109,7 +109,7 @@ bool Engine::evictFor(Slot* sl) {
         logI("kv pool full: evicting idle slot {} ({} pages, {} cached tokens)", victim->id, victim->pages.size(),
              victim->cache_tokens.size());
     }
-    stat_evictions_ += 1;
+    cnt_.noteEviction();
     freePages(*victim);
     return true;
 }
@@ -132,7 +132,7 @@ void Engine::cowPages(Slot& sl, std::uint32_t reuse, bool spill) {
     case PagePool::Cow::done:
         break;
     }
-    if (!spill) stat_unshare_ += 1;
+    if (!spill) cnt_.noteUnshare();
     sl.tier_pages = std::min(sl.tier_pages, static_cast<std::uint32_t>(keep));
 }
 
@@ -167,7 +167,7 @@ void Engine::dropSpe(Spe& s) {
     s.valid = false;
     s.n = 0;
     s.tier_id = 0;
-    stat_spe_evict_ += 1;
+    cnt_.noteSpeEvict();
 }
 
 void Engine::createSpe(Slot& sl, std::span<const std::uint32_t> toks_all, std::uint32_t pos, const char* kind,
@@ -239,7 +239,7 @@ void Engine::createSpe(Slot& sl, std::span<const std::uint32_t> toks_all, std::u
     s.last_used = use;
     s.uses = 0;
     s.tier_id = tier_id;
-    stat_spe_new_ += 1;
+    cnt_.noteSpeNew();
     logI("req {} | slot {} | shared prefix: kept {} checkpoint @{} ({} pages shared, 1 copied){}", sl.reqId(), sl.id,
          kind, pos, last, src ? " from the restored entry" : "");
     if (tier_id == 0) {
@@ -275,12 +275,12 @@ void Engine::attachSpe(Slot& sl, Spe& s) {
     dc_.dflReset(sl, s.n);
     s.last_used = ps_.cache().touch();
     s.uses += 1;
-    stat_spe_hits_ += 1;
+    cnt_.noteSpeHit();
     // the checkpoint's RAM tier entry was reused (served from VRAM here, so no tier restore marked it):
     // worth an SSD write under the seen-once filter, and on eviction in shutdown mode (TIER-EVICT)
     if (tb_.tier() != nullptr && s.tier_id != 0)
         if (tier::Entry* x = tb_.tier()->find(s.tier_id)) x->reused = true;
-    stat_spe_tok_ += s.n;
+    cnt_.noteSpeTok(s.n);
 }
 
 bool Engine::waitsForSys(Job& job) {

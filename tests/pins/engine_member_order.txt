@@ -19,7 +19,7 @@
 # | t->setWake([this]{..}) engine_tier.cpp:29 | Tier (outlives Engine) | Engine -> jq_ (JobQueue) | ~Engine must clear the wake (H1 / F13) before jq_ goes; C3 test |
 # | s.drop_cache / s.drafter_reset / s.share = [this, &sl] engine_tier.cpp:118-120 | TierBridge::RestoreSteps (stack of a restore) | Engine -> sc_ / dc_ | used only inside tb_.tryRestore called from the loop; no restore runs at ~Engine (stopIo before ~Engine) |
 # | tb_.flushOnStop([this]{ tierTick(); }) engine_tier.cpp:177 | call argument (not stored after return) | Engine -> tg_ | runs inside stop() before ~Engine; C3 test triggers flushOnStop before the reset |
-groups: BatchStats SampleBuffers ImageEmbeddings SpecState FloorState
+groups: BatchStats SampleBuffers ImageEmbeddings SpecState FloorState SlotPagesCounters
 m_
 ops_
 tok_
@@ -122,12 +122,12 @@ last_tick_
 last_reap_
 ps_
 tb_
-stat_spe_new_
-stat_spe_hits_
-stat_spe_tok_
-stat_spe_evict_
-stat_unshare_
-stat_evictions_
+cnt_.stat_spe_new_
+cnt_.stat_spe_hits_
+cnt_.stat_spe_tok_
+cnt_.stat_spe_evict_
+cnt_.stat_unshare_
+cnt_.stat_evictions_
 vis_.m_
 vis_.ops_
 vis_.cfg_

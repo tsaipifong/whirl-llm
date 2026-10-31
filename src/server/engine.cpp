@@ -181,12 +181,12 @@ Engine::Health Engine::health() {
 
 Engine::Stats Engine::stats() const {
     Stats s;
-    s.spe_new = stat_spe_new_;
-    s.spe_hits = stat_spe_hits_;
-    s.spe_tok = stat_spe_tok_;
-    s.spe_evict = stat_spe_evict_;
-    s.unshare = stat_unshare_;
-    s.evictions = stat_evictions_;
+    s.spe_new = cnt_.speNew();
+    s.spe_hits = cnt_.speHits();
+    s.spe_tok = cnt_.speTok();
+    s.spe_evict = cnt_.speEvict();
+    s.unshare = cnt_.unshares();
+    s.evictions = cnt_.evictions();
     s.cow_pages = pool_.stats().cow_pages;
     s.q_waits = pool_.stats().q_waits;
     s.spill_waits = tb_.spillWaits();

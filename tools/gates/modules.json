@@ -262,6 +262,8 @@
                           "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
    "server.slot_output": {"metrics": [], "metrics_none": "three small functions per decode / prefill step and per error answer (called across TUs, as before the move: the speed is the decode cycle's, measured by the engine split's E8 A/B): no bench key (whirl-iso-server-slot-output-tests)",
                           "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
+   "server.slot_cache": {"metrics": [], "metrics_none": "six counters, one add per eviction / copy-on-write / shared prefix checkpoint event (inline; S6: every product object identical to the 421e22b build): no bench key (whirl-iso-server-slot-cache-tests)",
+                          "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
    "server.cycle_prof": {"metrics": [], "metrics_none": "WHIRL_PROFILE only (off in the product default): no bench key (whirl-iso-server-cycle-prof-tests)",
                          "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "server_log_scan"]}},
    "server.sample_buffers": {"metrics": ["host.sched.round_us_per_cycle"],
@@ -947,6 +949,46 @@
     "V-move: scratch/a25_engine/s5/apply_s5.py --check (the bodies equal the 6d004b6 text byte for byte with the 3 definition lines mapped back; line multiset: every lost / added line explained) and s5/hdr_alone.py",
     "V-text: tools/impact/revtext.py --rules scratch/a25_engine/s5/revtext_rules_s5.json (the free definition lines mapped back to Engine::f, emit(ct_, -> emit()",
     "V-obj: objeq against the 6d004b6 build: engine.cpp / engine_decode.cpp / engine_prefill.cpp differ (member -> free symbols, this -> &ct_ / no this), engine_output.cpp is new, every other product object identical (scratch/a25_engine/s5/objeq_prediction.txt)"
+   ]
+  },
+  "server.slot_cache": {
+   "id": "N4-S6",
+   "desc": "the KV pages of the slots (DESIGN v3 2.3 L2; S6 part: src/server/engine_pages.h, arch025-engine S6): class SlotPagesCounters, the shared prefix checkpoint and KV page counters (spe_new / spe_hits / spe_tok / spe_evict / unshare / evictions of Engine::stats) - the former Engine members stat_spe_new_ .. stat_evictions_, verbatim, private, same order and initial values; one write method per former write statement (engine_pages.cpp: evictFor, cowPages, dropSpe, createSpe, attachSpe) and six const reads (Engine::stats). Engine holds it as cnt_ where stat_spe_new_ was (same offsets: member-order pin). Header-only so far; S7 adds SlotPages sc_ (saveCkpt .. initPool, kvTokBytes) to the module. Isolated: tests/iso/server.slot_cache (header-only manifest, no dependency)",
+   "paths": [
+    "src/server/engine_pages.h"
+   ],
+   "lands_on": "arch025-engine (leg 2, S6)",
+   "steps": [
+    "cpu_iso_server_slot_cache",
+    "cpu_server",
+    "cpu_pins",
+    "cpu_engine_split",
+    "cpu_member_order",
+    "golden_swift",
+    "golden_moe",
+    "srv_mt_precise",
+    "srv_mt_precise_moe",
+    "srv_balance",
+    "srv_fast",
+    "srv_cache_precise",
+    "srv_cache_balance"
+   ],
+   "gpus": {
+    "golden_swift": 2,
+    "golden_moe": 2,
+    "srv_mt_precise": 2,
+    "srv_mt_precise_moe": 2,
+    "srv_balance": 2,
+    "srv_fast": 2,
+    "srv_cache_precise": 1,
+    "srv_cache_balance": 1
+   },
+   "callers": "rdeps",
+   "manual": [
+    "whirl-iso-server-slot-cache-tests (every counter starts at 0; each write method changes exactly its counter by the former statement's amount, the token count summed in 64 bits; the six reads; layout: 6 x uint64, alignof 8, standard layout, trivially destroyed) and the s6-cnt-* mutants of tools/impact/mutations.json",
+    "V-move: scratch/a25_engine/s6/apply_s6.py --check (the declarations verbatim after private:, each method body = the former statement; line multiset: every lost / added line explained) and s6/hdr_alone.py",
+    "V-text: tools/impact/revtext.py --rules scratch/a25_engine/s6/revtext_rules_s6.json (cnt_.noteX(k) -> the former statement, cnt_.x() -> stat_x_)",
+    "V-obj: objeq against the 421e22b build: every product object identical (the methods inline to the former code at the same offsets; scratch/a25_engine/s6/objeq_prediction.txt)"
    ]
   },
   "server.cycle_prof": {

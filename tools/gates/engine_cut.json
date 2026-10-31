@@ -105,7 +105,19 @@
     "pagesFor",
     "poolAvailable",
     "initPool",
-    "kvTokBytes"
+    "kvTokBytes",
+    "noteEviction",
+    "noteUnshare",
+    "noteSpeEvict",
+    "noteSpeNew",
+    "noteSpeHit",
+    "noteSpeTok",
+    "speNew",
+    "speHits",
+    "speTok",
+    "speEvict",
+    "unshares",
+    "evictions"
    ],
    "data": [
     "kv_arrays_",
@@ -127,7 +139,8 @@
     "ps_",
     "slots_",
     "tb_"
-   ]
+   ],
+   "_doc_s6": "S6 (arch025-engine-s6, 2026-10-31): class SlotPagesCounters (src/server/engine_pages.h) holds the former Engine members stat_spe_new_ .. stat_evictions_ (private, same order and initial values; Engine holds it as cnt_ where stat_spe_new_ was). Its 12 in-class methods are entries of this module and header-inline: the six writes noteEviction (evictFor), noteUnshare (cowPages), noteSpeEvict (dropSpe), noteSpeNew (createSpe), noteSpeHit / noteSpeTok (attachSpe) - each body is the former write statement - and the six const reads speNew .. evictions that Engine::stats (server.engine, a downward call) uses instead of reading stat_* (S7 / S16 move stats to sc_.cacheCounters(), DESIGN v3 2.2). No writer list changes: cnt_ is written only by this module's entries (engine_pages.cpp:112/135/170/242/278/283)."
   },
   "server.governor": {
    "layer": 3,
@@ -505,7 +518,19 @@
   "dflReady",
   "draftRoom",
   "kvTokBytes",
-  "ctxForNew"
+  "ctxForNew",
+  "noteEviction",
+  "noteUnshare",
+  "noteSpeEvict",
+  "noteSpeNew",
+  "noteSpeHit",
+  "noteSpeTok",
+  "speNew",
+  "speHits",
+  "speTok",
+  "speEvict",
+  "unshares",
+  "evictions"
  ],
  "_doc_header_inline": "functions that stay inline in their module's header (they are inline today: engine.h, or inlined in their callers' TU in the c1ca7ce objects, inline_check.py)",
  "rewrites": {
