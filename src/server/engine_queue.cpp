@@ -69,40 +69,6 @@ void JobQueue::runLoopCalls(whirl::UniqueLock& lk) {
     WH_RELOCK_HELD(lk, q_mutex_);
 }
 
-void SlotEnd::reapDisconnected() {
-    if (msSince(last_reap_) < 50) return;
-    last_reap_ = Clock::now();
-    {
-        // queued: dropped without a response (nobody reads it)
-        whirl::MutexLock lk(q_mutex_);
-        for (std::size_t i = 0; i < queue_.size();) {
-            Job* job = queue_[i];
-            if (job->w == nullptr || job->w->alive()) {
-                ++i;
-                continue;
-            }
-            logW("req {} | client disconnected while queued; request dropped", job->id);
-            queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(i));
-            job->done = true;
-            q_cond_.notify_all();
-        }
-    }
-    for (Slot& sl : slots_) {
-        if (sl.job == nullptr || sl.job->w == nullptr || sl.st.gone) continue;
-        if (sl.phase != Phase::prefill && sl.phase != Phase::decode) continue;
-        if (sl.job->w->alive()) continue;
-        if (sl.phase == Phase::decode) {
-            sl.st.fail();  // the decode cycle finishes it ("client disconnected")
-            continue;
-        }
-        // prefilling: nothing was sent yet; the partial prefill is dropped
-        logW("req {} | slot {} | client disconnected during prefill ({} of {} prompt tokens); slot freed", sl.job->id, sl.id,
-             sl.reuse + sl.pf_off, sl.n_prompt);
-        sc_.dropCache(sl);
-        releaseSlot(sl);
-    }
-}
-
 void JobQueue::submitAndWait(Job& job) {
     whirl::UniqueLock lk(q_mutex_);
     if (stop_) {
