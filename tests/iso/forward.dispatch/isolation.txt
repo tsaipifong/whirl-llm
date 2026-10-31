@@ -1,0 +1,76 @@
+# ARCH-1 8.5 isolation check of forward.dispatch (arch025-n8b3, PLAN N8 batch 3): the Context members defined in
+# src/model/qwen35/forward/dispatch.cpp (profiler marks, GEMV / GEMM launches and grouping, the activation-input problems,
+# the fused-path predicates, rmsnorm / elementwise helpers), built over forward.state (context.cpp) and NO other forward
+# source. dispatch.cpp is a leaf of the forward call graph since Context::step (a one-line wrapper over run.cpp's forward)
+# moved verbatim to run.cpp (progress/arch025-n8b3.PRIOR_ART.md design 1); call_fwdrun / call_fwdprefill keep it so.
+# Declared dependencies: forward.state (context.cpp), the op planners it calls (src/ops), the kernel ABI tables, the GGUF
+# type names, the device contract (backend_hip.cpp), the launch log and the platform env it reads. Link doubles (test
+# program): the HIP layer (tests/iso/fake_hip.cpp, launch recorder) and TuneTable's defaults (model.core config.cpp). NOT
+# declared: any other forward source, class Model (model.core), the server, the engine. Format: tests/sampling/isolation.txt.
+module    forward.dispatch
+exe       whirl-iso-forward-dispatch-tests
+mutate    src/model/qwen35/forward/dispatch.cpp
+mutsym    model
+mutsym    engine
+mutsym    log
+mutsym    fwdrun
+mutsym    fwdprefill
+# module sources
+src       src/model/qwen35/forward/dispatch.cpp
+# declared dependency sources
+src       src/model/qwen35/context.cpp
+src       src/ops/act.cpp
+src       src/ops/matmul.cpp
+src       src/ops/gdn.cpp
+src       src/kernels_host/kernels_abi.cpp
+src       src/gguf/gguf.cpp
+src       src/device/backend_hip.cpp
+src       src/hip/launch_log.cpp
+src       src/platform/env_win.cpp
+src       src/common/util.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/args_win.cpp
+# headers (include closure of the sources above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/numerics.h
+hdr       include/whirl/ops/act.h
+hdr       include/whirl/ops/attention.h
+hdr       include/whirl/ops/gdn.h
+hdr       include/whirl/ops/matmul.h
+hdr       include/whirl/ops/moe.h
+hdr       include/whirl/ops/mtp.h
+hdr       include/whirl/relax_accept.h
+hdr       include/whirl/spec_sample.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/value_scope.h
+hdr       include/whirl/vismap.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/hip/launch_log.h
+hdr       src/hip/log_name.h
+hdr       src/model/qwen35/context.h
+hdr       src/model/qwen35/forward_internal.h
+hdr       src/model/qwen35/kv.h
+hdr       src/model/qwen35/load_types.h
+hdr       src/model/qwen35/model_error.h
+hdr       src/model/qwen35/scratch.h
+hdr       src/model/qwen35/tune_table.h
+hdr       src/model/qwen35/weights.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/spec/policy.h
+# test program (fake_hip.cpp: the HIP layer's link double)
+testsrc   tests/iso/forward.dispatch/forward_dispatch_tests.cpp
+testsrc   tests/iso/fake_hip.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

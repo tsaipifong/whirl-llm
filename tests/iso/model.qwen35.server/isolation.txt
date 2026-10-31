@@ -1,0 +1,150 @@
+# ARCH-1 8.5 isolation check of model.qwen35.server (arch025-n8b3, PLAN N8 batch 3): src/model/qwen35/server_model.cpp, the
+# ServerModel / ServerVision adapters (makeQwen35Backend, makeQwen35Vision) over qwen35::Model and vision::Vision, the seam between
+# the server contract (contract.server: src/server/backend.h, vision_iface.h, headers only) and the model core. modules.json called
+# it "not isolatable by design (it links both)": both are LOWER layers, so it is isolatable as the top of model.core, like
+# llama.cpp's server-context library over libllama (progress/arch025-n8b3.PRIOR_ART.md design 4). Declared dependencies: the
+# REAL model core and everything below it (the src lines of tests/iso/model.core, unchanged), the server contract headers and
+# the vision encoder sources (vision.*). Link doubles (test program): the HIP layer (tests/iso/fake_hip.cpp: launch recorder, fake kernel handles), the GPU
+# restriction half of gpusel (tests/iso/model.core/fake_gpu_restrict.cpp), the embedded draft vocabulary (3 ids), the vision code
+# objects (tests/iso/vision/fake_vision_objects.cpp, as tests/iso/vision) and the two async copies vision.cpp references
+# (tests/iso/model.qwen35.server/fake_hip_async.cpp, kept out of fake_hip.cpp so the forward programs stay strict). NOT declared:
+# the server (server.*), the engine, the server log, the KV host tier, the product architecture table (module.cpp). Format:
+# tests/sampling/isolation.txt.
+module    model.qwen35.server
+exe       whirl-iso-model-qwen35-server-tests
+mutate    src/model/qwen35/server_model.cpp
+mutsym    engine
+mutsym    log
+mutsym    tier
+mutsym    archtable
+define    WHIRL_VISION_GFX1201=1
+define    WHIRL_VISION_GFX1151=1
+# module sources
+src       src/model/qwen35/server_model.cpp
+# declared dependency sources
+src       src/model/config.cpp
+src       src/model/device.cpp
+src       src/model/dflash.cpp
+src       src/model/draft_vocab_embed.cpp
+src       src/model/exec_dump.cpp
+src       src/model/kernels.cpp
+src       src/model/loader.cpp
+src       src/model/tune.cpp
+src       src/model/qwen35/model_tune.cpp
+src       src/model/qwen35/model_kv.cpp
+src       src/model/qwen35/model_scratch.cpp
+src       src/model/qwen35/layer_subset.cpp
+src       src/model/qwen35/forward/run.cpp
+src       src/model/qwen35/forward/mtp_verify.cpp
+src       src/model/qwen35/forward/prefill.cpp
+src       src/model/qwen35/forward/vision_rows.cpp
+src       src/model/qwen35/forward/dispatch.cpp
+src       src/model/qwen35/forward/attn.cpp
+src       src/model/qwen35/forward/ffn.cpp
+src       src/model/qwen35/forward/gdn.cpp
+src       src/model/qwen35/context.cpp
+src       src/model/qwen35/weights.cpp
+src       src/model/qwen35/kv.cpp
+src       src/model/qwen35/scratch.cpp
+src       src/model/qwen35/tune_table.cpp
+src       src/model/arch_registry.cpp
+src       src/config/env_snapshot.cpp
+src       src/ops/act.cpp
+src       src/ops/attention.cpp
+src       src/ops/gdn.cpp
+src       src/ops/matmul.cpp
+src       src/ops/moe.cpp
+src       src/ops/mtp.cpp
+src       src/kernels_host/kernels_abi.cpp
+src       src/common/numerics.cpp
+src       src/common/dump.cpp
+src       src/gguf/gguf.cpp
+src       src/device/backend_hip.cpp
+src       src/hip/launch_log.cpp
+src       src/common/util.cpp
+src       src/common/vram_limit.cpp
+src       src/common/gpu_select.cpp
+src       src/platform/env_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/args_win.cpp
+src       src/platform/paths_win.cpp
+src       src/platform/proc_win.cpp
+src       src/config/run_settings.cpp
+src       src/vision/vision.cpp
+src       src/vision/image.cpp
+src       src/vision/hash.cpp
+src       src/vision/prompt.cpp
+src       src/vision/stb_image_impl.cpp
+src       src/vision/kernel_image.cpp
+src       tests/iso/vision/fake_vision_objects.cpp
+# headers (include closure of the sources above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_pick.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/dflash_policy.h
+hdr       include/whirl/dump.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/gpu_select.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/kv_layout.h
+hdr       include/whirl/model.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/numerics.h
+hdr       include/whirl/ops/act.h
+hdr       include/whirl/ops/attention.h
+hdr       include/whirl/ops/gdn.h
+hdr       include/whirl/ops/matmul.h
+hdr       include/whirl/ops/moe.h
+hdr       include/whirl/ops/mtp.h
+hdr       include/whirl/prefill_schedule.h
+hdr       include/whirl/relax_accept.h
+hdr       include/whirl/small_helpers.h
+hdr       include/whirl/spec_sample.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/value_scope.h
+hdr       include/whirl/vision.h
+hdr       include/whirl/vismap.h
+hdr       include/whirl/vram_limit.h
+hdr       kernels/gfx1151/attn_ws4_index.h
+hdr       src/cache/cache_model.h
+hdr       src/config/env_get.h
+hdr       src/config/env_snapshot.h
+hdr       src/config/run_settings.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/hip/launch_log.h
+hdr       src/hip/log_name.h
+hdr       src/model/arch_registry.h
+hdr       src/model/device_lock.h
+hdr       src/model/exec_dump.h
+hdr       src/model/qwen35/arch_names.h
+hdr       src/model/qwen35/context.h
+hdr       src/model/qwen35/forward_internal.h
+hdr       src/model/qwen35/kv.h
+hdr       src/model/qwen35/load_types.h
+hdr       src/model/qwen35/model_error.h
+hdr       src/model/qwen35/scratch.h
+hdr       src/model/qwen35/tune_table.h
+hdr       src/model/qwen35/weight_loader.h
+hdr       src/model/qwen35/weights.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/paths.h
+hdr       src/platform/proc.h
+hdr       src/server/backend.h
+hdr       src/server/vision_iface.h
+hdr       src/spec/policy.h
+hdr       src/vision/stb_image.h
+# test program (fake_hip.cpp: the HIP layer's link double)
+testsrc   tests/iso/model.qwen35.server/model_qwen35_server_tests.cpp
+testsrc   tests/iso/fake_hip.cpp
+testsrc   tests/iso/model.core/fake_gpu_restrict.cpp
+testsrc   tests/iso/model.qwen35.server/fake_hip_async.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
