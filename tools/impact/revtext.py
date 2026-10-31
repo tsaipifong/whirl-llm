@@ -497,8 +497,65 @@ def selftest(work):
         case("I2 is on a single-line inline method whose return type changed", addl(rok.replace("std::uint64_t", "std::uint32_t", 1)),
              {"added": {"speNew2": {"is": rok.strip(), "why": "selftest"}}}, 1,
              rel=ph, expect=r"^  ADDED speNew2: the all tokens is not the declared text at token 2:")
+        # rt3 (rt2 review consider-4): a qualifier-only change (const dropped) of a new in-class method
+        case("Q2 equals: the new method lost its const (sig declares const)", addl(rok.replace(") const {", ") {", 1)),
+             {"added": {"speNew2": {"equals": "return stat_spe_new_;", "sig": "std::uint64_t speNew2() const", "why": "selftest"}}}, 1,
+             rel=ph, expect=r"^  ADDED speNew2: the signature is not the declared text")
+        # rt3 (rt2 review consider-1): a brace inside the signature (`= {}` default) cut sig / body at the wrong `{`
+        case("B1 equals + sig on a method with a brace default argument (control)",
+             addl("    void noteSpeTok3(std::uint32_t n = {}) { stat_spe_tok_ += n; }"),
+             {"added": {"noteSpeTok3": {"equals": "stat_spe_tok_ += n;", "sig": "void noteSpeTok3(std::uint32_t n = {})", "why": "selftest"}}}, 0,
+             rel=ph, expect=r", 1 added entries as declared\)")
+        case("B2 is a brace default argument changed ({} -> {7}) caught by sig",
+             addl("    void noteSpeTok3(std::uint32_t n = {7}) { stat_spe_tok_ += n; }"),
+             {"added": {"noteSpeTok3": {"equals": "stat_spe_tok_ += n;", "sig": "void noteSpeTok3(std::uint32_t n = {})", "why": "selftest"}}}, 1,
+             rel=ph, expect=r"^  ADDED noteSpeTok3: the signature is not the declared text")
     else:
         cases.append(("S/I speNew anchor", False))
+    if dm:
+        # rt3 (rt2 review consider-4): an out-of-class definition whose parameter type differs from the declared sig
+        cq = src.replace(whole, whole + "\n" + whole.replace("dropCache(Slot& sl)", "dropCache2(const Slot& sl)", 1), 1)
+        case("Q1 equals: an out-of-class new function's parameter differs from sig (const Slot&)", cq,
+             {"added": {"dropCache2": {"equals": inner, "sig": f"void {DCLS}::dropCache2(Slot& sl)", "why": "selftest"}}}, 1,
+             expect=r"^  ADDED dropCache2: the signature is not the declared text")
+    # ---- rt3 (rt2 review act-on 1): declarations of a tracked class that have no body (member function declarations:
+    # default arguments, override / virtual / const; static constexpr data members; enums, using, static_assert) were
+    # in no census entry; after rt2 moved in-class entries to their first code character not even the line before an
+    # entry carried them (review probe: old tools FAIL 2, rt2 tools ok). Every declaration statement is compared now. ----
+    RL = "    void runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout = std::chrono::milliseconds(60000));\n"
+    SF = "    static constexpr std::uint64_t shutdown_flush_long_ms = 60000;\n"
+    SW = "    void submitAndWait(Job& job) override;\n"
+    if hs.count(RL) == 1 and hs.count(SF) == 1 and hs.count(SW) == 1:
+        d1 = hs.replace(RL, RL.replace("milliseconds(60000)", "milliseconds(600)"), 1)
+        case("D1 a default argument of a member function declaration changed (runOnLoop 60000 -> 600 ms)", d1, {}, 1,
+             rel=hh, expect=r"^  DIFF decl:runOnLoop at token")
+        case("D2 a static constexpr value changed (shutdown_flush_long_ms 60000 -> 600)", hs.replace(SF, SF.replace("60000", "600"), 1), {}, 1,
+             rel=hh, expect=r"^  DIFF member:shutdown_flush_long_ms at token")
+        case("D3 override removed from a declaration (submitAndWait)", hs.replace(SW, SW.replace(" override", ""), 1), {}, 1,
+             rel=hh, expect=r"^  DIFF decl:submitAndWait at token")
+        case("D4 the default argument change listed in allowed_diffs (control)", d1,
+             {"allowed_diffs": [{"entry": "decl:runOnLoop", "old": "60000", "new": "600", "why": "selftest"}]}, 0, rel=hh,
+             expect=r"^revtext: ok \(.*1 allowed differences")
+        dn = hs.replace(SW, SW + "    void zqDecl(int n = 3);\n", 1)
+        case("D5 a new member function declaration only in the new tree", dn, {}, 1, rel=hh,
+             expect=r"^  NEW decl:zqDecl: only in the new tree")
+        case("D6 the new declaration in rules.added (control)", dn,
+             {"added": {"decl:zqDecl": {"equals": "void zqDecl(int n = 3);", "why": "selftest"}}}, 0, rel=hh,
+             expect=r", 1 added entries as declared\)")
+        case("D7 rules.added declaration text differs (default 3 declared, 4 in the tree)", hs.replace(SW, SW + "    void zqDecl(int n = 4);\n", 1),
+             {"added": {"decl:zqDecl": {"equals": "void zqDecl(int n = 3);", "why": "selftest"}}}, 1, rel=hh,
+             expect=r"^  ADDED decl:zqDecl: the declaration is not the declared text")
+        case("D8 a declaration's added entry with sig is a rules error", dn,
+             {"added": {"decl:zqDecl": {"equals": "void zqDecl(int n = 3);", "sig": "void zqDecl(int n = 3)", "why": "selftest"}}}, 2, rel=hh,
+             expect=r"^revtext: rules error: added\['decl:zqDecl'\]: sig belongs")
+        case("E1 a new enum in the class is reported", hs.replace(SW, SW + "    enum class ZqMode { A = 1, B = 2 };\n", 1), {}, 1, rel=hh,
+             expect=r"^  NEW decl:enum:ZqMode: only in the new tree")
+        case("E2 a new using alias in the class is reported", hs.replace(SW, SW + "    using ZqClock = std::chrono::steady_clock;\n", 1), {}, 1, rel=hh,
+             expect=r"^  NEW decl:using:ZqClock: only in the new tree")
+    else:
+        cases.append(("D runOnLoop / shutdown_flush_long_ms / submitAndWait anchors", False))
+    if only and not cases:   # rt3 (rt2 review consider-3): a typo in --only must not look green
+        print(f"revtext selftest: --only {only!r} matched no case"); return 2
     ok = all(g for _, g in cases)
     for n, g in cases: print(f"  {'ok  ' if g else 'FAIL'} {n}")
     print(f"revtext selftest: {sum(g for _, g in cases)}/{len(cases)} as expected")
