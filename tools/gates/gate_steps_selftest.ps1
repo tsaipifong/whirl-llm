@@ -166,6 +166,10 @@ try {
         @{ step = "cpu_cmake_modules"; name = "planted: the self-test missed a planted case"; exit = 1; lines = @("FAIL block: an iso target no manifest names", "cmake modules check test: 19/20 ok"); want = $false },
         @{ step = "cpu_cmake_modules"; name = "planted: configure failed (setup, exit 2)"; exit = 2; lines = @("cmake modules check test: 20/20 ok", "cmake modules: SETUP (configure failed (exit 1): CMake Error)"); want = $false },
         @{ step = "cpu_cmake_modules"; name = "planted: exit 0 with no verdict line"; exit = 0; lines = @("cmake modules check test: 20/20 ok"); want = $false },
+        @{ step = "cpu_kernel_isa_cmp"; name = "clean (arch025-sc11c)"; exit = 0; lines = @("ok   pc-relative literals symbolized", "kernel_isa_cmp test: PASS", "ok   good tree: exit 0 (0)", "kernel_co_build test: PASS"); want = $true },
+        @{ step = "cpu_kernel_isa_cmp"; name = "planted: a changed kernel not reported"; exit = 1; lines = @("FAIL gfx1201 one kernel changed -> exit 1", "kernel_isa_cmp test: FAIL (1)"); want = $false },
+        @{ step = "cpu_kernel_isa_cmp"; name = "planted: a failed compile reported as built"; exit = 1; lines = @("kernel_isa_cmp test: PASS", "FAIL broken vision source: exit 1 (0)", "kernel_co_build test: FAIL (1)"); want = $false },
+        @{ step = "cpu_kernel_isa_cmp"; name = "planted: the builder test did not run (exit forged to 0)"; exit = 0; lines = @("kernel_isa_cmp test: PASS"); want = $false },
         @{ step = "cpu_step_selftest"; name = "clean"; exit = 0; lines = @("gate steps selftest: 36/36 as expected"); want = $true },
         @{ step = "cpu_step_selftest"; name = "planted: one proof did not hold"; exit = 1; lines = @("BAD  rules: ...", "gate steps selftest: 35/36 as expected"); want = $false }
     )

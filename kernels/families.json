@@ -118,7 +118,7 @@
    ]
   },
   "kernels.vision": {
-   "desc": "vision encoder kernels (Qwen3-VL ViT): one source, its own code object per architecture (cmake/vision.cmake), loaded only when an image arrives; not part of the whirl_kernels translation unit, so it compiles alone",
+   "desc": "vision encoder kernels (Qwen3-VL ViT): one source, its own code object per architecture (cmake/vision.cmake), loaded only when an image arrives; not part of the whirl_kernels translation unit, so it compiles alone (vis_gemm #includes the gemmh body kernels/shared/gemmh_impl.h, a header of kernels.gemm, ADR-0005)",
    "standalone": true,
    "paths": [
     "kernels/vision/vision.hip"

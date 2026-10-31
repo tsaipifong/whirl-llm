@@ -648,6 +648,15 @@ refactor (moving code between files, merging duplicates into helpers) is accepte
 objects compare IDENTICAL; only kernels it reports go to GPU acceptance. Test: `tools/gates/kernel_isa_cmp_test.py`
 (synthetic code objects per architecture: identical, other path / cuid, reordered, one kernel changed, constant table
 changed, kernel removed, LDS size changed; about 2.5 min).
+The code objects to compare come from `tools/gates/kernel_co_build.py --tree <dir with kernels/> --out DIR --side NAME`
+(arch025-sc11c): whirl_kernels and whirl_vision per architecture, with the clang flags read from `CMakeLists.txt` and
+`cmake/vision.cmake` (depfile options dropped), so a scratch copy of the base kernels is built exactly like the build
+does; writes `<side>.<what>.<arch>.hsaco` and a `<side>.DONE` line with every exit code (whirl gfx1201 about 6 min;
+start it detached). Release gate step `cpu_kernel_isa_cmp` runs both tests (`kernel_isa_cmp_test.py`,
+`kernel_co_build_test.py`: flags taken from the build files, a flag added there shows up, a failed compile is exit 1).
+`kernels/shared/gemmh_impl.h` (the f16 GEMM body) is #included by both `kernels/gemm_fp8t.hip` (gemmh_impl) and
+`kernels/vision/vision.hip` (vis_gemm, inside the kernel): a change to it changes the vision code object as well
+(kernels.gemm has `"callers": "rdeps"`, so the impact map adds kernels.vision).
 
 Isolation manifest include closure (CPU, seconds, no build): `cpu_iso_includes` (`tools/gates/iso_includes_check.py`: every quoted `#include` of a file a `tests/**/isolation.txt` stages must itself be staged; `--rev COMMIT` checks a commit read-only). Catches the merge that adds an include to a staged file without the manifest line before the ~1 min per module iso build (C1083) does.
 
