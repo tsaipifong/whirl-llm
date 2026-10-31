@@ -569,7 +569,7 @@
   ],
   [
    "model.arch_open",
-   "model.core"
+   "model.types"
   ],
   [
    "model.arch_registry",
