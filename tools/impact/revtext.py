@@ -22,14 +22,18 @@ rules (JSON; keys starting with "_" are comments, any other unknown key is a rul
         called that old name (two new entries onto one old entry = a copy: declare the second one in "added"); the
         key must be a new-tree entry and the value an old-tree entry.
   "removed": {"old entry": "why"}          old entries that are gone; listing an entry the new tree still has fails.
-  "added": {"new entry": {"equals": "<token text>" | "is": "<token text>" | "planned": true, "why": "..."}}
+  "added": {"new entry": {"equals": "<token text>", "sig": "<token text>" | "is": "<token text>" | "planned": true, "why": "..."}}
         entries ONLY in the new tree (functions, `member:<name>` declarations). Every new-tree entry that maps to no
         old entry must be listed here, or the run fails (`NEW <entry>`). After the replace / regex rules:
-          equals  - a function: the tokens inside its body braces; a member: its whole declaration statement
+          equals  - a function: the tokens inside its body braces AND (sig, required for a function; arch025-engine-rt2,
+                    S6 review act-on 1) the tokens before the body brace: return type, name, parameters, qualifiers
+                    (out of class: the definition's line, e.g. "void SlotPages::f(Slot& sl)"); a member: its whole
+                    declaration statement (no sig)
           is      - all tokens of the entry (signature + body, or the declaration)
           planned - the name is a planned row of the cut (new_funcs `<name>` / `Engine.<name>`; new_data for members);
                     use it only for code the step writes new, the review reads it (the text is not checked)
-        e.g. S6: "added": {"noteSpeNew": {"equals": "stat_spe_new_ += 1;", "why": "the former statement of createSpe"}}
+        e.g. S6: "added": {"noteSpeNew": {"equals": "stat_spe_new_ += 1;", "sig": "void noteSpeNew()", "why": "the former statement of createSpe"}}
+        An in-class entry starts at its first code character (census, rt2), so `is` works on a one-line inline method.
   "allowed_diffs": [{"entry": "<entry>" | ["<entry>", ...], "old": "<token text>", "new": "<token text>", "why": "..."}]
         a difference left after the rules: in each named entry the first whole-token run equal to `new` is put back
         to `old` (once per entry), then the entry is compared again. The entry must be named: "*" or any wildcard is a
@@ -101,7 +105,9 @@ def body_text(tree, rows):
             parts.append(re.sub(r"^\s*(?:public|private|protected)\s*:", "", raw[a0:a1]))
             continue
         lines = raw.split("\n")
-        parts.append("\n".join(lines[ln - 1:ln - 1 + n]))
+        # rt2: the census starts an in-class entry at its first code character; an access specifier on that same line
+        # (`public: void f() {..}`) is not part of the entry (members drop it the same way)
+        parts.append(re.sub(r"^\s*(?:(?:public|private|protected)\s*:(?!:)\s*)+", "", "\n".join(lines[ln - 1:ln - 1 + n])))
     return strip_comments("\n".join(parts))
 
 
@@ -144,6 +150,12 @@ def check_rules(rules):
         if "planned" in v and v["planned"] is not True: raise RulesError(f"added[{k!r}]: planned must be true")
         if not str(v.get("why", "")).strip(): raise RulesError(f"added[{k!r}] needs a why")
         if k in ren: raise RulesError(f"{k!r} is in both added and renames")
+        # rt2 (S6 review act-on 1): equals on a function compares its body AND its signature (the tokens before the
+        # body brace: return type, name, parameters, qualifiers); before, a function's equals was body-only
+        if "sig" in v and not ("equals" in v and not k.startswith("member:")):
+            raise RulesError(f"added[{k!r}]: sig belongs to a function's equals (is compares all tokens; a member's equals is its whole declaration)")
+        if "equals" in v and not k.startswith("member:") and (not isinstance(v.get("sig"), str) or not tokens(v["sig"])):
+            raise RulesError(f"added[{k!r}]: a function's equals needs sig (the tokens before the body brace, e.g. 'std::uint64_t speNew() const')")
     for i, ad in enumerate(rules.get("allowed_diffs", [])):
         ents = ad.get("entry")
         ents = [ents] if isinstance(ents, str) else ents
@@ -195,6 +207,12 @@ def apply_rules(text, rules):
 
 def body_tokens(tt, name):
     """tokens inside the body braces of function `name` (the first `{` after `name (`), or None"""
+    sb = sig_body(tt, name)
+    return None if sb is None else sb[1]
+
+
+def sig_body(tt, name):
+    """rt2: (the tokens before the body brace = the signature, the tokens inside the body braces) of function `name`"""
     short = name.split("::")[-1]
     for i in range(len(tt) - 1):
         if tt[i] == short and tt[i + 1] == "(":
@@ -203,7 +221,7 @@ def body_tokens(tt, name):
             d = 0
             for x in range(j, len(tt)):
                 d += (tt[x] == "{") - (tt[x] == "}")
-                if d == 0: return tt[j + 1:x]
+                if d == 0: return tt[:j], tt[j + 1:x]
             return None
     return None
 
@@ -289,7 +307,13 @@ def run(old, new, rules, cut, work, ro=None):
         elif len(parts) != 1:
             bad.append(f"ADDED {k}: {len(parts)} census parts (overloads?): use is, not equals"); continue
         else:
-            got, want, what = body_tokens(tt, k), tokens(spec["equals"]), "body"
+            sb = sig_body(tt, k)
+            if sb is not None and sb[0] != tokens(spec["sig"]):   # rt2: the signature (return type, parameters, const)
+                g, want = sb[0], tokens(spec["sig"])
+                j = next((i for i, (x, y) in enumerate(zip(want, g)) if x != y), min(len(want), len(g)))
+                bad.append(f"ADDED {k}: the signature is not the declared text at token {j}: declared [{' '.join(want[max(0, j - 6):j + 8])}] "
+                           f"new [{' '.join(g[max(0, j - 6):j + 8])}]"); continue
+            got, want, what = (None if sb is None else sb[1]), tokens(spec["equals"]), "body"
         if got == want:
             nadd += 1
         else:

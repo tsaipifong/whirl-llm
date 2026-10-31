@@ -153,6 +153,14 @@ def add_body(key, f, ln, txt, dfn, rng=None):
     return key
 
 
+def code_start(hs, i):
+    """rt2 (S6 review act-on 1): the first code character at or after i, past whitespace and access specifiers (hs has its
+    comments blanked). An in-class entry starts there: from stmt0 (the end of the statement before) the entry began on
+    the line before it, and revtext (which takes whole lines) compared that line too."""
+    m = re.compile(r"(?:\s|(?:public|private|protected)\s*:(?!:))*").match(hs, i)
+    return m.end()
+
+
 def parse_class(cname, rel, hs, a):
     cb0 = a.end()
     cb1 = match_close(hs, a.end() - 1, "{", "}")
@@ -171,14 +179,16 @@ def parse_class(cname, rel, hs, a):
                 tn = re.findall(r"\w+", hd)[1]
                 types.append((tn, lineno(hs, stmt0), cname))
                 if not hd.startswith("enum"):   # A2: the nested type's inline bodies are an entry type:X
-                    add_body("type:" + tn, rel, lineno(hs, stmt0), hs[stmt0:j + 1], f"struct {cname}::{tn} (in-class)", [(rel, stmt0, j + 1)])
+                    s0 = code_start(hs, stmt0)
+                    add_body("type:" + tn, rel, lineno(hs, s0), hs[s0:j + 1], f"struct {cname}::{tn} (in-class)", [(rel, s0, j + 1)])
                 k = hs.index(";", j); i = k + 1; stmt0 = i; continue
             hd = re.sub(r"\bdecltype\s*\(\s*auto\s*\)", "decltype_auto", hd)   # S0c (N11): a return type, not a call
             if "(" in hd.split("=")[0] and re.search(r"\w\s*$", hd.split("(")[0]) is not None:
                 pre = hd.split("(")[0]
                 nm = re.search(r"(operator\s*\S+|~?\w+)\s*$", pre).group(1)
                 funcs.append((nm, lineno(hs, stmt0), access, re.sub(r"\s+", " ", hd)[:90], cname))
-                add_body(resolve(cname, nm), rel, lineno(hs, stmt0), hs[stmt0:j + 1], f"{cname}::{nm} (inline)", [(rel, stmt0, j + 1)])
+                s0 = code_start(hs, stmt0)
+                add_body(resolve(cname, nm), rel, lineno(hs, s0), hs[s0:j + 1], f"{cname}::{nm} (inline)", [(rel, s0, j + 1)])
                 i = j + 1; stmt0 = i; continue
             i = j + 1; continue
         if c == ";":
