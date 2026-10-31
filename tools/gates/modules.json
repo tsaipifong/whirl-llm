@@ -501,9 +501,9 @@
    "manual": ["full release_gate on both GPUs (ARCH-1 3.3)"]
   },
   "forward.dispatch": {
-   "id": "F1", "desc": "Model forward matmul dispatch (GEMV / GEMM launches, activation-input choice, fused-path predicates) and the forward sources' internal header",
+   "id": "F1", "desc": "Model forward matmul dispatch (GEMV / GEMM launches, activation-input choice, fused-path predicates) and the forward sources' internal header; Context::step moved to forward.run (arch025-n8b3): dispatch.cpp calls no other forward file",
    "paths": ["src/model/qwen35/forward/dispatch.cpp", "src/model/qwen35/forward_internal.h"], "lands_on": "arch025-f1 (F1)",
-   "steps": ["cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+   "steps": ["cpu_iso_forward_dispatch", "cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
              "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance"],
    "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
             "golden_swift": 2, "golden_moe": 2, "seq_swift_precise": 2, "seq_swift_balance": 2, "seq_swift_fast": 2, "seq_moe_precise": 2,
@@ -515,7 +515,7 @@
   "forward.attn": {
    "id": "F2a", "desc": "Model forward attention block: MTP draft attention (draftAttn, OVH-C1 draft window), the gated full-attention sublayer attnBlock and the WMMA prefill attention (Swift and Ornith full-attention layers)",
    "paths": ["src/model/qwen35/forward/attn.cpp"], "lands_on": "arch025-f2 (F2)",
-   "steps": ["cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+   "steps": ["cpu_iso_forward_attn", "cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
              "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance"],
    "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
             "golden_swift": 2, "golden_moe": 2, "seq_swift_precise": 2, "seq_swift_balance": 2, "seq_swift_fast": 2, "seq_moe_precise": 2,
@@ -527,7 +527,7 @@
   "forward.ffn": {
    "id": "F2b", "desc": "Model forward FFN block: dense SwiGLU FFN (ffnBlock, Swift) and the MoE FFN (moeBlock: router, top-K experts, shared expert; Ornith, also called by tune.cpp)",
    "paths": ["src/model/qwen35/forward/ffn.cpp"], "lands_on": "arch025-f2 (F2)",
-   "steps": ["cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+   "steps": ["cpu_iso_forward_ffn", "cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
              "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance"],
    "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
             "golden_swift": 2, "golden_moe": 2, "seq_swift_precise": 2, "seq_swift_balance": 2, "seq_swift_fast": 2, "seq_moe_precise": 2,
@@ -539,7 +539,7 @@
   "forward.gdn": {
    "id": "F3", "desc": "Model forward Gated-DeltaNet: the DeltaNet layer body gdnLayer (extracted from Model::run: conv, gates, chunked / WMMA / strix / sequential recurrence, gated norm, out-proj), the state segment tables gdnSegsBatch / gdnSegsSingle (server batched verify / MTP) and gdnChunked / gdnScan (Swift and Ornith linear-attention layers)",
    "paths": ["src/model/qwen35/forward/gdn.cpp"], "lands_on": "arch025-f3 (F3)",
-   "steps": ["cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+   "steps": ["cpu_iso_forward_gdn", "cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
              "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance",
              "srv_mt_precise", "srv_mt_precise_moe", "srv_cache_balance"],
    "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
@@ -551,9 +551,9 @@
               "I5 host time (no cross-TU inlining without /GL): F8 server chat decode A/B after F7"]
   },
   "forward.run": {
-   "id": "F4a", "desc": "Model forward drivers: Model::forward, the device-resident decode step (decodeStep / decodeStepLaunches / beginDecode), the layer loop Model::run (attention / DeltaNet / FFN per layer, head) and lendScratch (prefill scratch lent to the vision encoder); every decode, prefill, verify and server path runs Model::run",
+   "id": "F4a", "desc": "Model forward drivers: Model::forward, Model::step (from dispatch.cpp, arch025-n8b3), the device-resident decode step (decodeStep / decodeStepLaunches / beginDecode), the layer loop Model::run (attention / DeltaNet / FFN per layer, head) and lendScratch (prefill scratch lent to the vision encoder); every decode, prefill, verify and server path runs Model::run",
    "paths": ["src/model/qwen35/forward/run.cpp"], "lands_on": "arch025-f4 (F4)",
-   "steps": ["cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+   "steps": ["cpu_iso_forward_run", "cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
              "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance",
              "srv_mt_precise", "srv_mt_precise_moe", "srv_cache_balance"],
    "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
@@ -567,7 +567,7 @@
   "forward.mtp_verify": {
    "id": "F4b", "desc": "Model forward MTP drafting and speculative verify: token upload (setTokens / setTokensDev / ctlSlot), the MTP block (mtpForward / mtpEnqueue / mtpBatchStepEx), DFlash2 layer-input capture, batched and single verify (verifyBatchEnqueue / verifyEnqueueEx / verify), the replay commit commitSeq, snapshot restore, draft-head logits and argmax / cycle readback",
    "paths": ["src/model/qwen35/forward/mtp_verify.cpp"], "lands_on": "arch025-f4 (F4)",
-   "steps": ["cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+   "steps": ["cpu_iso_forward_mtp_verify", "cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
              "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance",
              "srv_mt_precise", "srv_mt_precise_moe", "srv_cache_balance"],
    "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
@@ -581,7 +581,7 @@
   "forward.prefill": {
    "id": "F4c", "desc": "Model forward prefill drivers: prefill with MTP (prefillWithMtp / prefillMtpChunk, FIX-FS chunk boundary row), segmented multi-sequence prefill (canSegment / prefillSegs / segLogitsToFront), plain prefill, argmax and logits readback",
    "paths": ["src/model/qwen35/forward/prefill.cpp"], "lands_on": "arch025-f4 (F4)",
-   "steps": ["cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+   "steps": ["cpu_iso_forward_prefill", "cpu_iso_forward", "cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
              "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance",
              "srv_mt_precise", "srv_mt_precise_moe", "srv_cache_balance"],
    "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
@@ -594,7 +594,7 @@
   "forward.vision_rows": {
    "id": "F4d", "desc": "Model forward vision rows: per-sequence image maps (visAny / visOf / visBegin / visEnsure / visRelease), multi-section RoPE row positions (visRow / visCommit / visRowsCur) and the image embedding rows copied into x (injectRows)",
    "paths": ["src/model/qwen35/forward/vision_rows.cpp"], "lands_on": "arch025-f4 (F4)",
-   "steps": ["cpu_iso_forward", "cpu_model", "cpu_vision", "st_swift_precise", "golden_swift", "vis_ab", "srv_vis"],
+   "steps": ["cpu_iso_forward_vision_rows", "cpu_iso_forward", "cpu_model", "cpu_vision", "st_swift_precise", "golden_swift", "vis_ab", "srv_vis"],
    "gpus": {"st_swift_precise": 2, "golden_swift": 2, "vis_ab": 1, "srv_vis": 1},
    "manual": ["visab one GPU: base exe vs new exe, vis-encode resident / stream and chat --image (WHIRL_VIS_DUMP) embeddings byte-identical, answer text identical",
               "V-work: launch table under WHIRL_LAUNCH_LOG == S0b (text rows: visRowsCur / visCommit run on every forward)"]
@@ -988,9 +988,9 @@
      "manual": ["a layout change is an ABI change: the full gate on both GPUs (as contract)"]
   },
   "model.qwen35.server": {
-   "id": "M5c", "desc": "qwen35 family module, server half (arch025-lane2 leg 5: model.qwen35 split into arch / server): the ServerModel and ServerVision adapters over qwen35::Model / vision::Vision (src/model/qwen35/server_model.cpp: makeQwen35Backend, makeQwen35Vision; was src/server/backend_qwen35.cpp until M5) - the seam between the server contract (contract.server) and the model core, not isolatable by design (it links both)",
+   "id": "M5c", "desc": "qwen35 family module, server half (arch025-lane2 leg 5: model.qwen35 split into arch / server): the ServerModel and ServerVision adapters over qwen35::Model / vision::Vision (src/model/qwen35/server_model.cpp: makeQwen35Backend, makeQwen35Vision; was src/server/backend_qwen35.cpp until M5) - the seam between the server contract (contract.server) and the model core; link-isolated over the real model core (tests/iso/model.qwen35.server, arch025-n8b3: both are lower layers)",
    "paths": ["src/model/qwen35/server_model.cpp"], "lands_on": "arch025-m5 (M5); split arch025-lane2 leg 5",
-   "steps": ["cpu_model", "cpu_server", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_vis"],
+   "steps": ["cpu_iso_model_qwen35_server", "cpu_model", "cpu_server", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_vis"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_vis": 2},
    "callers": "rdeps",
    "manual": ["V-move: scratch/a25_m5/move_check.py (server_model.cpp == backend_qwen35.cpp with the named lines)",
