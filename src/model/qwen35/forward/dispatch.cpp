@@ -1,7 +1,7 @@
 // Model forward, matmul dispatch (arch025-F1, moved from src/model/forward.cpp): profiler marks, GEMV / GEMM
 // launches and grouping, the activation-input problems (h16Out / actCommon / rmsnormIn / gdnIn2; the choices are in
 // src/ops/act.cpp since arch025-F5), the fused-path predicates (rules in ops/act.h), rmsnorm / elementwise helpers
-// and Model::step.
+// (Model::step moved to forward/run.cpp, arch025-n8b3).
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../forward_internal.h"
@@ -428,11 +428,6 @@ void Context::elementwise(hip::Function f, DevPtr a, DevPtr b, u32 n) {
     x16_src = 0;
     hip::launch(f, D((n + 255) / 256), D(256), 0, stream, a, b, I(n));
     mark(OpClass::misc);
-}
-
-void Context::step(u32 token, u32 pos) {
-    const u32 one[1] = {token};
-    forward(one, pos);
 }
 
 }  // namespace whirl::qwen35

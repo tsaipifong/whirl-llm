@@ -20,6 +20,14 @@
 
 namespace whirl::hip {
 
+// arch025-n8b3: one recorded launch (the test programs that read the recorder declare the same struct)
+namespace isofake {
+struct Launch {
+    Function f;
+    Dim3 grid, block;
+};
+}  // namespace isofake
+
 namespace {
 
 [[noreturn]] void gpu(const char* op) { throw std::logic_error(std::string("iso fake hip: ") + op + " reached the device runtime"); }
@@ -36,6 +44,24 @@ DevPtr g_next = 0x100000;
 
 bool handedOut(DevPtr p) { return g_live.count(p) != 0; }
 
+// arch025-n8b3: the opt-in launch recorder (isofake::recordLaunches) and fake kernel handles (isofake::fakeFunctions), for
+// the per-file forward manifests (forward.attn / forward.ffn ...: code that only launches is observed through what it
+// launches; the host-side form of the launch table of tools/impact/work_equal.py, not a GPU result). Off (the default)
+// launchRaw and Module::getFunction throw as before. Recording: launchRaw records the kernel handle, grid and block and
+// returns (no argument is read). Fake functions: getFunction / getFunctionOpt return a distinct non-null handle per name
+// (never called: launchRaw only records it).
+bool g_rec_launch = false;
+bool g_fake_fn = false;
+std::vector<isofake::Launch> g_launches;
+std::vector<std::string> g_fn_names;
+
+Function fakeFunction(const char* name) {
+    for (std::size_t i = 0; i < g_fn_names.size(); ++i)
+        if (g_fn_names[i] == name) return reinterpret_cast<Function>(0x7000 + 0x10 * i);
+    g_fn_names.emplace_back(name);
+    return reinterpret_cast<Function>(0x7000 + 0x10 * (g_fn_names.size() - 1));
+}
+
 }  // namespace
 
 namespace isofake {
@@ -44,6 +70,12 @@ void recordAllocs(bool on) {
     if (on) g_sizes.clear();
 }
 std::vector<std::uint64_t> recordedSizes() { return g_sizes; }
+void recordLaunches(bool on) {
+    g_rec_launch = on;
+    if (on) g_launches.clear();
+}
+std::vector<isofake::Launch> recordedLaunches() { return g_launches; }
+void fakeFunctions(bool on) { g_fake_fn = on; }
 }  // namespace isofake
 
 const char* lastErrorOp() { return ""; }
@@ -114,11 +146,20 @@ void Graph::beginCapture(Stream) { gpu("Graph::beginCapture"); }
 Graph Graph::endCapture(Stream) { gpu("Graph::endCapture"); }
 void Graph::launch(Stream) const { gpu("Graph::launch"); }
 
-Function Module::getFunction(const char*) const { gpu("Module::getFunction"); }
-Function Module::getFunctionOpt(const char*) const { gpu("Module::getFunctionOpt"); }
+Function Module::getFunction(const char* name) const {
+    if (!g_fake_fn) gpu("Module::getFunction");
+    return fakeFunction(name);
+}
+Function Module::getFunctionOpt(const char* name) const {
+    if (!g_fake_fn) gpu("Module::getFunctionOpt");
+    return fakeFunction(name);
+}
 DevPtr Module::getGlobal(const char*, std::size_t*) const { gpu("Module::getGlobal"); }
 
-void launchRaw(Function, Dim3, Dim3, unsigned, Stream, void**) { gpu("launchRaw"); }
+void launchRaw(Function f, Dim3 grid, Dim3 block, unsigned, Stream, void**) {
+    if (!g_rec_launch) gpu("launchRaw");
+    g_launches.push_back({f, grid, block});
+}
 
 // arch025-lane2 leg 4 (model.core): the code-object loading of the kernel table (Model::loadKernels), the gfx target
 // names and the UMA check of the loader. Loading a code object reaches the GPU; an unloaded Module (every Model member

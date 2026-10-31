@@ -1698,6 +1698,9 @@ void testForwardSplit() {
         // F4 run.cpp
         {"void Context::forward(", 0}, {"void Context::decodeStep(", 0}, {"void Context::decodeStepLaunches(", 0},
         {"u32 Context::beginDecode(", 0}, {"void Context::run(", 0}, {"std::size_t Context::lendScratch(", 0},
+        // arch025-n8b3: Context::step moved verbatim from dispatch.cpp to run.cpp, next to Context::forward (its only
+        // callee), so dispatch.cpp calls nothing in the other forward files and links alone (forward.dispatch manifest)
+        {"void Context::step(", 0},
         // F4 mtp_verify.cpp
         {"void Context::setTokensDev(", 1}, {"DevPtr Context::ctlSlot(", 1}, {"void Context::setTokens(", 1},
         {"u32 Context::mtpForward(", 1}, {"void Context::mtpEnqueue(", 1}, {"void Context::captureLayerInput(", 1},
@@ -1715,7 +1718,7 @@ void testForwardSplit() {
         {"void Context::injectRows(", 3},
         // F1 dispatch.cpp
         {"void Context::mark(", 4}, {"void Context::gemvLaunch(", 4}, {"void Context::matmul(", 4}, {"void Context::gemmF16(", 4},
-        {"ops::GemmFlags Context::gemmFlags(", 4}, {"bool Context::fused(", 4}, {"void Context::step(", 4},
+        {"ops::GemmFlags Context::gemmFlags(", 4}, {"bool Context::fused(", 4},
         // F2 attn.cpp / ffn.cpp
         {"void Context::draftAttn(", 5}, {"void Context::attnBlock(", 5}, {"void Context::prefillAttn(", 5},
         {"void Context::ffnBlock(", 6}, {"void Context::moeBlock(", 6},
