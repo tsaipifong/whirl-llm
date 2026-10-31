@@ -641,7 +641,7 @@ own and its declared dependencies' fragments only). Both run `--selftest` first.
 
 Isolation manifest include closure (CPU, seconds, no build): `cpu_iso_includes` (`tools/gates/iso_includes_check.py`: every quoted `#include` of a file a `tests/**/isolation.txt` stages must itself be staged; `--rev COMMIT` checks a commit read-only). Catches the merge that adds an include to a staged file without the manifest line before the ~1 min per module iso build (C1083) does.
 
-## <a id="gate-run"></a>How `release_gate.ps1` runs CPU steps: heavy-CPU lock, one retry, parallel sections
+## <a id="gate-run"></a>How `release_gate.ps1` runs CPU steps: heavy-CPU lock, one retry, parallel sections, safety build cache
 
 - **Heavy-CPU lock.** Compiling CPU steps (`cpu_safety_selftest`, `cpu_asan`, `cpu_analyze`, `cpu_tsa`,
   `cpu_cmake_modules`, `cpu_sampling_iso`, `cpu_iso_*` except `cpu_iso_includes`) hold one machine-wide lock
@@ -663,8 +663,26 @@ Isolation manifest include closure (CPU, seconds, no build): `cpu_iso_includes` 
   `-List` order, so rows, verdict and exit code are those of `-Jobs 1`. `-Jobs 1`, `-Strict` and the release tags run
   everything serially; GPU steps are never parallel. Measured 2026-10-31 on 10 `cpu_iso_*` steps of the 8060S list
   while two builds ran beside it: serial 3048 s, `-Jobs 4` 624 s, `-Jobs 8` 500 s, all `PASS (10 steps)`.
-  Step seconds from a parallel section are wall-clock seconds under that load; `test_change.py` still takes the median
-  over them and serial seconds together (open: PLAN 9.32).
+  Step seconds from a parallel section are wall-clock seconds under that load; `test_change.py --refresh-times` keeps
+  them apart (PLAN 9.32): `median_s` / `n` are serial seconds only, `median_par_s` / `n_par` / `jobs` the parallel
+  ones (a step with no serial sample falls back to its parallel median with `n` 0). The summary marks no row; the
+  parallel steps are the runs of 2+ consecutive par steps of a summary whose header has `parallel: N group(s), ...`.
+- **Safety build cache (`cpu_asan`, `cpu_tsa`; PLAN 9.33 / 9.33b).** Every integration verify runs in a new
+  worktree, so the in-tree `build-asan` / `build-tsa` were always cold. Dev and integration runs of these two
+  now build in one persistent cache (`tools/safety/safety_cache.py`, `safety_step.ps1 -Mode cache`): the tree is
+  copied by content into a stable mirror (`<parent of the tree>\safety_cache\src`, or `WHIRL_SAFETY_CACHE\src`).
+  Only changed files get a new mtime, so ninja's own mtime, header-dependency and command-line checks rebuild what a
+  change reaches. A key over the build scripts, the cmake / ninja / MSVC / clang-cl / HIP SDK versions and the
+  toolchain environment wipes the build dir when it changes. After each build a deps check must pass:
+  `msvc_deps_prefix` present, no unparsed `/showIncludes` note, and every TU with a project include has recorded
+  deps. `cpu_analyze` never uses the cache and always runs its clean in-tree build ("mode clean (cpu_analyze never
+  uses the cache, PLAN 9.33b ...)"). Its findings are the per-TU SARIF files, a by-product that an incremental build
+  keeps from older compiles. An incremental analyze, keeping the SARIF of unchanged TUs, lost 6 of 22 warning keys
+  in every round of the 9.33 measurement. Each verdict line says which mode ran: `mode clean (...)`, `mode clean-cache (...)` or
+  `mode incremental (...)`. Strict and release runs keep the clean in-tree build. `WHIRL_SAFETY_MODE=clean|cache`
+  overrides a dev run, and `WHIRL_SAFETY_CACHE_CLEAN=1` forces a clean cache. Proofs: `tools/safety/test_safety_cache.py`
+  (no compiler) and `tools/safety/cache_real_test.py` (real cl + ninja: a header edit recompiles only the TU that
+  includes it, a flag change recompiles all, an incremental object equals a clean one).
 
 ## Change → required tests
 
