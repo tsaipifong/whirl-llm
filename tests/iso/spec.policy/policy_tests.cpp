@@ -9,8 +9,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <vector>
 
 using namespace whirl;
@@ -33,21 +36,102 @@ void testDraftVocab() {
     ISO_THROWS(readDraftVocab("iso_no_such_vocab_file.bin"), std::exception);
 }
 
+// <len> characters: base + "\" + segments of up to 100 characters (the last one longer by one when a separator would end it)
+std::wstring dirOfLen(const std::wstring& base, std::size_t len, wchar_t c) {
+    std::wstring d = base;
+    while (d.size() < len) {
+        const std::size_t room = len - d.size() - 1;
+        if (room == 0) {
+            d += c;
+            break;
+        }
+        d += L"\\" + std::wstring(std::min<std::size_t>(room, 100), c);
+    }
+    return d;
+}
+
+// <folder>\draft_vocab\subset_48k.bin with the ids 1 2, made through the \\?\ form (the folder may be one only that form
+// can make); false when it could not be written
+bool makeVocabNextTo(const std::wstring& folder) {
+    std::error_code ec;
+    const std::filesystem::path d(L"\\\\?\\" + folder + L"\\draft_vocab");
+    std::filesystem::create_directories(d, ec);
+    if (ec) return false;
+    std::ofstream f(d / L"subset_48k.bin", std::ios::binary);
+    const unsigned char b[8] = {1, 0, 0, 0, 2, 0, 0, 0};
+    f.write(reinterpret_cast<const char*>(b), sizeof b);
+    return static_cast<bool>(f);
+}
+
+// WHIRL_DRAFT_VOCAB=48k as whirl-server resolves it (server_main.cpp: draftVocabChoice(settings, exeDirectory()) ->
+// draftVocabSubset -> readDraftVocab) for an exe started as `exe`; "ok" or what went wrong
+std::string vocabNextToExe(const std::wstring& exe) {
+    const DraftVocabChoice c = draftVocabChoice(std::string("48k"), exeDirectoryOf(exe));
+    if (c.kind != DraftVocabChoice::Kind::file) return "no file chosen";
+    try {
+        const std::vector<std::uint32_t> ids = readDraftVocab(c.file);
+        return ids == std::vector<std::uint32_t>{1, 2} ? "ok" : "wrong ids";
+    } catch (const std::exception& ex) {
+        return std::string("throws: ") + ex.what();
+    }
+}
+
 void testExeDirectory() {
     const std::string d = exeDirectory();
     ISO_CHECK(!d.empty());
-    // arch025-lpath (1): GetModuleFileNameW returns the path as the program was started; started through a \\?\ path
-    // the folder must read the same as when it is started through the plain path (it shows in the draft-vocabulary
-    // line and is joined with file names), unless the plain form would be a path a program cannot open (>= 248)
     ISO_CHECK(exeDirectoryOf(L"C:\\whirl\\whirl-server.exe") == "C:\\whirl");
-    ISO_CHECK(exeDirectoryOf(L"\\\\?\\C:\\whirl\\whirl-server.exe") == "C:\\whirl");
-    ISO_CHECK(exeDirectoryOf(L"\\\\?\\UNC\\srv\\share\\w\\x.exe") == "\\\\srv\\share\\w");
     ISO_CHECK(exeDirectoryOf(L"\\\\srv\\share\\w\\x.exe") == "\\\\srv\\share\\w");
     ISO_CHECK(exeDirectoryOf(L"") == "");
+    // arch025-lpath2 (review F1): GetModuleFileNameW returns the path as the program was started. Started through a \\?\
+    // path the folder keeps the prefix, at every length: the files next to the exe are opened under it (draftVocabFile
+    // joins with backslashes), which works for every folder length and name. Taking the prefix off (cdd3519, for folders
+    // under 248 characters) lost the files of folders of 233-247 characters and of a folder whose name ends in a dot
+    // ("draft vocabulary file not found"); a rule on the folder alone cannot be safe, because the appended names are not
+    // bounded (WHIRL_DRAFT_VOCAB=<N>k).
+    ISO_CHECK(exeDirectoryOf(L"\\\\?\\C:\\whirl\\whirl-server.exe") == "\\\\?\\C:\\whirl");
+    ISO_CHECK(exeDirectoryOf(L"\\\\?\\UNC\\srv\\share\\w\\x.exe") == "\\\\?\\UNC\\srv\\share\\w");
     const std::wstring seg(120, L'q');
     const std::wstring longdir = L"C:\\" + seg + L"\\" + seg + L"\\" + seg;
     const std::string q120(120, 'q');
     ISO_CHECK(exeDirectoryOf(L"\\\\?\\" + longdir + L"\\x.exe") == "\\\\?\\C:\\" + q120 + "\\" + q120 + "\\" + q120);
+    // SC-2 item 1 (progress\arch025-d7.HANDOFF.md:47): a '/' join would break the \\?\ form. The draft-vocabulary path
+    // under a \\?\ exe folder keeps the prefix and has backslashes only (also for an exe in a drive root and a trailing-dot
+    // folder, names only \\?\ can carry)
+    for (const wchar_t* exe : {L"\\\\?\\C:\\whirl\\whirl-server.exe", L"\\\\?\\C:\\whirl-server.exe", L"\\\\?\\UNC\\srv\\share\\w\\x.exe",
+                               L"\\\\?\\C:\\tools\\whirl.\\whirl-server.exe"}) {
+        const std::optional<std::string> f = draftVocabFile("48k", exeDirectoryOf(exe));
+        const std::string tail = "\\draft_vocab\\subset_48k.bin";
+        ISO_CHECK(f && f->rfind("\\\\?\\", 0) == 0 && f->find('/') == std::string::npos && f->size() > tail.size() &&
+                  f->compare(f->size() - tail.size(), tail.size(), tail) == 0);
+    }
+    ISO_CHECK(draftVocabFile("48k", exeDirectoryOf(L"\\\\?\\C:\\whirl-server.exe")) == std::string("\\\\?\\C:\\draft_vocab\\subset_48k.bin"));
+    ISO_CHECK(draftVocabFile("48k", exeDirectoryOf(L"\\\\?\\C:\\tools\\whirl.\\whirl-server.exe")) ==
+              std::string("\\\\?\\C:\\tools\\whirl.\\draft_vocab\\subset_48k.bin"));
+}
+
+// arch025-lpath2 (review F1, the review's counter-test A / A3): the file really is read. Folders made under the current
+// directory through \\?\; this test program has no manifest, so it is not long-path aware, as whirl-server.exe on a
+// default Windows (LongPathsEnabled = 0). 6a9f6be read every case; cdd3519 threw for 233 / 240 / 247 and the trailing dot.
+void testExeDirectoryFiles() {
+    std::error_code ec;
+    const std::wstring base = std::filesystem::current_path(ec).wstring() + L"\\iso_lpath2";
+    std::filesystem::remove_all(std::filesystem::path(L"\\\\?\\" + base), ec);
+    ISO_CHECK(base.size() <= 190);  // room for the 200-character folder below
+    if (base.size() > 190) return;
+    for (const std::size_t len : {200u, 232u, 233u, 240u, 247u, 248u, 260u, 300u}) {
+        const std::wstring folder = dirOfLen(base + L"\\v", len, L'v');
+        ISO_CHECK(folder.size() == len && makeVocabNextTo(folder));
+        const std::string r = vocabNextToExe(L"\\\\?\\" + folder + L"\\whirl-server.exe");
+        if (r != "ok") std::printf("  exe_directory_files: \\\\?\\ start, folder of %zu characters: %s\n", len, r.c_str());
+        ISO_CHECK(r == "ok");
+    }
+    const std::wstring dot = base + L"\\t\\whirl.";  // a folder name ending in a dot (Win32 parsing would drop the dot)
+    ISO_CHECK(makeVocabNextTo(dot));
+    const std::string r = vocabNextToExe(L"\\\\?\\" + dot + L"\\whirl-server.exe");
+    if (r != "ok") std::printf("  exe_directory_files: \\\\?\\ start, folder name ending in a dot: %s\n", r.c_str());
+    ISO_CHECK(r == "ok");
+    ISO_CHECK(vocabNextToExe(base + L"\\v\\whirl-server.exe") != "ok");  // control: no vocabulary file in that folder
+    std::filesystem::remove_all(std::filesystem::path(L"\\\\?\\" + base), ec);
 }
 
 void testMtpDefaults() {
@@ -323,7 +407,8 @@ void testMtpDraftsGiven() {
 
 int main(int argc, char** argv) {
     return iso::run("spec.policy",
-                    {{"draft_vocab", testDraftVocab}, {"exe_directory", testExeDirectory}, {"mtp_defaults", testMtpDefaults}, {"ngram", testNgram},
+                    {{"draft_vocab", testDraftVocab}, {"exe_directory", testExeDirectory}, {"exe_directory_files", testExeDirectoryFiles},
+                     {"mtp_defaults", testMtpDefaults}, {"ngram", testNgram},
                      {"batch_drafts", testBatchDrafts}, {"draft_vocab_gate", testDraftVocabGate}, {"draft_vocab_subset", testDraftVocabSubset}, {"mtp_auto_mode", testMtpAutoMode},
                      {"dflash_rules", testDflashRules}, {"ngram_shown", testNgramShown}, {"mtp_drafts_given", testMtpDraftsGiven}},
                     argc, argv);

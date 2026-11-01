@@ -1016,6 +1016,92 @@ static void testSsdLongDir(NullBackend& ops, const fs::path& base) {
     fs::remove_all(top, ec);
 }
 
+// arch025-lpath2 (review F2): a --kv-ssd-dir that starts with a prefix, or a forward-slash spelling of one. cdd3519 gave
+// \??\ + 300 "cannot lock the SSD directory (Windows error 123)" and //?/ + 200 (204 characters, which 6a9f6be opened)
+// "(Windows error 53)": longPathForm put a second prefix in front. Each spelling must keep the SSD tier on, write the entry
+// into the directory and find it on a second start. Same setting as testSsdLongDir: this exe is not long-path aware.
+static void testSsdPrefixedDir(NullBackend& ops, const fs::path& base) {
+    std::error_code ec;
+    const std::wstring base_w = fs::absolute(base).lexically_normal().make_preferred().wstring();
+    const std::wstring top = L"\\\\?\\" + base_w;
+    fs::remove_all(top, ec);
+    const auto plainDir = [&](const std::wstring& name, std::size_t len) {  // base\name\sss... of `len` characters
+        std::wstring d = base_w + L"\\" + name;
+        while (d.size() < len) {
+            const std::size_t room = len - d.size() - 1;
+            if (room == 0) {  // a separator cannot end it: the last segment one longer
+                d += L's';
+                break;
+            }
+            d += L"\\" + std::wstring(std::min<std::size_t>(room, 100), L's');
+        }
+        return d;
+    };
+    const auto fwd = [](std::wstring s) {
+        std::replace(s.begin(), s.end(), L'\\', L'/');
+        return s;
+    };
+    struct Case {
+        const char* what;
+        std::wstring plain;  // the directory, plain form
+        std::wstring given;  // as the user gives it
+    };
+    std::vector<Case> cases;
+    const std::wstring p1 = plainDir(L"nt", 300), p2 = plainDir(L"q2", 200), p3 = plainDir(L"q3", 300), p4 = plainDir(L"dv", 300),
+                       p5 = plainDir(L"dd", 300);
+    cases.push_back({"\\??\\ + 300", p1, L"\\??\\" + p1});
+    cases.push_back({"//?/ + 200 (204 characters)", p2, L"//?/" + fwd(p2)});
+    cases.push_back({"//?/ + 300", p3, L"//?/" + fwd(p3)});
+    cases.push_back({"//./ + 300", p4, L"//./" + fwd(p4)});
+    cases.push_back({"\\\\.\\ + 300", p5, L"\\\\.\\" + p5});
+    const std::uint64_t fp = hashStr(0xcbf29ce484222325ull, "model-prefixed-dir");
+    for (const Case& c : cases) {
+        CHECK(c.plain.size() >= 200);
+        CHECK(fs::create_directories(fs::path(L"\\\\?\\" + c.plain), ec) || fs::exists(fs::path(L"\\\\?\\" + c.plain)));
+        Config cfg;
+        const std::u8string u8 = fs::path(c.given).u8string();
+        cfg.ssd_dir = std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+        cfg.ssd_cap = 1ull << 30;
+        cfg.ssd_delay_ms = 0;
+        cfg.ssd_seen_filter = false;
+        DevSlot src(ops, 2, 7);
+        src.fill(9);
+        const auto toks = makeTokens(1700, 23);
+        std::vector<std::string> logs;
+        bool on = false, written = false, in_dir = false, on2 = false;
+        std::size_t entries2 = 0;
+        {
+            auto t = Tier::create(ops, 32ull << 20, 5, 0);
+            t->log_fn = [&](std::string_view s) { logs.emplace_back(s); };
+            t->start(cfg, kLay, fp);
+            on = t->hasSsd();
+            Entry* e = on ? spill(*t, src, toks) : nullptr;
+            if (e && tickIdle(*t)) {
+                written = e->ssd.has_value();
+                in_dir = fs::exists(entryFile(fs::path(L"\\\\?\\" + c.plain), fp, e->id));
+            }
+        }
+        {
+            auto t = Tier::create(ops, 32ull << 20, 5, 0);
+            t->start(cfg, kLay, fp);
+            on2 = t->hasSsd();
+            entries2 = t->ssdEntries();
+        }
+        if (!(on && written && in_dir && on2 && entries2 == 1)) {
+            std::printf("  F2 %s: SSD on=%d, entry written=%d, in the directory=%d, second start on=%d entries=%zu\n", c.what, on, written,
+                        in_dir, on2, entries2);
+            for (const std::string& l : logs)
+                if (l.find("cannot") != std::string::npos) std::printf("    %s\n", l.c_str());
+        }
+        CHECK(on);
+        CHECK(written);
+        CHECK(in_dir);
+        CHECK(on2);
+        CHECK(entries2 == 1);
+    }
+    fs::remove_all(top, ec);
+}
+
 static void testRamTierSize() {
     constexpr std::uint64_t G = 1ull << 30;
     const auto sz = [](std::uint64_t total, std::uint64_t avail, std::uint64_t floor_mb = 8192) {
@@ -4978,6 +5064,11 @@ int main(int argc, char** argv) {
         std::printf("-- %s\n", "testSsdLongDir");
         const TestClean tc_(ops, "testSsdLongDir");
         testSsdLongDir(ops, dir / L"lpath_ssd");
+    }
+    if (want("testSsdPrefixedDir")) {
+        std::printf("-- %s\n", "testSsdPrefixedDir");
+        const TestClean tc_(ops, "testSsdPrefixedDir");
+        testSsdPrefixedDir(ops, dir / L"lpath2_ssd");
     }
     if (want("testEvictPolicy")) {
         std::printf("-- %s\n", "testEvictPolicy");

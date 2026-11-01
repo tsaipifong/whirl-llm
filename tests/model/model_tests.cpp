@@ -4169,6 +4169,43 @@ void testServerCtrlOrder() {
     check(count(add) == 1, "runServer calls platform::proc::addCtrlHandler(onConsoleCtrl) once (" + std::to_string(count(add)) + ")");
     check(body.find(restore) < body.find(add), "runServer calls restoreCtrlC before addCtrlHandler");
 }
+
+// arch025-lpath2 (review C2): the server's exe identity 0 guard of arch025-d7 (no SSD tier when this program's size / date
+// cannot be read, since 0 is shared by every such build) is decided by server::ssdDirForExeId (tested in server-args
+// ssd_dir_for_exe_id); server_main.cpp is linked into no CPU test, so the wiring is checked on its source text, the same
+// kind of rule as testServerCtrlOrder: in the body of ServerRun::startTier, without comments, the tier config takes the
+// directory first, then exactly one ssdDirForExeId call with tier::exeIdentity() replaces it and its warning is logged,
+// all before the tier starts with that config.
+void testServerSsdDirForExeId() {
+    const std::string s = codeOnly(readSource(std::filesystem::path(WHIRL_SOURCE_DIR) / "src" / "server" / "server_main.cpp"));
+    check(!s.empty(), "server_main.cpp readable");
+    const std::size_t head = s.find("void ServerRun::startTier() {");
+    check(head != std::string::npos, "server_main.cpp: void ServerRun::startTier() { found");
+    if (head == std::string::npos) return;
+    std::size_t end = s.find('{', head), depth = 0;
+    for (; end < s.size(); ++end) {
+        if (s[end] == '{') ++depth;
+        if (s[end] == '}' && --depth == 0) break;
+    }
+    check(end < s.size(), "server_main.cpp: the body of startTier ends");
+    const std::string body = s.substr(head, end - head);
+    const auto count = [&](const std::string& n) {
+        int k = 0;
+        for (std::size_t p = body.find(n); p != std::string::npos; p = body.find(n, p + n.size())) ++k;
+        return k;
+    };
+    const std::string take = "tc.ssd_dir = ssd_dir;";
+    const std::string guard = "tc.ssd_dir = ssdDirForExeId(tc.ssd_dir, tier::exeIdentity(), narrow(platform::proc::exePath()), &exe_warn);";
+    const std::string warn = "if (!exe_warn.empty()) logW(\"  \", exe_warn);";  // logW("{}", exe_warn): codeOnly blanks literal braces
+    const std::string start = "tier_pre->start(tc, lay, fp);";
+    check(count("ssdDirForExeId(") == 1, "startTier calls ssdDirForExeId once (" + std::to_string(count("ssdDirForExeId(")) + ")");
+    check(count(guard) == 1, "startTier: " + guard);
+    check(count(warn) == 1, "startTier logs the ssdDirForExeId warning: if (!exe_warn.empty()) logW(\"{}\", exe_warn);");
+    check(count(take) == 1 && count(start) == 1, "startTier: tc.ssd_dir = ssd_dir; and tier_pre->start(tc, lay, fp); once each");
+    const std::size_t p_take = body.find(take), p_guard = body.find(guard), p_warn = body.find(warn), p_start = body.find(start);
+    check(p_take < p_guard && p_guard < p_warn && p_warn < p_start,
+          "startTier: the directory is set, then ssdDirForExeId, then its warning, then the tier starts");
+}
 #endif
 
 int main(int argc, char** argv) {
@@ -4223,6 +4260,7 @@ int main(int argc, char** argv) {
 #ifdef WHIRL_SOURCE_DIR
     testServerPoolViaStartup();  // arch025-surv
     testServerCtrlOrder();  // arch025-surv2
+    testServerSsdDirForExeId();  // arch025-lpath2 (review C2)
     testNoGpuCallSites();  // arch025-X8bfix
 #endif
 #ifdef _WIN32
