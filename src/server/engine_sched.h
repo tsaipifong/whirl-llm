@@ -1,7 +1,7 @@
 // Server engine, the scheduler (arch025-engine S15b, module server.scheduler): runLoop and its phases idleWait /
 // admitQueued / startAdmitted, and logBatchStats. It only calls the components below it each loop iteration
 // (decodeCycle, runPrefill, the tier glue, the end and start of a request). References only - core.shared members of
-// Engine, the queue state of jq_ under its old names (read; locked as jq_.q_mutex_), every component below and the placed state last_tick_; bodies
+// Engine, the queue state of jq_ under its old names as const references (read; locked as jq_.q_mutex_), every component below and the placed state last_tick_; bodies
 // verbatim from engine.cpp (DESIGN v3 L9, 2.2).
 // SPDX-License-Identifier: Apache-2.0
 
@@ -48,8 +48,8 @@ public:
               JobQueue& jq, SlotEnd& se, PrefillPhase& pf, SpecCycle& cyc, SlotStart& ss, TierGlue& tg)
         : m_(m), opt_(opt), owner_(owner), spec_(spec), slots_(slots), bst_(bst), vram_probe_(vram_probe), pool_(pool),
           last_tick_(last_tick), ps_(ps), tb_(tb), vis_(vis), sc_(sc), gv_(gv), vw_(vw), jq_(jq), se_(se), pf_(pf),
-          cyc_(cyc), ss_(ss), tg_(tg), q_cond_(jq.q_cond_), queue_(jq.queue_), n_building_(jq.n_building_),
-          stop_(jq.stop_), loop_calls_(jq.loop_calls_), tier_wake_(jq.tier_wake_), wake_seq_(jq.wake_seq_) {}
+          cyc_(cyc), ss_(ss), tg_(tg), queue_(jq.queue_), n_building_(jq.n_building_), stop_(jq.stop_),
+          loop_calls_(jq.loop_calls_), wake_seq_(jq.wake_seq_) {}
     Scheduler(const Scheduler&) = delete;
     Scheduler& operator=(const Scheduler&) = delete;
 
@@ -105,15 +105,14 @@ private:
     SpecCycle& cyc_;
     SlotStart& ss_;
     TierGlue& tg_;
-    std::condition_variable& q_cond_;
-    // JobQueue's state the loop reads, under its old names, guarded by jq_.q_mutex_ (the lock the loop holds; S10b:
-    // the writes are JobQueue's methods), so the analysis checks every access here
-    std::deque<Job*>& queue_ WH_GUARDED_BY(jq_.q_mutex_);
-    std::atomic<std::uint32_t>& n_building_;
-    bool& stop_ WH_GUARDED_BY(jq_.q_mutex_);
-    std::vector<std::function<void()>>& loop_calls_ WH_GUARDED_BY(jq_.q_mutex_);
-    bool& tier_wake_ WH_GUARDED_BY(jq_.q_mutex_);
-    std::uint64_t& wake_seq_ WH_GUARDED_BY(jq_.q_mutex_);
+    // JobQueue's state the loop reads, under its old names: const references guarded by jq_.q_mutex_ (the lock the
+    // loop holds). The writes and the condition waits are JobQueue's methods (S10b, engreview E2): a write here does
+    // not compile, and the analysis checks every read
+    const std::deque<Job*>& queue_ WH_GUARDED_BY(jq_.q_mutex_);
+    const std::atomic<std::uint32_t>& n_building_;
+    const bool& stop_ WH_GUARDED_BY(jq_.q_mutex_);
+    const std::vector<std::function<void()>>& loop_calls_ WH_GUARDED_BY(jq_.q_mutex_);
+    const std::uint64_t& wake_seq_ WH_GUARDED_BY(jq_.q_mutex_);
 };
 
 }  // namespace whirl::server

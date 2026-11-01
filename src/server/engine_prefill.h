@@ -73,7 +73,7 @@ private:
     DrafterCtx& dc_;
     SlotPages& sc_;
     SlotEnd& se_;
-    std::atomic<std::uint32_t>& n_building_;
+    const std::atomic<std::uint32_t>& n_building_;
     PagePool& pool_;
     const ResponseCtx& rcx_;
 };

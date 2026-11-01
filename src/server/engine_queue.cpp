@@ -1,6 +1,7 @@
 // Server engine, the request queue (arch025-N4e, from engine.cpp): stop, the test hook runOnLoop, submitAndWait /
 // endBuilding for the connection threads, jqHealth, and the queue steps of the other modules (arch025-engine S10b:
-// runLoopCalls, abortQueued, jqAdmit, jqStartAdmitted, jqRelease, jqReap, jqTierWake). q_mutex_ guards the queue
+// runLoopCalls, abortQueued, jqAdmit, jqStartAdmitted, jqRelease, jqReap, jqTierWake) and the loop's condition waits
+// (arch025-engreview E2: jqWaitBurst, jqWaitTierBusy, jqWaitVision, jqWaitUntil, jqWaitIdle). q_mutex_ guards the queue
 // state (engine_queue.h).
 // SPDX-License-Identifier: Apache-2.0
 
@@ -131,6 +132,30 @@ void JobQueue::jqTierWake() {
     tier_wake_ = true;
     ++wake_seq_;
     q_cond_.notify_all();
+}
+
+// runLoop (engine_sched.cpp): burst gather / host-tier restore: 1 ms, sooner at a wake_seq_ bump (arch025-engreview E2)
+void JobQueue::jqWaitBurst(std::uint64_t wake_seq0) {
+    whirl::UniqueLock lw(q_mutex_);
+    q_cond_.wait_for(lw, std::chrono::milliseconds(1), [&]() WH_REQUIRES(q_mutex_) { return wake_seq_ != wake_seq0; });
+}
+
+// idleWait (engine_sched.cpp, q_mutex_ held by the caller): the four waits of the idle loop, verbatim
+void JobQueue::jqWaitTierBusy(whirl::UniqueLock& lk, std::uint64_t seq) {
+    q_cond_.wait_for(lk, std::chrono::milliseconds(5),
+                     [&]() WH_REQUIRES(q_mutex_) { return wake_seq_ != seq || !queue_.empty() || stop_ || !loop_calls_.empty(); });
+}
+
+void JobQueue::jqWaitVision(whirl::UniqueLock& lk) {
+    q_cond_.wait_for(lk, std::chrono::milliseconds(100), [&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
+}
+
+void JobQueue::jqWaitUntil(whirl::UniqueLock& lk, std::chrono::steady_clock::time_point due) {
+    q_cond_.wait_until(lk, due, [&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
+}
+
+void JobQueue::jqWaitIdle(whirl::UniqueLock& lk) {
+    q_cond_.wait(lk, [&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
 }
 
 void JobQueue::submitAndWait(Job& job) {
