@@ -13,8 +13,10 @@
 #       (e) HIP_VISIBLE_DEVICES=<the other ordinal> + --device pci:<this>: refused before any model work, the text
 #       lists the GPUs ("GPUs in this computer"), no hipError; --list-devices under each setting (2, 2, 1, 1, 1 GPUs).
 #       (f) v3 C-b2 "another program holds pinned memory": whirl-mem-hog pins 4096 MiB (it sees only this GPU), then
-#       the (d) server again: the startup inputs' pin.g0.adapter_shared grows by >= 3584 MiB, the "room for the RAM
-#       tier" drops by >= 3584 MiB (or to 0 / 512-step), and startup_lines.py (P-size replay) passes on both logs.
+#       the (d) server again: the startup inputs' pin.g0.adapter_shared grows by >= 3584 MiB, pin.pinned_max (the
+#       largest adapter) covers this adapter in both logs, each log's "room for the RAM tier" equals WHIRL's own rule
+#       on that log's inputs (so the drop is what the rule says, also when the OTHER adapter is the largest: arch025-e1f,
+#       env_matrix_e1f.ps1), and startup_lines.py (P-size replay) passes on both logs.
 #   E3  the other GPU hidden: HIP_VISIBLE_DEVICES=<this ordinal>: the default is this GPU (= E1 c) and
 #       --device pci:<other> is refused clearly. On the 8060S gate this is "R9700 not there" (PLAN E3).
 #   E4  a desktop with other programs: whirl-mem-hog holds 6144 MiB VRAM + 2048 MiB pinned on this GPU, then
@@ -39,6 +41,7 @@ $gate = Join-Path $Build "whirl-server-gate.exe"
 $hog = Join-Path $Build "whirl-mem-hog.exe"
 $replay = Join-Path $Build "whirl-startup-replay.exe"
 $sl = Join-Path $PSScriptRoot "startup_lines.py"
+. (Join-Path $PSScriptRoot "env_matrix_e1f.ps1")  # E1fJudge (cell E1f; runs on saved logs too)
 $py = if ($env:WHIRL_PYTHON) { $env:WHIRL_PYTHON } else { "C:\ClaudeWorkspace\tools\pyref\Scripts\python.exe" }
 if (-not (Test-Path $py)) { $py = "python" }
 foreach ($f in $cli, $srv, $Model) { if (-not (Test-Path $f)) { Write-Host "env matrix: FAIL (setup: $f missing)"; exit 2 } }
@@ -181,10 +184,8 @@ if ($Cells -contains "E1" -or $Cells -contains "E3") {
             $f = Srv "e1_pinned_hog" @{ HIP_VISIBLE_DEVICES = "$myOrd" } @("--device", $myPci)
             StopHog $h
             $ps0 = PSize $base.log; $ps1 = PSize $f.log
-            $grow = if ($base.shared -and $f.shared) { ([int64]$f.shared - [int64]$base.shared) / 1MB } else { -1 }
-            $drop = if ($base.room -and $f.room) { [int64]$base.room - [int64]$f.room } else { -1 }
-            $fOk = (Up $f $arch) -and $grow -ge 3584 -and ($drop -ge 3584 -or ($f.room -eq "0")) -and $ps0 -eq "PASS" -and $ps1 -eq "PASS"
-            Note "E1f" $fOk "pinned hog 4096 MiB: adapter_shared +$([math]::Round($grow)) MiB, room $($base.room) -> $($f.room) MiB (drop $drop), P-size $ps0 / $ps1"
+            $j = E1fJudge @(Get-Content $base.log -ErrorAction SilentlyContinue) @(Get-Content $f.log -ErrorAction SilentlyContinue) (Up $f $arch) $ps0 $ps1
+            Note "E1f" $j.ok $j.text
         }
     }
     if ($Cells -contains "E3") {
