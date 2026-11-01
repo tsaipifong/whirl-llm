@@ -134,6 +134,31 @@ void testExeDirectoryFiles() {
     std::filesystem::remove_all(std::filesystem::path(L"\\\\?\\" + base), ec);
 }
 
+// arch025-n2 (PLAN SC-2b, progress\arch025-lpath2.HANDOFF.md:57 N2): a PLAIN start (no \\?\) from a folder of 233+
+// characters: <folder>\draft_vocab\subset_48k.bin is 260+ characters, past MAX_PATH for this test program (no manifest,
+// as whirl-server.exe with LongPathsEnabled = 0). ab74257 threw "draft vocabulary file not found" for 233 / 240 / 247 /
+// 300; readDraftVocab now opens through platform::fs::longPathForm (Rust std get_long_path at the open). 200 / 232: the
+// joined path is under MAX_PATH and was read before as well.
+void testExeDirectoryPlainLong() {
+    std::error_code ec;
+    const std::wstring base = std::filesystem::current_path(ec).wstring() + L"\\iso_n2";
+    std::filesystem::remove_all(std::filesystem::path(L"\\\\?\\" + base), ec);
+    ISO_CHECK(base.size() <= 190);  // room for the 200-character folder below
+    if (base.size() > 190) return;
+    for (const std::size_t len : {200u, 232u, 233u, 240u, 247u, 300u}) {
+        const std::wstring folder = dirOfLen(base + L"\\p", len, L'p');
+        ISO_CHECK(folder.size() == len && makeVocabNextTo(folder));
+        const std::string r = vocabNextToExe(folder + L"\\whirl-server.exe");
+        if (r != "ok") std::printf("  exe_directory_plain_long: plain start, folder of %zu characters: %s\n", len, r.c_str());
+        ISO_CHECK(r == "ok");
+    }
+    // the error still names the path as given (not its \\?\ form) when the file is missing
+    const std::wstring none = dirOfLen(base + L"\\n", 300, L'n');
+    const std::string r = vocabNextToExe(none + L"\\whirl-server.exe");
+    ISO_CHECK(r.rfind("throws: draft vocabulary file not found: ", 0) == 0 && r.find("\\\\?\\") == std::string::npos);
+    std::filesystem::remove_all(std::filesystem::path(L"\\\\?\\" + base), ec);
+}
+
 void testMtpDefaults() {
     const MtpDefaults a = mtpDefaults(false);
     const MtpDefaults b = mtpDefaults(true);
@@ -408,6 +433,7 @@ void testMtpDraftsGiven() {
 int main(int argc, char** argv) {
     return iso::run("spec.policy",
                     {{"draft_vocab", testDraftVocab}, {"exe_directory", testExeDirectory}, {"exe_directory_files", testExeDirectoryFiles},
+                     {"exe_directory_plain_long", testExeDirectoryPlainLong},
                      {"mtp_defaults", testMtpDefaults}, {"ngram", testNgram},
                      {"batch_drafts", testBatchDrafts}, {"draft_vocab_gate", testDraftVocabGate}, {"draft_vocab_subset", testDraftVocabSubset}, {"mtp_auto_mode", testMtpAutoMode},
                      {"dflash_rules", testDflashRules}, {"ngram_shown", testNgramShown}, {"mtp_drafts_given", testMtpDraftsGiven}},
