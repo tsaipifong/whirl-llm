@@ -32,6 +32,9 @@ $fx = @{
     bad_when        = '{"modules":{"m":{"id":"T","paths":["src/server/engine.cpp"],"steps":["cpu_server"],"when":{"include/whirl/prefill_schedule.h":["no_such_step"]}}}}'
     bad_json        = '{"modules": {'
     rdeps_ok        = '{"modules":{"h":{"id":"T","paths":["src/device/handles.h"],"callers":"rdeps","steps":["cpu_device"]},"rest":{"id":"R","paths":["src/server/*","src/cache/*","src/tier/*","src/device/null_backend.*","src/device/backend*","include/whirl/*","src/model/*","src/vision/*","src/cli/*","src/release/*","src/config/*"],"steps":["cpu_server"]}}}'
+    # arch025-rega2: M1 (was repo -Module handles: engine.* were in no module until arch025-reg registered them) = rdeps_ok
+    # without "src/server/*": engine.h and the src/server files that include it are then in no module -> full gate
+    rdeps_lone      = '{"modules":{"h":{"id":"T","paths":["src/device/handles.h"],"callers":"rdeps","steps":["cpu_device"]},"rest":{"id":"R","paths":["src/cache/*","src/tier/*","src/device/null_backend.*","src/device/backend*","include/whirl/*","src/model/*","src/vision/*","src/cli/*","src/release/*","src/config/*"],"steps":["cpu_server"]}}}'
     callers_list    = '{"modules":{"m":{"id":"T","paths":["src/server/engine.cpp"],"callers":["c"],"steps":["cpu_server"]},"c":{"id":"C","paths":["src/cache/*"],"steps":["cpu_cache"]}}}'
     callers_bad     = '{"modules":{"m":{"id":"T","paths":["src/server/engine.cpp"],"callers":["nope"],"steps":["cpu_server"]}}}'
     one_cpu         = '{"modules":{"m":{"id":"T","paths":["src/server/engine.cpp"],"steps":["cpu_server"]}}}'
