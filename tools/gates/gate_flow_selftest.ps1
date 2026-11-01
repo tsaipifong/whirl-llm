@@ -32,6 +32,9 @@
 #   P8 each par step gets its own WHIRL_TEST_TMP and TMP / TEMP under <Work>\test_tmp\<step>
 #   P9 GPU steps are never run in parallel ("par" ignored)
 #   P10 WHIRL_GATE_JOBS sets the default concurrency; the header names the groups
+#   P11 (arch025-p4) what par steps record (P4 / P8: the variables a child saw) is read back for EVERY step when the
+#      children write their records at the same moment: test_pa's write stays open 3 s (a writer that lost the CPU between
+#      opening the file and writing, as beside a parallel compile) while test_pb / test_pc write theirs
 param([string]$Work = "")
 # arch025-c2fu: set or REMOVE a process environment variable (see release_gate.ps1).
 function SetEnvOrRemove([string]$k, $v) {
@@ -222,6 +225,14 @@ try {
         $ev = @(foreach ($i in $ivs) { ,@($i[0], 1); ,@($i[1], -1) }) | Sort-Object @{ e = { $_[0] } }, @{ e = { $_[1] } }
         $cur = 0; $mx = 0; foreach ($e in $ev) { $cur += $e[1]; if ($cur -gt $mx) { $mx = $cur } }; $mx
     }
+    # what a par step saw, as P4 / P8 record it: every child appends its value to one file of the case (Add-Content)
+    # RecordCmd: the command a child runs to record the value of the PowerShell expression $value; with $holdMs the write
+    # stays open that long (P11) and <case>_<name>.writing appears once it is open. Seen: the records, one per name.
+    function RecordCmd([string]$case, [string]$name, [string]$value, [int]$holdMs = 0) {
+        $v = if ($holdMs -gt 0) { "& { $value; 'open' | Set-Content '$Work\${case}_$name.writing'; Start-Sleep -Milliseconds $holdMs }" } else { $value }
+        "$v | Add-Content '$Work\${case}_seen.txt'"
+    }
+    function Seen([string]$case, [string[]]$names) { @(Get-Content (Join-Path $Work "${case}_seen.txt") -ErrorAction SilentlyContinue) }
     # rows and verdict without the seconds and the tag (the run-to-run part)
     function Norm($r, [string]$tag) { @($r.sum | Select-Object -Skip 1 | ForEach-Object { ($_ -replace "\b\d+ s\b", "# s") -replace [regex]::Escape($tag), "TAG" }) }
     $light = { param($n) @{ name = $n; heavy = $false; gpu = $false; cmd = (StepCmd "'light $n`: ok'"); rx = "^light $n`: ok" } }
@@ -311,6 +322,18 @@ try {
     SetEnvOrRemove "WHIRL_GATE_JOBS" $null
     $iv = @(Ivs "p10" $pn)
     Check "P10 WHIRL_GATE_JOBS=3: at most 3 at once (>= 2), header 'parallel: 1 group(s), 4 CPU steps, -Jobs 3'" ($r.rc -eq 0 -and $iv.Count -eq 4 -and (MaxConc $iv) -le 3 -and (MaxConc $iv) -ge 2 -and $r.sum[0] -match "parallel: 1 group\(s\), 4 CPU steps, -Jobs 3") "conc $(MaxConc $iv) | $($r.sum | Select-Object -First 1)"
+
+    # ---- P11 (arch025-p4) records written at the same moment are all kept (P4 lost one of three in 2 of 3 runs on
+    # 2026-11-01, scratch\a25_lpath\gate\gate_8060s\cpu_step_selftest.txt:154): test_pa's write stays open 3 s, test_pb and
+    # test_pc record while it is open
+    $wa = Join-Path $Work "p11_test_pa.writing"
+    $waitA = "for (`$i = 0; `$i -lt 600 -and -not (Test-Path '$wa'); `$i++) { Start-Sleep -Milliseconds 20 }"
+    $r = Gate "t_p11" (Steps "p11" @((ParStep "p11" "test_pa" 200 "" (RecordCmd "p11" "test_pa" "'seen by test_pa'" 3000)),
+                                    (ParStep "p11" "test_pb" 200 "" "$waitA; $(RecordCmd "p11" "test_pb" "'seen by test_pb'")"),
+                                    (ParStep "p11" "test_pc" 200 "" "$waitA; $(RecordCmd "p11" "test_pc" "'seen by test_pc'")"))) @("-Jobs", "4")
+    $sv = @(Seen "p11" @("test_pa", "test_pb", "test_pc"))
+    Check "P11 par steps that record at the same moment (one write open 3 s): every step's record is read back" ($r.rc -eq 0 -and (Test-Path $wa) -and
+        (@($sv | Sort-Object) -join "|") -eq "seen by test_pa|seen by test_pb|seen by test_pc") "exit $($r.rc), writing $(Test-Path $wa), seen: $($sv -join ' | ')"
 } finally {
     foreach ($p in $started) { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }
     foreach ($k in $keys) { SetEnvOrRemove $k $saved[$k] }
