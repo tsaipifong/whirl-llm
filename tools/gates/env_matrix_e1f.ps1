@@ -8,9 +8,12 @@
 # adapter (display, desktop programs) held 3460 MiB while the R9700 held 1416, so the 4096 MiB hog on the R9700 moved
 # the largest figure by 2058 MiB and the room by 2048: a false FAIL.
 # Now: (1) the hog is seen on this adapter: pin.g0.adapter_shared grows by >= 3584 MiB; (2) the largest-adapter figure
-# covers this adapter in both logs (pin.pinned_max >= pin.g0.adapter_shared); (3) each log's room equals the rule
+# covers this adapter in both logs (pin.pinned_max + 64 MiB >= pin.g0.adapter_shared: the two figures come from two
+# separate PDH queries, src/hip/wddm_mem.cpp, so another program's pin in between may move one of them; a stale largest
+# figure misses a 4096 MiB hog by far more); (3) each log's room equals the rule
 # applied to that log's own startup inputs (mirror of pinnedRoomMb below; P-size replays the C++ rule itself); so the
-# drop equals what the rule says, whichever adapter is the largest.
+# drop equals what the rule says, whichever adapter is the largest; (4) both logs list one GPU (pin.gpus=1), so pin.g0 is
+# this GPU in both (arch025-e1ff, review arch025-e1fr C1 / C4).
 function E1fPin([string[]]$txt) {
     $line = @($txt | Where-Object { $_ -match 'startup inputs:.* pin\.measured=' }) | Select-Object -Last 1
     $r = [ordered]@{ ok = $false; room = $null; total = 0; pmax = 0; later = 0; gpus = @() }
@@ -54,12 +57,14 @@ function E1fJudge([string[]]$baseTxt, [string[]]$hogTxt, [bool]$up = $true, [str
     }
     $MiB = 1048576
     $grow = ([double]$f.gpus[0].shared - [double]$b.gpus[0].shared) / $MiB
-    $cover = $b.pmax -ge $b.gpus[0].shared -and $f.pmax -ge $f.gpus[0].shared
+    $tol = 64 * $MiB   # PDH jitter between the two queries (review arch025-e1fr C1)
+    $cover = ($b.pmax + $tol) -ge $b.gpus[0].shared -and ($f.pmax + $tol) -ge $f.gpus[0].shared
+    $one = $b.gpus.Count -eq 1 -and $f.gpus.Count -eq 1   # pin.g0 = this GPU in both logs (review arch025-e1fr C4)
     $e0 = E1fRuleRoom $b; $e1 = E1fRuleRoom $f
     $drop = $b.room - $f.room; $want = $e0 - $e1
     $ruleOk = $b.room -eq $e0 -and $f.room -eq $e1
-    $ok = $up -and $grow -ge 3584 -and $cover -and $ruleOk -and $ps0 -eq "PASS" -and $ps1 -eq "PASS"
-    $t = "pinned hog 4096 MiB: adapter_shared +$([math]::Round($grow)) MiB, largest adapter $([math]::Round($b.pmax / $MiB)) -> $([math]::Round($f.pmax / $MiB)) MiB" +
-         " (covers this adapter: $cover), room $($b.room) -> $($f.room) MiB (drop $drop; the rule on the logged inputs: $e0 -> $e1, drop $want), P-size $ps0 / $ps1"
+    $ok = $up -and $one -and $grow -ge 3584 -and $cover -and $ruleOk -and $ps0 -eq "PASS" -and $ps1 -eq "PASS"
+    $t = "pinned hog 4096 MiB: pin.gpus $($b.gpus.Count) / $($f.gpus.Count), adapter_shared +$([math]::Round($grow)) MiB, largest adapter $([math]::Round($b.pmax / $MiB)) -> $([math]::Round($f.pmax / $MiB)) MiB" +
+         " (covers this adapter within 64 MiB: $cover), room $($b.room) -> $($f.room) MiB (drop $drop; the rule on the logged inputs: $e0 -> $e1, drop $want), P-size $ps0 / $ps1"
     return [pscustomobject]@{ ok = $ok; text = $t }
 }
