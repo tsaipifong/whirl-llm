@@ -33,6 +33,13 @@ MUTATIONS = [
      "[&]() WH_REQUIRES(q_mutex_) { return wake_seq_ != wake_seq0; }",
      "[&] { return wake_seq_ != wake_seq0; }",
      r"reading variable 'wake_seq_' requires holding mutex 'q_mutex_'"),
+    # arch025-regb1 (review arch025-e2e3r C2): jqWaitBurst takes q_mutex_ itself (E2 moved runLoop's checked
+    # `whirl::UniqueLock lw(jq_.q_mutex_);` into it), so runLoop must call it unlocked: with the `lk.unlock();` before
+    # the burst wait dropped, the caller still holds the lock and the analysis must name the self-deadlock
+    ("engine-burst-wait-locked", "src/server/engine_sched.cpp",
+     "        lk.unlock();\n        was_busy = true;\n",
+     "        was_busy = true;\n",
+     r"cannot call function 'jqWaitBurst' while mutex 'jq_\.q_mutex_' is held"),
     # arch025-e2e3 (review arch025-engreview C2): the S10b JobQueue methods that lock themselves had no lock-removal
     # mutant; jqRelease (releaseSlot's done / n_active_ / notify) is the one the DESIGN names
     ("jq-release-unlocked", "src/server/engine_queue.cpp",
