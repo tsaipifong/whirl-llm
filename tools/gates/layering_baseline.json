@@ -69,10 +69,6 @@
   ],
   [
    "cli",
-   "file:src/server/server_main.h"
-  ],
-  [
-   "cli",
    "gguf"
   ],
   [
@@ -122,6 +118,10 @@
   [
    "cli",
    "sampling"
+  ],
+  [
+   "cli",
+   "server.startup"
   ],
   [
    "cli",
@@ -205,7 +205,7 @@
   ],
   [
    "contract.server",
-   "file:src/server/vision_iface.h"
+   "hip.mem"
   ],
   [
    "contract.server",
@@ -214,6 +214,10 @@
   [
    "contract.server",
    "model.types"
+  ],
+  [
+   "contract.server",
+   "prefill.plan"
   ],
   [
    "contract.server",
@@ -242,58 +246,6 @@
   [
    "env_snapshot",
    "platform.env"
-  ],
-  [
-   "file:src/server/draft_caps.h",
-   "model.core"
-  ],
-  [
-   "file:src/server/log.cpp",
-   "common.base"
-  ],
-  [
-   "file:src/server/log.cpp",
-   "common.tsa"
-  ],
-  [
-   "file:src/server/log.cpp",
-   "file:src/server/log.h"
-  ],
-  [
-   "file:src/server/log.cpp",
-   "platform.fs"
-  ],
-  [
-   "file:src/server/log.cpp",
-   "platform.time"
-  ],
-  [
-   "file:src/server/vision_iface.h",
-   "hip.mem"
-  ],
-  [
-   "file:src/server/vision_iface.h",
-   "prefill.plan"
-  ],
-  [
-   "file:src/server/vision_iface.h",
-   "vision"
-  ],
-  [
-   "file:src/server/whirl_server.cpp",
-   "common.base"
-  ],
-  [
-   "file:src/server/whirl_server.cpp",
-   "file:src/server/server_main.h"
-  ],
-  [
-   "file:src/server/whirl_server.cpp",
-   "gpu_select"
-  ],
-  [
-   "file:src/server/whirl_server.cpp",
-   "release"
   ],
   [
    "forward.attn",
@@ -701,10 +653,6 @@
   ],
   [
    "model.qwen35.server",
-   "file:src/server/vision_iface.h"
-  ],
-  [
-   "model.qwen35.server",
    "hip.runtime"
   ],
   [
@@ -933,11 +881,7 @@
   ],
   [
    "protocol",
-   "file:src/server/log.h"
-  ],
-  [
-   "protocol",
-   "file:src/server/vision_iface.h"
+   "contract.server"
   ],
   [
    "protocol",
@@ -946,6 +890,10 @@
   [
    "protocol",
    "platform.net"
+  ],
+  [
+   "protocol",
+   "server.log"
   ],
   [
    "protocol",
@@ -1017,15 +965,15 @@
   ],
   [
    "server.cycle_prof",
-   "file:src/server/log.h"
-  ],
-  [
-   "server.cycle_prof",
    "model.types"
   ],
   [
    "server.cycle_prof",
    "protocol"
+  ],
+  [
+   "server.cycle_prof",
+   "server.log"
   ],
   [
    "server.drafter_ctx",
@@ -1078,18 +1026,6 @@
   [
    "server.engine",
    "contract.server"
-  ],
-  [
-   "server.engine",
-   "file:src/server/decode_floor.h"
-  ],
-  [
-   "server.engine",
-   "file:src/server/log.h"
-  ],
-  [
-   "server.engine",
-   "file:src/server/vision_iface.h"
   ],
   [
    "server.engine",
@@ -1141,6 +1077,10 @@
   ],
   [
    "server.engine",
+   "server.decode_floor"
+  ],
+  [
+   "server.engine",
    "server.drafter_ctx"
   ],
   [
@@ -1157,7 +1097,23 @@
   ],
   [
    "server.engine",
+   "server.job_queue"
+  ],
+  [
+   "server.engine",
+   "server.log"
+  ],
+  [
+   "server.engine",
+   "server.prefill"
+  ],
+  [
+   "server.engine",
    "server.sample_buffers"
+  ],
+  [
+   "server.engine",
+   "server.scheduler"
   ],
   [
    "server.engine",
@@ -1169,7 +1125,27 @@
   ],
   [
    "server.engine",
+   "server.slot_end"
+  ],
+  [
+   "server.engine",
    "server.slot_output"
+  ],
+  [
+   "server.engine",
+   "server.slot_start"
+  ],
+  [
+   "server.engine",
+   "server.spec_cycle"
+  ],
+  [
+   "server.engine",
+   "server.tier_glue"
+  ],
+  [
+   "server.engine",
+   "server.vram_watch"
   ],
   [
    "server.engine",
@@ -1221,10 +1197,6 @@
   ],
   [
    "server.engine_types",
-   "file:src/server/decode_floor.h"
-  ],
-  [
-   "server.engine_types",
    "model.types"
   ],
   [
@@ -1238,6 +1210,10 @@
   [
    "server.engine_types",
    "sampling"
+  ],
+  [
+   "server.engine_types",
+   "server.decode_floor"
   ],
   [
    "server.engine_types",
@@ -1257,15 +1233,15 @@
   ],
   [
    "server.governor",
-   "file:src/server/log.h"
-  ],
-  [
-   "server.governor",
    "mem.governor"
   ],
   [
    "server.governor",
    "mem.wddm_watch"
+  ],
+  [
+   "server.governor",
+   "server.log"
   ],
   [
    "server.governor",
@@ -1289,19 +1265,43 @@
   ],
   [
    "server.image_embeddings",
-   "file:src/server/log.h"
-  ],
-  [
-   "server.image_embeddings",
-   "file:src/server/vision_iface.h"
-  ],
-  [
-   "server.image_embeddings",
    "hip.mem"
   ],
   [
    "server.image_embeddings",
+   "server.log"
+  ],
+  [
+   "server.image_embeddings",
    "vision"
+  ],
+  [
+   "server.job_queue",
+   "cache.tier_adapter"
+  ],
+  [
+   "server.job_queue",
+   "common.tsa"
+  ],
+  [
+   "server.job_queue",
+   "model.core"
+  ],
+  [
+   "server.job_queue",
+   "protocol"
+  ],
+  [
+   "server.job_queue",
+   "server.log"
+  ],
+  [
+   "server.job_queue",
+   "server.slot"
+  ],
+  [
+   "server.job_queue",
+   "spec.rules"
   ],
   [
    "server.kv_fit",
@@ -1314,6 +1314,102 @@
   [
    "server.kv_fit",
    "mem.fit"
+  ],
+  [
+   "server.log",
+   "common.base"
+  ],
+  [
+   "server.log",
+   "common.tsa"
+  ],
+  [
+   "server.log",
+   "platform.fs"
+  ],
+  [
+   "server.log",
+   "platform.time"
+  ],
+  [
+   "server.prefill",
+   "cache.tier_adapter"
+  ],
+  [
+   "server.prefill",
+   "contract.device"
+  ],
+  [
+   "server.prefill",
+   "contract.server"
+  ],
+  [
+   "server.prefill",
+   "model.core"
+  ],
+  [
+   "server.prefill",
+   "page_pool"
+  ],
+  [
+   "server.prefill",
+   "prefill.plan"
+  ],
+  [
+   "server.prefill",
+   "prefix_store"
+  ],
+  [
+   "server.prefill",
+   "protocol"
+  ],
+  [
+   "server.prefill",
+   "server.cycle_prof"
+  ],
+  [
+   "server.prefill",
+   "server.decode_floor"
+  ],
+  [
+   "server.prefill",
+   "server.drafter_ctx"
+  ],
+  [
+   "server.prefill",
+   "server.engine_types"
+  ],
+  [
+   "server.prefill",
+   "server.job_queue"
+  ],
+  [
+   "server.prefill",
+   "server.log"
+  ],
+  [
+   "server.prefill",
+   "server.sample_buffers"
+  ],
+  [
+   "server.prefill",
+   "server.slot"
+  ],
+  [
+   "server.prefill",
+   "server.slot_cache"
+  ],
+  [
+   "server.prefill",
+   "server.slot_end"
+  ],
+  [
+   "server.prefill",
+   "server.slot_output"
+  ],
+  [
+   "server.prefill",
+   "spec.rules"
   ],
   [
    "server.sample_buffers",
@@ -1334,6 +1430,106 @@
   [
    "server.sample_buffers",
    "sampling"
+  ],
+  [
+   "server.scheduler",
+   "cache.tier_adapter"
+  ],
+  [
+   "server.scheduler",
+   "common.tsa"
+  ],
+  [
+   "server.scheduler",
+   "contract.server"
+  ],
+  [
+   "server.scheduler",
+   "mem.wddm_watch"
+  ],
+  [
+   "server.scheduler",
+   "model.core"
+  ],
+  [
+   "server.scheduler",
+   "page_pool"
+  ],
+  [
+   "server.scheduler",
+   "prefix_store"
+  ],
+  [
+   "server.scheduler",
+   "protocol"
+  ],
+  [
+   "server.scheduler",
+   "server.cycle_prof"
+  ],
+  [
+   "server.scheduler",
+   "server.engine_types"
+  ],
+  [
+   "server.scheduler",
+   "server.governor"
+  ],
+  [
+   "server.scheduler",
+   "server.image_embeddings"
+  ],
+  [
+   "server.scheduler",
+   "server.job_queue"
+  ],
+  [
+   "server.scheduler",
+   "server.log"
+  ],
+  [
+   "server.scheduler",
+   "server.prefill"
+  ],
+  [
+   "server.scheduler",
+   "server.slot"
+  ],
+  [
+   "server.scheduler",
+   "server.slot_cache"
+  ],
+  [
+   "server.scheduler",
+   "server.slot_end"
+  ],
+  [
+   "server.scheduler",
+   "server.slot_start"
+  ],
+  [
+   "server.scheduler",
+   "server.spec_cycle"
+  ],
+  [
+   "server.scheduler",
+   "server.tier_glue"
+  ],
+  [
+   "server.scheduler",
+   "server.vram_watch"
+  ],
+  [
+   "server.scheduler",
+   "spec.rules"
+  ],
+  [
+   "server.scheduler",
+   "threads"
+  ],
+  [
+   "server.scheduler",
+   "tier_bridge"
   ],
   [
    "server.slot",
@@ -1373,10 +1569,6 @@
   ],
   [
    "server.slot_cache",
-   "file:src/server/log.h"
-  ],
-  [
-   "server.slot_cache",
    "page_pool"
   ],
   [
@@ -1388,8 +1580,72 @@
    "server.engine_types"
   ],
   [
-   "server.slot_output",
-   "file:src/server/log.h"
+   "server.slot_cache",
+   "server.log"
+  ],
+  [
+   "server.slot_end",
+   "cache.tier_adapter"
+  ],
+  [
+   "server.slot_end",
+   "common.tsa"
+  ],
+  [
+   "server.slot_end",
+   "contract.device"
+  ],
+  [
+   "server.slot_end",
+   "contract.server"
+  ],
+  [
+   "server.slot_end",
+   "model.core"
+  ],
+  [
+   "server.slot_end",
+   "protocol"
+  ],
+  [
+   "server.slot_end",
+   "server.engine_types"
+  ],
+  [
+   "server.slot_end",
+   "server.image_embeddings"
+  ],
+  [
+   "server.slot_end",
+   "server.job_queue"
+  ],
+  [
+   "server.slot_end",
+   "server.log"
+  ],
+  [
+   "server.slot_end",
+   "server.sample_buffers"
+  ],
+  [
+   "server.slot_end",
+   "server.slot"
+  ],
+  [
+   "server.slot_end",
+   "server.slot_cache"
+  ],
+  [
+   "server.slot_end",
+   "server.vram_watch"
+  ],
+  [
+   "server.slot_end",
+   "spec.rules"
+  ],
+  [
+   "server.slot_end",
+   "tier_bridge"
   ],
   [
    "server.slot_output",
@@ -1401,7 +1657,167 @@
   ],
   [
    "server.slot_output",
+   "server.log"
+  ],
+  [
+   "server.slot_output",
    "server.slot"
+  ],
+  [
+   "server.slot_start",
+   "cache.tier_adapter"
+  ],
+  [
+   "server.slot_start",
+   "ckpt_store"
+  ],
+  [
+   "server.slot_start",
+   "contract.device"
+  ],
+  [
+   "server.slot_start",
+   "contract.server"
+  ],
+  [
+   "server.slot_start",
+   "model.core"
+  ],
+  [
+   "server.slot_start",
+   "page_pool"
+  ],
+  [
+   "server.slot_start",
+   "prefill.plan"
+  ],
+  [
+   "server.slot_start",
+   "prefix_store"
+  ],
+  [
+   "server.slot_start",
+   "protocol"
+  ],
+  [
+   "server.slot_start",
+   "server.drafter_ctx"
+  ],
+  [
+   "server.slot_start",
+   "server.engine_types"
+  ],
+  [
+   "server.slot_start",
+   "server.governor"
+  ],
+  [
+   "server.slot_start",
+   "server.image_embeddings"
+  ],
+  [
+   "server.slot_start",
+   "server.log"
+  ],
+  [
+   "server.slot_start",
+   "server.prefill"
+  ],
+  [
+   "server.slot_start",
+   "server.sample_buffers"
+  ],
+  [
+   "server.slot_start",
+   "server.slot"
+  ],
+  [
+   "server.slot_start",
+   "server.slot_cache"
+  ],
+  [
+   "server.slot_start",
+   "server.slot_output"
+  ],
+  [
+   "server.slot_start",
+   "spec.rules"
+  ],
+  [
+   "server.slot_start",
+   "tier_bridge"
+  ],
+  [
+   "server.spec_cycle",
+   "cache.tier_adapter"
+  ],
+  [
+   "server.spec_cycle",
+   "contract.device"
+  ],
+  [
+   "server.spec_cycle",
+   "contract.server"
+  ],
+  [
+   "server.spec_cycle",
+   "model.core"
+  ],
+  [
+   "server.spec_cycle",
+   "prefill.plan"
+  ],
+  [
+   "server.spec_cycle",
+   "protocol"
+  ],
+  [
+   "server.spec_cycle",
+   "sampling"
+  ],
+  [
+   "server.spec_cycle",
+   "server.cycle_prof"
+  ],
+  [
+   "server.spec_cycle",
+   "server.drafter_ctx"
+  ],
+  [
+   "server.spec_cycle",
+   "server.engine_types"
+  ],
+  [
+   "server.spec_cycle",
+   "server.log"
+  ],
+  [
+   "server.spec_cycle",
+   "server.sample_buffers"
+  ],
+  [
+   "server.spec_cycle",
+   "server.slot"
+  ],
+  [
+   "server.spec_cycle",
+   "server.slot_cache"
+  ],
+  [
+   "server.spec_cycle",
+   "server.slot_end"
+  ],
+  [
+   "server.spec_cycle",
+   "server.slot_output"
+  ],
+  [
+   "server.spec_cycle",
+   "server.vram_watch"
+  ],
+  [
+   "server.spec_cycle",
+   "spec.rules"
   ],
   [
    "server.startup",
@@ -1430,18 +1846,6 @@
   [
    "server.startup",
    "contract.server"
-  ],
-  [
-   "server.startup",
-   "file:src/server/draft_caps.h"
-  ],
-  [
-   "server.startup",
-   "file:src/server/log.h"
-  ],
-  [
-   "server.startup",
-   "file:src/server/server_main.h"
   ],
   [
    "server.startup",
@@ -1525,6 +1929,10 @@
   ],
   [
    "server.startup",
+   "server.log"
+  ],
+  [
+   "server.startup",
    "tier.kv"
   ],
   [
@@ -1536,12 +1944,104 @@
    "tokenizer"
   ],
   [
-   "server.vram_watch",
-   "file:src/server/log.h"
+   "server.tier_glue",
+   "cache.tier_adapter"
+  ],
+  [
+   "server.tier_glue",
+   "common.tsa"
+  ],
+  [
+   "server.tier_glue",
+   "contract.device"
+  ],
+  [
+   "server.tier_glue",
+   "model.core"
+  ],
+  [
+   "server.tier_glue",
+   "page_pool"
+  ],
+  [
+   "server.tier_glue",
+   "prefix_store"
+  ],
+  [
+   "server.tier_glue",
+   "protocol"
+  ],
+  [
+   "server.tier_glue",
+   "server.drafter_ctx"
+  ],
+  [
+   "server.tier_glue",
+   "server.engine_types"
+  ],
+  [
+   "server.tier_glue",
+   "server.governor"
+  ],
+  [
+   "server.tier_glue",
+   "server.job_queue"
+  ],
+  [
+   "server.tier_glue",
+   "server.log"
+  ],
+  [
+   "server.tier_glue",
+   "server.slot"
+  ],
+  [
+   "server.tier_glue",
+   "server.slot_cache"
+  ],
+  [
+   "server.tier_glue",
+   "server.slot_end"
+  ],
+  [
+   "server.tier_glue",
+   "server.slot_start"
+  ],
+  [
+   "server.tier_glue",
+   "spec.rules"
+  ],
+  [
+   "server.tier_glue",
+   "tier.kv"
+  ],
+  [
+   "server.tier_glue",
+   "tier_bridge"
   ],
   [
    "server.vram_watch",
-   "server.engine"
+   "common.tsa"
+  ],
+  [
+   "server.vram_watch",
+   "mem.wddm_watch"
+  ],
+  [
+   "server.vram_watch",
+   "protocol"
+  ],
+  [
+   "server.vram_watch",
+   "server.governor"
+  ],
+  [
+   "server.vram_watch",
+   "server.log"
+  ],
+  [
+   "server.vram_watch",
+   "threads"
   ],
   [
    "spec.engine",
@@ -1597,7 +2097,7 @@
   ],
   [
    "threads",
-   "file:src/server/log.h"
+   "server.log"
   ],
   [
    "tier.kv",
@@ -1645,10 +2145,6 @@
   ],
   [
    "tier_bridge",
-   "file:src/server/log.h"
-  ],
-  [
-   "tier_bridge",
    "handles"
   ],
   [
@@ -1662,6 +2158,10 @@
   [
    "tier_bridge",
    "prefix_store"
+  ],
+  [
+   "tier_bridge",
+   "server.log"
   ],
   [
    "tier_bridge",

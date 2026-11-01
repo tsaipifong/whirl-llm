@@ -3,12 +3,5 @@
           "them as WARN and fails on any other unregistered product file; an entry that matches no unregistered file is",
           "stale and fails, so this list only shrinks; release mode (census_check.py --release) fails while any entry is",
           "left. The main session removes an entry when it merges the lane that registered those files."],
- "pending": [
-  {"glob": "src/server/decode_floor.h", "owner": "lane 1 (arch025-r12cli, N4 Engine split)"},
-  {"glob": "src/server/draft_caps.h", "owner": "lane 1 (arch025-r12cli, N4 Engine split)"},
-  {"glob": "src/server/log.*", "owner": "lane 1 (arch025-r12cli, N4 Engine split)"},
-  {"glob": "src/server/vision_iface.h", "owner": "lane 1 (arch025-r12cli, N4 Engine split)"},
-  {"glob": "src/server/whirl_server.cpp", "owner": "lane 1 (arch025-r12cli, N10 assembly-only)"},
-  {"glob": "src/server/server_main.h", "owner": "lane 1 (arch025-r12cli, N10 assembly-only)"}
- ]
+ "pending": []
 }

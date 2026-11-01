@@ -277,9 +277,10 @@ def selftest(root, groups, want, pin, origin, work):
         case("C-1a: the same move with only a lone '*' audit row: fails", tbm, 1, r"^member order: NO AUDIT ROW for tb_ \(moved", p_star)
     else:
         cases.append(("tb_ / ck_ anchors missing", False, ""))
-    for old, new, nm in (("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", "vram_idle_s_"),
-                         # S8 moved gov_hold_ / ctx_new_ into GovState: the same two shapes (value, type) on Engine members
-                         ("    bool vram_warn_ = false;", "    bool vram_warn_ = true;", "vram_warn_"),
+    # S8 moved gov_hold_ / ctx_new_ into GovState, S9 vram_idle_s_ / vram_warn_ into VramState (engine_vram.h): the same
+    # shapes (value, type) on Engine members that stay in engine.h and have no audit row
+    for old, new, nm in (("    std::atomic<std::uint32_t> ctx_pub_{0};", "    std::atomic<std::uint32_t> ctx_pub_{1};", "ctx_pub_"),
+                         ("    bool spec_on_ = false;", "    bool spec_on_ = true;", "spec_on_"),
                          ("    bool spec_on_ = false;", "    int spec_on_ = 0;", "spec_on_")):
         if eh.count(old) == 1:
             case(f"in-class declaration changed ({old.strip()} -> {new.strip()}), names / order unchanged: fails",

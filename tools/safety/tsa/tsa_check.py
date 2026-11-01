@@ -20,15 +20,35 @@ import sys
 
 # name, source (repo-relative), exact text to find, its replacement, a regex the compiler output of the mutant must match
 MUTATIONS = [
+    # arch025-engine S10 / S10b: stop and runLoopCalls are JobQueue's (engine_queue.cpp); the loop bodies (runLoop,
+    # idleWait) are Scheduler's in engine_sched.cpp (S15b / S16): they lock jq_.q_mutex_ and read the queue state through
+    # references guarded by it, so the compiler names that lock
     ("engine-stop-unlocked", "src/server/engine_queue.cpp",
-     "void Engine::stop() {\n    whirl::MutexLock lk(q_mutex_);\n    stop_ = true;",
-     "void Engine::stop() {\n    stop_ = true;",
+     "void JobQueue::stop() {\n    whirl::MutexLock lk(q_mutex_);\n    stop_ = true;",
+     "void JobQueue::stop() {\n    stop_ = true;",
      r"writing variable 'stop_' requires holding mutex 'q_mutex_'"),
-    ("engine-wait-predicate-unannotated", "src/server/engine.cpp",
+    # arch025-e2e3 (DESIGN v3 10.2(f)): the condition waits of runLoop / idleWait are JobQueue's jqWait* methods
+    # (engine_queue.cpp, wait statements verbatim, the lock named q_mutex_ there); the predicate mutants follow them
+    ("engine-wait-predicate-unannotated", "src/server/engine_queue.cpp",
      "[&]() WH_REQUIRES(q_mutex_) { return wake_seq_ != wake_seq0; }",
      "[&] { return wake_seq_ != wake_seq0; }",
      r"reading variable 'wake_seq_' requires holding mutex 'q_mutex_'"),
-    ("engine-health-vram-unlocked", "src/server/engine.cpp",
+    # arch025-regb1 (review arch025-e2e3r C2): jqWaitBurst takes q_mutex_ itself (E2 moved runLoop's checked
+    # `whirl::UniqueLock lw(jq_.q_mutex_);` into it), so runLoop must call it unlocked: with the `lk.unlock();` before
+    # the burst wait dropped, the caller still holds the lock and the analysis must name the self-deadlock
+    ("engine-burst-wait-locked", "src/server/engine_sched.cpp",
+     "        lk.unlock();\n        was_busy = true;\n",
+     "        was_busy = true;\n",
+     r"cannot call function 'jqWaitBurst' while mutex 'jq_\.q_mutex_' is held"),
+    # arch025-e2e3 (review arch025-engreview C2): the S10b JobQueue methods that lock themselves had no lock-removal
+    # mutant; jqRelease (releaseSlot's done / n_active_ / notify) is the one the DESIGN names
+    ("jq-release-unlocked", "src/server/engine_queue.cpp",
+     "void JobQueue::jqRelease(Job* job) {\n    whirl::MutexLock lk(q_mutex_);\n",
+     "void JobQueue::jqRelease(Job* job) {\n",
+     r"writing variable 'n_active_' requires holding mutex 'q_mutex_'"),
+    # arch025-engine S9: health's vram_mu_ lock and reads are VramWatch::vramHealth (engine_vram.cpp, verbatim); vram_last_ /
+    # vram_spill_ are VramWatch references guarded by its vram_mu_ reference: the annotation must still bind there
+    ("engine-health-vram-unlocked", "src/server/engine_vram.cpp",
      "    whirl::MutexLock lk(vram_mu_);\n    h.vram_ok = vram_last_.ok;",
      "    h.vram_ok = vram_last_.ok;",
      r"reading variable 'vram_last_' requires holding mutex 'vram_mu_'"),
@@ -36,14 +56,15 @@ MUTATIONS = [
     # so their bodies are analysed (they were WH_NO_THREAD_SAFETY_ANALYSIS after arch025-E2, where a dropped relock passed;
     # the predicate lambdas are checked either way): a dropped predicate annotation, a dropped relock and an unbalanced
     # runLoopCalls must fail
-    ("engine-idlewait-predicate-unannotated", "src/server/engine.cpp",
-     "[&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });\n        } else {",
-     "[&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });\n        } else {",
+    # arch025-e2e3: the idle wait_until (was in idleWait before `} else {`) is JobQueue::jqWaitUntil now (DESIGN v3 10.2(f))
+    ("engine-idlewait-predicate-unannotated", "src/server/engine_queue.cpp",
+     "q_cond_.wait_until(lk, due, [&]() WH_REQUIRES(q_mutex_) {",
+     "q_cond_.wait_until(lk, due, [&] {",
      r"reading variable 'queue_' requires holding mutex 'q_mutex_'"),
-    ("engine-idlewait-relock-dropped", "src/server/engine.cpp",
-     "            vram_due = vramIdleTick();\n            gv_.govApply();\n            WH_RELOCK_HELD(lk, q_mutex_);\n",
-     "            vram_due = vramIdleTick();\n            gv_.govApply();\n",
-     r"reading variable 'queue_' requires holding mutex 'q_mutex_'"),
+    ("engine-idlewait-relock-dropped", "src/server/engine_sched.cpp",
+     "            vram_due = vw_.vramIdleTick();\n            gv_.govApply();\n            WH_RELOCK_HELD(lk, jq_.q_mutex_);\n",
+     "            vram_due = vw_.vramIdleTick();\n            gv_.govApply();\n",
+     r"reading variable 'queue_' requires holding mutex 'jq_\.q_mutex_'"),
     ("engine-runloopcalls-relock-dropped", "src/server/engine_queue.cpp",
      "    for (auto& f : calls) f();\n    WH_RELOCK_HELD(lk, q_mutex_);\n",
      "    for (auto& f : calls) f();\n",
@@ -58,6 +79,10 @@ MUTATIONS = [
      "    whirl::MutexLock lk(gov_mu_);\n    gov_json_ = memgov::statusJson(st);\n",
      "    gov_json_ = memgov::statusJson(st);\n",
      r"writing variable 'gov_json_' requires holding mutex 'gov_mu_'"),
+    ("vram-note-unlocked", "src/server/engine_vram.cpp",
+     "        whirl::MutexLock lk(vram_mu_);\n        vram_last_ = s;\n        vram_spill_ = vram_warn_ && vram_watch_.spilling();\n",
+     "        vram_last_ = s;\n        vram_spill_ = vram_warn_ && vram_watch_.spilling();\n",
+     r"writing variable 'vram_last_' requires holding mutex 'vram_mu_'"),
     # not Tier::submit: clang's analysis does not see the access in `(c ? q_reads_ : q_writes_).push_back(j)` (a guarded member
     # reached through ?: is not checked; arch025-Q4 HANDOFF "known gaps"), so removing that lock is not caught
     ("tier-pendingread-unlocked", "src/tier/kv_tier.cpp",

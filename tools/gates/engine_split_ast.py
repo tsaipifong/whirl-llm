@@ -577,8 +577,13 @@ class Walk:
         if loopv is None: return ("w", "range-for without a loop variable", None)
         t = T(loopv)
         if "&" in t and not is_const(t): return ("w", f"range-for loop variable {loopv.get('name') or '[..]'} is a non-const reference ({t[:40]})", None)
-        if is_pointer(t) and not is_const(t) and "*" in t:
-            return ("r", "range-for copies pointers", None)
+        if is_pointer(t) and not pointee_const(t):
+            # arch025-reg C1 (engreview C1): the loop variable copies each element pointer; follow it (S0f lptr), as the
+            # const-object path (S0g, _cobj) does - `for (Job* j : queue_) j->done = true;` is a write of queue_'s pointees
+            self._var = loopv
+            return ("r", f"pointer copied into {loopv.get('name') or ''}", None)
+        if is_pointer(t):
+            return ("r", "range-for copies pointers to const", None)
         return ("r", "range-for by value / const reference", None)
 
     def _leak_ret(self, node, depth=0):
@@ -1196,6 +1201,11 @@ _ST_CASES = [
     ("std::vector<int*> q19_;", "CONST:*q19_[0] = 1;", "w", "vector<int*> element pointee written (const) (S0f review probe)"),
     ("std::vector<int*> q19b_;", "CONST:for (int* p : q19b_) *p = 1;", "w", "vector<int*> range-for pointee written (const) (S0f review probe)"),
     ("std::vector<int*> q19n_;", "*q19n_[0] = 1;", "w", "control: vector<int*> pointee (non-const) (S0f review probe)"),
+    # arch025-reg C1 (engreview C1): range-for over a NON-const container of pointers, the loop variable written through
+    ("std::vector<int*> q19c_;", "for (int* p : q19c_) *p = 1;", "w", "vector<int*> range-for pointee written (non-const) (C1)"),
+    ("std::vector<GS*> q19d_;", "for (GS* j : q19d_) j->x = 1;", "w", "vector<GS*> range-for ->x written (non-const; C1, the queue_ shape)"),
+    ("std::vector<int*> q19e_;", "for (int* p : q19e_) { int v = *p; (void)v; }", "r", "control: vector<int*> range-for pointee read (C1)"),
+    ("std::vector<const int*> q19f_;", "for (const int* p : q19f_) (void)p;", "r", "control: pointer-to-const elements copied (C1)"),
     ("std::map<int, GS*> q20_;", "CONST:q20_.at(0)->x = 1;", "w", "map<int,GS*>::at()->x (const) (S0f review probe)"),
     ("int* q21_ = nullptr;", "CONST:int* const& r = q21_; *r = 1;", "w", "const reference to the pointer member, written through (S0f review probe)"),
     ("int* q22_ = nullptr;", "CONST:auto* q = q22_; q[0] = 1;", "w", "copy (auto*) subscript written (S0f review probe)"),

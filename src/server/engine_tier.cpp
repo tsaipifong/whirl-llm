@@ -2,8 +2,8 @@
 // restore admission and steps, the tick, the shutdown flush); the tier half is TierBridge (tb_).
 // SPDX-License-Identifier: Apache-2.0
 
-#include "engine.h"
-#include "engine_internal.h"
+// arch025-regb1 (N4-reg b1): the component's own header, not engine.h / engine_internal.h (no include edge back to server.engine)
+#include "server/engine_tierglue.h"
 
 #include "cache/tier_adapter.h"
 #include "log.h"
@@ -21,22 +21,17 @@
 
 namespace whirl::server {
 
-void Engine::attachTier(tier::Tier* t) {
+void TierGlue::attachTier(tier::Tier* t) {
     tb_.attach(t);
     pool_.setQuarantineStream(t ? t->stream() : nullptr);
     ps_.attachTier(t);
     if (t) {
-        t->setWake([this] {
-            whirl::MutexLock lk(q_mutex_);
-            tier_wake_ = true;
-            ++wake_seq_;
-            q_cond_.notify_all();
-        });
+        t->setWake([this] { jq_.jqTierWake(); });
         t->log_fn = [](std::string_view msg) { logI("{}", msg); };
     }
 }
 
-bool Engine::waitsForTier(Job& job) {
+bool TierGlue::waitsForTier(Job& job) {
     if (!tb_.tier()) return false;
     if (!job.params.cache_prompt || opt_.no_prefix_cache) return false;
     const std::span<const std::uint32_t> toks = job.tokens;
@@ -58,7 +53,7 @@ bool Engine::waitsForTier(Job& job) {
     return false;
 }
 
-void Engine::prefetchFor(Job& job) {
+void TierGlue::prefetchFor(Job& job) {
     if (!tb_.tier()) return;
     if (job.pf_checked) return;
     job.pf_checked = true;
@@ -76,7 +71,7 @@ void Engine::prefetchFor(Job& job) {
 // ---------------------------------------------------------------------------
 // item G: host tiers
 
-bool Engine::tryRestore(Slot& sl, Job& job) {
+bool TierGlue::tryRestore(Slot& sl, Job& job) {
     if (!tb_.tier()) return false;
     if (!job.params.cache_prompt || opt_.no_prefix_cache) return false;
     const std::span<const std::uint32_t> toks = job.tokens;
@@ -113,7 +108,7 @@ bool Engine::tryRestore(Slot& sl, Job& job) {
 }
 
 // the Engine steps TierBridge calls inside a restore (in the order they always ran)
-TierBridge::RestoreSteps Engine::restoreSteps(Slot& sl) {
+TierBridge::RestoreSteps TierGlue::restoreSteps(Slot& sl) {
     TierBridge::RestoreSteps s;
     s.drop_cache = [this, &sl] { sc_.dropCache(sl); };
     s.drafter_reset = [this, &sl](std::uint32_t n_tok) { dc_.dflReset(sl, n_tok); };
@@ -123,7 +118,7 @@ TierBridge::RestoreSteps Engine::restoreSteps(Slot& sl) {
     return s;
 }
 
-void Engine::pollRestores() {
+void TierGlue::pollRestores() {
     if (!tb_.tier()) return;
     for (Slot& sl : slots_) {
         if (!sl.restore) continue;
@@ -152,7 +147,7 @@ void Engine::pollRestores() {
 }
 
 // the tier's background work (TierBridge::tick), then the page pool's quarantine and the deferred spills
-bool Engine::tierTick() {
+bool TierGlue::tierTick() {
     if (!tb_.tier()) return false;
     bool busy = tb_.tick();
     if (!pool_.quarantineEmpty()) {
@@ -173,7 +168,7 @@ bool Engine::tierTick() {
 }
 
 // Shutdown (stop()): the bounded tier flush (TierBridge::flushOnStop), then the tier line
-void Engine::flushTierOnStop() {
+void TierGlue::flushTierOnStop() {
     tb_.flushOnStop([this] { return tierTick(); });
     tb_.logStats(pool_.stats().cow_pages, pool_.stats().q_waits);
 }

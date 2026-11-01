@@ -10,6 +10,10 @@ catch it) and cut-pin mutants (P1-P3, review3 C2).
   python -I tools/gates/engine_split_selftest.py [--work W] [--base R ...] [--jobs N] [--only ID,ID,...]
   --base: source trees with src/ (and include/); default = this repo. Mutants run on the FIRST base; every base
   runs as a baseline (B0, B1, ...). X13 (the leg-1 tree) runs on the second base when one is given.
+  arch025-e2e3 (DESIGN v3 10.5, review arch025-engreview A2): a case whose 8th element is "nofix" runs on the first
+  base WITHOUT the FIXTURE (the real tree: X12a-X12d, LE1, LE2 test the --core / leg_end rules, not fixture artefacts);
+  baseline B0c = the first base, no FIXTURE, in the exit mode `--writers leg_end --core` (must pass).
+  arch025-regb1 (review arch025-e2e3r C1): EW1-EW5 (nofix) test the cut's element_write_why (DESIGN v3 10.4 class E).
 Exit 0 = "engine split selftest: N/N as expected".
 """
 import hashlib, json, os, re, shutil, subprocess, sys
@@ -77,6 +81,8 @@ ENG = "server.engine"
 # is gone fails the whole selftest with one line naming the role, not ~100 ANCHOR FAIL lines). A later step that moves a
 # role function changes the one ROLES row (and checks the role's rule below still holds), not the cases.
 #   role: (class, function, module the cut must give it, kind, why this function)
+#   arch025-engclose: since S10b / S11-S15b the @LOW / @WR functions are the FIXTURE's inline Engine bodies (below), kind
+#   "body" (a non-const in-class body in a header); check_roles reads them in the fixture tree (WORK/F0).
 #   @LOW  rule "a low module's body reaching up" (viol(LM, ..)): a non-const Engine member of the lowest module that still
 #         has Engine members (job_queue, layer 1; every target module of these cases is higher). abortQueued has no Slot
 #         parameter: the edits start with PRE_SL (a local Slot& sl, no member use; control LOWc shows it is neutral).
@@ -89,13 +95,76 @@ ENG = "server.engine"
 #         server.engine; S16 keeps it as the forwarder). Was ctxForNew until S8 moved it into GovernorGlue. The written
 #         members are job_queue's (rp_ / rh_ / vp_ / queue_), so the writer must not be job_queue. M1 (an inline body
 #         reading a HIGHER module's data) needs a low module and declares its own inline method (m1Peek, job_queue).
-ROLES = {"@LOW": ("Engine", "abortQueued", JQ, "def"), "@WR": ("Engine", "finishJob", SE, "def"),
+ROLES = {"@LOW": ("Engine", "abortQueued", JQ, "body"), "@WR": ("Engine", "finishJob", SE, "body"),
          "@SPD": ("SlotPages", "dropCache", SC, "def"), "@KC": ("Engine", "ctxPublished", ENG, "inline")}
 LOW, WRR, SPD, KC = "@LOW", "@WR", "@SPD", "@KC"
 A = "@A@"   # in an edit's new text: the role's anchor (its definition head line / the inline head up to '{ ')
 LF, WF, KF = ROLES[LOW][1], ROLES[WRR][1], ROLES[KC][1]
 LM = ROLES[LOW][2]
 PRE_SL = "    Slot* sel = nullptr; Slot& sl = *sel; (void)sl;\n"
+
+
+# arch025-engclose FIXTURE (see the header of scratch/a25_engclose/st_fixture.py and the HANDOFF): the pre-S10 shapes for
+# the mutant trees of the first base. Inline Engine bodies named like the moved entries (assigned by name: abortQueued ->
+# job_queue, finishJob -> slot_end, runLoop -> scheduler) and shadow members with job_queue's names. B0f proves it neutral.
+FIX_PRIV = "private:\n    ServerModel& m_;\n"
+FIX_BODIES = ("private:\n"
+              "    // engine_split_selftest FIXTURE (never in the product tree)\n"
+              "    void abortQueued(whirl::UniqueLock& lk) {\n        (void)lk;\n    }\n"
+              "    void finishJob(Slot& sl) {\n        (void)sl;\n    }\n"
+              "    whirl::Mutex q_mutex_;\n    std::deque<Job*> queue_;\n    std::uint32_t n_active_ = 0;\n    bool stop_ = false;\n"
+              "    ServerModel& m_;\n")
+FIX_RUNL_OLD = "    void runLoop() { sch_.runLoop(); }\n"
+RUNL_H = "    void runLoop() {\n"
+# the body sits at the class end (in-class bodies are parsed in order; see pass 2 in the HANDOFF), the declaration stays
+FIX_RUNL_DECL = "    // FIXTURE: runLoop is the last member function of the class (parsed after the cases' accessors)\n"
+FIX_CLASS_END = "                   cyc_, ss_, tg_};\n};\n"
+FIX_END_MARK = "        sch_.runLoop();\n    }\n};\n"
+FIX_CLASS_END_NEW = "                   cyc_, ss_, tg_};\n\npublic:\n" + RUNL_H + FIX_END_MARK
+FIX_STOP = "    bool stop_ = false;\n"
+FIX_INC = '#include "engine_api.h"\n'
+FIX_PIN_QM = {"runLoop:q_mutex_": {"clang_why": ["write: CXXConstructExpr `lk(q_mutex_)`"], "class": "d lock guard",
+                                   "reason": "FIXTURE: the pre-S10 cut pin of runLoop's lock guard (the real one is runLoop#:q_mutex_)"}}
+CLASS_ENGINE = "class Engine final : public EngineApi {\n"
+DTOR = "Engine::~Engine() {\n"
+
+
+def apply_fixture(srcdir):
+    p = os.path.join(srcdir, "server", "engine.h")
+    t = open(p, encoding="utf-8").read()
+    if t.count(FIX_PRIV) != 1 or t.count(FIX_RUNL_OLD) != 1 or t.count(FIX_CLASS_END) != 1:
+        raise SystemExit("engine split selftest: FIXTURE anchors missing in " + p + " (re-anchor FIX_PRIV / FIX_RUNL_OLD / FIX_CLASS_END)")
+    t = t.replace(FIX_PRIV, FIX_BODIES).replace(FIX_RUNL_OLD, FIX_RUNL_DECL).replace(FIX_CLASS_END, FIX_CLASS_END_NEW)
+    open(p, "w", encoding="utf-8").write(t)
+
+
+def map_fixture_edits(edits):
+    """the pre-S10 anchors -> the FIXTURE: (engine.cpp, runLoop) -> the fixture's runLoop body (engine.h, class end),
+    (engine.cpp, startJob) -> SlotStart::startJob; text before an anchor -> namespace scope after class Engine; a role
+    edit on an #include -> engine.h's includes; a role body that calls startJob -> its Engine declaration.
+    Returns (edits, extra cut pins)."""
+    out, pins = [], {}
+    for rel, old, new in edits:
+        if rel == EC and old == RUNL:
+            pre, post = new.split(RUNL, 1) if RUNL in new else ("", new)
+            if "#define" in pre:   # N6: the macro must stay in engine.cpp (its finding names that file)
+                out.append((EC, DTOR, pre + DTOR + post)); continue
+            out.append((EH, RUNL_H, RUNL_H + post))
+            if pre: out.append((EH, CLASS_ENGINE, pre + CLASS_ENGINE))   # a declaration the body uses: before the class
+            if "MutexLock lk(q_mutex_)" in post: pins.update(FIX_PIN_QM)
+        elif rel == EC and old == STARTJ:
+            out.append((STARTJ_NOW[0], STARTJ_NOW[1], STARTJ_NOW[1] + new[len(STARTJ):]))
+        elif rel in (LOW, WRR) and old is not None and old.startswith("#include"):
+            out.append((EH, FIX_INC, FIX_INC + new[len(old):]))
+        elif rel in (LOW, WRR) and old is None and A in new and not new.startswith(A):
+            pre, post = new.split(A, 1)
+            out.append((rel, None, A + post))
+            out.append((EH, FIX_END_MARK, FIX_END_MARK + pre))
+        else:
+            out.append((rel, old, new))
+        if rel in (LOW, WRR) and "startJob(" in (new or ""):
+            out.append((EH, FIX_STOP, FIX_STOP + "    bool startJob(Slot& sl, Job& job);  // FIXTURE: SlotStart's since S14\n"))
+    return out, pins
 
 
 def find_role(srcdir, role):
@@ -105,6 +174,9 @@ def find_role(srcdir, role):
     if kind == "def":
         rx = re.compile(r"^[^\n;{}]*\b" + re.escape(cls) + "::" + re.escape(fn) + r"\([^\n;]*\)[^\n;]*\{\n", re.M)
         exts = (".cpp",)
+    elif kind == "body":   # arch025-engclose: a non-const in-class body `    void f(...) {` (the FIXTURE's)
+        rx = re.compile(r"^[ \t]+[\w:<>,&* ]+[ \t&*]" + re.escape(fn) + r"\([^\n;]*\)[ \t]*\{\n", re.M)
+        exts = (".h",)
     else:
         # S8 (S7st review consider-1): only inside the body of `class <cls>` / `struct <cls>`; `&` return types, `override`
         rx = re.compile(r"^[ \t]+[\w:<>,& ]+[ \t&]" + re.escape(fn) + r"\(\)[ \t]*const[ \t]*(?:override[ \t]*)?\{ ", re.M)
@@ -225,6 +297,8 @@ CLANG_ERR_OK = {
     "X9": "GovState's gov_hold_ is private (S8; before: GovState undeclared) in a new file (tests the engine-header user finding)",
     "X9b": "GovState's gov_hold_ is private (S8; before: undeclared) in a new file (tests unassigned)",
     "X9c": "GovState's gov_hold_ is private (S8; before: undeclared) in a new file (tests data use by name, text census)",
+    "X12b": "arch025-e2e3: SlotPagesCounters' stat_spe_new_ is private (S7; the compiler blocks the read): tests the --core data rule "
+            "of a second holder (cnt_) through the census's text fallback (the review prototype m4)",
 }
 
 
@@ -246,6 +320,14 @@ def fnd(t):
 # must still see the edge from emit through eng->. The `this` receiver shapes these cases had in Engine::emit before S5
 # keep a twin on dropCache (ids *t: a slot_cache member function still has `this`). s7st: S7 made dropCache a SlotPages
 # member; the twins are on the @LOW role (abortQueued, job_queue: an Engine member, so `this` is Engine).
+# arch025-e2e3: anchors in the real Scheduler (engine_sched.{h,cpp}) for the nofix cases that write queue_ outside the
+# class-E entries (Y12 / Y14 / N15 / LE2): idleWait's loop head, its definition line, an inline forwarder of Scheduler
+IW_LOOP = "    bool logged = false;\n    while (queue_.empty()) {\n"
+IW_DEF = "bool Scheduler::idleWait(whirl::UniqueLock& lk, bool& was_busy) {\n"
+SCH_ACC = "    void flushTierOnStop() { tg_.flushTierOnStop(); }\n"
+# arch025-regb1: the two class-E entries (DESIGN v3 10.4): runLoop with jq_.q_mutex_ held, admitQueued's admission step
+SCH_ADMIT = "        std::vector<Job*> admit = admitQueued(n_busy);\n"
+SCH_JQADMIT = "        jq_.jqAdmit(qi, admit);\n"
 EMIT_E = "bool emit(const chat::ChatTokens& ct_, Slot& sl, std::uint32_t t, Engine* eng) {\n"
 _EO_INC = '#include "server/engine_output.h"\n'
 
@@ -265,6 +347,8 @@ def _E(code, pre=""):
 # closed) an 'AST / emut write outside every census entry' finding, which would hide H1 / H7
 ED = "server/engine_drafter.h"
 STARTJ = "bool Engine::startJob(Slot& sl, Job& job) {\n"
+# arch025-engclose: startJob is SlotStart's (S14, engine_start.cpp; it holds dc_): the STARTJ edits map there
+STARTJ_NOW = (os.path.join("server", "engine_start.cpp").replace(os.sep, "/"), "bool SlotStart::startJob(Slot& sl, Job& job) {\n")
 _DCA = "    const EngineOptions& opt_;\n"
 _DCX = ("    int gap_ = 0;\n    void dflTouch(int n) { gap_ += n; }\n    void dflClear() { DrafterCtx c{*this}; c.gap_ = 0; *this = c; }\n"
         "    int dflGap() const { return gap_; }\n    DrafterCtx& operator=(const DrafterCtx& o) { (void)o; return *this; }\n")
@@ -342,8 +426,57 @@ MUT = [
      ["--no-pin"], viol(SO, GV, "data", "flushOutFree:gov_hold_")),
     ("X10", "emit reads vis_ (not in slot_output's refs) through eng", _E("if (eng && eng->vis_.encoded() == 7u) t = 0;"), None, [], r"^== reference lists \(R4\): uses outside the list: .*server\.slot_output uses vis_"),
     ("X11", "cut puts stats in two core categories", [], lambda c: c["core_categories"]["accessor"].append("stats"), ["--no-pin"], r"^== core categories overlap \(R6\): stats in "),
-    ("X12", "--core on today's tree (core still schedules) must fail", [], None, ["--core"], r"^== --core \(leg-end shape of server\.engine, R5 / R6\): [1-9]\d* problems"),
-    ("X13", "leg-1 tree (second base): emit -> finishJob", [(EC, EMIT_OLD, EMIT_OLD + "    if (t == 0xffffffffu) finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob"), 1),
+    # arch025-e2e3 (DESIGN v3 10.5, review arch025-engreview A2): X12 ("--core on today's tree must fail", any problem
+    # count) was caught only by FIXTURE artefacts once E3 was open; X12a-X12d name the --core rule on the real tree
+    # (nofix): the holder rule must not swallow a holder's member read (a, b), the special cap counts the definition
+    # lines (c), an in-class initializer is a member-name brace list or a literal (d)
+    ("X12a", "--core: health reads jq_.n_active_ through the holder jq_ (core uses job_queue data)",
+     [(EC, "    jq_.jqHealth(h);\n", "    jq_.jqHealth(h);\n    h.queued = jq_.n_active_;\n")], None, ["--core", "--writers", "leg_end"],
+     r"^   core uses server\.job_queue data: health:n_active_", 0, "nofix"),
+    ("X12b", "--core: health reads cnt_.stat_spe_new_ through the holder cnt_ (core uses slot_cache data)",
+     [(EC, "    jq_.jqHealth(h);\n", "    jq_.jqHealth(h);\n    h.queued = cnt_.stat_spe_new_;\n")], None, ["--core", "--writers", "leg_end"],
+     r"^   core uses server\.slot_cache data: health:stat_spe_new_", 0, "nofix"),
+    ("X12c", "--core: the constructor definition grows to 46 lines (special max_lines 45 counts definitions only)",
+     [(EC, "    tb_.setOwner(&owner_);\n}\n", "    tb_.setOwner(&owner_);\n" + "    (void)0;\n" * 5 + "}\n")], None, ["--core", "--writers", "leg_end"],
+     r"^   Engine \(special\): 46 lines > 45", 0, "nofix"),
+    ("X12d", "--core: a call in an in-class initializer (jq_{std::ref(slots_).get()})",
+     [(EH, "    JobQueue jq_{slots_};\n", "    JobQueue jq_{std::ref(slots_).get()};\n")], None, ["--core", "--writers", "leg_end"],
+     r"^   Engine \(in-class initializers\): `\{std::ref\(slots_\)\.get\(\)\}` is not a brace list", 0, "nofix"),
+    # leg_end exit mode on the real tree (DESIGN v3 10.5 L1 / L2; ids LE1 / LE2 because L1 / L2 are the S0f cases below):
+    # the tier wake lambda notifies the queue condition itself (LE1); the review's measured fault, idleWait marks the
+    # queued requests done through queue_'s elements (LE2: the census read it on the engclose tree, a7f1b1f)
+    ("LE1", "leg_end: TierGlue's wake lambda calls jq_.q_cond_.notify_all() (a wake outside JobQueue)",
+     [("server/engine_tier.cpp", "t->setWake([this] { jq_.jqTierWake(); });", "t->setWake([this] { jq_.jqTierWake(); jq_.q_cond_.notify_all(); });")],
+     None, ["--writers", "leg_end"], r"^   not in the expected list 'leg_end': .*\battachTier:q_cond_\b", 0, "nofix"),
+    ("LE2", "leg_end: idleWait writes the queued Jobs through queue_ (for (Job* j : queue_) j->done = true;)",
+     [("server/engine_sched.cpp", "    bool logged = false;\n    while (queue_.empty()) {\n",
+       "    bool logged = false;\n    for (Job* j : queue_) j->done = true;\n    while (queue_.empty()) {\n")],
+     None, ["--writers", "leg_end"], r"^   not in the expected list 'leg_end': .*\bidleWait:queue_\b", 0, "nofix"),
+    # arch025-regb1 (review arch025-e2e3r C1, DESIGN v3 10.4 class E): runLoop:queue_ / admitQueued:queue_ are allowed
+    # outside writers ((entry, member) grained), so a NEW write through queue_'s elements in those two entries passed
+    # (the reviewer's R1 / R2 / A2, measured NOT CAUGHT on 91073ce). The cut's element_write_why pins the census's list
+    # of write reasons of each class-E row (one per write position, positions dropped; Python and clang): a new write
+    # position changes the list (EW1-EW3, real tree); the pin's own rules: a stale entry (EW4), a list that no longer
+    # matches today's (EW5)
+    ("EW1", "class E: runLoop writes a Job field through the const alias, queue_.front()->id = 0 (e2e3r R1, the old Y12 shape)",
+     [("server/engine_sched.cpp", SCH_ADMIT, SCH_ADMIT + "        if (!queue_.empty()) queue_.front()->id = 0;\n")],
+     None, ["--writers", "leg_end"], r"^   cut element_write_why: runLoop#:queue_ write reasons changed", 0, "nofix"),
+    ("EW2", "class E: runLoop marks the queued Jobs done, for (Job* j : queue_) j->done = true; (engreview A1 fault, e2e3r R2)",
+     [("server/engine_sched.cpp", SCH_ADMIT, SCH_ADMIT + "        for (Job* j : queue_) j->done = true;\n")],
+     None, ["--writers", "leg_end"], r"^   cut element_write_why: runLoop#:queue_ write reasons changed", 0, "nofix"),
+    ("EW3", "class E: admitQueued writes another Job field, queue_[qi]->done = true (e2e3r A2)",
+     [("server/engine_sched.cpp", SCH_JQADMIT, "        queue_[qi]->done = true;\n" + SCH_JQADMIT)],
+     None, ["--writers", "leg_end"], r"^   cut element_write_why: admitQueued:queue_ write reasons changed", 0, "nofix"),
+    ("EW4", "element_write_why: an entry that no longer occurs is a finding (the list stays exact)", [],
+     lambda c: c.setdefault("element_write_why", {}).update(
+         {"runLoop#:stop_": {"python_why": ["assignment"], "clang_why": [], "class": "selftest", "reason": "selftest"}}),
+     ["--no-pin", "--writers", "leg_end"], fnd("cut element_write_why entry no longer occurs (remove it): runLoop#:stop_"), 0, "nofix"),
+    ("EW5", "element_write_why: a pinned list without one of today's reasons does not cover the row", [],
+     lambda c: c.setdefault("element_write_why", {}).update(
+         {"admitQueued:queue_": {"python_why": ["argument of waitsForSys() bound to a non-const reference"], "clang_why": [],
+                                 "class": "selftest", "reason": "selftest"}}),
+     ["--no-pin", "--writers", "leg_end"], r"^   cut element_write_why: admitQueued:queue_ write reasons changed", 0, "nofix"),
+    ("X13","leg-1 tree (second base): emit -> finishJob", [(EC, EMIT_OLD, EMIT_OLD + "    if (t == 0xffffffffu) finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob"), 1),
     ("X14", "friend in class Engine", [(EH, "    ServerModel& m_;\n", "    friend struct Peek;\n    ServerModel& m_;\n")], None, [], fnd("friend in tracked class Engine")),
     # --- review3 (Y1-Y14) ---
     ("Y1", "runLoop gov_json_.append (mutator method on governor data)", [(EC, RUNL, RUNL + '    gov_json_.append("x");\n')], None, [], ow("runLoop:gov_json_")),
@@ -372,11 +505,21 @@ MUT = [
      lambda c: (c["modules"][SC]["data"].append("up_"), c["holders"].update({"up_": "Engine"})), ["--no-pin"], fnd("cut holder of Engine: up_")),
     ("Y10", "runLoop std::swap(gov_warn_, gov_last_)", [(EC, RUNL, RUNL + "    std::swap(gov_warn_, gov_last_);\n")], None, [], ow("runLoop:gov_warn_")),
     ("Y11", "runLoop std::fill(gov_json_.begin(), ...)", [(EC, RUNL, RUNL + "    std::fill(gov_json_.begin(), gov_json_.end(), ' ');\n")], None, [], ow("runLoop:gov_json_")),
-    ("Y12", "runLoop queue_.front()->id = 0", [(EC, RUNL, RUNL + "    if (!queue_.empty()) queue_.front()->id = 0;\n")], None, [], ow("runLoop:queue_")),
+    # arch025-e2e3: Y12 / Y14 / N15 wrote queue_ in runLoop; DESIGN v3 10.4 class E allows runLoop:queue_ (the real
+    # Scheduler::runLoop writes pf_checked through queue_'s elements; outside_writers is (entry, member) grained), so in
+    # runLoop they were no longer caught (st1: NOT CAUGHT / CAUGHT BY ANOTHER RULE). They test the same rules in
+    # Scheduler::idleWait on the real tree (nofix), where no queue_ write is allowed; Scheduler's queue_ is const there,
+    # so the container writes (Y14, N15) go through the holder jq_ (a write through the const reference does not compile)
+    ("Y12", "idleWait queue_.front()->id = 0 (was runLoop: class E)",
+     [("server/engine_sched.cpp", IW_LOOP, "    bool logged = false;\n    if (!queue_.empty()) queue_.front()->id = 0;\n    while (queue_.empty()) {\n")],
+     None, [], ow("idleWait:queue_"), 0, "nofix"),
     ("Y13", "finishJob poke(gov_pending_) through a new header's bool& parameter",
      [("server/slot_util.h", None, "#pragma once\nnamespace whirl::server {\ninline void poke(bool& b) { b = true; }\n}\n"), (WRR, '#include "engine_internal.h"\n', '#include "engine_internal.h"\n#include "slot_util.h"\n'), (WRR, None, A + "    poke(gov_pending_);\n")], None, [], ow(WF + ":gov_pending_")),
-    ("Y14", "runLoop dropAll(queue_) defined in a new .cpp", [("server/sched_util.cpp", None, "#include <deque>\nnamespace whirl::server {\nstruct Job;\nvoid dropAll(std::deque<Job*>& q) { q.clear(); }\n}\n"), (EC, RUNL, "void dropAll(std::deque<Job*>& q);\n" + RUNL + "    dropAll(queue_);\n")],
-     None, [], ow("runLoop:queue_")),
+    ("Y14", "idleWait dropAll(jq_.queue_) defined in a new .cpp (was runLoop dropAll(queue_): class E)",
+     [("server/sched_util.cpp", None, "#include <deque>\nnamespace whirl::server {\nstruct Job;\nvoid dropAll(std::deque<Job*>& q) { q.clear(); }\n}\n"),
+      ("server/engine_sched.cpp", IW_DEF, "void dropAll(std::deque<Job*>& q);\n" + IW_DEF),
+      ("server/engine_sched.cpp", IW_LOOP, "    bool logged = false;\n    dropAll(jq_.queue_);\n    while (queue_.empty()) {\n")],
+     None, [], ow("idleWait:queue_"), 0, "nofix"),
     # --- DESIGN 1.5 alias write ---
     ("AW1", "alias write (DESIGN 1.5): finishJob auto& q = queue_; q.push_back(nullptr)", [(WRR, None, A + "    { auto& q = queue_; q.push_back(nullptr); }\n")], None, [], ow(WF + ":queue_")),
     ("AW2", "alias pointer write: finishJob auto* p = &n_active_; *p = 0", [(WRR, None, A + "    { auto* p = &n_active_; *p = 0; }\n")], None, [], ow(WF + ":n_active_")),
@@ -453,8 +596,10 @@ MUT = [
      [(EH, HOLD, HOLD + "\n    std::span<char> jsonView() { return gov_json_; }"), (EC, RUNL, RUNL + "    if (!jsonView().empty()) jsonView()[0] = 'x';\n")], lambda c: c["new_funcs"].update({"jsonView": GV}), ["--no-pin"], ow("runLoop:gov_json_")),
     ("N14", "control: accessor whose return type has parentheses: std::function<wddmwatch::Sample()>& probeRef(); runLoop probeRef() = nullptr (vram_probe_ is core.shared)",
      [(EH, HOLD, HOLD + "\n    std::function<wddmwatch::Sample()>& probeRef() { return vram_probe_; }"), (EC, RUNL, RUNL + "    probeRef() = nullptr;\n")], lambda c: c["new_funcs"].update({"probeRef": "server.vram_watch"}), ["--no-pin"], sw("runLoop:vram_probe_")),
-    ("N15", "accessor returning an iterator: auto qBegin() { return queue_.begin(); }; runLoop *qBegin() = nullptr",
-     [(EH, HOLD, HOLD + "\n    auto qBegin() { return queue_.begin(); }"), (EC, RUNL, RUNL + "    if (!queue_.empty()) *qBegin() = nullptr;\n")], lambda c: c["new_funcs"].update({"qBegin": GV}), ["--no-pin"], ow("runLoop:queue_")),
+    ("N15", "accessor returning an iterator: auto qBegin() { return jq_.queue_.begin(); } (Scheduler); idleWait *qBegin() = nullptr (was runLoop: class E)",
+     [("server/engine_sched.h", SCH_ACC, SCH_ACC + "    auto qBegin() { return jq_.queue_.begin(); }\n"),
+      ("server/engine_sched.cpp", IW_LOOP, "    bool logged = false;\n    if (!queue_.empty()) *qBegin() = nullptr;\n    while (queue_.empty()) {\n")],
+     lambda c: c["new_funcs"].update({"qBegin": "server.scheduler"}), ["--no-pin"], ow("idleWait:queue_"), 0, "nofix"),
     ("C1", "control: init capture by reference [&q = stop_]{ q = true; }() (finishJob)", [(WRR, None, A + "    [&q = stop_] { q = true; }();\n")], None, [], ow(WF + ":stop_")),
     ("C2", "control: std::exchange(stop_, true) (finishJob)", [(WRR, None, A + "    (void)std::exchange(stop_, true);\n")], None, [], ow(WF + ":stop_")),
     ("C3", "control: *queue_.begin() = nullptr (finishJob)", [(WRR, None, A + "    if (!queue_.empty()) *queue_.begin() = nullptr;\n")], None, [], ow(WF + ":queue_")),
@@ -519,6 +664,15 @@ MUT = [
     ("F1", "read: std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end() (the review's F1 with whirl::MutexLock; as written it does not compile, F1x)",
      *_okc("{ whirl::MutexLock lk(q_mutex_); (void)(std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end()); }")[:1],
      _epin({"runLoop:queue_": _E_BE("queue_")}), ["--no-pin"], r"(?#OK)^engine split check: ok"),
+    # arch025-e2e3: F1 / Z6 read queue_ in runLoop, where class E (DESIGN v3 10.4) now allows runLoop:queue_ - a read the
+    # census misread as a write would pass there unseen; the same reads in Scheduler::idleWait (real tree, no queue_
+    # allowance; queue_ is Scheduler's const reference) keep the read controls for queue_ meaningful
+    ("F1i", "read: std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end() in idleWait (F1 outside class E; const reference)",
+     [("server/engine_sched.cpp", IW_LOOP, "    bool logged = false;\n    (void)(std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end());\n    while (queue_.empty()) {\n")],
+     None, ["--no-pin"], r"(?#OK)^engine split check: ok", 0, "nofix"),
+    ("Z6i", "control: reads in idleWait (Z6's queue_ / stop_ part outside class E: compare a handle, !, front()) stay reads",
+     [("server/engine_sched.cpp", IW_LOOP, "    bool logged = false;\n    if (!queue_.empty() && queue_.front() != nullptr && !stop_) {}\n    while (queue_.empty()) {\n")],
+     None, ["--no-pin"], r"(?#OK)^engine split check: ok", 0, "nofix"),
     ("F1x", "the review's F1 as written (std::lock_guard<std::mutex> on a whirl::Mutex) does not compile: the AST census fails closed",
      [(EC, RUNL, RUNL + "    { std::lock_guard<std::mutex> lk(q_mutex_); (void)(std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end()); }\n")],
      None, [], fnd("clang errors in src/server/engine.cpp")),
@@ -675,8 +829,15 @@ def one(job):
     if bi >= len(bases):
         return mid, "SKIP", f"{mid} {what}\n   needs --base #{bi + 1} -> SKIPPED (not counted)"
     base = bases[bi]
+    # arch025-e2e3 (DESIGN v3 10.5): "nofix" = the real first base, no FIXTURE (its anchors and edits stay as written)
+    fx = bi == 0 and not (len(item) > 7 and item[7] == "nofix")
     if any(rel == EH and old == HOLD for rel, old, _ in edits) or any(SHADOW_RX.search(new or "") for _, _, new in edits):
         edits = [(EH, GST, SHADOW)] + list(edits)   # S8: the pre-S8 Engine governor members (SHADOW above)
+    fix_pins = {}
+    if fx: edits, fix_pins = map_fixture_edits(edits)   # arch025-engclose: the FIXTURE's anchors
+    if fix_pins:
+        _ce = cut_edit
+        cut_edit = lambda c, _ce=_ce: (c.setdefault("emut_read_ok", {}).update(fix_pins), _ce(c) if _ce else None)
     if wdir != mid: what = f"{what} [work dir {wdir}]"
     d = os.path.join(WORK, wdir)
     if os.path.isdir(d): shutil.rmtree(d)
@@ -684,6 +845,7 @@ def one(job):
     for sub in ("src", "include"):
         if os.path.isdir(os.path.join(base, sub)):
             shutil.copytree(os.path.join(base, sub), os.path.join(d, sub))
+    if fx: apply_fixture(os.path.join(d, "src"))   # arch025-engclose: the pre-S10 shapes (FIXTURE)
     tools = HERE
     if any(rel.startswith("TOOL:") for rel, _, _ in edits):   # S0b: a copy of the checker tools, one of them edited
         tools = os.path.join(d, "tools", "gates")
@@ -860,7 +1022,12 @@ def main():
               f"{', '.join(sorted(known)[:8])} ...): usage error")
         return 2
     # s7st: every anchor role must exist once in the first base and sit in the module its rule needs (one line per role)
-    bad = check_roles(os.path.join(bases[0], "src"), json.load(open(CUT, encoding="utf-8")))
+    f0 = os.path.join(WORK, "F0")   # arch025-engclose: the first base + the FIXTURE (roles live there; B0f below)
+    if os.path.isdir(f0): shutil.rmtree(f0)
+    for sub_ in ("src", "include"):
+        if os.path.isdir(os.path.join(bases[0], sub_)): shutil.copytree(os.path.join(bases[0], sub_), os.path.join(f0, sub_))
+    apply_fixture(os.path.join(f0, "src"))
+    bad = check_roles(os.path.join(f0, "src"), json.load(open(CUT, encoding="utf-8")))
     if bad:
         for b in bad: print(f"anchor role {b}")
         print(f"engine split selftest: {len(bad)} anchor role(s) missing - FAIL (re-anchor the role in ROLES, not the cases)")
@@ -874,11 +1041,19 @@ def main():
         print(out.strip()); print("engine split selftest: CRASH (no emut.exe)"); return 3
     os.environ["WHIRL_EMUT"] = out.strip().splitlines()[-1][len("emut: "):]
     res = []
-    for i, b in enumerate(bases):   # baselines
+    for i, b in enumerate(bases + [f0]):   # baselines (arch025-engclose: the last one is B0f, the FIXTURE tree)
         rc, out = run([PY, "-I", os.path.join(HERE, "engine_split_check.py"), "--root", b, "--work", os.path.join(WORK, f"B{i}"), "--pin", PIN,
                        "--reviews", LEDGER, "--base-dir", BASESNAP])
         ok = rc == 0 and "engine split check: ok" in out
-        res.append((f"B{i}", "PASS" if ok else "FAIL", f"B{i} baseline {b}\n   rc={rc}: {out.strip().splitlines()[-1] if out.strip() else ''} -> {'PASS' if ok else 'FAIL (false positive)'}"))
+        bid = f"B{i}" if i < len(bases) else "B0f"
+        res.append((bid, "PASS" if ok else "FAIL", f"{bid} baseline {b}\n   rc={rc}: {out.strip().splitlines()[-1] if out.strip() else ''} -> {'PASS' if ok else 'FAIL (false positive)'}"))
+    # arch025-e2e3 (DESIGN v3 10.5 B0c, review arch025-engreview A2 / C3): the real first base, no FIXTURE, in the exit
+    # mode of E2 / E3 (--writers leg_end --core) must pass, so the nofix cases above fail for their mutant only
+    rc, out = run([PY, "-I", os.path.join(HERE, "engine_split_check.py"), "--root", bases[0], "--work", os.path.join(WORK, "B0c"), "--pin", PIN,
+                   "--reviews", LEDGER, "--base-dir", BASESNAP, "--writers", "leg_end", "--core"])
+    ok = rc == 0 and "engine split check: ok" in out
+    res.append(("B0c", "PASS" if ok else "FAIL", f"B0c baseline {bases[0]} (no FIXTURE) --writers leg_end --core\n   rc={rc}: "
+                f"{out.strip().splitlines()[-1] if out.strip() else ''} -> {'PASS' if ok else 'FAIL (false positive)'}"))
     with ThreadPoolExecutor(JOBS) as ex:
         res += list(ex.map(one, [(w, m) for w, m in zip(WDIRS, MUT) if not ONLY or m[0] in ONLY]))
     res += [g for g in git_cases(sha) if not ONLY or g[0] in ONLY]

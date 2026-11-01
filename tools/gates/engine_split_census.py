@@ -950,6 +950,14 @@ if not _PX["errfiles"] and not _CX["errfiles"]:   # with clang errors the error 
     findings.extend(ESE.check_positions(_PX, _CX))
 _eok = {k: v for k, v in cut.get("emut_read_ok", {}).items() if not k.startswith("_")}
 _eused = set()
+# arch025-regb1 (review arch025-e2e3r C1, DESIGN v3 10.4 class E): outside_writers is (entry, member) grained, so the
+# class-E rows (runLoop#:queue_, admitQueued:queue_: writes through the queued Jobs that queue_'s elements point to)
+# admitted ANY new write through the elements. The cut's "element_write_why" pins each such row's census write-reason
+# LIST ("entry:member" -> {"python_why": [...], "clang_why": [...], "class", "reason"}: one reason per write position,
+# positions dropped, sorted; the clang side normalised like emut_read_ok): any other list is a finding (a new write
+# position through the elements needs a cut change and its review), a pinned row that no longer occurs is one too.
+_eww = {k: v for k, v in cut.get("element_write_why", {}).items() if not k.startswith("_")}
+_ewseen = set()
 _etext = lambda rel: texts.get(rel, ("", ""))[1]
 _skip = lambda rel, idx, mem: holder_call(_etext(rel), idx, mem)
 _erows = []
@@ -961,6 +969,17 @@ for key in list(rows):
     p_all, rd_of, inb = ESE.body_writes(_PX, rng, _skip)
     c_all, _crd, cinb = ESE.body_writes(_CX, rng, _skip)
     _inbody |= inb | cinb
+    for m in sorted(set(p_all) | set(c_all)):   # arch025-regb1: the class-E write-reason lists (element_write_why above)
+        k2 = f"{key}:{m}"
+        if k2 not in _eww: continue
+        _ewseen.add(k2)
+        pin = _eww[k2] if isinstance(_eww[k2], dict) else {}
+        have = (sorted(w for w, _, _ in p_all.get(m, [])), sorted(ESE.norm_why(w) for w, _, _ in c_all.get(m, [])))
+        want = (sorted(pin.get("python_why") or []), sorted(pin.get("clang_why") or []))
+        if have != want:
+            findings.append(f"cut element_write_why: {k2} write reasons changed (Python {json.dumps(have[0])}, clang "
+                            f"{json.dumps(have[1])}; pinned Python {json.dumps(want[0])}, clang {json.dumps(want[1])}): a write "
+                            f"through the elements the pin does not name - name it in the cut (a cut change, reviewed) or remove it")
     files_k = {r for r, _, _ in rng}
     blind = [r for r in files_k if r in _errfiles or r not in _covered]
     cblind = [r for r in files_k if r in _CX["errfiles"] or r not in _CX["covered"]]
@@ -990,6 +1009,8 @@ for key in list(rows):
     rows[key] = (f, ln, ud, aw, uf, ut)
 for k2 in sorted(set(_eok) - _eused):
     findings.append(f"cut emut_read_ok entry no longer occurs (remove it): {k2}")
+for k2 in sorted(set(_eww) - _ewseen):
+    findings.append(f"cut element_write_why entry no longer occurs (remove it): {k2}")
 open(os.path.join(OUT, "emut_xcheck.tsv"), "w", encoding="utf-8").write(
     "entry\tmember\tpython\tclang\tfinal\tclass\tpython_why\tclang_why\n" + "".join("\t".join(r) + "\n" for r in _erows))
 _ecnt = {}

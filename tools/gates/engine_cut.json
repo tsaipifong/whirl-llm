@@ -33,7 +33,20 @@
     "stop",
     "runOnLoop",
     "runLoopCalls",
-    "abortQueued"
+    "abortQueued",
+    "JobQueue",
+    "jqAdmit",
+    "jqStartAdmitted",
+    "jqRelease",
+    "jqReap",
+    "jqTierWake",
+    "jqTierWakeClear",
+    "jqHealth",
+    "jqWaitBurst",
+    "jqWaitTierBusy",
+    "jqWaitVision",
+    "jqWaitUntil",
+    "jqWaitIdle"
    ],
    "data": [
     "q_mutex_",
@@ -49,7 +62,8 @@
    ],
    "refs": [
     "slots_"
-   ]
+   ],
+   "_doc_s10b": "S10 / S10b / S16 health (arch025-engclose, 2026-11-01): class JobQueue (src/server/engine_queue.{h,cpp}) owns the queue state (the former Engine members q_mutex_ .. wake_seq_) and every write of it: runLoopCalls / abortQueued / jqAdmit / jqTierWakeClear with the caller's lock (WH_REQUIRES(q_mutex_); the scheduler holds it as jq_.q_mutex_), jqStartAdmitted / jqRelease / jqReap / jqTierWake / jqHealth take it themselves; bodies verbatim from admitQueued, startAdmitted, releaseSlot, reapDisconnected, attachTier's wake callback, idleWait's two `tier_wake_ = false;` and Engine::health. jqTierWakeClear is header-inline (the statement was inline in idleWait). The planned rows new_funcs jqAdmit .. jqHealth are deleted: written now, they are in funcs (as S7 did for cacheCounters)."
   },
   "server.slot_output": {
    "layer": 1,
@@ -208,7 +222,11 @@
    "funcs": [
     "setVramProbe",
     "vramNote",
-    "vramIdleTick"
+    "vramIdleTick",
+    "VramState",
+    "VramWatch",
+    "vramSpilling",
+    "vramLastSample"
    ],
    "data": [
     "vram_watch_",
@@ -223,7 +241,8 @@
    "refs": [
     "owner_",
     "vram_probe_"
-   ]
+   ],
+   "_doc_s9": "S9 (arch025-engine-s9, 2026-10-31): class VramState (src/server/engine_vram.h; the former Engine members vram_watch_ .. vram_last_t_ verbatim, in order, without prefill_tok_cum_ / crlf_norm_; private, `friend class VramWatch` = the same module, the S8 census friend rule) and class VramWatch (setVramProbe / vramNote / vramIdleTick, engine_vram.cpp bodies verbatim, F15 order kept in vramNote; vramHealth = engine.cpp health's vram_mu_ lock and five reads, verbatim; the header-inline accessors vramSpilling (engine_decode.cpp's `vram_warn_ && vram_watch_.spilling()`) and vramLastSample (idleWait's vram_last_t_)). VramWatch holds references only, private, under the members' names: refs owner_ / vram_probe_ (core.shared; vram_probe_ non-const: setVramProbe installs it), vram_others_ (governor's placed state, written only by setVramProbe, DESIGN v3 2.6), gv_ (server.governor, a lower module: govTick / govActive / govSetWarn / govReduced) and vst_'s members, bound in its constructor (entry VramWatch; VramState's entry = its in-class initializers). vramSpilling / vramLastSample are new here (no planned row named them); the planned vramHealth stays in new_funcs (realized, as govActive after S8). Engine keeps the public setVramProbe (forwarder, Engine.setVramProbe); VramWatch's body is the census entry setVramProbe#."
   },
   "server.slot_end": {
    "layer": 5,
@@ -231,7 +250,8 @@
     "releaseSlot",
     "failSlot",
     "finishJob",
-    "reapDisconnected"
+    "reapDisconnected",
+    "SlotEnd"
    ],
    "data": [
     "last_reap_"
@@ -256,7 +276,8 @@
     "prefillGroup",
     "finishPrefill",
     "runPrefill",
-    "noteFloor"
+    "noteFloor",
+    "PrefillPhase"
    ],
    "data": [
     "rcx_",
@@ -299,7 +320,8 @@
     "pickDrafts",
     "relaxRepeats",
     "splitDrafts",
-    "draftCap"
+    "draftCap",
+    "SpecCycle"
    ],
    "data": [
     "spec_on_"
@@ -319,7 +341,8 @@
   "server.slot_start": {
    "layer": 7,
    "funcs": [
-    "startJob"
+    "startJob",
+    "SlotStart"
    ],
    "data": [
     "ids_",
@@ -351,7 +374,8 @@
     "pollRestores",
     "restoreSteps",
     "tierTick",
-    "flushTierOnStop"
+    "flushTierOnStop",
+    "TierGlue"
    ],
    "data": [],
    "refs": [
@@ -405,7 +429,8 @@
     "idleWait",
     "admitQueued",
     "startAdmitted",
-    "logBatchStats"
+    "logBatchStats",
+    "Scheduler"
    ],
    "data": [
     "last_tick_"
@@ -450,7 +475,8 @@
    "setCtx",
    "setNumerics",
    "setStartup",
-   "setKvSsdMode"
+   "setKvSsdMode",
+   "type:StateMem"
   ],
   "accessor": [
    "visionConfig",
@@ -543,7 +569,10 @@
   "govHolding",
   "govSetWarn",
   "govCtxPublished",
-  "govPublishCtx"
+  "govPublishCtx",
+  "vramSpilling",
+  "vramLastSample",
+  "jqTierWakeClear"
  ],
  "_doc_header_inline": "functions that stay inline in their module's header (they are inline today: engine.h, or inlined in their callers' TU in the c1ca7ce objects, inline_check.py)",
  "rewrites": {
@@ -580,35 +609,35 @@
    "Engine:conv_bytes_",
    "Engine:crlf_norm_",
    "Engine:ctx_pub_",
+   "Engine:cyc_",
    "Engine:dc_",
    "Engine:fl_",
    "Engine:gst_",
+   "Engine:gv_",
    "Engine:ids_",
+   "Engine:jq_",
    "Engine:kv_arrays_",
+   "Engine:last_reap_",
+   "Engine:last_tick_",
+   "Engine:pf_",
+   "Engine:prefill_tok_cum_",
    "Engine:sc_",
+   "Engine:se_",
+   "Engine:spec_on_",
+   "Engine:ss_",
    "Engine:ssm_bytes_",
-   "admitQueued:n_active_",
+   "Engine:tg_",
+   "Engine:vram_others_",
+   "Engine:vst_",
+   "Engine:vw_",
    "admitQueued:queue_",
    "allocState:spec_on_",
-   "attachTier:q_cond_",
-   "attachTier:tier_wake_",
-   "attachTier:wake_seq_",
    "dropOutOfRoom:sc_",
    "finishPrefill:sc_",
-   "idleWait:q_cond_",
-   "idleWait:q_mutex_",
-   "idleWait:tier_wake_",
-   "logBatchStats:fl_",
    "prefillGroup:sc_",
    "prefillStep:sc_",
-   "reapDisconnected:q_cond_",
-   "reapDisconnected:queue_",
-   "releaseSlot:n_active_",
-   "releaseSlot:q_cond_",
-   "runLoop:q_cond_",
+   "runLoop:queue_",
    "setVramProbe:vram_others_",
-   "startAdmitted:n_active_",
-   "startAdmitted:queue_",
    "startJob:sc_",
    "tryRestore:sc_"
   ],
@@ -617,18 +646,34 @@
    "Engine:conv_bytes_",
    "Engine:crlf_norm_",
    "Engine:ctx_pub_",
+   "Engine:cyc_",
    "Engine:dc_",
    "Engine:fl_",
    "Engine:gst_",
+   "Engine:gv_",
    "Engine:ids_",
+   "Engine:jq_",
    "Engine:kv_arrays_",
+   "Engine:last_reap_",
+   "Engine:last_tick_",
+   "Engine:pf_",
+   "Engine:prefill_tok_cum_",
    "Engine:sc_",
+   "Engine:se_",
+   "Engine:spec_on_",
+   "Engine:ss_",
    "Engine:ssm_bytes_",
+   "Engine:tg_",
+   "Engine:vram_others_",
+   "Engine:vst_",
+   "Engine:vw_",
+   "admitQueued:queue_",
    "allocState:spec_on_",
    "dropOutOfRoom:sc_",
    "finishPrefill:sc_",
    "prefillGroup:sc_",
    "prefillStep:sc_",
+   "runLoop:queue_",
    "setVramProbe:vram_others_",
    "startJob:sc_",
    "tryRestore:sc_"
@@ -637,7 +682,31 @@
   "_doc_s0d": "S0d (AST census): Engine:ids_ - the constructor's rcx_{opt_.model_name, tok_, ids_} binds ResponseCtx's IdGen& (an aggregate reference member, S0c review R10 shape); present at c1ca7ce too",
   "_doc_s4": "S4 (arch025-engine-s4, 2026-10-30) listed 7 `<entry>:dc_` rows here (calls of DrafterCtx's non-const methods dflReset / dflIngest on the holder dc_). The s0b merge (main session, 2026-10-31) removed them: the N4-emut2 census counts a non-const call h.f( on a cut holder whose methods use only their own members through this-> as a call edge (census holder_call), not a write of the holder; what the methods write (m_, bst_) stays under shared_writers. engine.h `DrafterCtx dc_{bst_, m_, opt_}` binds bst_ to a BatchStats& member, so Engine is a writer of bst_ (shared_writers now / leg_end; both analyzers, progress/arch025-engine.emut2.REVIEW.md:14)",
   "_doc_s7": "S7 (arch025-engine-s7, 2026-10-31): (a) Engine:cnt_ / Engine:dc_ / Engine:kv_arrays_ - engine.h `SlotPages sc_{ck_, m_, ops_, opt_, pool_, ps_, slots_, tb_, kv_arrays_, conv_bytes_, ssm_bytes_, cnt_, dc_}` binds SlotPages's non-const reference members to slot_cache's placed state and to the drafter context (the constructor is the assembly point, DESIGN v3 2.6 rule A; the Engine:ids_ shape of rcx_). (b) <entry>:sc_ - the calls sc_.ensurePages (dropOutOfRoom engine_decode.cpp:135, prefillStep engine_prefill.cpp:68, prefillGroup :132, finishPrefill :218, tryRestore engine_tier.cpp:95) and sc_.cowPages (startJob engine.cpp:296, finishPrefill engine_prefill.cpp:217): their bodies build `SlotEvictor ev(*this, ...)` (PagePool's evictor calls back evictFor during the call), so the census holder_call rule (3) keeps the call a write of the holder; SlotPages owns no data (references only), what it writes through them is under shared_writers / its own data. They stay at leg end (the callers are those components' entries).",
-  "_doc_s8": "S8 (arch025-engine-s8, 2026-10-31): Engine:gst_ / Engine:sc_ - engine.h `GovernorGlue gv_{ck_, ctx_, m_, ops_, opt_, owner_, pool_, ps_, slots_, tb_, vram_probe_, vram_others_, ctx_pub_, sc_, gst_}` binds GovernorGlue's constructor parameters GovState& / SlotPages& (the constructor is the assembly point, DESIGN v3 2.6 rule A; the S7 Engine:cnt_ / dc_ shape). Removed from now (the writes are gone, DESIGN v3 2.6): setCtx:ctx_pub_ (setCtx calls gv_.govPublishCtx) and vramNote:gov_warn_ (vramNote calls gv_.govSetWarn; DESIGN planned it for S9, S8 has to: gov_warn_ is private in GovState)."
+  "_doc_s8": "S8 (arch025-engine-s8, 2026-10-31): Engine:gst_ / Engine:sc_ - engine.h `GovernorGlue gv_{ck_, ctx_, m_, ops_, opt_, owner_, pool_, ps_, slots_, tb_, vram_probe_, vram_others_, ctx_pub_, sc_, gst_}` binds GovernorGlue's constructor parameters GovState& / SlotPages& (the constructor is the assembly point, DESIGN v3 2.6 rule A; the S7 Engine:cnt_ / dc_ shape). Removed from now (the writes are gone, DESIGN v3 2.6): setCtx:ctx_pub_ (setCtx calls gv_.govPublishCtx) and vramNote:gov_warn_ (vramNote calls gv_.govSetWarn; DESIGN planned it for S9, S8 has to: gov_warn_ is private in GovState).",
+  "_doc_s9": "S9 (arch025-engine-s9, 2026-10-31): Engine:gv_ / Engine:vram_others_ / Engine:vst_ - engine.h `VramWatch vw_{owner_, vram_probe_, vram_others_, gv_, vst_}` binds VramWatch's constructor parameters GovernorGlue& / std::function<...>& (vram_others_, the governor's placed state that setVramProbe installs) / VramState& (the constructor is the assembly point, DESIGN v3 2.6 rule A; the S8 Engine:gst_ / Engine:sc_ shape).",
+  "_doc_engclose": "arch025-engclose (2026-11-01): Engine:cyc_ / jq_ / last_reap_ / last_tick_ / pf_ / prefill_tok_cum_ / se_ / spec_on_ / ss_ / tg_ / vw_ are the constructor's member initializers binding the components (a non-const reference = a write in the census): the constructor is the assembly point (DESIGN v3 2.6), like Engine:dc_ / sc_ / gv_ / vst_ before. S10b removes the job_queue writes of attachTier / reapDisconnected / releaseSlot / startAdmitted / idleWait:tier_wake_ / admitQueued:n_active_ (JobQueue methods now). Left in 'now' (not leg_end): admitQueued:queue_ (queue_[qi] passed as Job& to waitsForSys / waitsForTier), idleWait / runLoop q_cond_ waits and the WH_UNLOCK_HELD / WH_RELOCK_HELD of jq_.q_mutex_. The component constructors PrefillPhase / Scheduler bound JobQueue's members by non-const reference (listed in both lists here until arch025-e2e3); DESIGN v3 10 (review arch025-engreview A1) made them const references and removed the rows (_doc_engreview).",
+  "_doc_engreview": "arch025-e2e3 (DESIGN v3 10.2 / 10.4, review arch025-engreview A1 and the E2 decision, 2026-11-01): now = leg_end = the 35 rows of DESIGN 10.4 in five classes. A constructor statements (rule A): Engine:conv_bytes_ ssm_bytes_ crlf_norm_ fl_ ctx_pub_. B startup installers: allocState:spec_on_, setVramProbe:vram_others_. C assembly bindings (Engine's member initializers - constructor list and in-class initializers - bind the components' non-const references to the owners' data; only the assembly point Engine, never a component binding another module's data; the in-class initializers obey core_shapes.in_class_init): Engine:cnt_ cyc_ dc_ gst_ gv_ ids_ jq_ kv_arrays_ last_reap_ last_tick_ pf_ prefill_tok_cum_ sc_ se_ spec_on_ ss_ tg_ vram_others_ vst_ vw_. D holder calls (sc_.ensurePages / cowPages through SlotEvictor, _doc_s7): dropOutOfRoom finishPrefill prefillGroup prefillStep startJob tryRestore :sc_. E the Jobs that queue_'s elements point to (the requests' own flags, loop thread only): admitQueued:queue_ (waitsForSys / waitsForTier write sys_wait_logged / tier_wait_logged, admitQueued pool_wait_logged, under jq_.q_mutex_), runLoop:queue_ (pf_jobs -> prefetchFor writes pf_checked); Job belongs to no cut module, the census's strict pointee rule (S0g) books a write through a queue_ element pointer on queue_ (as a write through slots_ on slots_, shared_writers); queue_ itself is a const reference in Scheduler (a container write through that alias does not compile; through the non-const holder jq_ it compiles and the census books it on runLoop:jq_ / admitQueued:jq_, which no list allows - review arch025-e2e3r N1). Removed: Scheduler:loop_calls_ n_building_ q_cond_ queue_ stop_ tier_wake_ wake_seq_ and PrefillPhase:n_building_ (const references now), idleWait:jq_ / idleWait:q_mutex_ (the clang-only helpers of WH_UNLOCK_HELD / WH_RELOCK_HELD take const Mutex&), idleWait:q_cond_ / runLoop:q_cond_ (the condition waits are JobQueue's jqWaitBurst / jqWaitTierBusy / jqWaitVision / jqWaitUntil / jqWaitIdle). Limit: rows are (entry, member) grained; class E's write reasons are pinned in element_write_why since arch025-regb1 (review arch025-e2e3r C1: a new write position through queue_'s elements in runLoop / admitQueued that the census sees is a finding; review arch025-regr A1: not every one is seen, (iii)). Not seen (measured, scratch/a25_regb1/limit_probe.txt and scratch/a25_regr/probe_regr.txt): (i) a further field written through an existing alias after its first write use (runLoop's qj after pf_jobs.push_back, admitQueued's Job& qj), (ii) a field written in a callee (prefetchFor, waitsForSys, waitsForTier) and (iii) a write through a range-for loop variable bound by REFERENCE to an element pointer (`for (const auto& j : queue_) j->done = true;` or `Job* const& j`, in runLoop - class E - and in any other function such as idleWait: the clang JSON type of `const auto&` over std::vector<Job*> is `const value_type &` without a desugared type, so engine_split_ast.py's pointer test does not follow it; `for (auto j : queue_)` / `Job* j` are caught); the tool fix (follow such variables in _range_for) is a 0.2.6 item with the field-level census (main-session decision), it changes the census = a new pin and review; field-level (access path) census stays a later tool item (DESIGN 10.4). Corrected 2026-11-01: this text said a new field must be named here, but _doc keys are outside the pin (engine_split_check.py:11-12, sections()) and nothing checked it."
+ },
+ "element_write_why": {
+  "_doc": "arch025-regb1 (review arch025-e2e3r C1, DESIGN v3 10.4 class E, 2026-11-01): the outside_writers rows of class E (writes through the Jobs that queue_'s elements point to) are (entry, member) grained, so before this section a NEW write through the elements in runLoop / admitQueued passed (the reviewer's R1 queue_.front()->id = 0, R2 for (Job* j : queue_) j->done = true, A2 queue_[qi]->done = true: NOT CAUGHT on 91073ce). Key = census entry:member; python_why / clang_why = the census's LIST of write reasons of the pair (one per write position, positions dropped, sorted; clang side as emut_read_ok, engine_split_emut.norm_why). engine_split_census.py: another list is a finding (a new write position changes it: name it here = a cut change and its review, or remove the write); a key that no longer occurs is a finding. Not seen by the lists (measured, DESIGN 10.4): (i) a further field written through an existing alias after the alias's first write use, (ii) a field written inside a callee, and (iii) a write through a range-for loop variable bound by reference to an element pointer (`for (const auto& j : queue_) j->done = true;`, `Job* const& j`: the census does not follow it, so the reason list does not change; review arch025-regr A1, scratch/a25_regr/probe_regr.txt K1 / K2 / K4; tool fix in 0.2.6 with the field-level census); field-level (access path) census stays a later tool item. Selftest EW1-EW5.",
+  "admitQueued:queue_": {
+   "python_why": [
+    "argument of waitsForSys() bound to a non-const reference",
+    "argument of waitsForTier() bound to a non-const reference",
+    "bound to a non-const reference variable qj"
+   ],
+   "clang_why": [],
+   "class": "E the queued Jobs through queue_'s elements",
+   "reason": "engine_sched.cpp admitQueued (jq_.q_mutex_ held, loop thread): sc_.waitsForSys(*queue_[qi]) / waitsForTier(*queue_[qi]) write sys_wait_logged / tier_wait_logged in the callees; Job& qj = *queue_[qi], then qj.pool_wait_logged = true"
+  },
+  "runLoop#:queue_": {
+   "python_why": [
+    "pointer copied into qj; pointer passed to a CXXMemberCallExpr (non-const pointee)"
+   ],
+   "clang_why": [],
+   "class": "E the queued Jobs through queue_'s elements",
+   "reason": "engine_sched.cpp runLoop (jq_.q_mutex_ held, loop thread): for (Job* qj : queue_) ... pf_jobs.push_back(qj); after the unlock prefetchFor(*qj) writes pf_checked"
+  }
  },
  "engine_members_final": [
   "m_",
@@ -730,12 +799,6 @@
   "govReduced": "server.governor",
   "govCtxPublished": "server.governor",
   "govPublishCtx": "server.governor",
-  "jqHealth": "server.job_queue",
-  "jqAdmit": "server.job_queue",
-  "jqStartAdmitted": "server.job_queue",
-  "jqRelease": "server.job_queue",
-  "jqReap": "server.job_queue",
-  "jqTierWake": "server.job_queue",
   "vramHealth": "server.vram_watch",
   "floorLogPeriod": "server.prefill",
   "floorOn": "server.prefill",
@@ -799,6 +862,11 @@
    "forbid": [
     "\\bwhile\\b"
    ]
+  },
+  "in_class_init": {
+   "allow": "\\{\\s*\\w+(\\s*,\\s*\\w+)*\\s*\\}|true|false|nullptr|-?\\d+",
+   "what": "a brace list of member names or a literal (no call, no expression)",
+   "_doc": "arch025-engreview E3: Engine's in-class member initializers (census A2 entry Engine#): the components' reference bindings and literal defaults; special.max_lines counts the constructor / destructor definitions only"
   }
  },
  "core_exceptions": {
@@ -926,6 +994,7 @@
     "waitsForTier"
    ],
    "sb_": [
+    "Engine",
     "acceptSlot",
     "allocState",
     "finishPrefill",
@@ -985,6 +1054,7 @@
     "tryRestore"
    ],
    "vis_": [
+    "Engine",
     "attachVision",
     "idleWait",
     "releaseSlot",
@@ -992,6 +1062,7 @@
     "startJob"
    ],
    "vram_probe_": [
+    "Engine",
     "setVramProbe"
    ]
   },
@@ -1114,6 +1185,7 @@
     "waitsForTier"
    ],
    "sb_": [
+    "Engine",
     "acceptSlot",
     "allocState",
     "finishPrefill",
@@ -1121,6 +1193,7 @@
     "startJob"
    ],
    "slots_": [
+    "Engine",
     "allocState",
     "evictFor",
     "govDrain",
@@ -1172,6 +1245,7 @@
     "tryRestore"
    ],
    "vis_": [
+    "Engine",
     "attachVision",
     "idleWait",
     "releaseSlot",
@@ -1179,13 +1253,16 @@
     "startJob"
    ],
    "vram_probe_": [
+    "Engine",
     "setVramProbe"
    ]
   },
   "_doc_s0b": "S0b (S0 review act-on 1): model:m_ (Engine::model() returns ServerModel& = a non-const reference accessor) and startAdmitted:slots_ (std::span<Slot>(slots_) handed to ps_.pickSlot = a writable view) are conservative writes the S0b census sees; they were there at c1ca7ce too (same census on scratch/a25_engine/s0/base_c1 and base_abe)",
   "_doc_s0d": "S0d (AST census, tools/gates/engine_split_ast.py): Engine:ops_ (in-class sb_{m_, ops_} binds SampleBuffers' Backend&), attachSpe:m_ (m_.mapPages, non-const ServerModel method), idleWait/runLoop:vis_ (vis_.idle(), non-const), startJob:vis_ (vis_.prepare(), non-const), startJob:ck_ (ck_.load(const Ckpt&), non-const CkptStore method; the text census took 'load' for std::atomic::load) - writes by declared type the text rules missed, present at c1ca7ce / abe3512 too",
   "_doc_s0g": "S0g (strict pointee rule, decisions.tsv ADR candidate 2026-10-30): layoutBatch:spec_ - cy.p = spec_.prof.get() keeps the profiler pointer (non-const pointee) in the cycle state; govDrain / freePages / dropSpe:m_ - m_.stream() (a hipStream_t, a pointer with a non-const pointee) passed to ops_.streamSync / streamWaitEvent; attachSpe:tb_ - tb_.tier()->find(..) is a non-const TierStore method reached through the pointer tb_.tier() returns. Present on c1ca7ce / abe3512 / 7ad196c alike.",
-  "_doc_s7": "S7 (arch025-engine-s7, 2026-10-31): Engine:slots_ - the sc_ initializer (engine.h) binds std::vector<Slot>& slots_ (SlotPages: evictFor / waitsForSys / poolAvailable, which are listed writers or readers of slots_ already)."
+  "_doc_s7": "S7 (arch025-engine-s7, 2026-10-31): Engine:slots_ - the sc_ initializer (engine.h) binds std::vector<Slot>& slots_ (SlotPages: evictFor / waitsForSys / poolAvailable, which are listed writers or readers of slots_ already).",
+  "_doc_s9": "S9 (arch025-engine-s9, 2026-10-31): vram_probe_ += Engine - the vw_ initializer binds VramWatch's std::function<wddmwatch::Sample()>& (setVramProbe, now VramWatch's, assigns the probe through it; GovernorGlue binds a const& and is no writer).",
+  "_doc_engclose": "arch025-engclose: Engine writes sb_ / vis_ in the census because the constructor binds them by non-const reference into se_ / pf_ / cyc_ / ss_ / sch_ (S11-S15b; assembly, DESIGN v3 2.6)"
  },
  "_doc_engine_members_final": "E3 (graph3 --core): Engine's data members at leg end, in declaration order; placed state stays at its c1ca7ce position (DESIGN 2.5)",
  "_doc_s0": "S0 (2026-10-29): generated by scratch/a25_engine/s0/gen_cut_s0.py from cut_v3.json; the architecture part is pinned by tests/pins/engine_cut_arch.sha256 (engine_split_check.py --pin-check, review3 C2)",
@@ -1241,9 +1318,9 @@
    "text_why": "address taken",
    "reason": "engine.cpp:151 f.tok = &tok_ in a const method; EngineFacts::tok is const Tokenizer* (engine_api.h:68)"
   },
-  "finishPrefill:rcx_": {
-   "text_why": "address taken",
-   "reason": "engine_prefill.cpp:289 sl.st.cx = &rcx_; StreamState::cx is const ResponseCtx* (stream.h:60)"
+  "runLoop#:q_mutex_": {
+   "text_why": "not a known read form (Lock lk(jq_. .. ))",
+   "reason": "engine_sched.cpp Scheduler::runLoop: whirl::UniqueLock lk(jq_.q_mutex_), a lock guard (S10b names the queue lock through the holder jq_); the burst wait's lw and its WH_REQUIRES(jq_.q_mutex_) predicate moved into JobQueue::jqWaitBurst (arch025-e2e3, DESIGN v3 10.2); the AST census reads lk as the lock guard (emut pin runLoop#:q_mutex_)"
   }
  },
  "emut_read_ok": {
@@ -1262,26 +1339,12 @@
    "class": "d log.h formatter",
    "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
   },
-  "attachTier:q_mutex_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(q_mutex_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
-  },
   "draftCap:opt_": {
    "clang_why": [
     "write: CXXOperatorCallExpr `opt_.batch_drafts[std::min(A, gdn_max_seg)]`"
    ],
    "class": "d non-const operator[] overload, result only read",
    "reason": "std::array / vector operator[] on a non-const object picks the non-const overload; the result is bound to a const& or passed by value / const& (Python: 'const object bound to / passed', 'read (value)'), engine_decode.cpp:85-292, 655"
-  },
-  "endBuilding:q_mutex_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(q_mutex_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
   },
   "facts:tok_": {
    "clang_why": [
@@ -1303,20 +1366,6 @@
    ],
    "class": "d log.h formatter",
    "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
-  },
-  "health:q_mutex_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(q_mutex_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
-  },
-  "health:vram_mu_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(vram_mu_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
   },
   "modulesOwned:owner_": {
    "clang_why": [
@@ -1346,78 +1395,6 @@
    ],
    "class": "d const accessor return (analyzer false positive)",
    "reason": "a const method returning const T& of the member (engine.h: owner() const / options() const / tokenizer() const): AsNonConstRefReturn assumes a NoOp cast to const that a const method's member does not have (ExprMutationAnalyzer.cpp:483-489; emut selftest e13_)"
-  },
-  "reapDisconnected:q_mutex_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(q_mutex_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
-  },
-  "releaseSlot:q_mutex_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(q_mutex_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
-  },
-  "runLoop:q_mutex_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(q_mutex_)`",
-    "write: CXXConstructExpr `lw(q_mutex_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
-  },
-  "runOnLoop:q_mutex_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(q_mutex_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
-  },
-  "setVramProbe:vram_mu_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(vram_mu_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
-  },
-  "startAdmitted:q_mutex_": {
-   "clang_why": [
-    "write: CXXConstructExpr `g(q_mutex_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
-  },
-  "startJob:ctx_": {
-   "clang_why": [
-    "write: CallExpr `logW(\"req {} | prompt of {} tokens does not fit the context per request of {} tokens (lowered from {...`",
-    "write: CallExpr `logW(\"req {} | prompt of {} tokens does not fit the context per request of {} tokens ({})\", job.id, ...`"
-   ],
-   "class": "d log.h formatter",
-   "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
-  },
-  "startJob:opt_": {
-   "clang_why": [
-    "write: CallExpr `logW(\"req {} | prompt of {} tokens does not fit the context per request of {} tokens ({})\", job.id, ...`"
-   ],
-   "class": "d log.h formatter",
-   "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d)"
-  },
-  "stop:q_mutex_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(q_mutex_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
-  },
-  "submitAndWait:q_mutex_": {
-   "clang_why": [
-    "write: CXXConstructExpr `lk(q_mutex_)`"
-   ],
-   "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF)"
   },
   "tokenizer:tok_": {
    "clang_why": [
@@ -1460,6 +1437,42 @@
    ],
    "class": "d non-const overload, result only read",
    "reason": "engine_gov.cpp:89 `b += ps_.spes().size() * ck_.bytes(false);` in the const GovernorGlue::govFreeable: ps_ is now PrefixStore& (S8), so the non-const spes() overload (prefix_store.h:151) is picked; only size() is read (Python: read). Until S8 the const Engine method picked the const overload (prefix_store.h:152); the S7 poolAvailable:ps_ shape."
+  },
+  "vramHealth:vram_mu_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(vram_mu_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF); S9: health's lock moved into VramWatch::vramHealth verbatim"
+  },
+  "runLoop#:q_mutex_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(jq_.q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF) S10b (arch025-engclose): Scheduler::runLoop (census key runLoop#, after Engine's inline forwarder runLoop) locks the queue as jq_.q_mutex_. arch025-e2e3 (DESIGN v3 10.2): the burst wait's guard lw moved into JobQueue::jqWaitBurst; lk stays."
+  },
+  "runLoop#:jq_": {
+   "clang_why": [
+    "write: CXXConstructExpr `lk(jq_.q_mutex_)`"
+   ],
+   "class": "d lock guard",
+   "reason": "the lock guard lk seen through the holder jq_ (JobQueue&): locking jq_.q_mutex_ is the mutex's own synchronisation, not a data write of jq_ (S10b, arch025-engclose); the 1 ms burst wait's guard lw moved into JobQueue::jqWaitBurst (arch025-e2e3, DESIGN v3 10.2)"
+  },
+  "startJob##:ctx_": {
+   "clang_why": [
+    "write: CallExpr `logW(\"req {} | prompt of {} tokens does not fit the context per request of {} tokens (lowered from {...`",
+    "write: CallExpr `logW(\"req {} | prompt of {} tokens does not fit the context per request of {} tokens ({})\", job.id, ...`"
+   ],
+   "class": "d log.h formatter",
+   "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d) S14 (arch025-engclose re-key): SlotStart::startJob is census key startJob## (after the forwarders in Scheduler and TierGlue)."
+  },
+  "startJob##:opt_": {
+   "clang_why": [
+    "write: CallExpr `logW(\"req {} | prompt of {} tokens does not fit the context per request of {} tokens ({})\", job.id, ...`"
+   ],
+   "class": "d log.h formatter",
+   "reason": "logI / logW take Args&... (forwarding references) and only format them (Python: 'formatted by logI / logW (log.h)', the measured log.h formatter; cross-check class d) S14 (arch025-engclose re-key): SlotStart::startJob is census key startJob## (after the forwarders in Scheduler and TierGlue)."
   }
  }
 }

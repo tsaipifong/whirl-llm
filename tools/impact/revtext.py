@@ -401,14 +401,15 @@ def selftest(work):
 
     only = arg("--only")   # rt2: a regex on the case names (red / green runs of a few cases; the full run has no --only)
 
-    def case(name, text, rules, want, extra=None, rel=eh, expect=None):
-        """want = exit code; expect = a regex the run's output must match (the case is red for the right reason)"""
+    def case(name, text, rules, want, extra=None, rel=eh, expect=None, cutp=None):
+        """want = exit code; expect = a regex the run's output must match (the case is red for the right reason);
+        cutp: another cut file for this case (arch025-engclose: N5's selftest-only planned row)"""
         if only and not re.search(only, name): return
         d = tree(name, text, extra, rel)
         print(f"-- {name}")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            rc = run(REPO, d, rules, cut, d + "_w", ro=ro)
+            rc = run(REPO, d, rules, cutp or cut, d + "_w", ro=ro)
         out = buf.getvalue(); print(out, end="")
         good = rc == want and (expect is None or re.search(expect, out, re.M) is not None)
         if rc == want and not good: print(f"  (exit {rc} as expected, but no line matches {expect!r})")
@@ -446,26 +447,30 @@ def selftest(work):
     # arch025-engine S8: the governor members moved into GovState (server/engine_gov.h); a member anchor is looked up in
     # the header that has it (exactly one of these)
     def mhdr(line):
-        for r in ("server/engine.h", "server/engine_gov.h"):
+        for r in ("server/engine.h", "server/engine_gov.h", "server/engine_vram.h"):   # S9: + VramState
             fp = os.path.join(REPO, "src", r)
             if os.path.exists(fp) and open(fp, encoding="utf-8").read().count(line) == 1: return r
         return None
     gh = mhdr("    bool gov_hold_ = false;") or hh
     gs = open(os.path.join(REPO, "src", gh), encoding="utf-8").read()
+    vh = mhdr("    double vram_idle_s_ = 60.0;") or hh   # S9: VramState (engine_vram.h)
+    vs = open(os.path.join(REPO, "src", vh), encoding="utf-8").read()
     for old, new, nm in (("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", "an in-class initializer changed (vram_idle_s_ 60 -> 30)"),
                          ("    bool gov_hold_ = false;", "    bool gov_hold_ = true;", "an in-class initializer changed (gov_hold_ false -> true)"),
                          ("    std::uint32_t ctx_new_ = 0xffffffffu;", "    std::uint16_t ctx_new_ = 0xffffffffu;", "a member type changed (ctx_new_ uint32 -> uint16)")):
         r_ = mhdr(old)
         if r_: case(nm, open(os.path.join(REPO, "src", r_), encoding="utf-8").read().replace(old, new, 1), {}, 1, rel=r_)
         else: cases.append((nm + ": anchor", False))
-    if hs.count("    double vram_idle_s_ = 60.0;") == 1:
-        case("the initializer change listed in allowed_diffs (control)", hs.replace("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", 1),
-             {"allowed_diffs": [{"entry": "member:vram_idle_s_", "old": "60.0", "new": "30.0", "why": "selftest"}]}, 0, rel=hh)
+    if vs.count("    double vram_idle_s_ = 60.0;") == 1:
+        case("the initializer change listed in allowed_diffs (control)", vs.replace("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", 1),
+             {"allowed_diffs": [{"entry": "member:vram_idle_s_", "old": "60.0", "new": "30.0", "why": "selftest"}]}, 0, rel=vh)
+    else:
+        cases.append(("the initializer change listed in allowed_diffs (control): anchor", False))
     # ---- revtextfix (S0 review C-6 = S0b review C-4) ----
-    if hs.count("    double vram_idle_s_ = 60.0;") == 1 and gs.count("    bool gov_hold_ = false;") == 1:
+    if vs.count("    double vram_idle_s_ = 60.0;") == 1 and gs.count("    bool gov_hold_ = false;") == 1:
         # allowed_diffs match whole tokens: `16` is not a token of `160.0` (the old joined-string replace made 160.0 -> 60.0)
-        case("A1 an allowed_diff that is not on a token boundary (16 -> 6 inside 160.0)", hs.replace("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 160.0;", 1),
-             {"allowed_diffs": [{"entry": "member:vram_idle_s_", "old": "6", "new": "16", "why": "selftest"}]}, 1, rel=hh,
+        case("A1 an allowed_diff that is not on a token boundary (16 -> 6 inside 160.0)", vs.replace("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 160.0;", 1),
+             {"allowed_diffs": [{"entry": "member:vram_idle_s_", "old": "6", "new": "16", "why": "selftest"}]}, 1, rel=vh,
              expect=r"^  DIFF member:vram_idle_s_ ")
         # entry "*" would apply `false -> true` once in every member entry (S0b review C-4): a rules error now
         case("A2 an allowed_diff with entry * is a rules error", gs.replace("    bool gov_hold_ = false;", "    bool gov_hold_ = true;", 1),
@@ -498,11 +503,17 @@ def selftest(work):
         # arch025-engine S8: govActive is real now; the control takes a planned new_funcs name no file of the tree defines yet
         alltxt = "".join(open(os.path.join(dp, f), encoding="utf-8", errors="replace").read()
                          for dp, _, fs in os.walk(os.path.join(REPO, "src")) for f in fs if f.endswith((".h", ".cpp")))
-        pl = next(k for k in sorted(json.load(open(cut, encoding="utf-8")).get("new_funcs", {}))
-                  if not k.startswith("_") and "." not in k and not re.search(r"\b" + re.escape(k) + r"\b", alltxt))
+        pl = next((k for k in sorted(json.load(open(cut, encoding="utf-8")).get("new_funcs", {}))
+                   if not k.startswith("_") and "." not in k and not re.search(r"\b" + re.escape(k) + r"\b", alltxt)), None)
+        cut5 = None
+        if pl is None:   # arch025-engclose: every planned row is written (S10b / S16): a selftest-only row in a cut copy
+            pl = "stPlannedRow"
+            cj = json.load(open(cut, encoding="utf-8")); cj["new_funcs"][pl] = "server.engine"
+            os.makedirs(work, exist_ok=True)
+            cut5 = os.path.join(work, "cut_n5.json"); json.dump(cj, open(cut5, "w", encoding="utf-8"), indent=1)
         ga = src.replace(whole, whole + f"\nbool Engine::{pl}() const {{\n    return false;\n}}\n", 1)
         case(f"N5 rules.added planned for {pl} (in the cut's new_funcs) (control)", ga,
-             {"added": {pl: {"planned": True, "why": "selftest"}}}, 0, expect=r", 1 added entries as declared\)")
+             {"added": {pl: {"planned": True, "why": "selftest"}}}, 0, expect=r", 1 added entries as declared\)", cutp=cut5)
         # renames are one to one: two new entries onto one old entry was a silent dict overwrite (with the name rule the
         # copy passed as "identical")
         case("R1 renames a copy onto the old entry it was copied from", cp,
@@ -584,19 +595,22 @@ def selftest(work):
     # default arguments, override / virtual / const; static constexpr data members; enums, using, static_assert) were
     # in no census entry; after rt2 moved in-class entries to their first code character not even the line before an
     # entry carried them (review probe: old tools FAIL 2, rt2 tools ok). Every declaration statement is compared now. ----
-    RL = "    void runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout = std::chrono::milliseconds(60000));\n"
+    # arch025-engclose: since S10 runOnLoop / submitAndWait are one-line forwarders with bodies (no body-less declaration
+    # left); D1 / D4 take setVramProbe's default argument startup_warned, D3 the body-less `governorJson() override;`
+    # (Engine.setVramProbe / Engine.governorJson: the census names an Engine declaration that way when a component has the name)
+    RL = "                      wddmwatch::Config cfg = {}, bool startup_warned = false,\n"
     SF = "    static constexpr std::uint64_t shutdown_flush_long_ms = 60000;\n"
-    SW = "    void submitAndWait(Job& job) override;\n"
+    SW = "    std::string governorJson() override;\n"
     if hs.count(RL) == 1 and hs.count(SF) == 1 and hs.count(SW) == 1:
-        d1 = hs.replace(RL, RL.replace("milliseconds(60000)", "milliseconds(600)"), 1)
-        case("D1 a default argument of a member function declaration changed (runOnLoop 60000 -> 600 ms)", d1, {}, 1,
-             rel=hh, expect=r"^  DIFF decl:runOnLoop at token")
+        d1 = hs.replace(RL, RL.replace("startup_warned = false", "startup_warned = true"), 1)
+        case("D1 a default argument of a member function declaration changed (setVramProbe startup_warned false -> true)", d1, {}, 1,
+             rel=hh, expect=r"^  DIFF decl:Engine.setVramProbe at token")
         case("D2 a static constexpr value changed (shutdown_flush_long_ms 60000 -> 600)", hs.replace(SF, SF.replace("60000", "600"), 1), {}, 1,
              rel=hh, expect=r"^  DIFF member:shutdown_flush_long_ms at token")
-        case("D3 override removed from a declaration (submitAndWait)", hs.replace(SW, SW.replace(" override", ""), 1), {}, 1,
-             rel=hh, expect=r"^  DIFF decl:submitAndWait at token")
+        case("D3 override removed from a declaration (governorJson)", hs.replace(SW, SW.replace(" override", ""), 1), {}, 1,
+             rel=hh, expect=r"^  DIFF decl:Engine.governorJson at token")
         case("D4 the default argument change listed in allowed_diffs (control)", d1,
-             {"allowed_diffs": [{"entry": "decl:runOnLoop", "old": "60000", "new": "600", "why": "selftest"}]}, 0, rel=hh,
+             {"allowed_diffs": [{"entry": "decl:Engine.setVramProbe", "old": "false", "new": "true", "why": "selftest"}]}, 0, rel=hh,
              expect=r"^revtext: ok \(.*1 allowed differences")
         dn = hs.replace(SW, SW + "    void zqDecl(int n = 3);\n", 1)
         case("D5 a new member function declaration only in the new tree", dn, {}, 1, rel=hh,

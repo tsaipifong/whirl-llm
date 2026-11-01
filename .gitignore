@@ -57,6 +57,8 @@ tune4-*.txt
 oracle_build.txt
 oracle_cfg.txt
 *.log
+# arch025-regb2: the isolation manifest folder of module server.log (tests/iso/<module>/) is source, not a log
+!/tests/iso/server.log/
 
 # Python bytecode (tools/impact, tools/quick)
 __pycache__/

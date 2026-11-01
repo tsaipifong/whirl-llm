@@ -286,7 +286,9 @@ AddStep "cpu_iso_includes" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I
 # fault cases of the per-step reverse text proof (tools/impact/revtext.py, DESIGN 5 P1),
 # the P4 / E7 EQUIVALENT-MODULO-TIMING comparer's rule self-test (tools/gates/mt_equiv_compare.py, review3 A4: each leg's GPU
 # batch is compared with it, --hh = that batch's own B / B2 pair), and the member-order pin (declaration order == destruction order, tests/pins/engine_member_order.txt) after its fault cases.
-AddStep "cpu_engine_split" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\mt_equiv_compare.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\engine_split_check.py")' --selftest --work '@WORK@\selftest'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\revtext.py")' --selftest --work '@WORK@\revtext'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\engine_split_check.py")' --work '@WORK@\check'; exit `$LASTEXITCODE") `
+# arch025-e2e3 (DESIGN v3 10.5, review arch025-engreview C3): the cut check runs in the exit mode of E2 / E3
+# (--writers leg_end --core; outside_writers now == leg_end), so a re-added outside write or core shape fails every gate run.
+AddStep "cpu_engine_split" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\mt_equiv_compare.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\engine_split_check.py")' --selftest --work '@WORK@\selftest'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\revtext.py")' --selftest --work '@WORK@\revtext'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\engine_split_check.py")' --writers leg_end --core --work '@WORK@\check'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^selftest: ([1-9]\d*)/\1 PASS") -and ($o -match "(?m)^engine split selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^revtext selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^engine split check: ok") }
 AddStep "cpu_member_order" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\member_order_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\member_order_check.py")'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^member order selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^member order: ok") }
@@ -326,7 +328,7 @@ AddStep "cpu_step_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $r
 #   cpu_analyze  full MSVC /analyze rebuild; no warning beyond tools/safety/analyze_baseline.txt, every baseline key with file:line
 #                + reason (analyze_whitelist.tsv), the analyze_fault.bat proof (clean PASS, planted NEW, same key NEW x1)
 #   cpu_tsa      (Q4) clang-cl -Wthread-safety -Werror=thread-safety build of whirl_server_core + whirl_tier_core (build-tsa,
-#                include/whirl/thread_annotations.h) clean, and each of the 9 lock removals of tools/safety/tsa/tsa_check.py must
+#                include/whirl/thread_annotations.h) clean, and each lock removal of tools/safety/tsa/tsa_check.py must
 #                fail it (a few minutes; needs the HIP SDK clang-cl, no GPU)
 # They reuse the HIP code objects of -Build (same tree) for a new build directory. WHIRL_GATE_QUIET_WAIT: a local script that
 # waits while a GPU measurement holds the machine (passed on as WHIRL_QUIET_WAIT; build_cfg.bat runs it before compiling).

@@ -75,6 +75,9 @@ add_library(whirl_server_core STATIC
   ${CMAKE_SOURCE_DIR}/src/server/engine_pages.cpp
   ${CMAKE_SOURCE_DIR}/src/server/engine_prefill.cpp
   ${CMAKE_SOURCE_DIR}/src/server/engine_queue.cpp
+  ${CMAKE_SOURCE_DIR}/src/server/engine_end.cpp
+  ${CMAKE_SOURCE_DIR}/src/server/engine_sched.cpp
+  ${CMAKE_SOURCE_DIR}/src/server/engine_start.cpp
   ${CMAKE_SOURCE_DIR}/src/server/engine_tier.cpp
   ${CMAKE_SOURCE_DIR}/src/server/engine_sampling.cpp
   ${CMAKE_SOURCE_DIR}/src/server/engine_thread.cpp
