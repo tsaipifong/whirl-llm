@@ -212,7 +212,10 @@ bool attributes(const wchar_t* path, Attributes* out) {
 std::wstring longPathForm(const std::wstring& path) {
     constexpr std::size_t kLegacyMax = 248;  // CreateDirectoryW's limit (MAX_PATH - 12); Rust std uses the same
     if (path.size() < kLegacyMax) return path;
-    if (path.rfind(L"\\\\?\\", 0) == 0 || path.rfind(L"\\\\.\\", 0) == 0) return path;
+    // arch025-lpath2 (review F2): as Rust std get_long_path. \\?\ (not parsed) and \??\ (NT form; GetFullPathNameW would
+    // read it as a rooted path on the current drive) are used as given; every other spelling is made absolute and
+    // normalised by GetFullPathNameW and gets the prefix that fits the result, never a second one
+    if (path.rfind(L"\\\\?\\", 0) == 0 || path.rfind(L"\\??\\", 0) == 0) return path;
     std::wstring full(path.size() + 1, L'\0');
     for (int tries = 0; tries < 4; ++tries) {
         const DWORD n = GetFullPathNameW(path.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr);
@@ -224,25 +227,11 @@ std::wstring longPathForm(const std::wstring& path) {
         full.assign(n, L'\0');  // n = the size needed, with the terminating null
     }
     if (full.empty() || full.back() == L'\0') return path;
-    if (full.size() >= 3 && full[1] == L':' && full[2] == L'\\') return L"\\\\?\\" + full;
-    if (full.rfind(L"\\\\", 0) == 0) return L"\\\\?\\UNC\\" + full.substr(2);
+    if (full.size() >= 3 && full[1] == L':' && full[2] == L'\\') return L"\\\\?\\" + full;  // drive path: \\?\C:\...
+    if (full.rfind(L"\\\\.\\", 0) == 0) return L"\\\\?\\" + full.substr(4);  // \\.\ is parsed (MAX_PATH applies): \\?\ instead
+    if (full.rfind(L"\\\\?\\", 0) == 0 || full.rfind(L"\\??\\", 0) == 0) return full;  // e.g. from //?/: prefixed already
+    if (full.rfind(L"\\\\", 0) == 0) return L"\\\\?\\UNC\\" + full.substr(2);  // \\server\share -> \\?\UNC\server\share
     return path;
-}
-
-std::wstring shortPathForm(const std::wstring& path) {
-    constexpr std::size_t kLegacyMax = 248;  // as longPathForm
-    std::wstring plain;
-    const auto lower = [](wchar_t c) { return static_cast<wchar_t>(c | 0x20); };
-    if (path.size() >= 8 && path.compare(0, 4, L"\\\\?\\") == 0 && lower(path[4]) == L'u' && lower(path[5]) == L'n' &&
-        lower(path[6]) == L'c' && path[7] == L'\\')
-        plain = L"\\\\" + path.substr(8);  // \\?\UNC\server\share -> \\server\share
-    else if (path.size() >= 7 && path.compare(0, 4, L"\\\\?\\") == 0 && lower(path[4]) >= L'a' && lower(path[4]) <= L'z' &&
-             path[5] == L':' && path[6] == L'\\')
-        plain = path.substr(4);  // \\?\C:\dir -> C:\dir
-    else
-        return path;  // \\?\Volume{..}, \\.\device, a plain path: not ours to change
-    if (plain.size() >= kLegacyMax || plain.find(L'/') != std::wstring::npos) return path;  // would not open / not normalised
-    return plain;
 }
 
 std::wstring longPathFormDir(const std::wstring& dir, std::size_t reserve) {

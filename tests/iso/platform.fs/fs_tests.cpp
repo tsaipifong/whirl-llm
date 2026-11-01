@@ -77,23 +77,7 @@ void testLongPathForm() {
     ISO_CHECK(fs::longPathForm(messy) == L"\\\\?\\C:\\" + seg + L"\\" + seg + L"\\" + seg + L"\\a.exe");
 }
 
-// arch025-lpath (1): shortPathForm takes the long-path prefix off when the plain path is short, and only then
-void testShortPathForm() {
-    ISO_CHECK(fs::shortPathForm(L"C:\\whirl\\x.exe") == L"C:\\whirl\\x.exe");
-    ISO_CHECK(fs::shortPathForm(L"\\\\?\\C:\\whirl\\x.exe") == L"C:\\whirl\\x.exe");
-    ISO_CHECK(fs::shortPathForm(L"\\\\?\\UNC\\srv\\share\\x.exe") == L"\\\\srv\\share\\x.exe");
-    ISO_CHECK(fs::shortPathForm(L"\\\\srv\\share\\x.exe") == L"\\\\srv\\share\\x.exe");
-    ISO_CHECK(fs::shortPathForm(L"\\\\.\\COM1") == L"\\\\.\\COM1");  // a device path is not a file path
-    ISO_CHECK(fs::shortPathForm(L"\\\\?\\Volume{1}\\x") == L"\\\\?\\Volume{1}\\x");
-    ISO_CHECK(fs::shortPathForm(L"") == L"");
-    const std::wstring seg(120, L'q');
-    const std::wstring longp = L"\\\\?\\C:\\" + seg + L"\\" + seg + L"\\" + seg + L"\\x.exe";  // plain form is 370 characters
-    ISO_CHECK(fs::shortPathForm(longp) == longp);
-    const std::wstring edge = L"C:\\" + std::wstring(240, L'e');  // 243 characters: plain form < 248
-    ISO_CHECK(fs::shortPathForm(L"\\\\?\\" + edge) == edge);
-    const std::wstring edge2 = L"C:\\" + std::wstring(245, L'e');  // 248 characters
-    ISO_CHECK(fs::shortPathForm(L"\\\\?\\" + edge2) == L"\\\\?\\" + edge2);
-}
+// (arch025-lpath2: shortPathForm, the prefix strip of arch025-lpath (1), is gone with its test: review F1)
 
 // arch025-lpath (2): longPathFormDir is the long-path form when the files under the directory need it
 void testLongPathFormDir() {
@@ -180,7 +164,7 @@ void testShortPathIdentity() {
 int main(int argc, char** argv) {
     return iso::run("platform.fs", {{"write_read", testWriteRead}, {"fake_recorder", testFakeRecorder}, {"utf8_strict", testUtf8Strict},
                                    {"long_path_form", testLongPathForm},
-                                   {"short_path_form", testShortPathForm}, {"long_path_form_dir", testLongPathFormDir},
+                                   {"long_path_form_dir", testLongPathFormDir},
                                    {"long_path_form_prefixed", testLongPathFormPrefixed}, {"short_path_identity", testShortPathIdentity}},
                     argc, argv);
 }

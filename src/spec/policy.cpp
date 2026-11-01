@@ -9,7 +9,6 @@
 #include "whirl/vismap.h"  // image_id_base (Ngram::lookup)
 
 #include "whirl/common.h"  // widen / narrow (bug-envpaths)
-#include "platform/fs.h"  // shortPathForm (arch025-lpath)
 #include "platform/proc.h"  // exePath (arch025 PL4)
 
 #include <algorithm>
@@ -254,8 +253,10 @@ std::string exeDirectory() {
 
 std::string exeDirectoryOf(const std::wstring& exe) {
     if (exe.empty()) return {};
-    // arch025-lpath (1): started through a long-path-prefix path the folder reads the same as through the plain path (short ones)
-    return narrow(platform::fs::shortPathForm(std::filesystem::path(exe).parent_path().wstring()));  // bug-envpaths: UTF-8 (was .string(): ANSI)
+    // arch025-lpath2 (review F1): the folder in the form the program was started with, a \\?\ prefix included: the files
+    // next to the exe are joined under it with backslashes (draftVocabFile), which opens at any length and for any name
+    // (as llama.cpp ggml-backend-reg.cpp does); taking the prefix off lost them for folders of 233-247 characters
+    return narrow(std::filesystem::path(exe).parent_path().wstring());  // bug-envpaths: UTF-8 (was .string(): ANSI)
 }
 
 u32 pickDrafts(std::span<const DraftAccept* const> accepts, const DraftTiming& timing, u32 max, u32 cycle, u32 prev) {
