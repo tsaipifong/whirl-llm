@@ -1,5 +1,5 @@
-// whirl CLI: the CLI's own model building (arch025-C2): the GPU choice, the numerics request, Model::load with the CLI's
-// options, the load log, the after-load switches (applyRuntimeEnv: the CLI front of numerics::applyFront, the draft
+// whirl CLI: the CLI's own model building (arch025-C2): the GPU choice, the numerics request, the load through the
+// architecture module (model::loadServerModel, whirl-server's load; arch025-cli2 N15d) with the CLI's options, the load log, the after-load switches (applyRuntimeEnv: the CLI front of numerics::applyFront, the draft
 // vocabulary, the DFlash2 drafter). whirl-server builds its model in src/server/server_main.cpp (buildModel) and does
 // not apply these switches (0.2.5; feat026-o6 shares them in 0.2.6)
 // SPDX-License-Identifier: Apache-2.0
@@ -138,7 +138,8 @@ whirl::numerics::Request modeRequest(const Args& a) {
 // ctx_explicit: the context was asked for (--ctx / WHIRL_MAX_CTX, bench sizes): precise f16 KV that
 // does not fit refuses instead of shrinking to at least min_ctx tokens. no_mtp: --draft dflash
 // (the MTP block is not loaded; the DFlash2 drafter drafts instead)
-Loaded loadModel(const Args& a, const gguf::File& f, u32 max_ctx, bool ctx_explicit, u32 min_ctx, bool no_mtp) {
+Loaded loadModel(const Args& a, const gguf::File& f, const whirl::model::ArchModule& am, u32 max_ctx, bool ctx_explicit, u32 min_ctx,
+                 bool no_mtp) {
     Loaded L;
     q::LoadOptions lo;
     lo.numerics = modeRequest(a);
@@ -148,7 +149,9 @@ Loaded loadModel(const Args& a, const gguf::File& f, u32 max_ctx, bool ctx_expli
     // (arch025-N15c: the server's rule; the floor was max_batch_default 4096, now the scheduler's 1280 rows)
     if (auto v = whirl::settings::prefillBatch(settingsWarn)) lo.max_batch = vram::prefillBatchAtLoad(*v, q::max_batch_limit);
     lo.kv_req = q::kvRequestFromEnv();
-    L.model = q::Model::load(f, max_ctx, L.stats, lo);
+    // the architecture module's load, whirl-server's call (model::loadServerModel = loadArch -> the row's load entry, for the
+    // qwen35 row qwen35::Model::load with these arguments; arch025-cli2, N15d)
+    L.model = whirl::model::loadServerModel(am, f, max_ctx, L.stats, lo);
     q::Model& m = *L.model;
     if (envGet("TUNE_COLD")) m.tuneTable().tune_cold = true;
     if (auto v = envGet("TUNE_MASK")) m.tuneTable().tune_mask = std::stoull(*v, nullptr, 0);

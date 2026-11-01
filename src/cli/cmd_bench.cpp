@@ -52,7 +52,8 @@ int cmdBench(const Args& a) {
     }
     const bool think = thinkFromArgs(a);
     gguf::File f = gguf::File::open(path);
-    const q::Config cfg = whirl::model::openArch(f).cfg;  // the architecture module, as whirl-server (arch025-N15d)
+    const whirl::model::OpenedArch oa = whirl::model::openArch(f);  // the architecture module, as whirl-server (arch025-N15d)
+    const q::Config& cfg = oa.cfg;
     std::string dev_line;
     selectDevice(a, &dev_line);
     out(fmt("whirl bench: %s (%s)\n", path.c_str(), cfg.archName()));
@@ -65,7 +66,7 @@ int cmdBench(const Args& a) {
     const u32 ctx = std::max<u32>(max_size + 64, static_cast<u32>(dec_ids.size()) + n_dec + 64);
     bool use_dflash = wantDFlash(a, f);
     if (dflash_req && !use_dflash && !a.get("--modes")) modes = {"mtp-ngram", "mtp", "plain"};
-    Loaded L = loadModel(a, f, ctx, true, 0, use_dflash);
+    Loaded L = loadModel(a, f, *oa.am, ctx, true, 0, use_dflash);
     q::Model& model = *L.model;
     {
         std::string log;

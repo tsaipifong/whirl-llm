@@ -2,14 +2,16 @@
 // did this inline, the CLI called qwen35::Config::fromGguf directly): general.architecture -> model::findArch (the
 // table of src/model/arch_registry.h), an unsupported name -> ModelError UnsupportedArch with the table's text (the
 // same code and text Config::fromGguf throws), else the module and its config (ArchModule::fromGguf).
-// Header-only: both callers already include whirl/model.h (ModelError).
+// Header-only; it includes the error type and the config only (model/qwen35/model_error.h, whirl/model_types.h), not the
+// Model class (arch025-cli2, SC-10 (1): was whirl/model.h and its 39-header closure).
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 
 #include "model/arch_registry.h"
+#include "model/qwen35/model_error.h"  // qwen35::ModelError
 #include "whirl/gguf.h"
-#include "whirl/model.h"
+#include "whirl/model_types.h"  // qwen35::Config
 
 #include <string_view>
 
