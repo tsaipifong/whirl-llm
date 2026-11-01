@@ -767,10 +767,10 @@
               "isolation: header-only over model.arch_registry and whirl/model.h (ModelError); no own iso program"]
   },
   "server.engine": {
-   "id": "N4", "desc": "the server engine (class Engine, src/server/engine.h): engine.cpp = construction, the request lifecycle and runLoop's scheduling phases; arch025-N4e / N4f split the rest of its member functions by concern, verbatim: engine_queue.cpp (the request queue: stop, runOnLoop, submitAndWait, abortQueued, the reaper), engine_pages.cpp (checkpoints, KV pages, shared prefix checkpoints), engine_tier.cpp (the scheduler's half of the host tiers), engine_prefill.cpp (prefill phases, decode floor), engine_decode.cpp (the decode cycle and its phases, drafts, DFlash2 context); engine_internal.h is what they include beyond engine.h (CycleProf from server.cycle_prof, KvPoolFull from server.engine_types, the log). Member groups are components (N4a SampleBuffers, N4b ImageEmbeddings, N4c BatchStats, N4f SpecState spec_ / FloorState fl_). Member declaration order = destruction order (pool_ / ps_ / tb_ / kv_arrays_ pinned by comments) is kept by every split (scratch/a25_lane1b/pin_member_order.py against 2d166f4). arch025-engine S10-S16: the component files left this module (arch025-reg, PLAN N4-reg: server.job_queue engine_queue.*, server.slot_end engine_end.*, server.prefill engine_prefill.*, server.spec_cycle engine_cycle.h + engine_decode.cpp, server.slot_start engine_start.*, server.tier_glue engine_tierglue.h + engine_tier.cpp, server.scheduler engine_sched.*); what is left is the core L10 (DESIGN v3 2.3): construction / assembly, the EngineApi forwarders and the status calls",
+   "id": "N4", "desc": "the server engine's core (class Engine, src/server/engine.{h,cpp} + engine_internal.h; progress/arch025-engine.DESIGN.md v3 2.3 L10 / 2.5, after the arch025-engine split S1-S16): it owns core.shared (the model, backend, options, context, slots, cache stack, tiers, vision) and every component (server.job_queue jq_, slot_cache sc_, governor gv_, vram_watch vw_, slot_end se_, prefill pf_, spec_cycle cyc_, slot_start ss_, tier_glue tg_, scheduler sch_, drafter_ctx dc_) and binds their references in its constructor - the assembly point only (DESIGN v3 2.6 rule A); what else is left: allocState / allocStateMeasured / initPool / attachVision (startup), the one-line EngineApi forwarders to the components (nextJobId / submitAndWait / beginBuilding / endBuilding / runLoop / stop / runOnLoop / attachTier / setVramProbe / setGovernor / governorJson / ctxPublished), health / facts / stats and the startup setters (setCtx / setNumerics / setStartup / setKvSsdMode). No scheduling, queue, prefill, decode, slot or tier logic (those moved verbatim to the components, arch025-reg registered their files). Member declaration order = destruction order (pool_ / ps_ / tb_ / kv_arrays_ pinned by comments) is pinned by member_order_check. Isolated by tests/iso/server.engine (arch025-regb2: engine.cpp over the real components; the include mutants name server/server_main.h)",
    "paths": ["src/server/engine.cpp", "src/server/engine.h", "src/server/engine_internal.h"],
    "lands_on": "arch025-lane1b (lane 1 leg 3, registration with N4a; leg 4 N4e / N4f split files)",
-   "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance",
+   "steps": ["cpu_iso_server_engine", "cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance",
              "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_balance": 2, "srv_fast": 2,
             "srv_cache_precise": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_vis": 1},
@@ -784,9 +784,8 @@
    "paths": ["src/server/engine_queue.cpp", "src/server/engine_queue.h"],
    "lands_on": "arch025-engine S10-S16 + E2/E3 (files); registered by arch025-reg (PLAN N4-reg a)",
    "callers": "rdeps",
-   "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
+   "steps": ["cpu_iso_server_job_queue", "cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_balance": 2, "srv_fast": 2, "srv_cache_precise": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_vis": 1},
-   "pending": [{"step": "cpu_iso_server_job_queue", "by": "arch025 N4-reg part b (iso manifests, DESIGN v3 7 E1 / E5)"}],
    "manual": ["whirl-server-tests (all: the end-to-end engine tests on MockModel / NullBackend) and whirl-pins"]
   },
   "server.slot_end": {
@@ -795,9 +794,8 @@
    "paths": ["src/server/engine_end.cpp", "src/server/engine_end.h"],
    "lands_on": "arch025-engine S10-S16 + E2/E3 (files); registered by arch025-reg (PLAN N4-reg a)",
    "callers": "rdeps",
-   "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
+   "steps": ["cpu_iso_server_slot_end", "cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_balance": 2, "srv_fast": 2, "srv_cache_precise": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_vis": 1},
-   "pending": [{"step": "cpu_iso_server_slot_end", "by": "arch025 N4-reg part b (iso manifests, DESIGN v3 7 E1 / E5)"}],
    "manual": ["whirl-server-tests (all: the end-to-end engine tests on MockModel / NullBackend) and whirl-pins"]
   },
   "server.prefill": {
@@ -806,9 +804,8 @@
    "paths": ["src/server/engine_prefill.cpp", "src/server/engine_prefill.h"],
    "lands_on": "arch025-engine S10-S16 + E2/E3 (files); registered by arch025-reg (PLAN N4-reg a)",
    "callers": "rdeps",
-   "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
+   "steps": ["cpu_iso_server_prefill", "cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_balance": 2, "srv_fast": 2, "srv_cache_precise": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_vis": 1},
-   "pending": [{"step": "cpu_iso_server_prefill", "by": "arch025 N4-reg part b (iso manifests, DESIGN v3 7 E1 / E5)"}],
    "manual": ["whirl-server-tests (all: the end-to-end engine tests on MockModel / NullBackend) and whirl-pins"]
   },
   "server.spec_cycle": {
@@ -817,9 +814,8 @@
    "paths": ["src/server/engine_cycle.h", "src/server/engine_decode.cpp"],
    "lands_on": "arch025-engine S10-S16 + E2/E3 (files); registered by arch025-reg (PLAN N4-reg a)",
    "callers": "rdeps",
-   "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
+   "steps": ["cpu_iso_server_spec_cycle", "cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_balance": 2, "srv_fast": 2, "srv_cache_precise": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_vis": 1},
-   "pending": [{"step": "cpu_iso_server_spec_cycle", "by": "arch025 N4-reg part b (iso manifests, DESIGN v3 7 E1 / E5)"}],
    "manual": ["whirl-server-tests (all: the end-to-end engine tests on MockModel / NullBackend) and whirl-pins"]
   },
   "server.slot_start": {
@@ -828,9 +824,8 @@
    "paths": ["src/server/engine_start.cpp", "src/server/engine_start.h"],
    "lands_on": "arch025-engine S10-S16 + E2/E3 (files); registered by arch025-reg (PLAN N4-reg a)",
    "callers": "rdeps",
-   "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
+   "steps": ["cpu_iso_server_slot_start", "cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_balance": 2, "srv_fast": 2, "srv_cache_precise": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_vis": 1},
-   "pending": [{"step": "cpu_iso_server_slot_start", "by": "arch025 N4-reg part b (iso manifests, DESIGN v3 7 E1 / E5)"}],
    "manual": ["whirl-server-tests (all: the end-to-end engine tests on MockModel / NullBackend) and whirl-pins"]
   },
   "server.tier_glue": {
@@ -839,9 +834,8 @@
    "paths": ["src/server/engine_tier.cpp", "src/server/engine_tierglue.h"],
    "lands_on": "arch025-engine S10-S16 + E2/E3 (files); registered by arch025-reg (PLAN N4-reg a)",
    "callers": "rdeps",
-   "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
+   "steps": ["cpu_iso_server_tier_glue", "cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_balance": 2, "srv_fast": 2, "srv_cache_precise": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_vis": 1},
-   "pending": [{"step": "cpu_iso_server_tier_glue", "by": "arch025 N4-reg part b (iso manifests, DESIGN v3 7 E1 / E5)"}],
    "manual": ["whirl-server-tests (all: the end-to-end engine tests on MockModel / NullBackend) and whirl-pins"]
   },
   "server.scheduler": {
@@ -850,9 +844,8 @@
    "paths": ["src/server/engine_sched.cpp", "src/server/engine_sched.h"],
    "lands_on": "arch025-engine S10-S16 + E2/E3 (files); registered by arch025-reg (PLAN N4-reg a)",
    "callers": "rdeps",
-   "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
+   "steps": ["cpu_iso_server_scheduler", "cpu_server", "cpu_pins", "cpu_tsa", "cpu_engine_split", "cpu_member_order", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_balance": 2, "srv_fast": 2, "srv_cache_precise": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_vis": 1},
-   "pending": [{"step": "cpu_iso_server_scheduler", "by": "arch025 N4-reg part b (iso manifests, DESIGN v3 7 E1 / E5)"}],
    "manual": ["whirl-server-tests (all: the end-to-end engine tests on MockModel / NullBackend) and whirl-pins"]
   },
   "server.decode_floor": {
@@ -861,9 +854,8 @@
    "paths": ["src/server/decode_floor.h"],
    "lands_on": "arch025-reg (PLAN N4-reg a, SC-14)",
    "callers": "rdeps",
-   "steps": ["cpu_server", "srv_mt_precise", "srv_balance"],
+   "steps": ["cpu_iso_server_decode_floor", "cpu_server", "srv_mt_precise", "srv_balance"],
    "gpus": {"srv_mt_precise": 1, "srv_balance": 1},
-   "pending": [{"step": "cpu_iso_server_decode_floor", "by": "arch025 N4-reg part b (iso manifests, DESIGN v3 7 E1 / E5)"}],
    "manual": ["whirl-server-tests decode_floor / concurrency_floor"]
   },
   "server.log": {
@@ -872,8 +864,7 @@
    "paths": ["src/server/log.*"],
    "lands_on": "arch025-reg (PLAN N4-reg a, SC-14)",
    "callers": "rdeps",
-   "steps": ["cpu_server", "cpu_logscan_selftest"],
-   "pending": [{"step": "cpu_iso_server_log", "by": "arch025 N4-reg part b (iso manifests, DESIGN v3 7 E1 / E5)"}],
+   "steps": ["cpu_iso_server_log", "cpu_server", "cpu_logscan_selftest"],
    "manual": ["server log line format: tools/gates/server_log_scan.ps1 and startup_lines.py read these lines"]
   },
   "server.engine_split_tools": {
