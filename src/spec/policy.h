@@ -53,6 +53,8 @@ std::vector<std::uint32_t> draftVocabIds(std::span<const std::uint32_t> ids, std
                                          std::span<const std::uint32_t> required, std::uint32_t* added = nullptr);
 // directory of the running executable ("" if unknown)
 std::string exeDirectory();
+// exeDirectory() of the executable at `exe` (the path as GetModuleFileNameW returns it)
+std::string exeDirectoryOf(const std::wstring& exe);
 // What WHIRL_DRAFT_VOCAB selects. Unset = the embedded 64k subset by default (only applied to a
 // model draftVocabDefaultFits accepts); "64k" = the embedded subset explicitly; "off" / "0" / "" =
 // the full vocabulary; N = the first N rows (old experiment); "48k" etc. = <dir>/draft_vocab/

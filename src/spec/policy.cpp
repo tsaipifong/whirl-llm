@@ -9,6 +9,7 @@
 #include "whirl/vismap.h"  // image_id_base (Ngram::lookup)
 
 #include "whirl/common.h"  // widen / narrow (bug-envpaths)
+#include "platform/fs.h"  // longPathForm (arch025-n2: readDraftVocab)
 #include "platform/proc.h"  // exePath (arch025 PL4)
 
 #include <algorithm>
@@ -214,7 +215,10 @@ BatchDrafts batchDraftsFrom(BatchDrafts batch_drafts, const std::string& s) {
 }
 
 std::vector<u32> readDraftVocab(const std::string& path) {
-    std::ifstream f(std::filesystem::path(widen(path)), std::ios::binary | std::ios::ate);  // bug-envpaths: path is UTF-8
+    // bug-envpaths: path is UTF-8. arch025-n2 (SC-2b): opened in its long-path form (Rust std get_long_path at the open:
+    // unchanged under 248 characters and for \\?\ / \??\), so <plain exe folder of 233+ chars>\draft_vocab\subset_48k.bin
+    // opens without long-path support; the messages keep the path as given
+    std::ifstream f(std::filesystem::path(platform::fs::longPathForm(widen(path))), std::ios::binary | std::ios::ate);
     if (!f) throw std::runtime_error("draft vocabulary file not found: " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0 || n % 4 != 0) throw std::runtime_error("draft vocabulary file size is not a multiple of 4: " + path);
@@ -248,8 +252,14 @@ std::vector<u32> draftVocabIds(std::span<const u32> ids, u32 n_rows, std::span<c
 std::string exeDirectory() {
     // arch025 PL4: GetModuleFileNameW through platform::proc (same buffer and size); the dead non-Windows readlink
     // branch is gone (WHIRL builds for Windows only; a port adds a proc implementation, not a branch here)
-    const std::wstring exe = platform::proc::exePath();
+    return exeDirectoryOf(platform::proc::exePath());
+}
+
+std::string exeDirectoryOf(const std::wstring& exe) {
     if (exe.empty()) return {};
+    // arch025-lpath2 (review F1): the folder in the form the program was started with, a \\?\ prefix included: the files
+    // next to the exe are joined under it with backslashes (draftVocabFile), which opens at any length and for any name
+    // (as llama.cpp ggml-backend-reg.cpp does); taking the prefix off lost them for folders of 233-247 characters
     return narrow(std::filesystem::path(exe).parent_path().wstring());  // bug-envpaths: UTF-8 (was .string(): ANSI)
 }
 

@@ -257,3 +257,15 @@ std::string tierLayoutWarn(std::uint64_t page_row, std::uint64_t per_tok) {
 }
 
 }  // namespace whirl::server
+
+namespace whirl::server {
+std::optional<std::string> ssdDirForExeId(const std::optional<std::string>& ssd_dir, std::uint64_t exe_id, std::string_view exe_path,
+                                          std::string* warn) {
+    if (!ssd_dir || exe_id != 0) return ssd_dir;
+    if (warn)
+        *warn = std::format("kv tier: cannot read the size / date of this program's file ({}); SSD tier off (an SSD cache entry "
+                            "of another WHIRL build could not be told apart)",
+                            exe_path);
+    return std::nullopt;
+}
+}  // namespace whirl::server

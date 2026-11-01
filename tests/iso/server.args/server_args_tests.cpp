@@ -158,6 +158,25 @@ void testKvTierSetup() {
     std::printf("kv tier setup: %zu cases == c1ca7ce\n", n);
 }
 
+// arch025-lpath (3): the exe identity 0 branch of the server's tier setup (arch025-d7 D7.1, 56c4da0): no SSD directory and
+// the warning line; the text is the one server_main.cpp printed inline, byte for byte
+void testSsdDirForExeId() {
+    using whirl::server::ssdDirForExeId;
+    std::string warn;
+    const std::optional<std::string> dir = std::string("D:\\kv");
+    ISO_CHECK(ssdDirForExeId(dir, 0x1234, "C:\\w\\whirl.exe", &warn) == dir);
+    ISO_CHECK(warn.empty());
+    ISO_CHECK(ssdDirForExeId(std::nullopt, 0, "C:\\w\\whirl.exe", &warn) == std::nullopt);
+    ISO_CHECK(warn.empty());  // no SSD tier asked for: nothing to turn off, nothing to say
+    ISO_CHECK(ssdDirForExeId(dir, 0, "C:\\w\\whirl.exe", &warn) == std::nullopt);
+    ISO_CHECK(warn == "kv tier: cannot read the size / date of this program's file (C:\\w\\whirl.exe); SSD tier off (an SSD cache "
+                      "entry of another WHIRL build could not be told apart)");
+    ISO_CHECK(ssdDirForExeId(std::string(), 0, "", &warn) == std::nullopt);  // an empty (but given) directory is a directory
+    ISO_CHECK(warn == "kv tier: cannot read the size / date of this program's file (); SSD tier off (an SSD cache entry of "
+                      "another WHIRL build could not be told apart)");
+    ISO_CHECK(ssdDirForExeId(dir, 0, "x", nullptr) == std::nullopt);  // warn is optional
+}
+
 // ---- leg 10 part B: verbatim c1ca7ce src/server/server_main.cpp (CLI over env; env read only without the flag) ---------
 // :1002 (makeEngine) --decode-min-tps / WHIRL_DECODE_MIN_TPS (default 20 inside the env reader)
 std::uint32_t old_decodeMin(const std::optional<std::uint32_t>& cli, std::uint32_t env, int& reads) { return cli ? *cli : (++reads, env); }
@@ -215,5 +234,5 @@ void testCliOverEnv() {
 }
 
 int main(int argc, char** argv) {
-    return iso::run("server.args", {{"defaults", testDefaults}, {"flags", testFlags}, {"resolve", testResolve}, {"served_model_name", testServedModelName}, {"kv_ssd_mode", testKvSsdMode}, {"kv_tier_setup", testKvTierSetup}, {"cli_over_env", testCliOverEnv}}, argc, argv);
+    return iso::run("server.args", {{"defaults", testDefaults}, {"flags", testFlags}, {"resolve", testResolve}, {"served_model_name", testServedModelName}, {"kv_ssd_mode", testKvSsdMode}, {"kv_tier_setup", testKvTierSetup}, {"cli_over_env", testCliOverEnv}, {"ssd_dir_for_exe_id", testSsdDirForExeId}}, argc, argv);
 }

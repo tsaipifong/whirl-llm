@@ -119,11 +119,17 @@ std::FILE* openStdio(const wchar_t* path, const wchar_t* mode);
 // UTF-8 -> UTF-16 with MB_ERR_INVALID_CHARS (MultiByteToWideChar); false on invalid UTF-8 (out untouched). "" -> "".
 bool utf8ToWideStrict(std::string_view s, std::wstring* out);
 
-// arch025-d7 (D7.1): the form of path a Win32 file call accepts whatever its length (Rust std's maybe_verbatim): a path
-// shorter than 248 characters, one that already starts with \\?\ or \\.\, or one that is neither drive-absolute nor UNC
-// after GetFullPathNameW comes back unchanged; a longer one is made absolute (GetFullPathNameW) and gets \\?\ (UNC:
-// \\?\UNC\server\share\...). A process that is not long-path aware (no manifest, or LongPathsEnabled = 0, the Windows
-// default) cannot open a path past MAX_PATH in the normal form.
+// arch025-d7 (D7.1): the form of path a Win32 file call accepts whatever its length (Rust std's get_long_path /
+// maybe_verbatim): a path shorter than 248 characters comes back unchanged, and so does one that starts with \\?\ or \??\;
+// any other is made absolute and normalised (GetFullPathNameW) and gets the prefix its result needs: X:\... -> \\?\X:\...,
+// \\server\share\... -> \\?\UNC\server\share\..., \\.\... -> \\?\... (arch025-lpath2: \\.\ is parsed, so MAX_PATH
+// applies to it), a result that starts with \\?\ or \??\ (from //?/ ...) as it is; anything else: path unchanged. A
+// process that is not long-path aware (no manifest, or LongPathsEnabled = 0, the Windows default) cannot open a path past
+// MAX_PATH in the normal form.
 std::wstring longPathForm(const std::wstring& path);
+// arch025-lpath (2): the form of a DIRECTORY under which files with names of up to `reserve` characters are made: the
+// long-path form when dir + a backslash + a name of `reserve` characters needs it (longPathForm of that path, the name
+// taken off again), else dir unchanged. A directory of 230 characters can be opened itself, its files cannot.
+std::wstring longPathFormDir(const std::wstring& dir, std::size_t reserve);
 
 }  // namespace whirl::platform::fs
