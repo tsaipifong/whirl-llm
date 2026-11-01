@@ -246,13 +246,19 @@ def pin_check(cutp, pinp, reviews=REVIEWS, base="auto"):
                    f"tool change needs a row sha256<TAB>review report<TAB>what changed<TAB>author, added after the review)")
         return bad
     g = base["git"] if base else None
+    # arch025-pinfix (INT11 cpu_engine_split :694): SELF-REVIEWED means THIS row (all four columns, whitespace-normalised)
+    # was already in the ledger at the pin commit. Another row of the same pin there - the author row "review pending" that
+    # every pin change since S8 carries - is not a review (row_problem rejects it) and must not poison a later review row.
+    norm = lambda cols: tuple(" ".join(c.split()) for c in (list(cols[:4]) + [""] * 4)[:4])
+    pin_rows = {norm(x.split("\t")) for x in ((g or {}).get("pin_commit_reviews") or "").split("\n")
+                if x.strip() and x.split("\t")[0].strip() == ps}
     probs = []
     for q in mine:
         pr = row_problem(q, ps)
         if pr is None and g is not None:
             if g["head_pin"] != ptext:
                 pr = "SELF-REVIEWED: the pin change is not committed; its review row must land in a later commit than the pin"
-            elif g["pin_commit"] and any(x.split("\t")[0].strip() == ps for x in (g["pin_commit_reviews"] or "").split("\n")):
+            elif g["pin_commit"] and norm(q) in pin_rows:
                 pr = f"SELF-REVIEWED: the row was added in the same commit as the pin change ({g['pin_commit'][:12]})"
         if pr is None:
             return bad
