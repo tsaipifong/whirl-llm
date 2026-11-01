@@ -23,6 +23,9 @@ AND compile with the product flags (/I src /I include), which is what makes the 
                        helpers share a name with engine.h's (tier_bridge.cpp: kv_page, msSince), where the line at the
                        top would not compile with the product flags either; the product source stays as it is)
   include_relative     gains #include "<relative path>/server/engine.h"                -> isolated compile C1083
+                       (mutincfile PATH, arch025-regb2: both include mutants name src/PATH instead, for the module
+                       that declares engine.h itself - server.engine names server/server_main.h; a manifest whose
+                       src / hdr lines hold the include mutants' header is refused: that case could never be caught)
   call_<sym>           a function appended at the end calls a symbol outside the tree  -> isolated link LNK2019
        hip    whirl::hip::deviceCount       (src/hip, whirl_hip: the device runtime)
        log    whirl::server::Log::line      (src/server/log.cpp, whirl_server_core)
@@ -173,6 +176,7 @@ class Manifest:
         self.exe = None
         self.mutate = None
         self.mutinc = "top"
+        self.mutincfile = ENGINE_H
         self.mutsyms = []
         self.syslibs = []
         self.items = []
@@ -197,6 +201,12 @@ class Manifest:
                 if p not in ("top", "end"):
                     raise SetupError(f"{self.rel}: mutinc {p} (known: top, end)")
                 self.mutinc = p
+            elif kind == "mutincfile":
+                # arch025-regb2: the header (path under src/) the include mutants name instead of server/engine.h, for the
+                # module that declares engine.h itself (server.engine: server/server_main.h, server.startup's header)
+                if not os.path.isfile(os.path.join(root, "src", p)):
+                    raise SetupError(f"{self.rel}: mutincfile {p}: no such file src/{p}")
+                self.mutincfile = p
             elif kind == "mutsym":
                 if p not in SYMS:
                     raise SetupError(f"{self.rel}: unknown mutsym {p} (known: {', '.join(SYMS)})")
@@ -240,6 +250,11 @@ class Manifest:
         for p in self.declbase:
             if ("hdr", p) not in self.items or p == self.mutate or not self.header_only:
                 raise SetupError(f"{self.rel}: declbase {p} must be a hdr line of a header-only module, not its mutate header")
+        # arch025-regb2: an include mutant naming a header the manifest declares compiles in the isolated build too (the
+        # case could never be caught): refused, the manifest names another header with mutincfile
+        if any(k in ("src", "hdr") and p == "src/" + self.mutincfile for k, p in self.items):
+            raise SetupError(f"{self.rel}: src/{self.mutincfile} is declared, so the include mutants naming it would compile; "
+                             "name an undeclared header with mutincfile")
         if self.mutate and (("src", self.mutate) not in self.items) and not self.header_only:
             raise SetupError(f"{self.rel}: mutate {self.mutate} is not one of its src or hdr lines")
         # arch025-iso4-fix (REVIEW 7): a define reaches the module's product sources too; one that a product file (not under
@@ -342,18 +357,19 @@ def stage(root, man, d):
     return out
 
 
-def relative_engine(src_rel):
-    # from the source's directory to src/server/engine.h, as a relative include ("../server/engine.h" from src/sampling)
+def relative_engine(src_rel, target=ENGINE_H):
+    # from the source's directory to src/server/engine.h (or the manifest's mutincfile), as a relative include
+    # ("../server/engine.h" from src/sampling)
     if not src_rel.startswith("src/"):
         # arch025-lane2 leg 6: a header under include/ (include/whirl/model_types.h): up to the root, then src/
-        return "/".join([".."] * (len(src_rel.split("/")) - 1) + ["src", ENGINE_H])
+        return "/".join([".."] * (len(src_rel.split("/")) - 1) + ["src", target])
     up = len(staged(src_rel).split("/")) - 1
-    return "/".join([".."] * up + [ENGINE_H]) if up else ENGINE_H
+    return "/".join([".."] * up + [target]) if up else target
 
 
-def mutate(text, case, src_rel, inc_at="top"):
+def mutate(text, case, src_rel, inc_at="top", target=ENGINE_H):
     if case in ("include_engine", "include_relative"):
-        inc = ENGINE_H if case == "include_engine" else relative_engine(src_rel)
+        inc = target if case == "include_engine" else relative_engine(src_rel, target)
         if inc_at == "end":
             return text + ("" if text.endswith("\n") else "\n") + f'#include "{inc}"  // iso mutant (mutinc end)\n'
         m = re.search(r'^#include "[^"]+"[^\n]*\n', text, re.M)
@@ -523,7 +539,7 @@ def product_compile_header(root, rel_hdr, text, tag, env, d, man, case=""):
         probe = f'#include "_iso_mut_{tag}.h"\n'
         write_copy = True
         if probe_plan(rel_hdr, case, engine_includes(root)) == "engine_first":
-            inc = ENGINE_H if case == "include_engine" else relative_engine(rel_hdr)
+            inc = man.mutincfile if case == "include_engine" else relative_engine(rel_hdr, man.mutincfile)
             probe = f'#include "{inc}"\n#include "{os.path.basename(rel_hdr)}"\n'
             write_copy = False
         try:
@@ -613,7 +629,8 @@ def selftest():
         lines.append(f"{'ok  ' if ok else 'FAIL'} selftest {name}")
 
     with tempfile.TemporaryDirectory() as root:
-        for p in ("include/whirl/t.h", "kernels/k.h", "src/a/t.cpp", "tests/iso/t/t_tests.cpp"):
+        for p in ("include/whirl/t.h", "kernels/k.h", "src/a/t.cpp", "tests/iso/t/t_tests.cpp", "src/server/engine.h",
+                  "src/server/server_main.h"):
             os.makedirs(os.path.join(root, os.path.dirname(p)), exist_ok=True)
             open(os.path.join(root, p), "w").close()
         mp = os.path.join(root, "tests", "iso", "t", "isolation.txt")
@@ -671,6 +688,21 @@ def selftest():
              man(head + "hdr kernels/k.h\nmutate include/whirl/t.h\ndeclbase kernels/k.h\n") is not None)
         case("declbase naming no hdr line refused", man(head + "mutate include/whirl/t.h\ndeclbase kernels/k.h\n") is None)
         case("declbase naming the mutate header refused", man(head + "mutate include/whirl/t.h\ndeclbase include/whirl/t.h\n") is None)
+        # arch025-regb2: the include mutants' header must be outside the tree (server.engine declares server/engine.h, so
+        # its include mutants name server/server_main.h through `mutincfile`)
+        esrc = head + "src src/a/t.cpp\nmutate src/a/t.cpp\nhdr src/server/engine.h\n"
+        case("include mutant header that is a hdr line refused", man(esrc) is None)
+        me = man(esrc + "mutincfile server/server_main.h\n")
+        case("mutincfile names the include mutants' header",
+             me is not None and me.mutincfile == "server/server_main.h"
+             and '#include "server/server_main.h"  // iso mutant' in mutate('#include "a.h"\n', "include_engine", "src/server/x.cpp",
+                                                                          "top", me.mutincfile)
+             and '#include "../server/server_main.h"  // iso mutant' in mutate('#include "a.h"\n', "include_relative",
+                                                                             "src/server/x.cpp", "top", me.mutincfile))
+        case("mutincfile naming no src/ header refused", man(esrc + "mutincfile server/nope.h\n") is None)
+        case("mutincfile that is a hdr line refused", man(esrc + "hdr src/server/server_main.h\nmutincfile server/server_main.h\n") is None)
+        case("no mutincfile: the include mutants name server/engine.h",
+             m2 is not None and m2.mutincfile == ENGINE_H)
         mk = man("module t\nexe t-tests\ntestsrc tests/iso/t/t_tests.cpp\nhdr kernels/k.h\nmutate kernels/k.h\n")
         case("header outside src/ include/ tests/ is staged next to mod/",
              mk is not None and mk.header_only and mutate_target(mk, "D", {"src": []}).replace(chr(92), "/") == "D/kernels/k.h")
@@ -728,7 +760,7 @@ def check_module(root, man, work, env, mutants, keep):
                 lines.append(tail(out, 14))
         else:
             src_text = open(os.path.join(root, man.mutate), encoding="utf-8").read()
-            mut = mutate(src_text, name, man.mutate, man.mutinc)
+            mut = mutate(src_text, name, man.mutate, man.mutinc, man.mutincfile)
             target = mutate_target(man, d, files)
             with open(target, "w", encoding="utf-8", newline="\n") as f:
                 f.write(mut)
