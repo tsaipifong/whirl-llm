@@ -973,6 +973,7 @@ def git_cases(sha):
     rp = os.path.join(d, "REVIEW.md"); open(rp, "w", encoding="utf-8").write(f"pin sha256: {psha}\nreviewer: rev-agent\n")
     led = os.path.join(d, "reviews.tsv")
     row = f"{psha}\t{rp} (rev-agent)\tcut edit\tstep-agent"
+    arow = f"{psha}\tauthor row (step-agent); review pending\tcut edit\tstep-agent"   # arch025-pinfix GP1-GP3
     base_led = open(LEDGER, encoding="utf-8").read()
     open(led, "w", encoding="utf-8", newline="\n").write(base_led.rstrip("\n") + "\n" + row + "\n")
     ptxt = open(pin, encoding="utf-8").read()
@@ -988,7 +989,16 @@ def git_cases(sha):
             ("G5", "empty range (merge-base == HEAD on the integration branch), only a '<sha> x x' row -> REVIEW ROW INVALID", "empty",
              r"REVIEW ROW INVALID .*needs 4 non-empty columns"),
             ("G6", "S0d (S0c review consider 3): a base without the cut file (an integration branch without arch025-engine) fails closed",
-             dict(mk(), cut=None), r"BASE CUT MISSING")):
+             dict(mk(), cut=None), r"BASE CUT MISSING"),
+            # arch025-pinfix (INT11 cpu_engine_split :694): the pin commit adds an author row "review pending"; that row is
+            # not a review and must not make the later valid review row SELF-REVIEWED (only the same row in the pin commit does)
+            ("GP1", "pinfix: pin commit adds an author row 'review pending', a later commit adds the valid review row -> ok",
+             mk(pin_commit_reviews=base_led + arow + "\n"), None),
+            ("GP2", "pinfix: the valid review row itself is in the pin commit (with the author row) -> SELF-REVIEWED",
+             mk(pin_commit_reviews=base_led + arow + "\n" + row.replace("\t", " \t ") + "  \n"),
+             r"REVIEW ROW INVALID .*SELF-REVIEWED: the row was added in the same commit"),
+            ("GP3", "pinfix: only the author row 'review pending' (pin commit) -> REVIEW ROW INVALID (pending)",
+             mk(pin_commit_reviews=base_led + arow + "\n"), r"REVIEW ROW INVALID .*review column says pending")):
         try:
             if gid == "G5":
                 led5 = os.path.join(d, "reviews_xx.tsv")
@@ -999,6 +1009,11 @@ def git_cases(sha):
                 led4 = os.path.join(d, "reviews_s0b_shape.tsv")
                 open(led4, "w", encoding="utf-8").write(f"{sha}\tprogress/arch025-engine.S0b.REVIEW.md (s0b-review)\tS0b row shape\n")
                 lines = esc.pin_check(CUT, PIN, led4, None)
+            elif gid in ("GP1", "GP2", "GP3"):   # the ledger at HEAD: base + author row (+ the review row except GP3)
+                ledp = os.path.join(d, f"reviews_{gid}.tsv")
+                open(ledp, "w", encoding="utf-8", newline="\n").write(
+                    base_led.rstrip("\n") + "\n" + arow + "\n" + ("" if gid == "GP3" else row + "\n"))
+                lines = esc.pin_check(CUT, pin, ledp, base)
             else:
                 lines = esc.pin_check(CUT, pin, led, base)
             txt = "\n".join(lines)
@@ -1010,7 +1025,7 @@ def git_cases(sha):
     return out
 
 
-GIT_IDS = {f"G{i}" for i in range(1, 7)}   # git_cases() (G1..G6)
+GIT_IDS = {f"G{i}" for i in range(1, 7)} | {"GP1", "GP2", "GP3"}   # git_cases() (G1..G6, arch025-pinfix GP1..GP3)
 
 
 def main():
