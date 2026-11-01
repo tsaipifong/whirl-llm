@@ -1,0 +1,21 @@
+# ARCH-1 8.5 isolation check of server.decode_floor (registered by arch025-reg SC-14; manifest arch025-regb2, PLAN
+# N4-reg b2): a header-only module (src/server/decode_floor.h, class DecodeFloor: pure bookkeeping on caller times), so
+# the boundary is the test program itself - it includes only the header, built with that copy as the ONLY include path and
+# linked to nothing else (tools/gates/iso_check.py header-only mode: `mutate` names an hdr line; tests/iso/model.types).
+# `mutinc end`: server/engine.h includes decode_floor.h back, so an engine include at the top would see the module
+# half-read (the product flags compile must pass; the model.types precedent).
+# declared dependencies: none (the C++ standard library only).
+module    server.decode_floor
+exe       whirl-iso-server-decode-floor-tests
+mutate    src/server/decode_floor.h
+mutinc    end
+mutsym    hip
+mutsym    engine
+mutsym    log
+# module headers
+hdr       src/server/decode_floor.h
+# declared dependency headers (include closure of the sources above and the test)
+# test program
+testsrc   tests/iso/server.decode_floor/decode_floor_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

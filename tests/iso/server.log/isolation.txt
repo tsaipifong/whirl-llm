@@ -1,0 +1,40 @@
+# ARCH-1 8.5 isolation check of server.log (registered by arch025-reg SC-14; manifest arch025-regb2, PLAN N4-reg b2):
+# the module's sources, its DECLARED dependencies and the ONLY headers they may see. Format: tests/sampling/isolation.txt;
+# read by cmake/iso.cmake and tools/gates/iso_check.py.
+# module: src/server/log.{h,cpp} (the 'yyyy-mm-dd HH:MM:SS.mmm L message' lines on stderr, the log file and a test hook).
+# declared dependencies: platform.time (src/platform/time_win.cpp, the local time of the stamp), platform.fs
+# (src/platform/fs_win.cpp, openStdio) and lib whirl's src/common/util.cpp (widen, the log file path) with the platform layer it
+# links (platform.args / platform.proc / platform.env: the tests/iso/server.image_embeddings set).
+# NOT declared: the engine, the model, the HIP layer, the KV host tier.
+module    server.log
+exe       whirl-iso-server-log-tests
+mutate    src/server/log.cpp
+mutsym    hip
+mutsym    engine
+mutsym    model
+mutsym    tier
+syslib    winmm.lib
+# module sources
+src       src/server/log.cpp
+# declared dependency sources
+src       src/common/util.cpp
+src       src/platform/time_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/args_win.cpp
+src       src/platform/proc_win.cpp
+src       src/platform/env_win.cpp
+# module headers
+hdr       src/server/log.h
+# declared dependency headers (include closure of the sources above and the test)
+hdr       include/whirl/common.h
+hdr       include/whirl/thread_annotations.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/platform/time.h
+# test program
+testsrc   tests/iso/server.log/log_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

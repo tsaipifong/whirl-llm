@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Included from cmake/server.cmake after whirl_sampling. One manifest per module: tests/sampling/isolation.txt and
-# tests/iso/<module>/isolation.txt (kinds: module, exe, lib, mutate, mutinc, mutsym, declbase, syslib, define, sdkinc, gen, src, hdr, testsrc, testhdr; see
+# tests/iso/<module>/isolation.txt (kinds: module, exe, lib, mutate, mutinc, mutincfile, mutsym, declbase, syslib, define, sdkinc, gen, src, hdr, testsrc, testhdr; see
 # tools/gates/iso_check.py; a header-only module has no src line and no object library). The listed files are copied into <build>/iso/<module>/{mod,test}/ (the leading src/
 # include/ tests/ dropped) and compiled from there:
 #   <lib>   OBJECT library of the module sources + the declared dependency sources; include path = iso/<module>/mod
@@ -50,7 +50,7 @@ function(whirl_iso_module _list)
         message(FATAL_ERROR "${_list}: unknown sdkinc '${_path}' (known: hip)")
       endif()
       list(APPEND _sdk ${_path})
-    elseif(_kind MATCHES "^(mutate|mutinc|mutsym|declbase)$")
+    elseif(_kind MATCHES "^(mutate|mutinc|mutincfile|mutsym|declbase)$")
       # iso_check.py only
     elseif(_kind STREQUAL "gen")
       # arch025-lane2 leg 5: a header the build generates (${CMAKE_BINARY_DIR}/generated/<path>, e.g. whirl/version.h,
