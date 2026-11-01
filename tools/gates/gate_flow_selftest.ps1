@@ -25,13 +25,19 @@
 #      fails twice; each step's log has its own output
 #   P3 a par step that fails once: FLAKY row as in a serial run; its retry runs after the section, alone
 #   P4 heavy par steps take the heavy-CPU lock ONCE for the section (one wait line, the first row says "cpu lock: waited"),
-#      no par step starts before the holder lets go, each child sees WHIRL_CPU_LOCK_HELD
+#      no par step starts before the holder lets go, each child sees WHIRL_CPU_LOCK_HELD (each child records what it saw
+#      in its own file, see RecordCmd / P11)
 #   P5 -Jobs 2: never more than 2 par steps at once (and 2 do overlap)
 #   P6 -Strict: par steps run serially; header "parallel: off (strict)"
 #   P7 WHIRL_GATE_QUIET_WAIT: the quiet script runs before each par step starts (-Who names the step)
 #   P8 each par step gets its own WHIRL_TEST_TMP and TMP / TEMP under <Work>\test_tmp\<step>
 #   P9 GPU steps are never run in parallel ("par" ignored)
 #   P10 WHIRL_GATE_JOBS sets the default concurrency; the header names the groups
+#   P11 (arch025-p4) what par steps record (P4 / P8: the variables a child saw) is read back for EVERY step when the
+#      children write their records at the same moment: test_pa's write stays open 3 s (a writer that lost the CPU between
+#      opening the file and writing, as beside a parallel compile) while test_pb / test_pc write theirs. One file per
+#      child (RecordCmd / Seen); with one shared file appended by Add-Content this case lost test_pb's record in both
+#      test-first runs (arch025-p4)
 param([string]$Work = "")
 # arch025-c2fu: set or REMOVE a process environment variable (see release_gate.ps1).
 function SetEnvOrRemove([string]$k, $v) {
@@ -222,6 +228,21 @@ try {
         $ev = @(foreach ($i in $ivs) { ,@($i[0], 1); ,@($i[1], -1) }) | Sort-Object @{ e = { $_[0] } }, @{ e = { $_[1] } }
         $cur = 0; $mx = 0; foreach ($e in $ev) { $cur += $e[1]; if ($cur -gt $mx) { $mx = $cur } }; $mx
     }
+    # what a par step saw (P4 / P8 / P11): every child writes its OWN file <case>_<name>.seen, the parent reads them after the
+    # gate (as the .iv files above, CTest / llama.cpp per-test output). Never one file appended by concurrent children:
+    # Add-Content opens with FileShare.ReadWrite, seeks to the end and writes at close, so two children at once write at
+    # the same offset and one line is lost without an error (arch025-p4: P4 saw 2 of 3 in 2 of 3 runs on 2026-11-01,
+    # 15 of 20 rounds of three synchronised writers; progress\arch025-p4.PRIOR_ART.md).
+    # RecordCmd: the command a child runs to record the value of the PowerShell expression $value; with $holdMs the write
+    # stays open that long (P11) and <case>_<name>.writing appears once it is open. Seen: one record per name, in $names
+    # order ("<none>" when a step wrote none).
+    function RecordCmd([string]$case, [string]$name, [string]$value, [int]$holdMs = 0) {
+        $v = if ($holdMs -gt 0) { "& { $value; 'open' | Set-Content '$Work\${case}_$name.writing'; Start-Sleep -Milliseconds $holdMs }" } else { $value }
+        "$v | Set-Content '$Work\${case}_$name.seen'"
+    }
+    function Seen([string]$case, [string[]]$names) {
+        @(foreach ($n in $names) { $t = @(Get-Content (Join-Path $Work "${case}_$n.seen") -ErrorAction SilentlyContinue); if ($t.Count) { $t -join "`n" } else { "<none>" } })
+    }
     # rows and verdict without the seconds and the tag (the run-to-run part)
     function Norm($r, [string]$tag) { @($r.sum | Select-Object -Skip 1 | ForEach-Object { ($_ -replace "\b\d+ s\b", "# s") -replace [regex]::Escape($tag), "TAG" }) }
     $light = { param($n) @{ name = $n; heavy = $false; gpu = $false; cmd = (StepCmd "'light $n`: ok'"); rx = "^light $n`: ok" } }
@@ -256,17 +277,16 @@ try {
     Check "P3 the retry started after every step of the section ended" ($ivf.Count -eq 2 -and $ivo.Count -eq 2 -and $ivf[1][0] -gt $endO) "flaky tries $($ivf.Count), retry start $(if ($ivf.Count -eq 2) { $ivf[1][0] }) section end $endO"
 
     # ---- P4 one lock for the section
-    $hl = Join-Path $Work "p4_held.txt"
-    $ex = "`"`$env:WHIRL_CPU_LOCK_HELD`" | Add-Content '$hl'"
+    $p4n = @("test_pa", "test_pb", "test_pc")
     # the holder lets go 8 s after the light step before the section ran (timing-independent, as L1)
     $h = Start-Holder "p4" 8 "$Work\p4.go"; $started += $h
     $go4 = @{ name = "test_l0"; heavy = $false; gpu = $false; cmd = (StepCmd "'go' | Set-Content '$Work\p4.go'; 'light test_l0: ok'"); rx = "^light test_l0: ok" }
-    $r = Gate "t_p4" (Steps "p4" @($go4, (ParStep "p4" "test_pa" 1000 "" $ex $true), (ParStep "p4" "test_pb" 1000 "" $ex $true), (ParStep "p4" "test_pc" 1000 "" $ex $true))) @("-Jobs", "4")
+    $r = Gate "t_p4" (Steps "p4" @(@($go4) + @($p4n | ForEach-Object { ParStep "p4" $_ 1000 "" (RecordCmd "p4" $_ "`"`$env:WHIRL_CPU_LOCK_HELD`"") $true }))) @("-Jobs", "4")
     $h.WaitForExit(30000) | Out-Null
     $rel = [long](Get-Content "$Work\holder_p4.released" -ErrorAction SilentlyContinue)
-    $iv = @(Ivs "p4" @("test_pa", "test_pb", "test_pc"))
+    $iv = @(Ivs "p4" $p4n)
     $minS = ($iv | ForEach-Object { $_[0] } | Measure-Object -Minimum).Minimum
-    $hv = @(Get-Content $hl -ErrorAction SilentlyContinue)
+    $hv = @(Seen "p4" $p4n)
     Check "P4 one 'cpu lock: busy' wait for the whole section; only the first row says 'cpu lock: waited'" ($r.rc -eq 0 -and @($r.out -match "cpu lock: busy").Count -eq 1 -and ($r.sum[2] -match "^PASS test_pa .*cpu lock: waited \d+ s") -and -not ($r.sum[1] -match "cpu lock") -and -not ($r.sum[3] -match "cpu lock") -and -not ($r.sum[4] -match "cpu lock")) "$(Last $r)"
     Check "P4 no par step started before the holder let go" ($iv.Count -eq 3 -and $rel -gt 0 -and $minS -gt $rel) "released $rel first start $minS"
     Check "P4 every child saw WHIRL_CPU_LOCK_HELD naming the section" ($hv.Count -eq 3 -and @($hv | Where-Object { $_ -match "^release gate t_p4/parallel test_pa\.\.test_pc" }).Count -eq 3 -and (MaxConc $iv) -ge 2) "seen: $($hv -join ' | ')"
@@ -292,10 +312,8 @@ try {
     Check "P7 WHIRL_GATE_QUIET_WAIT ran once before each par step (-Who names it), not for the light step" ($r.rc -eq 0 -and $q.Count -eq 2 -and @($q -match "who=release gate t_p7/test_pa").Count -eq 1 -and @($q -match "who=release gate t_p7/test_pb").Count -eq 1) "quiet calls: $($q -join ' | ')"
 
     # ---- P8 own temp folders
-    $tf8 = Join-Path $Work "p8_tmp.txt"
-    $ex = "`"`$env:WHIRL_TEST_TMP|`$env:TMP|`$env:TEMP`" | Add-Content '$tf8'"
-    $r = Gate "t_p8" (Steps "p8" @((ParStep "p8" "test_pa" 200 "" $ex), (ParStep "p8" "test_pb" 200 "" $ex))) @("-Jobs", "4")
-    $tl = @(Get-Content $tf8 -ErrorAction SilentlyContinue)
+    $r = Gate "t_p8" (Steps "p8" @("test_pa", "test_pb" | ForEach-Object { ParStep "p8" $_ 200 "" (RecordCmd "p8" $_ "`"`$env:WHIRL_TEST_TMP|`$env:TMP|`$env:TEMP`"") })) @("-Jobs", "4")
+    $tl = @(Seen "p8" @("test_pa", "test_pb"))
     $okT = $tl.Count -eq 2 -and @($tl | Where-Object { $p = $_ -split "\|"; $n = if ($p[0] -like "*\test_pa") { "test_pa" } else { "test_pb" }; $p[0] -like "*\work_t_p8\test_tmp\$n" -and $p[1] -like "$($p[0])\*" -and $p[2] -eq $p[1] }).Count -eq 2 -and ($tl[0] -split "\|")[0] -ne ($tl[1] -split "\|")[0]
     Check "P8 each par step has its own WHIRL_TEST_TMP (<Work>\test_tmp\<step>) and TMP = TEMP inside it" ($r.rc -eq 0 -and $okT) "seen: $($tl -join ' || ')"
 
@@ -311,6 +329,18 @@ try {
     SetEnvOrRemove "WHIRL_GATE_JOBS" $null
     $iv = @(Ivs "p10" $pn)
     Check "P10 WHIRL_GATE_JOBS=3: at most 3 at once (>= 2), header 'parallel: 1 group(s), 4 CPU steps, -Jobs 3'" ($r.rc -eq 0 -and $iv.Count -eq 4 -and (MaxConc $iv) -le 3 -and (MaxConc $iv) -ge 2 -and $r.sum[0] -match "parallel: 1 group\(s\), 4 CPU steps, -Jobs 3") "conc $(MaxConc $iv) | $($r.sum | Select-Object -First 1)"
+
+    # ---- P11 (arch025-p4) records written at the same moment are all kept (P4 lost one of three in 2 of 3 runs on
+    # 2026-11-01, scratch\a25_lpath\gate\gate_8060s\cpu_step_selftest.txt:154): test_pa's write stays open 3 s, test_pb and
+    # test_pc record while it is open
+    $wa = Join-Path $Work "p11_test_pa.writing"
+    $waitA = "for (`$i = 0; `$i -lt 600 -and -not (Test-Path '$wa'); `$i++) { Start-Sleep -Milliseconds 20 }"
+    $r = Gate "t_p11" (Steps "p11" @((ParStep "p11" "test_pa" 200 "" (RecordCmd "p11" "test_pa" "'seen by test_pa'" 3000)),
+                                    (ParStep "p11" "test_pb" 200 "" "$waitA; $(RecordCmd "p11" "test_pb" "'seen by test_pb'")"),
+                                    (ParStep "p11" "test_pc" 200 "" "$waitA; $(RecordCmd "p11" "test_pc" "'seen by test_pc'")"))) @("-Jobs", "4")
+    $sv = @(Seen "p11" @("test_pa", "test_pb", "test_pc"))
+    Check "P11 par steps that record at the same moment (one write open 3 s): every step's record is read back" ($r.rc -eq 0 -and (Test-Path $wa) -and
+        (@($sv | Sort-Object) -join "|") -eq "seen by test_pa|seen by test_pb|seen by test_pc") "exit $($r.rc), writing $(Test-Path $wa), seen: $($sv -join ' | ')"
 } finally {
     foreach ($p in $started) { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }
     foreach ($k in $keys) { SetEnvOrRemove $k $saved[$k] }
