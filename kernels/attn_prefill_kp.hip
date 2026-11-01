@@ -27,17 +27,7 @@ __device__ __forceinline__ void attn_kx_impl(const float *q, const KvArgs &kv, f
     const int my_qc = min(my_q, n_tok - 1);
     const int my_pos = pos0 + my_qc;
 
-    half8 qf[FA_D / 16];
-    {
-        const float *qr = q + ((size_t)my_qc * n_head + h) * q_stride;
-#pragma unroll
-        for (int st = 0; st < FA_D / 16; ++st) {
-            const float4 a = *(const float4 *)(qr + 16 * st + 8 * (lane / 16));
-            const float4 b = *(const float4 *)(qr + 16 * st + 8 * (lane / 16) + 4);
-            qf[st] = (half8){(_Float16)a.x, (_Float16)a.y, (_Float16)a.z, (_Float16)a.w,
-                             (_Float16)b.x, (_Float16)b.y, (_Float16)b.z, (_Float16)b.w};
-        }
-    }
+#include "shared/attn_fa_qfrag.h"  // half8 qf[FA_D / 16]: Q^T fragments of query my_qc (ADR-0005)
     constexpr int DT = FA_D / 32;  // this wave's 16-dim output tiles
     float8 o[DT];
 #pragma unroll
@@ -115,32 +105,7 @@ __device__ __forceinline__ void attn_kx_impl(const float *q, const KvArgs &kv, f
             sc[0] = kt == 0 ? own : other;
             sc[1] = kt == 0 ? other : own;
         }
-        float mx = -INFINITY;
-#pragma unroll
-        for (int kt = 0; kt < FA_K / 16; ++kt)
-#pragma unroll
-            for (int v = 0; v < 8; ++v) {
-                const int key = k0 + kt * 16 + 8 * (lane / 16) + v;
-                const float x = (key <= my_pos) ? sc[kt][v] * scale : -INFINITY;
-                sc[kt][v] = x;
-                mx = fmaxf(mx, x);
-            }
-        mx = fmaxf(mx, __shfl_xor(mx, 16, WARP));
-        const float m_new = fmaxf(m, mx);
-        const float alpha = (m == -INFINITY) ? 0.f : __expf(m - m_new);
-        float rs = 0.f;
-        half8 pt[FA_K / 16];
-#pragma unroll
-        for (int kt = 0; kt < FA_K / 16; ++kt)
-#pragma unroll
-            for (int v = 0; v < 8; ++v) {
-                const float p = (sc[kt][v] == -INFINITY) ? 0.f : __expf(sc[kt][v] - m_new);
-                rs += p;
-                pt[kt][v] = (_Float16)p;
-            }
-        rs += __shfl_xor(rs, 16, WARP);
-        l = l * alpha + rs;
-        m = m_new;
+#include "shared/attn_fa_softmax.h"  // mask + online softmax of the key tile (ADR-0005)
         if (__builtin_amdgcn_ballot_w32(alpha != 1.f)) {
 #pragma unroll
             for (int dt = 0; dt < DT; ++dt)
@@ -242,17 +207,7 @@ __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, f
     const int my_q = q0 + lane % 16;
     const int my_qc = min(my_q, n_tok - 1);
     const int my_pos = pos0 + my_qc;
-    half8 qf[FA_D / 16];
-    {
-        const float *qr = q + ((size_t)my_qc * n_head + h) * q_stride;
-#pragma unroll
-        for (int st = 0; st < FA_D / 16; ++st) {
-            const float4 a = *(const float4 *)(qr + 16 * st + 8 * (lane / 16));
-            const float4 b = *(const float4 *)(qr + 16 * st + 8 * (lane / 16) + 4);
-            qf[st] = (half8){(_Float16)a.x, (_Float16)a.y, (_Float16)a.z, (_Float16)a.w,
-                             (_Float16)b.x, (_Float16)b.y, (_Float16)b.z, (_Float16)b.w};
-        }
-    }
+#include "shared/attn_fa_qfrag.h"  // half8 qf[FA_D / 16]: Q^T fragments of query my_qc (ADR-0005)
     constexpr int DT = FA_D / 32;
     float8 o[DT];
 #pragma unroll

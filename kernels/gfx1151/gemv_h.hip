@@ -204,19 +204,7 @@ __device__ __forceinline__ void gemvh_direct_impl(const uint8_t *__restrict__ W,
     constexpr int DEPTH = D::DP, SB_EVERY = D::SBE;
     const int lane = threadIdx.x % WARP;
     for (int tile = blockIdx.x; tile * 16 < nrows; tile += gridDim.x) {
-    const int m0 = tile * 16;
-    const int nsb = ncols / (16 * D::UK);
-    const int rl = lane % 16;
-    const int row = min(m0 + rl, nrows - 1);
-    const uint8_t *rowp = W + (size_t)row * row_bytes;
-    float8 acc[TN];
-    const _Float16 *xr[TN];
-#pragma unroll
-    for (int j = 0; j < TN; ++j) {
-        acc[j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
-        const int t = j * 16 + rl;
-        xr[j] = X + (size_t)min(t, n_tok - 1) * ncols;
-    }
+#include "shared/gemvh11_tile.h"  // m0, nsb, rl, row, rowp, acc[TN], xr[TN] (ADR-0005)
     Regs buf[DEPTH];
 #pragma unroll
     for (int u = 0; u < DEPTH - 1; ++u)
@@ -513,19 +501,7 @@ __device__ __forceinline__ void gemvh_dual_impl(const uint8_t *__restrict__ W, u
     constexpr int DEPTH = D::DP, SB_EVERY = D::SBE;
     const int lane = threadIdx.x % WARP;
     for (int tile = blockIdx.x; tile * 16 < nrows; tile += gridDim.x) {
-    const int m0 = tile * 16;
-    const int nsb = ncols / (16 * D::UK);
-    const int rl = lane % 16;
-    const int row = min(m0 + rl, nrows - 1);
-    const uint8_t *rowp = W + (size_t)row * row_bytes;
-    float8 acc[TN];
-    const _Float16 *xr[TN];
-#pragma unroll
-    for (int j = 0; j < TN; ++j) {
-        acc[j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
-        const int t = j * 16 + rl;
-        xr[j] = X + (size_t)min(t, n_tok - 1) * ncols;
-    }
+#include "shared/gemvh11_tile.h"  // m0, nsb, rl, row, rowp, acc[TN], xr[TN] (ADR-0005)
     Regs b0r[DEPTH], b1r[DEPTH];
 #pragma unroll
     for (int u = 0; u < DEPTH - 1; ++u)

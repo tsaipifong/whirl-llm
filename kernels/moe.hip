@@ -19,14 +19,7 @@ template <int T>
 __device__ void moe_gu_impl(const uint8_t *__restrict__ W1, const uint8_t *__restrict__ W2, uint64_t row_bytes, int ff,
                             int nrows, const int8_t *__restrict__ xq, const float *__restrict__ xd,
                             const int *__restrict__ ids, float *__restrict__ y1, float *__restrict__ y2, int C, int K) {
-    const int lane = threadIdx.x % WARP;
-    const int row = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;
-    if (row >= nrows) return;
-    const int p = blockIdx.y;
-    const int t = p / K, e = ids[p];
-    const bool second = row >= ff;
-    const int r = second ? row - ff : row;
-    const uint8_t *wr = (second ? W2 : W1) + ((size_t)e * ff + r) * row_bytes;
+#include "shared/moe_gu_pair.h"  // lane, row, p, t, e, second, r, wr (ADR-0005)
     const int8_t *xt = xq + (size_t)t * C;
     const float *dt = xd + (size_t)t * (C / 32);
     const int nu = C / QD<T>::sb * QD<T>::per_sb;
@@ -76,76 +69,12 @@ __device__ void moe_down_impl(const uint8_t *__restrict__ W, uint64_t row_bytes,
 template <int T, int BM, int BN, int BK, int WAVES_M, int NTH>
 __device__ void gemm_tile_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
                                float *__restrict__ Y, int ncols, int nrows, int n_tok, int m0, int t0) {
-    constexpr int WAVES_N = NTH / 32 / WAVES_M;
-    constexpr int TM = BM / 16 / WAVES_M, TN = BN / 16 / WAVES_N;
-    constexpr int LD = BK + 8;
-    constexpr int GPR = BK / 8;
-    constexpr int A_PER = BM * GPR / NTH;
-    constexpr int B_PER = BN * GPR / NTH;
-    static_assert(BM * GPR % NTH == 0 && BN * GPR % NTH == 0, "tile/threads");
-    __shared__ _Float16 As[BM][LD];
-    __shared__ _Float16 Bs[BN][LD];
-    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
-    const int wm = wid % WAVES_M, wn = wid / WAVES_M;
-    float8 acc[TM][TN];
-#pragma unroll
-    for (int i = 0; i < TM; ++i)
-#pragma unroll
-        for (int j = 0; j < TN; ++j) acc[i][j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
-    half8 ra[A_PER], rb[B_PER];
-#define GTILE_FETCH(k0_)                                                                            \
-    do {                                                                                            \
-        _Pragma("unroll") for (int e = 0; e < A_PER; ++e) {                                         \
-            const int i = threadIdx.x + e * NTH;                                                    \
-            const int r = i / GPR, gg = i % GPR;                                                    \
-            if (m0 + r < nrows) {                                                                   \
-                ra[e] = dec_group_h<T>(W + (size_t)(m0 + r) * row_bytes, (k0_) / 8 + gg);            \
-            } else {                                                                                \
-                _Pragma("unroll") for (int q = 0; q < 8; ++q) ra[e][q] = (_Float16)0.f;              \
-            }                                                                                       \
-        }                                                                                           \
-        _Pragma("unroll") for (int e = 0; e < B_PER; ++e) {                                         \
-            const int i = threadIdx.x + e * NTH;                                                    \
-            const int t = i / GPR, gg = i % GPR;                                                    \
-            if (t0 + t < n_tok) {                                                                   \
-                rb[e] = *(const half8 *)(X + (size_t)(t0 + t) * ncols + (k0_) + gg * 8);            \
-            } else {                                                                                \
-                _Pragma("unroll") for (int q = 0; q < 8; ++q) rb[e][q] = (_Float16)0.f;              \
-            }                                                                                       \
-        }                                                                                           \
-    } while (0)
-    GTILE_FETCH(0);
-    for (int k0 = 0; k0 < ncols; k0 += BK) {
-        __syncthreads();
-#pragma unroll
-        for (int e = 0; e < A_PER; ++e) {
-            const int i = threadIdx.x + e * NTH;
-            *(half8 *)&As[i / GPR][(i % GPR) * 8] = ra[e];
-        }
-#pragma unroll
-        for (int e = 0; e < B_PER; ++e) {
-            const int i = threadIdx.x + e * NTH;
-            *(half8 *)&Bs[i / GPR][(i % GPR) * 8] = rb[e];
-        }
-        __syncthreads();
-        if (k0 + BK < ncols) GTILE_FETCH(k0 + BK);
-#pragma unroll
-        for (int kk = 0; kk < BK; kk += 16) {
-            half8 a[TM], b[TN];
-#pragma unroll
-            for (int i = 0; i < TM; ++i)
-                a[i] = *(const half8 *)&As[(wm * TM + i) * 16 + lane % 16][kk + 8 * (lane / 16)];
-#pragma unroll
-            for (int j = 0; j < TN; ++j)
-                b[j] = *(const half8 *)&Bs[(wn * TN + j) * 16 + lane % 16][kk + 8 * (lane / 16)];
-#pragma unroll
-            for (int i = 0; i < TM; ++i)
-#pragma unroll
-                for (int j = 0; j < TN; ++j)
-                    acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a[i], b[j], acc[i][j]);
-        }
-    }
-#undef GTILE_FETCH
+    // main loop: kernels/shared/gemm3_mainloop.h (shared with gemm3_impl, ADR-0005)
+#define G3_TILE_ORIGIN
+#define G3_A_MODE1(k_)
+#define G3_SKIP_CHUNK
+#define G3_COL_IF(j)
+#include "shared/gemm3_mainloop.h"
 #pragma unroll
     for (int i = 0; i < TM; ++i) {
 #pragma unroll

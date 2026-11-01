@@ -7,20 +7,7 @@ extern "C" __global__ void __launch_bounds__(1024)
     rmsnorm_q8(const float *x, const float *w, float *out, int8_t *xq, float *xd, int n, float eps) {
     // row blockIdx.x (small multi-token batches: speculative verify)
     x += (size_t)blockIdx.x * n;
-    out += (size_t)blockIdx.x * n;
-    xq += (size_t)blockIdx.x * n;
-    xd += (size_t)blockIdx.x * (n / 32);
-    float ss = 0.f;
-    for (int i = threadIdx.x; i < n; i += blockDim.x) ss += x[i] * x[i];
-    ss = block_sum(ss);
-    const float r = rsqrtf(ss / n + eps);
-    const int wid = threadIdx.x / WARP, lane = threadIdx.x % WARP, nw = blockDim.x / WARP;
-    for (int b = wid; b < n / 32; b += nw) {
-        const int i = b * 32 + lane;
-        const float v = x[i] * r * w[i];
-        out[i] = v;
-        wave_q8(v, xq, xd, b);
-    }
+#include "shared/rmsnorm_q8_row.h"  // norm + int8 copy of output row blockIdx.x (ADR-0005)
 }
 
 // g = silu(g) * u and its int8 copy. One wave per 32-block.

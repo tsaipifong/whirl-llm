@@ -38,14 +38,7 @@ extern "C" __global__ void __launch_bounds__(256)
                   const int8_t *__restrict__ xq, const float *__restrict__ xd, const int *__restrict__ ids,
                   float *__restrict__ y1, float *__restrict__ y2, int C, int K, const int *skip) {
     if (skip != nullptr && *skip) return;
-    const int lane = threadIdx.x % WARP;
-    const int row = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;
-    if (row >= nrows) return;
-    const int p = blockIdx.y;
-    const int t = p / K, e = ids[p];
-    const bool second = row >= ff;
-    const int r = second ? row - ff : row;
-    const uint8_t *wr = (second ? W2 : W1) + ((size_t)e * ff + r) * row_bytes;
+#include "shared/moe_gu_pair.h"  // lane, row, p, t, e, second, r, wr (ADR-0005)
     const int8_t *xt = xq + (size_t)t * C;
     const float *dt = xd + (size_t)t * (C / 32);
     float acc = 0.f;
@@ -126,110 +119,12 @@ __device__ void gemm8_moe_impl(const uint8_t *__restrict__ W1, const uint8_t *__
     const float *__restrict__ sx = sxa + tl.y;
     const int nrows = rows_e, n_tok = tl.z;
 
-    constexpr int WAVES_N = NTH / 32 / WAVES_M;
-    constexpr int TM = BM / 16 / WAVES_M, TN = BN / 16 / WAVES_N;
-    constexpr int LD = BK + 16;  // bytes; 16-byte aligned rows
-    constexpr int UPR = BK / 32;  // 32-value weight units per row per chunk
-    constexpr int A_UNITS = BM * UPR;
-    constexpr int A_PER = (A_UNITS + NTH - 1) / NTH;
-    constexpr int CPR = BK / 16;  // 16-byte activation pieces per row per chunk
-    constexpr int B_PER = BN * CPR / NTH;
-    static_assert((A_UNITS % NTH == 0 || NTH % A_UNITS == 0) && BN * CPR % NTH == 0, "tile/threads");
-    __shared__ __attribute__((aligned(16))) uint8_t As[BM * LD];
-    __shared__ __attribute__((aligned(16))) uint8_t Bs[BN * LD];
-    __shared__ uint32_t tab[16][2];
-    if (threadIdx.x < 32) tab[threadIdx.x >> 1][threadIdx.x & 1] = k_fp8tab[threadIdx.x >> 1][threadIdx.x & 1];
-
-    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
-    const int wm = wid % WAVES_M, wn = wid / WAVES_M;
-    const int m0 = by * BM;
-
-    float8 acc[TM][TN];
-#pragma unroll
-    for (int i = 0; i < TM; ++i)
-#pragma unroll
-        for (int j = 0; j < TN; ++j) acc[i][j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
-
-    uint4 rq[A_PER];
-    uint32_t re[A_PER];
-    int rref[A_PER];
-    uint4 rb[B_PER];
-#pragma unroll
-    for (int e = 0; e < A_PER; ++e) {
-        const int r = (threadIdx.x + e * NTH) / UPR;
-        rref[e] = (r < BM && m0 + r < nrows) ? wref[m0 + r] : 0;
-    }
-#define G8M_FETCH(k0_)                                                                                     \
-    do {                                                                                                   \
-        _Pragma("unroll") for (int e = 0; e < A_PER; ++e) {                                                \
-            const int i = threadIdx.x + e * NTH;                                                           \
-            const int r = i / UPR, u = i % UPR;                                                            \
-            const int k = (k0_) + u * 32;                                                                  \
-            if (i < A_UNITS && m0 + r < nrows) {                                                           \
-                const uint8_t *sb = W + (size_t)(m0 + r) * row_bytes + (size_t)(k >> 8) * 136;             \
-                rq[e] = *(const uint4 *)(sb + 8 + ((k & 255) >> 5) * 16);                                  \
-                re[e] = sb[(k & 255) >> 5];                                                                \
-            } else {                                                                                       \
-                rq[e] = make_uint4(0, 0, 0, 0);                                                            \
-                re[e] = 0;                                                                                 \
-            }                                                                                              \
-        }                                                                                                  \
-        _Pragma("unroll") for (int e = 0; e < B_PER; ++e) {                                                \
-            const int i = threadIdx.x + e * NTH;                                                           \
-            const int t = i / CPR, c = i % CPR;                                                            \
-            rb[e] = t < n_tok ? *(const uint4 *)(X8 + (size_t)t * ncols + (k0_) + c * 16)                  \
-                              : make_uint4(0, 0, 0, 0);                                                    \
-        }                                                                                                  \
-    } while (0)
-
-    G8M_FETCH(0);
-    for (int k0 = 0; k0 < ncols; k0 += BK) {
-        __syncthreads();
-#pragma unroll
-        for (int e = 0; e < A_PER; ++e) {
-            const int i = threadIdx.x + e * NTH;
-            if (i >= A_UNITS) break;
-            const int r = i / UPR, u = i % UPR;
-            int d = rref[e] - (int)re[e];
-            d = d < 0 ? 0 : (d > 15 ? 15 : d);
-            const uint32_t ta = tab[d][0], tb = tab[d][1];
-            uint4 lo, hi;
-            lo.x = mx_fp8x4(rq[e].x & 0x0F0F0F0Fu, ta, tb);
-            lo.y = mx_fp8x4(rq[e].y & 0x0F0F0F0Fu, ta, tb);
-            lo.z = mx_fp8x4(rq[e].z & 0x0F0F0F0Fu, ta, tb);
-            lo.w = mx_fp8x4(rq[e].w & 0x0F0F0F0Fu, ta, tb);
-            hi.x = mx_fp8x4((rq[e].x >> 4) & 0x0F0F0F0Fu, ta, tb);
-            hi.y = mx_fp8x4((rq[e].y >> 4) & 0x0F0F0F0Fu, ta, tb);
-            hi.z = mx_fp8x4((rq[e].z >> 4) & 0x0F0F0F0Fu, ta, tb);
-            hi.w = mx_fp8x4((rq[e].w >> 4) & 0x0F0F0F0Fu, ta, tb);
-            *(uint4 *)&As[r * LD + u * 32] = lo;
-            *(uint4 *)&As[r * LD + u * 32 + 16] = hi;
-        }
-#pragma unroll
-        for (int e = 0; e < B_PER; ++e) {
-            const int i = threadIdx.x + e * NTH;
-            *(uint4 *)&Bs[(i / CPR) * LD + (i % CPR) * 16] = rb[e];
-        }
-        __syncthreads();
-        if (k0 + BK < ncols) G8M_FETCH(k0 + BK);
-#pragma unroll
-        for (int kk = 0; kk < BK; kk += 16) {
-            fp8x8 a[TM], b[TN];
-#pragma unroll
-            for (int i = 0; i < TM; ++i)
-                a[i] = *(const fp8x8 *)&As[((wm * TM + i) * 16 + lane % 16) * LD + kk + 8 * (lane / 16)];
-#pragma unroll
-            for (int j = 0; j < TN; ++j)
-                b[j] = *(const fp8x8 *)&Bs[((wn * TN + j) * 16 + lane % 16) * LD + kk + 8 * (lane / 16)];
-#pragma unroll
-            for (int i = 0; i < TM; ++i)
-#pragma unroll
-                for (int j = 0; j < TN; ++j)
-                    if (!SKIP || (wn * TN + j) * 16 < n_tok)
-                        acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a[i], b[j], acc[i][j]);
-        }
-    }
-#undef G8M_FETCH
+    // main loop: kernels/shared/gemm8_mainloop.h (shared with gemm8_impl, ADR-0005)
+#define G8_TILE_ORIGIN m0 = by * BM
+#define G8_TROW(t) t
+#define G8_TOFF(t) (size_t)t
+#define G8_WMMA_IF(j) if (!SKIP || (wn * TN + j) * 16 < n_tok)
+#include "shared/gemm8_mainloop.h"
     float *__restrict__ Yb = second ? Y2 : Y1;  // [pos][rows_e], f32 or (OH) f16 elements
     const bool vec = (nrows & 7) == 0;
 #pragma unroll

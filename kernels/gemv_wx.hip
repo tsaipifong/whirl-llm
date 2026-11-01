@@ -68,23 +68,8 @@ template <int TILES, int QT> struct GX_K {
 #pragma unroll
             for (int tt = 0; tt < TILES; ++tt) {
                 const uint4 hd = p.hd[tt];
-                const float d = __half2float(__ushort_as_half((uint16_t)(hd.x & 0xFFFF)));
-                const float dmin = __half2float(__ushort_as_half((uint16_t)(hd.x >> 16)));
-                const int sel = 16 * (j & 1);
-                const uint32_t A = hd.y >> sel, B = hd.z >> sel, C = hd.w >> sel;
-                int s0, m0, s1, m1;
-                if constexpr (!J2) {
-                    s0 = A & 63;
-                    s1 = (A >> 8) & 63;
-                    m0 = B & 63;
-                    m1 = (B >> 8) & 63;
-                } else {
-                    s0 = (C & 0xF) | (((A >> 6) & 3) << 4);
-                    s1 = ((C >> 8) & 0xF) | (((A >> 14) & 3) << 4);
-                    m0 = ((C >> 4) & 0xF) | (((B >> 6) & 3) << 4);
-                    m1 = ((C >> 12) & 0xF) | (((B >> 14) & 3) << 4);
-                }
-                const float ds0 = d * s0, ds1 = d * s1, dm0 = dmin * m0, dm1 = dmin * m1;
+#define GKS_LOW_J constexpr (!J2)
+#include "shared/gemv_kscale.h"  // ds0, ds1, dm0, dm1 of sub-blocks 2j, 2j+1 (ADR-0005)
                 const uint32_t q[4] = {p.qv[tt].x, p.qv[tt].y, p.qv[tt].z, p.qv[tt].w};
                 int lo[4], hi[4];
                 if constexpr (QT == QT_Q4_K) {
@@ -167,23 +152,7 @@ template <int TILES, int QT> struct GX_4L {
             }
 #pragma unroll
         for (int tt = 0; tt < TILES; ++tt) {
-            float dl0, dl1;
-            if constexpr (QT == QT_IQ4_XS) {
-                const uint32_t hdr = p.hdr[tt];
-                const float d = __half2float(__ushort_as_half((uint16_t)(hdr & 0xFFFF)));
-                const uint32_t sh = hdr >> 16;
-                const int ib0 = 2 * pp, ib1 = 2 * pp + 1;
-                const uint32_t sl = (p.sc[tt] >> (8 * pp)) & 0xFF;
-                const int ls0 = (sl & 0xF) | (((sh >> (2 * ib0)) & 3) << 4);
-                const int ls1 = (sl >> 4) | (((sh >> (2 * ib1)) & 3) << 4);
-                dl0 = d * (ls0 - 32);
-                dl1 = d * (ls1 - 32);
-            } else {
-                const uint32_t ee = p.hdr[tt];
-                dl0 = e8m0_half(ee & 0xFF);
-                dl1 = e8m0_half(ee >> 8);
-            }
-            const uint2 g0 = p.g0[tt], g1 = p.g1[tt];
+#include "shared/gemv_unit4_scales.h"  // dl0, dl1, g0, g1 of tile tt (ADR-0005)
             int b0[4], b1[4];
             if constexpr (QT == QT_IQ4_XS) {
                 b0[0] = IQ4F(g0.x & 0x0F0F0F0F);

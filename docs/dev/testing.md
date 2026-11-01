@@ -657,6 +657,20 @@ start it detached). Release gate step `cpu_kernel_isa_cmp` runs both tests (`ker
 `kernels/shared/gemmh_impl.h` (the f16 GEMM body) is #included by both `kernels/gemm_fp8t.hip` (gemmh_impl) and
 `kernels/vision/vision.hip` (vis_gemm, inside the kernel): a change to it changes the vision code object as well
 (kernels.gemm has `"callers": "rdeps"`, so the impact map adds kernels.vision).
+Partial-body duplicates are merged the same way (arch025-sc11d, ADR-0005): the common statements move to a
+`kernels/shared/<name>.h` statement block that each kernel #includes inside its own braces, not into a called helper
+(an inlined helper can change the ISA: SC-11c). Where the copies differ, the includer `#define`s a small hook (an
+offset expression, a guard, a loop condition) before the #include and the header `#undef`s it; a per-architecture line
+is an `#if defined(__GFX11__)` in the header. Expanded, the token sequence of the whirl_kernels translation unit is the
+one before the merge (`clang -E -P`, whitespace only differs), and the code objects compare IDENTICAL. Header line 1 is
+a code line, its description at the end (clang -E -P whitespace). Changing one of these headers changes every kernel
+that includes it: the impact map's includer list (`tools/impact_map.json`) names them.
+Cross-set copies (gfx1201 `kernels/` and gfx1151 `kernels/gfx1151/`, arch025-sc11e) use the same rule, and some
+headers are file-scope definitions included at the old TU position (`gemv_mr_kw.h`, `gemv_q_qd.h`, `attn_dq4.h`).
+The per-set difference is a hook each set defines next to the #include: the activation-scale read (`GMR_X0` / `GQ_XD(e)`:
+gfx1201 `xd[e]`, gfx1151 packed scale words `xdv(xd + (e))`) or the block mapping (`ADQ_GRID`). A change to such a
+header changes both code objects. Check it with the preprocessed-TU compare of both architectures (and the vision TU for
+`block_sum.h`) before the code-object build.
 
 Isolation manifest include closure (CPU, seconds, no build): `cpu_iso_includes` (`tools/gates/iso_includes_check.py`: every quoted `#include` of a file a `tests/**/isolation.txt` stages must itself be staged; `--rev COMMIT` checks a commit read-only). Catches the merge that adds an include to a staged file without the manifest line before the ~1 min per module iso build (C1083) does.
 

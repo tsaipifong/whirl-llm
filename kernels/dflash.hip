@@ -148,22 +148,7 @@ extern "C" __global__ void __launch_bounds__(256)
     __syncthreads();
     float mloc = -INFINITY;
     for (int k = tid; k < nk; k += blockDim.x) {
-        const float *kr;
-        bool vis;
-        if (k < W) {
-            const int p = cpos[k];
-            vis = p >= 0 && p < qpos && (window == 0 || my_pos - p < window);
-            kr = kc + ((size_t)k * nkv + g) * hd;
-        } else {
-            vis = true;
-            kr = kb + ((size_t)(k - W) * nkv + g) * hd;
-        }
-        float s = -INFINITY;
-        if (vis) {
-            float d = 0.f;
-            for (int i = 0; i < hd; ++i) d += qs[i] * kr[i];
-            s = d * scale;
-        }
+#include "shared/dflash_kscore.h"  // s = scaled q.k of key k, -inf if not visible (ADR-0005)
         sc[k] = s;
         mloc = fmaxf(mloc, s);
     }
@@ -209,22 +194,7 @@ extern "C" __global__ void __launch_bounds__(256)
         float mloc = -INFINITY;
         for (int j = tid; j < nc; j += blockDim.x) {
             const int k = c0 + j;
-            const float *kr;
-            bool vis;
-            if (k < W) {
-                const int p = cpos[k];
-                vis = p >= 0 && p < qpos && (window == 0 || my_pos - p < window);
-                kr = kc + ((size_t)k * nkv + g) * hd;
-            } else {
-                vis = true;
-                kr = kb + ((size_t)(k - W) * nkv + g) * hd;
-            }
-            float s = -INFINITY;
-            if (vis) {
-                float d = 0.f;
-                for (int i = 0; i < hd; ++i) d += qs[i] * kr[i];
-                s = d * scale;
-            }
+#include "shared/dflash_kscore.h"  // s = scaled q.k of key k, -inf if not visible (ADR-0005)
             sc[j] = s;
             mloc = fmaxf(mloc, s);
         }

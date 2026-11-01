@@ -190,18 +190,7 @@ __device__ __forceinline__ void attn_ws4_impl(const float *q, const KvArgs &kv, 
     ws4_load<F, BF>(raw[0], kv, tb, b0, b1, g, n_kv, tv);
     // Q^T (f16) of the group's columns, as attn_wsplit_impl
     for (int i = tv; i < 16 * (AW_D / 8); i += 128) {
-        const int c = i / (AW_D / 8), d8 = (i % (AW_D / 8)) * 8;
-        half8 v8;
-        if (c < ncol) {
-            const float *qr = q + ((size_t)(first + c / grp) * n_head + g * grp + c % grp) * q_stride + d8;
-            const float4 a = *(const float4 *)qr, b = *(const float4 *)(qr + 4);
-            v8 = (half8){(_Float16)a.x, (_Float16)a.y, (_Float16)a.z, (_Float16)a.w,
-                         (_Float16)b.x, (_Float16)b.y, (_Float16)b.z, (_Float16)b.w};
-        } else {
-#pragma unroll
-            for (int e = 0; e < 8; ++e) v8[e] = (_Float16)0.f;
-        }
-        *(half8 *)&Qs[c][d8] = v8;
+#include "shared/attn_qs_f16.h"  // Qs[c][d8..+8) = f16 Q of column c (ADR-0005)
     }
     ws4_stage<F>(raw[0], Ks, Vt, b0, b1, tv);
 #pragma unroll
@@ -450,18 +439,7 @@ __device__ __forceinline__ void attn_ws4g_impl(const float *q, const KvArgs &kv,
     Ws4gRaw<F> raw;
     ws4g_load<F>(raw, kv, tb, b0, b1, g, n_kv, isv, tq);
     for (int i = tv; i < 16 * CG * (AW_D / 8); i += 256) {
-        const int c = i / (AW_D / 8), d8 = (i % (AW_D / 8)) * 8;
-        half8 v8;
-        if (c < ncol) {
-            const float *qr = q + ((size_t)(first + c / grp) * n_head + g * grp + c % grp) * q_stride + d8;
-            const float4 a = *(const float4 *)qr, b = *(const float4 *)(qr + 4);
-            v8 = (half8){(_Float16)a.x, (_Float16)a.y, (_Float16)a.z, (_Float16)a.w,
-                         (_Float16)b.x, (_Float16)b.y, (_Float16)b.z, (_Float16)b.w};
-        } else {
-#pragma unroll
-            for (int e = 0; e < 8; ++e) v8[e] = (_Float16)0.f;
-        }
-        *(half8 *)&Qs[c][d8] = v8;
+#include "shared/attn_qs_f16.h"  // Qs[c][d8..+8) = f16 Q of column c (ADR-0005)
     }
     ws4g_stage<F>(raw, Ks, Vt, b0, b1, isv, tq);
     ws4g_load<F>(raw, kv, tb, b0 + min(1, nch - 1) * AW_K, b1, g, n_kv, isv, tq);

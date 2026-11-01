@@ -180,104 +180,26 @@ __device__ __forceinline__ half8 dec_group_h<QT_Q3_K>(const uint8_t *row, int g)
 template <int T, int BM, int BN, int BK, int WAVES_M, int MODE = 0, int NTH = 256, bool TOK_X = false>
 __device__ void gemm3_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
                            float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {
-    constexpr int WAVES_N = NTH / 32 / WAVES_M;
-    constexpr int TM = BM / 16 / WAVES_M, TN = BN / 16 / WAVES_N;
-    constexpr int LD = BK + 8;
-    constexpr int GPR = BK / 8;                   // 8-value groups per row per chunk
-    constexpr int A_PER = BM * GPR / NTH;         // groups per thread (weights)
-    constexpr int B_PER = BN * GPR / NTH;         // groups per thread (activations)
-    static_assert(BM * GPR % NTH == 0 && BN * GPR % NTH == 0, "tile/threads");
-    __shared__ _Float16 As[BM][LD];
-    __shared__ _Float16 Bs[BN][LD];
-
-    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
-    const int wm = wid % WAVES_M, wn = wid / WAVES_M;
+    // main loop: kernels/shared/gemm3_mainloop.h (shared with gemm_tile_impl and the gfx1201 set, ADR-0005)
     // TOK_X: token blocks along grid x so the blocks sharing a weight row
     // block run back to back and reuse it from L2 instead of re-streaming W.
-    const int m0 = (TOK_X ? blockIdx.y : blockIdx.x) * BM, t0 = (TOK_X ? blockIdx.x : blockIdx.y) * BN;
-
-    float8 acc[TM][TN];
-#pragma unroll
-    for (int i = 0; i < TM; ++i)
-#pragma unroll
-        for (int j = 0; j < TN; ++j) acc[i][j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
-
-    half8 ra[A_PER], rb[B_PER];
-    // (a macro, not a lambda: a by-reference capture of ra/rb takes their
-    // address and pushes them to scratch)
-#define GEMM3_FETCH(k0_)                                                                            \
-    do {                                                                                            \
-        _Pragma("unroll") for (int e = 0; e < A_PER; ++e) {                                         \
-            const int i = threadIdx.x + e * NTH;                                                    \
-            const int r = i / GPR, gg = i % GPR;                                                    \
-            if (MODE == 1) {                                                                        \
-                ra[e] = *(const half8 *)(W + (size_t)(m0 + r) * row_bytes + (((k0_) / 8 + gg) * 16) % row_bytes); \
-            } else if (m0 + r < nrows) {                                                            \
-                ra[e] = dec_group_h<T>(W + (size_t)(m0 + r) * row_bytes, (k0_) / 8 + gg);            \
-            } else {                                                                                \
-                _Pragma("unroll") for (int q = 0; q < 8; ++q) ra[e][q] = (_Float16)0.f;              \
-            }                                                                                       \
-        }                                                                                           \
-        _Pragma("unroll") for (int e = 0; e < B_PER; ++e) {                                         \
-            const int i = threadIdx.x + e * NTH;                                                    \
-            const int t = i / GPR, gg = i % GPR;                                                    \
-            if (t0 + t < n_tok) {                                                                   \
-                rb[e] = *(const half8 *)(X + (size_t)(t0 + t) * ncols + (k0_) + gg * 8);            \
-            } else {                                                                                \
-                _Pragma("unroll") for (int q = 0; q < 8; ++q) rb[e][q] = (_Float16)0.f;              \
-            }                                                                                       \
-        }                                                                                           \
-    } while (0)
-
-    GEMM3_FETCH(0);
-    for (int k0 = 0; k0 < ncols; k0 += BK) {
-        __syncthreads();
-#pragma unroll
-        for (int e = 0; e < A_PER; ++e) {
-            const int i = threadIdx.x + e * NTH;
-            *(half8 *)&As[i / GPR][(i % GPR) * 8] = ra[e];
-        }
-#pragma unroll
-        for (int e = 0; e < B_PER; ++e) {
-            const int i = threadIdx.x + e * NTH;
-            *(half8 *)&Bs[i / GPR][(i % GPR) * 8] = rb[e];
-        }
-        __syncthreads();
-        if (k0 + BK < ncols) GEMM3_FETCH(k0 + BK);
-#pragma unroll
-        for (int kk = 0; kk < BK; kk += 16) {
-            half16 a[TM], b[TN];
-#pragma unroll
-            for (int i = 0; i < TM; ++i)
-                a[i] = ld_frag16(&As[(wm * TM + i) * 16 + lane % 16][kk]);
-#pragma unroll
-            for (int j = 0; j < TN; ++j)
-                b[j] = ld_frag16(&Bs[(wn * TN + j) * 16 + lane % 16][kk]);
-#pragma unroll
-            for (int i = 0; i < TM; ++i)
-#pragma unroll
-                for (int j = 0; j < TN; ++j)
-                    acc[i][j] = WMMA16(a[i], b[j], acc[i][j]);
-        }
-    }
+#define G3_TILE_ORIGIN const int m0 = (TOK_X ? blockIdx.y : blockIdx.x) * BM, t0 = (TOK_X ? blockIdx.x : blockIdx.y) * BN;
+    // MODE 1: raw f16 rows
+#define G3_A_MODE1(k_)                                                                                  \
+    if (MODE == 1) {                                                                                    \
+        ra[e] = *(const half8 *)(W + (size_t)(m0 + r) * row_bytes + (((k_) / 8 + gg) * 16) % row_bytes); \
+    } else
+#define G3_SKIP_CHUNK
+#define G3_COL_IF(j)
+#include "shared/gemm3_mainloop.h"
 #pragma unroll
     for (int i = 0; i < TM; ++i) {
 #pragma unroll
         for (int j = 0; j < TN; ++j) {
-            const int t = t0 + (wn * TN + j) * 16 + lane % 16;
-            if (t >= n_tok) continue;
-#pragma unroll
-            for (int v = 0; v < 8; ++v) {
-                const int row = m0 + (wm * TM + i) * 16 + CROW(lane, v);
-                if (row < nrows) {
-                    float *dst = Y + (size_t)t * nrows + row;
-                    *dst = accumulate ? *dst + acc[i][j][v] : acc[i][j][v];
-                }
-            }
+#include "shared/gemm_store_ij_f32.h"  // f32 Y[t][row] of accumulator (i, j) (ADR-0005)
         }
     }
 }
-#undef GEMM3_FETCH
 
 #define GEMM3_BM 256
 #define GEMM3_BN 256
@@ -397,16 +319,7 @@ __device__ void gemm4_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, co
     for (int i = 0; i < TM; ++i) {
 #pragma unroll
         for (int j = 0; j < TN; ++j) {
-            const int t = t0 + (wn * TN + j) * 16 + lane % 16;
-            if (t >= n_tok) continue;
-#pragma unroll
-            for (int v = 0; v < 8; ++v) {
-                const int row = m0 + (wm * TM + i) * 16 + CROW(lane, v);
-                if (row < nrows) {
-                    float *dst = Y + (size_t)t * nrows + row;
-                    *dst = accumulate ? *dst + acc[i][j][v] : acc[i][j][v];
-                }
-            }
+#include "shared/gemm_store_ij_f32.h"  // f32 Y[t][row] of accumulator (i, j) (ADR-0005)
         }
     }
 }
