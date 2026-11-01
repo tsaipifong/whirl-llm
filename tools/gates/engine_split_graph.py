@@ -33,6 +33,10 @@ for l in list(open(FUNCS, encoding="utf-8"))[1:]:
     r["calls"].update(x for x in p[6].split(",") if x)
     r["types"].update("type:" + x for x in p[7].split(",") if x)
     r.setdefault("defs", set()).add(p[8] if len(p) > 8 else "")
+    # arch025-engreview E3: the census A2 entry of in-class member initializers is counted apart from the definitions
+    if len(p) > 8 and p[8].endswith("(in-class initializers)"):
+        r["init_lines"] = r.get("init_lines", 0) + int(p[3])
+        r.setdefault("init_keys", []).append(p[0])
 all_data = set()
 for l in list(open(os.path.join(os.path.dirname(FUNCS), "members.tsv"), encoding="utf-8"))[1:]:
     p = l.split("\t")
@@ -262,8 +266,19 @@ if "--core" in args:
             cb.append(f"{f} ({c}): {len(stm)} statements > {rule['max_statements']}")
         for bad_re in rule.get("forbid", []):
             if re.search(bad_re, body): cb.append(f"{f} ({c}): body matches forbidden /{bad_re}/")
-        if rule.get("max_lines") is not None and rows[f]["lines"] > rule["max_lines"]:
-            cb.append(f"{f} ({c}): {rows[f]['lines']} lines > {rule['max_lines']}")
+        # arch025-engreview E3: max_lines counts the definition lines; in-class initializers have core_shapes.in_class_init
+        def_lines = rows[f]["lines"] - rows[f].get("init_lines", 0)
+        if rule.get("max_lines") is not None and def_lines > rule["max_lines"]:
+            cb.append(f"{f} ({c}): {def_lines} lines > {rule['max_lines']}")
+        for ik in rows[f].get("init_keys", []):
+            irule = SHAPE.get("in_class_init")
+            if irule is None:
+                cb.append(f"{f}: in-class initializers but no core_shapes.in_class_init rule"); continue
+            it = bodies.get(ik, "").strip()
+            it = it[1:-1] if it.startswith("{") and it.endswith("}") else it
+            for part in (x.strip() for x in it.split(";")):
+                if part and not re.fullmatch(irule["allow"], part):
+                    cb.append(f"{f} (in-class initializers): `{' '.join(part.split())[:70]}` is not {irule['what']}")
     # core reads / writes no component-owned data (the constructor / destructor are the assembly point: exempt).
     # arch025-engclose (S16): a component holder (cut `holders`: jq_, sc_, gv_, vw_ ...) used by a core function is the
     # assembly's call into that component (`gv_.govCtxPublished()`, `jq_.jqHealth(h)`): the call is a call edge, checked

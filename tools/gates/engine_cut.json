@@ -41,7 +41,12 @@
     "jqReap",
     "jqTierWake",
     "jqTierWakeClear",
-    "jqHealth"
+    "jqHealth",
+    "jqWaitBurst",
+    "jqWaitTierBusy",
+    "jqWaitVision",
+    "jqWaitUntil",
+    "jqWaitIdle"
    ],
    "data": [
     "q_mutex_",
@@ -625,24 +630,13 @@
    "Engine:vram_others_",
    "Engine:vst_",
    "Engine:vw_",
-   "PrefillPhase:n_building_",
-   "Scheduler:loop_calls_",
-   "Scheduler:n_building_",
-   "Scheduler:q_cond_",
-   "Scheduler:queue_",
-   "Scheduler:stop_",
-   "Scheduler:tier_wake_",
-   "Scheduler:wake_seq_",
    "admitQueued:queue_",
    "allocState:spec_on_",
    "dropOutOfRoom:sc_",
    "finishPrefill:sc_",
-   "idleWait:jq_",
-   "idleWait:q_cond_",
-   "idleWait:q_mutex_",
    "prefillGroup:sc_",
    "prefillStep:sc_",
-   "runLoop:q_cond_",
+   "runLoop:queue_",
    "setVramProbe:vram_others_",
    "startJob:sc_",
    "tryRestore:sc_"
@@ -673,19 +667,13 @@
    "Engine:vram_others_",
    "Engine:vst_",
    "Engine:vw_",
-   "PrefillPhase:n_building_",
-   "Scheduler:loop_calls_",
-   "Scheduler:n_building_",
-   "Scheduler:q_cond_",
-   "Scheduler:queue_",
-   "Scheduler:stop_",
-   "Scheduler:tier_wake_",
-   "Scheduler:wake_seq_",
+   "admitQueued:queue_",
    "allocState:spec_on_",
    "dropOutOfRoom:sc_",
    "finishPrefill:sc_",
    "prefillGroup:sc_",
    "prefillStep:sc_",
+   "runLoop:queue_",
    "setVramProbe:vram_others_",
    "startJob:sc_",
    "tryRestore:sc_"
@@ -696,7 +684,8 @@
   "_doc_s7": "S7 (arch025-engine-s7, 2026-10-31): (a) Engine:cnt_ / Engine:dc_ / Engine:kv_arrays_ - engine.h `SlotPages sc_{ck_, m_, ops_, opt_, pool_, ps_, slots_, tb_, kv_arrays_, conv_bytes_, ssm_bytes_, cnt_, dc_}` binds SlotPages's non-const reference members to slot_cache's placed state and to the drafter context (the constructor is the assembly point, DESIGN v3 2.6 rule A; the Engine:ids_ shape of rcx_). (b) <entry>:sc_ - the calls sc_.ensurePages (dropOutOfRoom engine_decode.cpp:135, prefillStep engine_prefill.cpp:68, prefillGroup :132, finishPrefill :218, tryRestore engine_tier.cpp:95) and sc_.cowPages (startJob engine.cpp:296, finishPrefill engine_prefill.cpp:217): their bodies build `SlotEvictor ev(*this, ...)` (PagePool's evictor calls back evictFor during the call), so the census holder_call rule (3) keeps the call a write of the holder; SlotPages owns no data (references only), what it writes through them is under shared_writers / its own data. They stay at leg end (the callers are those components' entries).",
   "_doc_s8": "S8 (arch025-engine-s8, 2026-10-31): Engine:gst_ / Engine:sc_ - engine.h `GovernorGlue gv_{ck_, ctx_, m_, ops_, opt_, owner_, pool_, ps_, slots_, tb_, vram_probe_, vram_others_, ctx_pub_, sc_, gst_}` binds GovernorGlue's constructor parameters GovState& / SlotPages& (the constructor is the assembly point, DESIGN v3 2.6 rule A; the S7 Engine:cnt_ / dc_ shape). Removed from now (the writes are gone, DESIGN v3 2.6): setCtx:ctx_pub_ (setCtx calls gv_.govPublishCtx) and vramNote:gov_warn_ (vramNote calls gv_.govSetWarn; DESIGN planned it for S9, S8 has to: gov_warn_ is private in GovState).",
   "_doc_s9": "S9 (arch025-engine-s9, 2026-10-31): Engine:gv_ / Engine:vram_others_ / Engine:vst_ - engine.h `VramWatch vw_{owner_, vram_probe_, vram_others_, gv_, vst_}` binds VramWatch's constructor parameters GovernorGlue& / std::function<...>& (vram_others_, the governor's placed state that setVramProbe installs) / VramState& (the constructor is the assembly point, DESIGN v3 2.6 rule A; the S8 Engine:gst_ / Engine:sc_ shape).",
-  "_doc_engclose": "arch025-engclose (2026-11-01): Engine:cyc_ / jq_ / last_reap_ / last_tick_ / pf_ / prefill_tok_cum_ / se_ / spec_on_ / ss_ / tg_ / vw_ are the constructor's member initializers binding the components (a non-const reference = a write in the census): the constructor is the assembly point (DESIGN v3 2.6), like Engine:dc_ / sc_ / gv_ / vst_ before. S10b removes the job_queue writes of attachTier / reapDisconnected / releaseSlot / startAdmitted / idleWait:tier_wake_ / admitQueued:n_active_ (JobQueue methods now). Left in 'now' (not leg_end): admitQueued:queue_ (queue_[qi] passed as Job& to waitsForSys / waitsForTier), idleWait / runLoop q_cond_ waits and the WH_UNLOCK_HELD / WH_RELOCK_HELD of jq_.q_mutex_. The component constructors PrefillPhase / Scheduler bind JobQueue's members by non-const reference (their member initializers; the readers keep the old names): assembly, listed in both lists."
+  "_doc_engclose": "arch025-engclose (2026-11-01): Engine:cyc_ / jq_ / last_reap_ / last_tick_ / pf_ / prefill_tok_cum_ / se_ / spec_on_ / ss_ / tg_ / vw_ are the constructor's member initializers binding the components (a non-const reference = a write in the census): the constructor is the assembly point (DESIGN v3 2.6), like Engine:dc_ / sc_ / gv_ / vst_ before. S10b removes the job_queue writes of attachTier / reapDisconnected / releaseSlot / startAdmitted / idleWait:tier_wake_ / admitQueued:n_active_ (JobQueue methods now). Left in 'now' (not leg_end): admitQueued:queue_ (queue_[qi] passed as Job& to waitsForSys / waitsForTier), idleWait / runLoop q_cond_ waits and the WH_UNLOCK_HELD / WH_RELOCK_HELD of jq_.q_mutex_. The component constructors PrefillPhase / Scheduler bound JobQueue's members by non-const reference (listed in both lists here until arch025-e2e3); DESIGN v3 10 (review arch025-engreview A1) made them const references and removed the rows (_doc_engreview).",
+  "_doc_engreview": "arch025-e2e3 (DESIGN v3 10.2 / 10.4, review arch025-engreview A1 and the E2 decision, 2026-11-01): now = leg_end = the 35 rows of DESIGN 10.4 in five classes. A constructor statements (rule A): Engine:conv_bytes_ ssm_bytes_ crlf_norm_ fl_ ctx_pub_. B startup installers: allocState:spec_on_, setVramProbe:vram_others_. C assembly bindings (Engine's member initializers - constructor list and in-class initializers - bind the components' non-const references to the owners' data; only the assembly point Engine, never a component binding another module's data; the in-class initializers obey core_shapes.in_class_init): Engine:cnt_ cyc_ dc_ gst_ gv_ ids_ jq_ kv_arrays_ last_reap_ last_tick_ pf_ prefill_tok_cum_ sc_ se_ spec_on_ ss_ tg_ vram_others_ vst_ vw_. D holder calls (sc_.ensurePages / cowPages through SlotEvictor, _doc_s7): dropOutOfRoom finishPrefill prefillGroup prefillStep startJob tryRestore :sc_. E the Jobs that queue_'s elements point to (the requests' own flags, loop thread only): admitQueued:queue_ (waitsForSys / waitsForTier write sys_wait_logged / tier_wait_logged, admitQueued pool_wait_logged, under jq_.q_mutex_), runLoop:queue_ (pf_jobs -> prefetchFor writes pf_checked); Job belongs to no cut module, the census's strict pointee rule (S0g) books a write through a queue_ element pointer on queue_ (as a write through slots_ on slots_, shared_writers); queue_ itself is a const reference in Scheduler (a container write does not compile). Removed: Scheduler:loop_calls_ n_building_ q_cond_ queue_ stop_ tier_wake_ wake_seq_ and PrefillPhase:n_building_ (const references now), idleWait:jq_ / idleWait:q_mutex_ (the clang-only helpers of WH_UNLOCK_HELD / WH_RELOCK_HELD take const Mutex&), idleWait:q_cond_ / runLoop:q_cond_ (the condition waits are JobQueue's jqWaitBurst / jqWaitTierBusy / jqWaitVision / jqWaitUntil / jqWaitIdle). Limit: rows are (entry, member) grained; class E admits any Job field written through queue_ by runLoop / admitQueued (a new one must be named here; field-level census is a later tool item, DESIGN 10.4)"
  },
  "engine_members_final": [
   "m_",
@@ -852,6 +841,11 @@
    "forbid": [
     "\\bwhile\\b"
    ]
+  },
+  "in_class_init": {
+   "allow": "\\{\\s*\\w+(\\s*,\\s*\\w+)*\\s*\\}|true|false|nullptr|-?\\d+",
+   "what": "a brace list of member names or a literal (no call, no expression)",
+   "_doc": "arch025-engreview E3: Engine's in-class member initializers (census A2 entry Engine#): the components' reference bindings and literal defaults; special.max_lines counts the constructor / destructor definitions only"
   }
  },
  "core_exceptions": {
@@ -1178,6 +1172,7 @@
     "startJob"
    ],
    "slots_": [
+    "Engine",
     "allocState",
     "evictFor",
     "govDrain",
@@ -1303,12 +1298,8 @@
    "reason": "engine.cpp:151 f.tok = &tok_ in a const method; EngineFacts::tok is const Tokenizer* (engine_api.h:68)"
   },
   "runLoop#:q_mutex_": {
-   "text_why": [
-    "not a known read form (EQUIRES(jq_. .. ))",
-    "not a known read form (Lock lk(jq_. .. ))",
-    "not a known read form (Lock lw(jq_. .. ))"
-   ],
-   "reason": "engine_sched.cpp Scheduler::runLoop: whirl::UniqueLock lk(jq_.q_mutex_), whirl::UniqueLock lw(jq_.q_mutex_) and the wait predicate's WH_REQUIRES(jq_.q_mutex_): lock guards / an annotation (S10b names the queue lock through the holder jq_); the AST census reads them as the lock guard (emut pin runLoop#:q_mutex_)"
+   "text_why": "not a known read form (Lock lk(jq_. .. ))",
+   "reason": "engine_sched.cpp Scheduler::runLoop: whirl::UniqueLock lk(jq_.q_mutex_), a lock guard (S10b names the queue lock through the holder jq_); the burst wait's lw and its WH_REQUIRES(jq_.q_mutex_) predicate moved into JobQueue::jqWaitBurst (arch025-e2e3, DESIGN v3 10.2); the AST census reads lk as the lock guard (emut pin runLoop#:q_mutex_)"
   }
  },
  "emut_read_ok": {
@@ -1435,19 +1426,17 @@
   },
   "runLoop#:q_mutex_": {
    "clang_why": [
-    "write: CXXConstructExpr `lk(jq_.q_mutex_)`",
-    "write: CXXConstructExpr `lw(jq_.q_mutex_)`"
+    "write: CXXConstructExpr `lk(jq_.q_mutex_)`"
    ],
    "class": "d lock guard",
-   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF) S10b (arch025-engclose): Scheduler::runLoop (census key runLoop#, after Engine's inline forwarder runLoop) locks the queue as jq_.q_mutex_."
+   "reason": "whirl::MutexLock / UniqueLock take the mutex by Mutex& (the analyzer: a non-const reference constructor argument); the census's measured lock-type rule (Python: 'locked by whirl::MutexLock / UniqueLock'); locking is the mutex's own synchronisation, not a data write of the member (cross-check class d, arch025-emut HANDOFF) S10b (arch025-engclose): Scheduler::runLoop (census key runLoop#, after Engine's inline forwarder runLoop) locks the queue as jq_.q_mutex_. arch025-e2e3 (DESIGN v3 10.2): the burst wait's guard lw moved into JobQueue::jqWaitBurst; lk stays."
   },
   "runLoop#:jq_": {
    "clang_why": [
-    "write: CXXConstructExpr `lk(jq_.q_mutex_)`",
-    "write: CXXConstructExpr `lw(jq_.q_mutex_)`"
+    "write: CXXConstructExpr `lk(jq_.q_mutex_)`"
    ],
    "class": "d lock guard",
-   "reason": "the same two lock guards seen through the holder jq_ (JobQueue&): locking jq_.q_mutex_ is the mutex's own synchronisation, not a data write of jq_ (S10b, arch025-engclose)"
+   "reason": "the lock guard lk seen through the holder jq_ (JobQueue&): locking jq_.q_mutex_ is the mutex's own synchronisation, not a data write of jq_ (S10b, arch025-engclose); the 1 ms burst wait's guard lw moved into JobQueue::jqWaitBurst (arch025-e2e3, DESIGN v3 10.2)"
   },
   "startJob##:ctx_": {
    "clang_why": [
