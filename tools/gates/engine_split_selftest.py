@@ -11,8 +11,9 @@ catch it) and cut-pin mutants (P1-P3, review3 C2).
   --base: source trees with src/ (and include/); default = this repo. Mutants run on the FIRST base; every base
   runs as a baseline (B0, B1, ...). X13 (the leg-1 tree) runs on the second base when one is given.
   arch025-e2e3 (DESIGN v3 10.5, review arch025-engreview A2): a case whose 8th element is "nofix" runs on the first
-  base WITHOUT the FIXTURE (the real tree: X12a-X12d, L1, L2 test the --core / leg_end rules, not fixture artefacts);
+  base WITHOUT the FIXTURE (the real tree: X12a-X12d, LE1, LE2 test the --core / leg_end rules, not fixture artefacts);
   baseline B0c = the first base, no FIXTURE, in the exit mode `--writers leg_end --core` (must pass).
+  arch025-regb1 (review arch025-e2e3r C1): EW1-EW5 (nofix) test the cut's element_write_why (DESIGN v3 10.4 class E).
 Exit 0 = "engine split selftest: N/N as expected".
 """
 import hashlib, json, os, re, shutil, subprocess, sys
@@ -324,6 +325,9 @@ def fnd(t):
 IW_LOOP = "    bool logged = false;\n    while (queue_.empty()) {\n"
 IW_DEF = "bool Scheduler::idleWait(whirl::UniqueLock& lk, bool& was_busy) {\n"
 SCH_ACC = "    void flushTierOnStop() { tg_.flushTierOnStop(); }\n"
+# arch025-regb1: the two class-E entries (DESIGN v3 10.4): runLoop with jq_.q_mutex_ held, admitQueued's admission step
+SCH_ADMIT = "        std::vector<Job*> admit = admitQueued(n_busy);\n"
+SCH_JQADMIT = "        jq_.jqAdmit(qi, admit);\n"
 EMIT_E = "bool emit(const chat::ChatTokens& ct_, Slot& sl, std::uint32_t t, Engine* eng) {\n"
 _EO_INC = '#include "server/engine_output.h"\n'
 
@@ -448,7 +452,31 @@ MUT = [
      [("server/engine_sched.cpp", "    bool logged = false;\n    while (queue_.empty()) {\n",
        "    bool logged = false;\n    for (Job* j : queue_) j->done = true;\n    while (queue_.empty()) {\n")],
      None, ["--writers", "leg_end"], r"^   not in the expected list 'leg_end': .*\bidleWait:queue_\b", 0, "nofix"),
-    ("X13", "leg-1 tree (second base): emit -> finishJob", [(EC, EMIT_OLD, EMIT_OLD + "    if (t == 0xffffffffu) finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob"), 1),
+    # arch025-regb1 (review arch025-e2e3r C1, DESIGN v3 10.4 class E): runLoop:queue_ / admitQueued:queue_ are allowed
+    # outside writers ((entry, member) grained), so a NEW write through queue_'s elements in those two entries passed
+    # (the reviewer's R1 / R2 / A2, measured NOT CAUGHT on 91073ce). The cut's element_write_why pins the census's list
+    # of write reasons of each class-E row (one per write position, positions dropped; Python and clang): a new write
+    # position changes the list (EW1-EW3, real tree); the pin's own rules: a stale entry (EW4), a list that no longer
+    # matches today's (EW5)
+    ("EW1", "class E: runLoop writes a Job field through the const alias, queue_.front()->id = 0 (e2e3r R1, the old Y12 shape)",
+     [("server/engine_sched.cpp", SCH_ADMIT, SCH_ADMIT + "        if (!queue_.empty()) queue_.front()->id = 0;\n")],
+     None, ["--writers", "leg_end"], r"^   cut element_write_why: runLoop#:queue_ write reasons changed", 0, "nofix"),
+    ("EW2", "class E: runLoop marks the queued Jobs done, for (Job* j : queue_) j->done = true; (engreview A1 fault, e2e3r R2)",
+     [("server/engine_sched.cpp", SCH_ADMIT, SCH_ADMIT + "        for (Job* j : queue_) j->done = true;\n")],
+     None, ["--writers", "leg_end"], r"^   cut element_write_why: runLoop#:queue_ write reasons changed", 0, "nofix"),
+    ("EW3", "class E: admitQueued writes another Job field, queue_[qi]->done = true (e2e3r A2)",
+     [("server/engine_sched.cpp", SCH_JQADMIT, "        queue_[qi]->done = true;\n" + SCH_JQADMIT)],
+     None, ["--writers", "leg_end"], r"^   cut element_write_why: admitQueued:queue_ write reasons changed", 0, "nofix"),
+    ("EW4", "element_write_why: an entry that no longer occurs is a finding (the list stays exact)", [],
+     lambda c: c.setdefault("element_write_why", {}).update(
+         {"runLoop#:stop_": {"python_why": ["assignment"], "clang_why": [], "class": "selftest", "reason": "selftest"}}),
+     ["--no-pin", "--writers", "leg_end"], fnd("cut element_write_why entry no longer occurs (remove it): runLoop#:stop_"), 0, "nofix"),
+    ("EW5", "element_write_why: a pinned list without one of today's reasons does not cover the row", [],
+     lambda c: c.setdefault("element_write_why", {}).update(
+         {"admitQueued:queue_": {"python_why": ["argument of waitsForSys() bound to a non-const reference"], "clang_why": [],
+                                 "class": "selftest", "reason": "selftest"}}),
+     ["--no-pin", "--writers", "leg_end"], r"^   cut element_write_why: admitQueued:queue_ write reasons changed", 0, "nofix"),
+    ("X13","leg-1 tree (second base): emit -> finishJob", [(EC, EMIT_OLD, EMIT_OLD + "    if (t == 0xffffffffu) finishJob(sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob"), 1),
     ("X14", "friend in class Engine", [(EH, "    ServerModel& m_;\n", "    friend struct Peek;\n    ServerModel& m_;\n")], None, [], fnd("friend in tracked class Engine")),
     # --- review3 (Y1-Y14) ---
     ("Y1", "runLoop gov_json_.append (mutator method on governor data)", [(EC, RUNL, RUNL + '    gov_json_.append("x");\n')], None, [], ow("runLoop:gov_json_")),
