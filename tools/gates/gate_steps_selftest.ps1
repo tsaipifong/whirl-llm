@@ -48,6 +48,10 @@ try {
         Check "list 8060s $n GPU" (@($s8.out | Where-Object { $_ -match "^$n\s+GPU\s*$" }).Count -eq 1) "not listed as an available GPU step"
     }
     Check "list cpu_platform_check CPU (arch025-PL5)" (@($r97.out | Where-Object { $_ -match "^cpu_platform_check\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^cpu_platform_check\s+CPU\s*$" }).Count -eq 1) "missing"
+    # rel025-c5bench: the measure-tools test exes under the names tools/impact/impact.py derives (exe minus whirl- / -tests)
+    foreach ($n in "cpu_bench-out", "cpu_kt-bench", "cpu_stage-bench") {
+        Check "list $n CPU on both cards (rel025-c5bench)" (@($r97.out | Where-Object { $_ -match "^$n\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^$n\s+CPU\s*$" }).Count -eq 1) "missing"
+    }
     Check "list cpu_step_selftest CPU" (@($r97.out | Where-Object { $_ -match "^cpu_step_selftest\s+CPU\s*$" }).Count -eq 1) "missing"
     Check "list cpu_cmake_modules CPU (arch025-n17)" (@($r97.out | Where-Object { $_ -match "^cpu_cmake_modules\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^cpu_cmake_modules\s+CPU\s*$" }).Count -eq 1) "missing"
     Check "list r9700 srv_env_e2 not available" (@($r97.out | Where-Object { $_ -match "^srv_env_e2\s+GPU\s+\(not in this gate: 8060s only" }).Count -eq 1) "want '(not in this gate: 8060s only'"
@@ -170,6 +174,17 @@ try {
         @{ step = "cpu_kernel_isa_cmp"; name = "planted: a changed kernel not reported"; exit = 1; lines = @("FAIL gfx1201 one kernel changed -> exit 1", "kernel_isa_cmp test: FAIL (1)"); want = $false },
         @{ step = "cpu_kernel_isa_cmp"; name = "planted: a failed compile reported as built"; exit = 1; lines = @("kernel_isa_cmp test: PASS", "FAIL broken vision source: exit 1 (0)", "kernel_co_build test: FAIL (1)"); want = $false },
         @{ step = "cpu_kernel_isa_cmp"; name = "planted: the builder test did not run (exit forged to 0)"; exit = 0; lines = @("kernel_isa_cmp test: PASS"); want = $false },
+        @{ step = "cpu_bench-out"; name = "clean (rel025-c5bench)"; exit = 0; lines = @("PASS  writer: one row per call", "PASS  writer: escape", "whirl-bench-out-tests: 0 failed"); want = $true },
+        @{ step = "cpu_bench-out"; name = "planted: one case failed"; exit = 1; lines = @("PASS  writer: one row per call", "FAIL  writer: escape  (got x)", "whirl-bench-out-tests: 1 failed"); want = $false },
+        @{ step = "cpu_bench-out"; name = "planted: 0 failed but no case ran"; exit = 0; lines = @("whirl-bench-out-tests: 0 failed"); want = $false },
+        @{ step = "cpu_bench-out"; name = "planted: a FAIL line, exit and total forged"; exit = 0; lines = @("FAIL  writer: escape", "whirl-bench-out-tests: 0 failed"); want = $false },
+        @{ step = "cpu_kt-bench"; name = "clean"; exit = 0; lines = @("PASS  stop rule", "whirl-kt-bench-tests: 15 PASS, 0 failed"); want = $true },
+        @{ step = "cpu_kt-bench"; name = "planted: one case failed"; exit = 1; lines = @("FAIL  stop rule  (x)", "whirl-kt-bench-tests: 14 PASS, 1 failed"); want = $false },
+        @{ step = "cpu_kt-bench"; name = "planted: 0 cases ran"; exit = 0; lines = @("whirl-kt-bench-tests: 0 PASS, 0 failed"); want = $false },
+        @{ step = "cpu_stage-bench"; name = "clean"; exit = 0; lines = @("PASS  parse_args", "", "2 passed, 0 failed"); want = $true },
+        @{ step = "cpu_stage-bench"; name = "planted: one case failed"; exit = 1; lines = @("FAIL  driver  (x)", "", "1 passed, 1 failed"); want = $false },
+        @{ step = "cpu_stage-bench"; name = "planted: 0 cases ran"; exit = 0; lines = @("", "0 passed, 0 failed"); want = $false },
+        @{ step = "cpu_stage-bench"; name = "planted: crash after the cases (exit -1073741819)"; exit = -1073741819; lines = @("PASS  parse_args", "2 passed, 0 failed"); want = $false },
         @{ step = "cpu_step_selftest"; name = "clean"; exit = 0; lines = @("gate steps selftest: 36/36 as expected"); want = $true },
         @{ step = "cpu_step_selftest"; name = "planted: one proof did not hold"; exit = 1; lines = @("BAD  rules: ...", "gate steps selftest: 35/36 as expected"); want = $false }
     )
