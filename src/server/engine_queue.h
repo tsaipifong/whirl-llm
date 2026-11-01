@@ -52,7 +52,7 @@ public:
     void jqRelease(Job* job);  // releaseSlot: the request is done, one active less
     void jqReap();             // reapDisconnected: queued requests whose client disconnected are dropped
     void jqTierWake();         // attachTier: the tier IO thread's wake callback
-    void jqWaitBurst(std::uint64_t wake_seq0);  // runLoop: burst gather / restore, 1 ms or a wake_seq_ bump (E2)
+    void jqWaitBurst(std::uint64_t wake_seq0) WH_EXCLUDES(q_mutex_);  // runLoop: burst gather / restore, 1 ms or a wake_seq_ bump (E2)
 
     // the queue state (Engine's loop, release and tier paths read and write it under q_mutex_)
     whirl::Mutex q_mutex_;
