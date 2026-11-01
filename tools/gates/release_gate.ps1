@@ -142,6 +142,9 @@ $exe = @{}
 foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test", "whirl-tests", "whirl-model-tests", "whirl-cache-tests",
                "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests",
                "whirl-pins", "whirl-startup-replay", "whirl-sampling-tests") { $exe[$n] = Join-Path $Build "$n.exe" }
+# rel025-c5bench: the measure-tools CPU unit tests (cmake/server.cmake: whirl-bench-out-tests, whirl-kt-bench-tests,
+# whirl-stage-bench-tests). Registered, so a build without them is a setup error, as for every exe above.
+foreach ($n in "whirl-bench-out-tests", "whirl-kt-bench-tests", "whirl-stage-bench-tests") { $exe[$n] = Join-Path $Build "$n.exe" }
 
 # ---------------------------------------------------------------------------------------------------
 # step table: name, gpu, command (array: exe + args), rule (scriptblock over the output lines + exit code)
@@ -165,6 +168,18 @@ $pwsh = (Get-Process -Id $PID).Path
 foreach ($t in "whirl-tests", "whirl-model-tests", "whirl-cache-tests", "whirl-vision-tests", "whirl-tier-tests", "whirl-device-tests", "whirl-ops-tests", "whirl-sampling-tests") {
     AddStep "cpu_$($t -replace '^whirl-','' -replace '-tests$','')" $false @($exe[$t]) { param($o, $c) $c -eq 0 -and ($o -match "\b[1-9]\d* passed, 0 failed") }
 }
+# rel025-c5bench (PLAN 10.5b): the measure-tools unit tests. Step names = tools/impact/impact.py's rule (exe name minus
+# whirl- and -tests, hyphens kept), so the impact scope proof of release_check R1 finds them (they were in no gate before;
+# mt-p0b e153399 had them as cpu_bench_out / ... on a branch that was never merged). The tests write fixed names under
+# temp_directory_path(), so each runs with TMP / TEMP = this gate's test_tmp folder, set in the child pwsh only (a step's
+# env hashtable is removed, not restored, after the step). Rules: exit 0, a count > 0, 0 failed, no FAIL line.
+$benchTmp = Join-Path $Work "test_tmp"
+function TmpCmd([string]$x) {
+    return @($pwsh, "-NoProfile", "-Command", "`$env:TMP = '$($benchTmp -replace "'", "''")'; `$env:TEMP = `$env:TMP; & '$($x -replace "'", "''")'; exit `$LASTEXITCODE")
+}
+AddStep "cpu_bench-out" $false (TmpCmd $exe["whirl-bench-out-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "^whirl-bench-out-tests: 0 failed$") -and @($o | Where-Object { $_ -match "^PASS " }).Count -gt 0 -and -not ($o -match "^FAIL ") }
+AddStep "cpu_kt-bench" $false (TmpCmd $exe["whirl-kt-bench-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "^whirl-kt-bench-tests: [1-9]\d* PASS, 0 failed$") -and -not ($o -match "^FAIL ") }
+AddStep "cpu_stage-bench" $false (TmpCmd $exe["whirl-stage-bench-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "^[1-9]\d* passed, 0 failed$") -and -not ($o -match "^FAIL ") }
 # arch025 N7: each module's host unit tests alone: tests/unit/<module>_tests.cpp -> whirl-unit-<module>-tests.exe
 # (cmake/unit.cmake), step cpu_unit_<module> (the file's stem); cpu_tests above runs every one of them in one program
 # (whirl-tests: the same cases in the old order). unit_tests.cpp (whirl-tests' main) and numerics_plan_tests.cpp (a part
