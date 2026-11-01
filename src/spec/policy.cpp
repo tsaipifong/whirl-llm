@@ -9,6 +9,7 @@
 #include "whirl/vismap.h"  // image_id_base (Ngram::lookup)
 
 #include "whirl/common.h"  // widen / narrow (bug-envpaths)
+#include "platform/fs.h"  // longPathForm (arch025-n2: readDraftVocab)
 #include "platform/proc.h"  // exePath (arch025 PL4)
 
 #include <algorithm>
@@ -214,7 +215,10 @@ BatchDrafts batchDraftsFrom(BatchDrafts batch_drafts, const std::string& s) {
 }
 
 std::vector<u32> readDraftVocab(const std::string& path) {
-    std::ifstream f(std::filesystem::path(widen(path)), std::ios::binary | std::ios::ate);  // bug-envpaths: path is UTF-8
+    // bug-envpaths: path is UTF-8. arch025-n2 (SC-2b): opened in its long-path form (Rust std get_long_path at the open:
+    // unchanged under 248 characters and for \\?\ / \??\), so <plain exe folder of 233+ chars>\draft_vocab\subset_48k.bin
+    // opens without long-path support; the messages keep the path as given
+    std::ifstream f(std::filesystem::path(platform::fs::longPathForm(widen(path))), std::ios::binary | std::ios::ate);
     if (!f) throw std::runtime_error("draft vocabulary file not found: " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0 || n % 4 != 0) throw std::runtime_error("draft vocabulary file size is not a multiple of 4: " + path);
