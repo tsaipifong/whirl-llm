@@ -2,8 +2,9 @@
 // admitQueued / startAdmitted, and logBatchStats; bodies verbatim from engine.cpp (S16 file move).
 // SPDX-License-Identifier: Apache-2.0
 
-#include "engine.h"
-#include "engine_internal.h"
+// arch025-regb1 (N4-reg b1): the component's own header, not engine.h / engine_internal.h (no include edge back to server.engine)
+#include "server/engine_sched.h"
+#include "server/engine_prof.h"
 
 #include "cache/tier_adapter.h"
 #include "log.h"

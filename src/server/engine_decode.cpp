@@ -3,8 +3,10 @@
 // to engine_drafter.h (arch025-engine S4, module server.drafter_ctx).
 // SPDX-License-Identifier: Apache-2.0
 
-#include "engine.h"
-#include "engine_internal.h"
+// arch025-regb1 (N4-reg b1): the component's own header, not engine.h / engine_internal.h (no include edge back to server.engine)
+#include "server/engine_cycle.h"
+#include "server/engine_output.h"
+#include "server/engine_prof.h"
 
 #include "cache/tier_adapter.h"
 #include "log.h"

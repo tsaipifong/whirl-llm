@@ -1273,10 +1273,6 @@
   ],
   [
    "server.job_queue",
-   "server.engine"
-  ],
-  [
-   "server.job_queue",
    "server.log"
   ],
   [
@@ -1349,15 +1345,15 @@
   ],
   [
    "server.prefill",
+   "server.cycle_prof"
+  ],
+  [
+   "server.prefill",
    "server.decode_floor"
   ],
   [
    "server.prefill",
    "server.drafter_ctx"
-  ],
-  [
-   "server.prefill",
-   "server.engine"
   ],
   [
    "server.prefill",
@@ -1386,6 +1382,10 @@
   [
    "server.prefill",
    "server.slot_end"
+  ],
+  [
+   "server.prefill",
+   "server.slot_output"
   ],
   [
    "server.prefill",
@@ -1445,7 +1445,7 @@
   ],
   [
    "server.scheduler",
-   "server.engine"
+   "server.cycle_prof"
   ],
   [
    "server.scheduler",
@@ -1589,10 +1589,6 @@
   ],
   [
    "server.slot_end",
-   "server.engine"
-  ],
-  [
-   "server.slot_end",
    "server.engine_types"
   ],
   [
@@ -1689,10 +1685,6 @@
   ],
   [
    "server.slot_start",
-   "server.engine"
-  ],
-  [
-   "server.slot_start",
    "server.engine_types"
   ],
   [
@@ -1722,6 +1714,10 @@
   [
    "server.slot_start",
    "server.slot_cache"
+  ],
+  [
+   "server.slot_start",
+   "server.slot_output"
   ],
   [
    "server.slot_start",
@@ -1761,11 +1757,11 @@
   ],
   [
    "server.spec_cycle",
-   "server.drafter_ctx"
+   "server.cycle_prof"
   ],
   [
    "server.spec_cycle",
-   "server.engine"
+   "server.drafter_ctx"
   ],
   [
    "server.spec_cycle",
@@ -1790,6 +1786,10 @@
   [
    "server.spec_cycle",
    "server.slot_end"
+  ],
+  [
+   "server.spec_cycle",
+   "server.slot_output"
   ],
   [
    "server.spec_cycle",
@@ -1954,10 +1954,6 @@
   [
    "server.tier_glue",
    "server.drafter_ctx"
-  ],
-  [
-   "server.tier_glue",
-   "server.engine"
   ],
   [
    "server.tier_glue",
@@ -2184,16 +2180,5 @@
    "platform.env"
   ]
  ],
- "cycles": [
-  [
-   "server.engine",
-   "server.job_queue",
-   "server.prefill",
-   "server.scheduler",
-   "server.slot_end",
-   "server.slot_start",
-   "server.spec_cycle",
-   "server.tier_glue"
-  ]
- ]
+ "cycles": []
 }

@@ -2,8 +2,8 @@
 // restore admission and steps, the tick, the shutdown flush); the tier half is TierBridge (tb_).
 // SPDX-License-Identifier: Apache-2.0
 
-#include "engine.h"
-#include "engine_internal.h"
+// arch025-regb1 (N4-reg b1): the component's own header, not engine.h / engine_internal.h (no include edge back to server.engine)
+#include "server/engine_tierglue.h"
 
 #include "cache/tier_adapter.h"
 #include "log.h"
