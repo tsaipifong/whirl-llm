@@ -7,7 +7,9 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 
 No new feature (feature freeze until the modularization is done). This release finishes WHIRL's modularization and
 lists ten fixes below. You run it exactly as 0.2.4: same command-line options, same server API, same model files.
-precise mode gives the same output, bit for bit, as in 0.2.4.
+precise mode gives the same output, bit for bit, as in 0.2.4, except for the requests that the fixes below change
+(the two Ornith chat-template details, an image read while the image encoder is streamed, fast-only environment
+settings).
 
 ### Fixed
 
@@ -91,7 +93,7 @@ is built and accepted. The old release text stays as it was; the corrected READM
   decode on each card, model and build, chosen by a short probe before the measurement: Swift-1.5 27B with MTP +
   n-gram drafts, Ornith-1.5-35B-A3B without speculation, on both GPUs. Releases 0.2.0 to 0.2.4 compared with
   llama.cpp b11214; numbers from the two llama.cpp versions are not compared with each other. precise and fast use the
-  same kernels and the same GPU work as 0.2.4 and keep their earlier numbers.
+  same kernels and the same GPU work as 0.2.4 and were not re-measured.
 - Radeon 8060S numbers: max power (80 W), ASUS ROG Flow Z13; they are subject to the Z13's power limits and vary
   slightly.
 

@@ -5,9 +5,9 @@
 **Windows HIP Inference for RDNA LLMs**
 
 > ### WHIRL 0.2.5 對最新官方 llama.cpp（b11960）：ROCm 與 Vulkan
-> 0.2.5 在同一台機器、用同一組模型檔重新量測，對照最新的官方 llama.cpp 發布版 **b11960（= v0.8.0）** 的 ROCm 版與 Vulkan 版：預設模式（balance）下 WHIRL 在每個量過的格子都領先（2k、96k、128k token 提示的預填與解碼，以及寫程式對話）：Radeon 8060S 上，Swift-1.5 27B 對 ROCm 快 +18% 到 +49%、對 Vulkan 快 +19% 到 +93%，Ornith-1.5-35B-A3B 分別快 +40% 到 +54% 與 +41% 到 +114%；R9700 上，Swift-1.5 27B 對 ROCm 快 +59% 到 +177%、對 Vulkan 快 +42% 到 +299%，Ornith-1.5-35B-A3B 分別快 +82% 到 +180% 與 +100% 到 +326%（[0.2.5 發布說明](https://github.com/tsaipifong/whirl-llm/releases/tag/v0.2.5)）。llama.cpp 在每張卡、每個模型、每個版本都用它最快的解碼方式（Swift 27B 用 MTP + n-gram 草稿，Ornith 35B-A3B 不用投機解碼）。Radeon 8060S 的數字為最大功率（80 W），ASUS ROG Flow Z13；受 Z13 功耗限制，數據略有浮動。
+> 0.2.5 在同一台機器、用同一組模型檔重新量測，對照最新的官方 llama.cpp 發布版 **b11960（= v0.8.0）** 的 ROCm 版與 Vulkan 版：預設模式（balance）下 WHIRL 在每個量過的格子都領先（2k、96k、128k token 提示的預填與解碼，以及寫程式對話）：Radeon 8060S 上，Swift-1.5 27B 對 ROCm 快 +18% 到 +49%、對 Vulkan 快 +19% 到 +93%，Ornith-1.5-35B-A3B 分別快 +40% 到 +54% 與 +41% 到 +113%；R9700 上，Swift-1.5 27B 對 ROCm 快 +59% 到 +177%、對 Vulkan 快 +42% 到 +299%，Ornith-1.5-35B-A3B 分別快 +82% 到 +180% 與 +100% 到 +326%（[0.2.5 發布說明](https://github.com/tsaipifong/whirl-llm/releases/tag/v0.2.5)）。llama.cpp 在每張卡、每個模型、每個版本都用它最快的解碼方式（Swift 27B 用 MTP + n-gram 草稿，Ornith 35B-A3B 不用投機解碼）。Radeon 8060S 的數字為最大功率（80 W），ASUS ROG Flow Z13，GPU 記憶體（UMA frame buffer）64 GB，WHIRL 與 llama.cpp 相同；受 Z13 功耗限制，數據略有浮動。
 >
-> 0.2.5 本身沒有新功能：修正十個錯誤、引擎全面模組化，命令列選項與模型檔都不變，precise 的輸出與 0.2.4 逐位元相同（[更新內容](#025-更新內容)）。
+> 0.2.5 本身沒有新功能：修正十個錯誤、引擎全面模組化，命令列選項與模型檔都不變，precise 的輸出除了本版修正會改變的請求之外，與 0.2.4 逐位元相同（[更新內容](#025-更新內容)）。
 
 WHIRL 是 Windows 上 AMD GPU 的開源（Apache-2.0）LLM 推論引擎：原生 C++／HIP，每一支 kernel 都公開，不需要 WSL、Docker，也不用安裝 ROCm。**下載 zip、解壓縮、執行，只需要 AMD 驅動。** 支援 **AMD Ryzen AI Max+ 395** 的 **Radeon 8060S** 與 **AMD Radeon AI PRO R9700**（RDNA 4，32 GB），搭配我們的兩個 MXFP4 模型：**Swift-1.5 27B MXFP4**（稠密）與 **Ornith-1.5-35B-A3B MXFP4**（MoE）。兩張卡上，WHIRL 0.2.5 的預設模式都**比最新的官方 llama.cpp 快**，ROCm 與 Vulkan 版皆然，每個量過的提示長度都是如此。WHIRL 0.2.0 對 llama.cpp b11214 時，三種模式、2k 到 ~250k token 的每個提示長度都領先（見下方表格與圖）。
 
@@ -383,7 +383,7 @@ Ryzen AI Max+ 395。WHIRL 每格單次量測（2026-10-17）；llama.cpp 為 1 �
 
 ## 0.2.5 更新內容
 
-沒有新功能；用法與 0.2.4 完全相同（命令列選項、server API、模型檔都不變），precise 的輸出與 0.2.4 逐位元相同。
+沒有新功能；用法與 0.2.4 完全相同（命令列選項、server API、模型檔都不變），precise 的輸出除了下列修正會改變的請求（Ornith 的兩個對話範本細節、視覺編碼器串流載入時讀取的圖片、fast 專用的環境變數設定）之外，與 0.2.4 逐位元相同。
 
 - **修正十個錯誤**，包括：在使用 RAM 快取時停止 whirl-server 可能以錯誤結束；接續的對話可能只有一部分找得到快取；長路徑（超過 260 字元的 SSD 快取資料夾、透過 `\\?\` 路徑啟動）、Windows 使用者名稱含非英文字元；圖片偶爾會被讀錯的罕見情況；Ornith 的兩個對話範本細節；fast 專用的環境變數設定不再滲入 precise 與 balance。
 - **重新對照最新的官方 llama.cpp**：b11960（= v0.8.0），ROCm 與 Vulkan，同一台機器（見本頁開頭）。
