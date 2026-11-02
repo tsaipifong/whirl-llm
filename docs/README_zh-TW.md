@@ -4,14 +4,50 @@
 
 **Windows HIP Inference for RDNA LLMs**
 
-> ### 0.2.0 新增：支援 AMD Ryzen AI Max+ 395（Radeon 8060S）
-> WHIRL 現在可以在 **AMD Ryzen AI Max+ 395** 的內建 GPU **Radeon 8060S** 上執行：kernel 針對它調校過，三種數值模式都能用，提示最長約 250k token。在 8060S 上，我們量過的每一種提示長度都比原廠 llama.cpp 的 ROCm 和 Vulkan 版本快（見[下方 8060S 表格](#whirl-對-llamacpp一眼看)；最大功率（80 W），ASUS ROG Flow Z13）。
+> ### WHIRL 0.2.5 對最新官方 llama.cpp（b11960）：ROCm 與 Vulkan
+> 0.2.5 在同一台機器、用同一組模型檔重新量測，對照最新的官方 llama.cpp 發布版 **b11960（= v0.8.0）** 的 ROCm 版與 Vulkan 版：預設模式（balance）下 WHIRL 領先 [TBD:cell=lead summary per GPU and model: balance lead vs ROCm / vs Vulkan, from release025\remeasured.json + margins.tsv after R1-R3]（[0.2.5 發布說明](https://github.com/tsaipifong/whirl-llm/releases/tag/v0.2.5)）。llama.cpp 在每張卡、每個模型、每個版本都用它最快的解碼方式（Swift 27B 用 MTP + n-gram 草稿，Ornith 35B-A3B 不用投機解碼）。Radeon 8060S 的數字為最大功率（80 W），ASUS ROG Flow Z13；受 Z13 功耗限制，數據略有浮動。
+>
+> 0.2.5 本身沒有新功能：修正十個錯誤、引擎全面模組化，命令列選項與模型檔都不變，precise 的輸出與 0.2.4 逐位元相同（[更新內容](#025-更新內容)）。
 
-WHIRL 是 Windows 上 AMD GPU 的開源（Apache-2.0）LLM 推論引擎：原生 C++／HIP，每一支 kernel 都公開，不需要 WSL、Docker，也不用安裝 ROCm。**下載 zip、解壓縮、執行，只需要 AMD 驅動。** 0.2.0 支援 **AMD Ryzen AI Max+ 395** 的 **Radeon 8060S**（0.2.0 新增）與 **AMD Radeon AI PRO R9700**（RDNA 4，32 GB），搭配我們的兩個 MXFP4 模型：**Swift-1.5 27B MXFP4**（稠密）與 **Ornith-1.5-35B-A3B MXFP4**（MoE）。兩張卡上都**比 llama.cpp 快**，ROCm 與 Vulkan 版皆然，三種模式、我們量過的每個提示長度（2k 到 ~250k token）都是如此。
+WHIRL 是 Windows 上 AMD GPU 的開源（Apache-2.0）LLM 推論引擎：原生 C++／HIP，每一支 kernel 都公開，不需要 WSL、Docker，也不用安裝 ROCm。**下載 zip、解壓縮、執行，只需要 AMD 驅動。** 支援 **AMD Ryzen AI Max+ 395** 的 **Radeon 8060S** 與 **AMD Radeon AI PRO R9700**（RDNA 4，32 GB），搭配我們的兩個 MXFP4 模型：**Swift-1.5 27B MXFP4**（稠密）與 **Ornith-1.5-35B-A3B MXFP4**（MoE）。兩張卡上，WHIRL 0.2.5 的預設模式都**比最新的官方 llama.cpp 快**，ROCm 與 Vulkan 版皆然，每個量過的提示長度都是如此 [TBD:verify=margins-no-loss]。WHIRL 0.2.0 對 llama.cpp b11214 時，三種模式、2k 到 ~250k token 的每個提示長度都領先（見下方表格與圖）。
+
+## 快速上手
+
+1. 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 `whirl-0.2.5-windows-x64.zip`，以及一個模型，例如 [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF)，存到 `C:\models\`。只需要 AMD 驅動（[需求](#需求)；Radeon 8060S 請先設定 GPU 記憶體）。
+2. 解壓縮後執行，在 PowerShell：
+
+```powershell
+Unblock-File .\whirl-0.2.5-windows-x64.zip
+Expand-Archive .\whirl-0.2.5-windows-x64.zip -DestinationPath C:\whirl
+cd C:\whirl\whirl-0.2.5-windows-x64
+.\whirl.exe devices                                    # 應列出 Radeon 8060S（gfx1151）和／或 R9700（gfx1201）
+.\whirl.exe chat C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf "用兩句話解釋 TCP slow start。" --max-tokens 400
+.\whirl-server.exe C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf --port 8080      # 預設模式：balance
+```
+
+server 在 `http://127.0.0.1:8080/v1` 提供 OpenAI API（`/v1/chat/completions`、`/v1/completions`、`/v1/models`、`/health`），任何相容 OpenAI 的用戶端都能用。加 `--precise` 得到逐位元無損輸出，加 `--fast` 追求最高速度。用 Ctrl+C 停止 server，會先把重複使用過的工作階段寫進 SSD 層。
+
+長文件可加大每個 slot 的上下文，例如 `--ctx-per-slot 262144`；見 [recipes_zh-TW.md](recipes_zh-TW.md#long-context)。
+
+### 選擇 GPU
+
+- 沒加 `--device` 時，WHIRL 使用 GPU 記憶體最大的那張（內顯以專用記憶體計算；一樣大時，選 `--list-devices`
+  列出的第一張），啟動紀錄會寫出用的是哪張。
+- 要改用別張，請加 `--device pci:匯流排:裝置`，號碼可在工作管理員 →「效能」→ 選顯示卡 →「實體位置」查到。
+- 例如：工作管理員顯示實體位置為「PCI 匯流排 71，裝置 0，函數 0」→ `whirl-server.exe <模型.gguf> --device pci:71:0`
+
+`-dev` 和環境變數 `WHIRL_DEVICE` 的作用與 `--device` 相同（`whirl` 與 `whirl-server` 都適用）。
+
+`whirl devices`（或 `--list-devices`）會列出每張卡的 `pci:` 編號。只有一張卡符合時，也可以用編號、`r9700`、
+`8060s` 或名稱的一部分。USB4／Thunderbolt 外接顯卡在接上時才分配匯流排編號，重新插拔後請再看一次工作管理員。
+
+每個模型第一次執行時會調校一次 GPU kernel，結果快取在 `%LOCALAPPDATA%\whirl`（R9700 上我們的 MXFP4 檔只要幾秒；8060S 較久）。完整步驟：[快速上手](quickstart_zh-TW.md)。所有選項：[使用參考](guide/zh-TW/usage.md)。
+
+**進階：從原始碼建置**——給想自己修改、調校 WHIRL 的使用者：[building_zh-TW.md](building_zh-TW.md)。
 
 ## WHIRL 對 llama.cpp：一眼看
 
-WHIRL 0.2.0 預設模式（balance）對 ggml-org 官方 llama.cpp **b11214**，**ROCm** 與 **Vulkan** 兩個版本分開列。同一個 GGUF 檔、同一組提示、greedy 解碼、一個使用者。
+本節的圖與表格是 **0.2.0 的量測**：WHIRL 0.2.0 預設模式（balance）對 ggml-org 官方 llama.cpp **b11214**，**ROCm** 與 **Vulkan** 兩個版本分開列。同一個 GGUF 檔、同一組提示、greedy 解碼、一個使用者。WHIRL 0.2.5 對 llama.cpp b11960（balance，兩張卡）的數字在 [0.2.5 發布說明](https://github.com/tsaipifong/whirl-llm/releases/tag/v0.2.5) [TBD:verify=readme-tables-0.2.0-or-regenerate]。
 
 ![Radeon 8060S（Ryzen AI Max+ 395）prefill 速度：WHIRL 0.2.0 對 llama.cpp ROCm 與 Vulkan](images/bench020_prefill_s8.png)
 
@@ -118,7 +154,7 @@ Swift 27B，WHIRL balance。一段工作階段＝約 20k token 的系統＋工�
 
 | | |
 |---|---|
-| **下載就能跑** | 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 **`whirl-0.2.4-windows-x64.zip`**，解壓縮、執行。**只需要 AMD 驅動**：不需要 HIP SDK、ROCm，也不用另外安裝 Visual C++ 可轉散發套件（ROCm 10.1 驅動需要的幾個執行階段 DLL 已附在 zip 裡） |
+| **下載就能跑** | 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 **`whirl-0.2.5-windows-x64.zip`**，解壓縮、執行。**只需要 AMD 驅動**：不需要 HIP SDK、ROCm，也不用另外安裝 Visual C++ 可轉散發套件（ROCm 10.1 驅動需要的幾個執行階段 DLL 已附在 zip 裡） |
 | 驅動 | **AMD Software: Adrenalin Edition 26.8.1（驅動 32.0.31041.1004）或更新版**，兩張卡都一樣。更舊的版本未測試。使用 Adrenalin Edition for ROCm 10.1 驅動時，請讓 zip 裡的 `rocm_kpack.dll` 留在 `whirl.exe` 旁邊（該驅動的 GPU runtime 需要它，但驅動沒有安裝它），連同它用到的 Visual C++ 執行階段 DLL（`msvcp140.dll`、`vcruntime140.dll`、`vcruntime140_1.dll`，同樣附在 zip 裡） |
 | GPU | **Radeon 8060S**（RDNA 3.5，gfx1151，AMD Ryzen AI Max+ 395 內顯）或 **AMD Radeon AI PRO R9700**（RDNA 4，gfx1201，32 GB）；一個行程用一張 GPU |
 | Radeon 8060S：GPU 記憶體 | **先在 Armoury Crate 或 BIOS 設定 GPU 記憶體（UMA frame buffer 大小）**（其他筆電：AMD Software 的 *Variable Graphics Memory*），再重新開機。WHIRL 把模型、緩衝區和 KV 快取放在這塊專用記憶體；Windows 的「共用 GPU 記憶體」不拿來放這些（token 嵌入表和 RAM 快取層放在鎖定的系統 RAM，工作管理員會把它顯示成共用 GPU 記憶體）。**Swift-1.5 27B MXFP4 至少設 40 GB**（precise 模式搭配預設 KV 快取要 48 GB），**Ornith-1.5-35B-A3B MXFP4 至少 32 GB**（128 GB 的機器設 64 GB，任一模型、任一模式都能跑）。以 server 預設值量測（4 個 slot、262,144 token 的 KV 快取）：Swift 在 balance 用 29.9 GiB、fast 31.0 GiB、precise 38.2 GiB；Ornith 在 balance 與 precise 用 27.3 GiB、fast 23.4 GiB。設得比這少時，server 會縮小 KV 快取，或停下來並告訴你要設多大。`whirl devices` 會以「dedicated」顯示目前的大小 |
@@ -131,48 +167,14 @@ Swift 27B，WHIRL balance。一段工作階段＝約 20k token 的系統＋工�
 
 我們的 R9700 是用 USB4／Thunderbolt 外接，可以正常運作。直接插在 PCIe 插槽的卡，在資料要經過主機連線的地方（載入模型、RAM／SSD 層還原）數字可能略有不同，prefill 與 decode 不受影響。
 
-## 快速上手
-
-1. 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 `whirl-0.2.4-windows-x64.zip`，以及一個模型，例如 [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF)，存到 `C:\models\`。
-2. 解壓縮後執行，在 PowerShell：
-
-```powershell
-Unblock-File .\whirl-0.2.4-windows-x64.zip
-Expand-Archive .\whirl-0.2.4-windows-x64.zip -DestinationPath C:\whirl
-cd C:\whirl\whirl-0.2.4-windows-x64
-.\whirl.exe devices                                    # 應列出 Radeon 8060S（gfx1151）和／或 R9700（gfx1201）
-.\whirl.exe chat C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf "用兩句話解釋 TCP slow start。" --max-tokens 400
-.\whirl-server.exe C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf --port 8080      # 預設模式：balance
-```
-
-server 在 `http://127.0.0.1:8080/v1` 提供 OpenAI API（`/v1/chat/completions`、`/v1/completions`、`/v1/models`、`/health`），任何相容 OpenAI 的用戶端都能用。加 `--precise` 得到逐位元無損輸出，加 `--fast` 追求最高速度。用 Ctrl+C 停止 server，會先把重複使用過的工作階段寫進 SSD 層。
-
-長文件可加大每個 slot 的上下文，例如 `--ctx-per-slot 262144`；見 [recipes_zh-TW.md](recipes_zh-TW.md#long-context)。
-
-### 選擇 GPU
-
-- 沒加 `--device` 時，WHIRL 使用 GPU 記憶體最大的那張（內顯以專用記憶體計算；一樣大時，選 `--list-devices`
-  列出的第一張），啟動紀錄會寫出用的是哪張。
-- 要改用別張，請加 `--device pci:匯流排:裝置`，號碼可在工作管理員 →「效能」→ 選顯示卡 →「實體位置」查到。
-- 例如：工作管理員顯示實體位置為「PCI 匯流排 71，裝置 0，函數 0」→ `whirl-server.exe <模型.gguf> --device pci:71:0`
-
-`-dev` 和環境變數 `WHIRL_DEVICE` 的作用與 `--device` 相同（`whirl` 與 `whirl-server` 都適用）。
-
-`whirl devices`（或 `--list-devices`）會列出每張卡的 `pci:` 編號。只有一張卡符合時，也可以用編號、`r9700`、
-`8060s` 或名稱的一部分。USB4／Thunderbolt 外接顯卡在接上時才分配匯流排編號，重新插拔後請再看一次工作管理員。
-
-每個模型第一次執行時會調校一次 GPU kernel，結果快取在 `%LOCALAPPDATA%\whirl`（R9700 上我們的 MXFP4 檔只要幾秒；8060S 較久）。完整步驟：[快速上手](quickstart_zh-TW.md)。所有選項：[使用參考](guide/zh-TW/usage.md)。
-
-**進階：從原始碼建置**——給想自己修改、調校 WHIRL 的使用者：[building_zh-TW.md](building_zh-TW.md)。
-
 ## 三種模式：速度與精度
 
-WHIRL 0.2.0 有三種數值模式，每個行程選一種（`--precise`、`--balance`、`--fast`）；不加旗標時是 **balance**。
+WHIRL 有三種數值模式，每個行程選一種（`--precise`、`--balance`、`--fast`）；不加旗標時是 **balance**。
 
 | 模式 | 是什麼 | 輸出保證 |
 |---|---|---|
 | **precise** | **逐位元無損**：除了 GGUF 本身的權重之外，不再量化任何東西；f16 KV 快取，激活值全程 f16／f32 | 輸出與單純 greedy 解碼**逐位元相同**：有沒有投機草稿、單獨跑或和其他使用者合批、命中前綴快取或還原工作階段，位元都相同 |
-| **balance**（預設） | 近乎無損，預設 | MTP／n-gram 草稿、合批，輸出的 token 都和 balance 模式下單純 greedy 解碼相同，還原的工作階段與留在 VRAM 的同一工作階段 token 相同；對話的下一回合從上一段回覆結尾的快取接續，與冷算數值等價，但非逐位元相同，回覆可能不同 |
+| **balance**（預設） | 業界標準的近乎無損，預設：只用允許清單內的加速項目（R9700 的 fp8 prefill 矩陣乘法、int8 解碼激活值、f16 中間值、稠密模型的 int8 KV 快取）；以任務準確度驗收，KL／top-1 只作回歸守門 | 非逐位元；MTP／n-gram 草稿、合批，輸出的 token 都和 balance 模式下單純 greedy 解碼相同，還原的工作階段與留在 VRAM 的同一工作階段 token 相同；對話的下一回合從上一段回覆結尾的快取接續，與冷算數值等價，但非逐位元相同，回覆可能不同 |
 | **fast**（自選） | 在 4-bit 等級品質內求最高速度：balance 再加 4-bit KV 快取與放寬的 MTP 接受規則（Radeon 8060S 上的稠密模型保留 int8 KV 快取，在那張卡上 decode 較快） | 有損；驗收標準是任務準確度回收至少達 precise 的 95%（KL 門檻只是回歸守門）；文字可能隨草稿與其他使用者而不同 |
 
 實際上代表：
@@ -209,7 +211,7 @@ precise 會犧牲速度。R9700 上代價最大的是 MXFP4 檔的 prefill，因
 
 ## 效能
 
-WHIRL 0.2.0 對官方 llama.cpp b11214（ggml-org 的 Windows 執行檔），ROCm 與 Vulkan 版並列。同一個 GGUF 檔、同一組提示（文件問答提示，第一行每次不同，不會命中前綴快取；生成 256 token）、greedy 解碼、關閉思考、一個使用者，tok/s 取自各 server 自己的 timings。三種 WHIRL 模式都列出；領先幅度欄是 balance（預設）。**precise 與 fast 也在每一格領先兩個 llama.cpp 版本。** 方法、旗標與提示：[benchmarks.md](guide/zh-TW/benchmarks.md)。
+以下是 0.2.0 的量測（0.2.5 對 llama.cpp b11960：見[發布說明](https://github.com/tsaipifong/whirl-llm/releases/tag/v0.2.5)）。WHIRL 0.2.0 對官方 llama.cpp b11214（ggml-org 的 Windows 執行檔），ROCm 與 Vulkan 版並列。同一個 GGUF 檔、同一組提示（文件問答提示，第一行每次不同，不會命中前綴快取；生成 256 token）、greedy 解碼、關閉思考、一個使用者，tok/s 取自各 server 自己的 timings。三種 WHIRL 模式都列出；領先幅度欄是 balance（預設）。**precise 與 fast 也在每一格領先兩個 llama.cpp 版本。** 方法、旗標與提示：[benchmarks.md](guide/zh-TW/benchmarks.md)。
 
 <!-- gen:ranges.zh -->
 | WHIRL balance 領先幅度（每個量過的長度） | Prefill 對 ROCm | Prefill 對 Vulkan | Decode 對 ROCm | Decode 對 Vulkan |
@@ -377,6 +379,17 @@ Ryzen AI Max+ 395。WHIRL 每格單次量測（2026-10-17）；llama.cpp 為 1 �
 - **Ornith 的 decode 是各自出廠設定的對比**：WHIRL 用 MTP 草稿，llama.cpp 不用投機解碼（它的 MTP 在這個模型上較慢）。
 - **不用投機的一般解碼**在每個引擎都受記憶體頻寬限制；WHIRL 大部分的 decode 領先來自 MTP + n-gram 投機解碼。
 - **fast 不一定比 balance 快**（見[三種模式](#三種模式速度與精度)），**precise 要付出速度**，R9700 的 prefill 最明顯。
+
+## 0.2.5 更新內容
+
+沒有新功能；用法與 0.2.4 完全相同（命令列選項、server API、模型檔都不變），precise 的輸出與 0.2.4 逐位元相同。
+
+- **修正十個錯誤**，包括：在使用 RAM 快取時停止 whirl-server 可能以錯誤結束；接續的對話可能只有一部分找得到快取；安裝資料夾路徑很長、Windows 使用者名稱含非英文字元；圖片偶爾會被讀錯的罕見情況；Ornith 的兩個對話範本細節；fast 專用的環境變數設定不再滲入 precise 與 balance。
+- **重新對照最新的官方 llama.cpp**：b11960（= v0.8.0），ROCm 與 Vulkan，同一台機器（見本頁開頭）。
+- **WHIRL 全面模組化**：每個部分都是獨立模組、有自己的測試；whirl.exe 與 whirl-server 共用同一套投機解碼迴圈。
+- **更正模式說明**：本 README 與使用指南已更正（balance 與 fast 以任務準確度驗收，KL 只作回歸守門）。
+
+完整清單：[CHANGELOG.md](../CHANGELOG.md)。
 
 ## 0.2.0 新功能
 

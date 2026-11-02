@@ -4,14 +4,53 @@
 
 **Windows HIP Inference for RDNA LLMs**
 
-> ### New in 0.2.0: AMD Ryzen AI Max+ 395 (Radeon 8060S) support
-> WHIRL now runs on the **Radeon 8060S** integrated GPU of the **AMD Ryzen AI Max+ 395**, with kernels tuned for it, all three numerics modes, and prompts up to ~250k tokens. On the 8060S it is faster than the official llama.cpp ROCm and Vulkan builds at every prompt length we measured (see the [8060S tables below](#whirl-vs-llamacpp-at-a-glance); max power (80 W), ASUS ROG Flow Z13).
+> ### WHIRL 0.2.5 against the latest official llama.cpp (b11960), ROCm and Vulkan
+> Measured again for 0.2.5 on the same machine with the same model files, against the latest official llama.cpp release **b11960 (= v0.8.0)**, its ROCm and its Vulkan build: in its default mode (balance) WHIRL leads [TBD:cell=lead summary per GPU and model: balance lead vs ROCm / vs Vulkan, from release025\remeasured.json + margins.tsv after R1-R3] ([0.2.5 release notes](https://github.com/tsaipifong/whirl-llm/releases/tag/v0.2.5)). llama.cpp runs with its fastest decode on each card, model and build (Swift 27B with MTP + n-gram drafts, Ornith 35B-A3B without speculation). Radeon 8060S numbers are at max power (80 W), ASUS ROG Flow Z13; they are subject to the Z13's power limits and vary slightly.
+>
+> 0.2.5 itself has no new feature: ten bug fixes, a fully modular engine, the same options and model files, and precise output bit-identical to 0.2.4 ([what's new](#whats-new-in-025)).
 
-WHIRL is an open-source (Apache-2.0) LLM inference engine for AMD GPUs on Windows: native C++/HIP, every kernel included, no WSL, Docker or ROCm install. **Download the zip, unzip, run; the AMD driver is all it needs.** Version 0.2.0 runs on the **Radeon 8060S** of the **AMD Ryzen AI Max+ 395** (new in 0.2.0) and the **AMD Radeon AI PRO R9700** (RDNA 4, 32 GB), with our two MXFP4 models, **Swift-1.5 27B MXFP4** (dense) and **Ornith-1.5-35B-A3B MXFP4** (MoE). On both GPUs it is **faster than llama.cpp**, ROCm and Vulkan builds alike, in every mode and at every prompt length we measured, from 2k to ~250k tokens.
+WHIRL is an open-source (Apache-2.0) LLM inference engine for AMD GPUs on Windows: native C++/HIP, every kernel included, no WSL, Docker or ROCm install. **Download the zip, unzip, run; the AMD driver is all it needs.** It runs on the **Radeon 8060S** of the **AMD Ryzen AI Max+ 395** and the **AMD Radeon AI PRO R9700** (RDNA 4, 32 GB), with our two MXFP4 models, **Swift-1.5 27B MXFP4** (dense) and **Ornith-1.5-35B-A3B MXFP4** (MoE). On both GPUs WHIRL 0.2.5 in its default mode is **faster than the latest official llama.cpp**, ROCm and Vulkan builds alike, at every prompt length measured [TBD:verify=margins-no-loss]. WHIRL 0.2.0 led llama.cpp b11214 in every mode and at every prompt length from 2k to ~250k tokens (the tables and charts below).
+
+## Quick start
+
+1. Download `whirl-0.2.5-windows-x64.zip` from [Releases](https://github.com/tsaipifong/whirl-llm/releases) and a model, for example [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF) saved in `C:\models\`. You need only the AMD driver ([requirements](#requirements); on the Radeon 8060S set its GPU memory first).
+2. Unzip and run, in PowerShell:
+
+```powershell
+Unblock-File .\whirl-0.2.5-windows-x64.zip
+Expand-Archive .\whirl-0.2.5-windows-x64.zip -DestinationPath C:\whirl
+cd C:\whirl\whirl-0.2.5-windows-x64
+.\whirl.exe devices                                    # lists the Radeon 8060S (gfx1151) and/or the R9700 (gfx1201)
+.\whirl.exe chat C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf "Explain TCP slow start in two sentences." --max-tokens 400
+.\whirl-server.exe C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf --port 8080      # default mode: balance
+```
+
+The server speaks the OpenAI API at `http://127.0.0.1:8080/v1` (`/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`), so any OpenAI-compatible client works. Add `--precise` for bitwise-lossless output or `--fast` for maximum speed. Stop the server with Ctrl+C; reused sessions are written to the SSD tier first.
+
+For long documents give a slot a longer context, for example `--ctx-per-slot 262144`; see [recipes.md](docs/recipes.md#long-context).
+
+### Choosing the GPU
+
+- Without `--device`, WHIRL uses the GPU with the most GPU memory (integrated GPUs count their dedicated memory; if
+  equal, the first one in `--list-devices`); the startup log shows which GPU it uses.
+- To use another GPU, add `--device pci:<bus>:<device>`; the numbers are in Task Manager > Performance > (select the
+  GPU) > Physical location.
+- Example: Task Manager shows Physical location "PCI bus 71, device 0, function 0" →
+  `whirl-server.exe <model.gguf> --device pci:71:0`
+
+`-dev` and `WHIRL_DEVICE` do the same as `--device`, for `whirl` and `whirl-server`.
+
+`whirl devices` (or `--list-devices`) prints the same `pci:` numbers for every GPU. An index, `r9700`, `8060s` or a
+part of the name also work when only one GPU matches. An external USB4 / Thunderbolt GPU gets its bus number when it
+is connected, so check Task Manager again after replugging it.
+
+The first run with a model tunes the GPU kernels once and caches the result in `%LOCALAPPDATA%\whirl` (a few seconds for our MXFP4 files on the R9700; longer on the 8060S). Full walkthrough: [quick start](docs/quickstart.md). Every option: [usage reference](docs/usage.md).
+
+**Advanced: build from source** — for users who want to modify and tune WHIRL themselves: [building.md](docs/building.md).
 
 ## WHIRL vs llama.cpp at a glance
 
-WHIRL 0.2.0 in its default mode (balance) against the official llama.cpp release **b11214** (ggml-org), shown separately for its **ROCm** and its **Vulkan** build. Same GGUF files, same prompts, greedy decoding, one user.
+The charts and tables in this section are the **0.2.0 measurements**: WHIRL 0.2.0 in its default mode (balance) against the official llama.cpp release **b11214** (ggml-org), shown separately for its **ROCm** and its **Vulkan** build. Same GGUF files, same prompts, greedy decoding, one user. WHIRL 0.2.5 against llama.cpp b11960 (balance, both GPUs) is in the [0.2.5 release notes](https://github.com/tsaipifong/whirl-llm/releases/tag/v0.2.5) [TBD:verify=readme-tables-0.2.0-or-regenerate].
 
 ![Prefill speed on the Radeon 8060S (Ryzen AI Max+ 395), WHIRL 0.2.0 vs llama.cpp ROCm and Vulkan](docs/images/bench020_prefill_s8.png)
 
@@ -118,7 +157,7 @@ Every kernel is open source in this repository; nothing is closed or downloaded 
 
 | | |
 |---|---|
-| **Download and run** | Download **`whirl-0.2.4-windows-x64.zip`** from [Releases](https://github.com/tsaipifong/whirl-llm/releases), unzip, run. **Only the AMD driver is needed**: no HIP SDK, no ROCm, no Visual C++ Redistributable to install (the few runtime DLLs the ROCm 10.1 driver needs are in the zip) |
+| **Download and run** | Download **`whirl-0.2.5-windows-x64.zip`** from [Releases](https://github.com/tsaipifong/whirl-llm/releases), unzip, run. **Only the AMD driver is needed**: no HIP SDK, no ROCm, no Visual C++ Redistributable to install (the few runtime DLLs the ROCm 10.1 driver needs are in the zip) |
 | Driver | **AMD Software: Adrenalin Edition 26.8.1 (driver 32.0.31041.1004) or newer**, for both GPUs. Older drivers are untested. With the Adrenalin Edition for ROCm 10.1 driver, keep the `rocm_kpack.dll` from the zip next to `whirl.exe` (that driver's GPU runtime needs it but does not install it), together with the Visual C++ runtime DLLs it uses (`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`, also in the zip) |
 | GPU | **Radeon 8060S** (RDNA 3.5, gfx1151, the AMD Ryzen AI Max+ 395 iGPU) or **AMD Radeon AI PRO R9700** (RDNA 4, gfx1201, 32 GB); one GPU per process |
 | Radeon 8060S: GPU memory | **Set the GPU memory (UMA frame buffer size) in Armoury Crate or the BIOS first** (other laptops: *Variable Graphics Memory* in AMD Software), then restart. WHIRL keeps the model, its buffers and the KV cache in this dedicated memory; Windows' "shared GPU memory" is not used for them (the token-embedding table and the RAM cache tier sit in pinned system RAM, which Task Manager shows as shared GPU memory). Set **at least 40 GB for Swift-1.5 27B MXFP4** (48 GB for its precise mode with the default KV cache) and **32 GB for Ornith-1.5-35B-A3B MXFP4** (64 GB on a 128 GB machine runs either model in every mode). Measured with the server defaults (4 slots, 262,144-token KV cache): Swift uses 29.9 GiB in balance, 31.0 GiB in fast, 38.2 GiB in precise; Ornith 27.3 GiB in balance and precise, 23.4 GiB in fast. With less, the server shrinks the KV cache, or stops with a message naming the size to set. `whirl devices` shows the current size as "dedicated" |
@@ -131,51 +170,14 @@ Support scope: WHIRL officially supports the Radeon 8060S and the R9700 and targ
 
 Our R9700 is connected as a USB4 / Thunderbolt eGPU; that works. A card in a direct PCIe slot may differ slightly where data crosses the host link (model loading, RAM / SSD tier restores), not in prefill or decode.
 
-## Quick start
-
-1. Download `whirl-0.2.4-windows-x64.zip` from [Releases](https://github.com/tsaipifong/whirl-llm/releases) and a model, for example [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF) saved in `C:\models\`.
-2. Unzip and run, in PowerShell:
-
-```powershell
-Unblock-File .\whirl-0.2.4-windows-x64.zip
-Expand-Archive .\whirl-0.2.4-windows-x64.zip -DestinationPath C:\whirl
-cd C:\whirl\whirl-0.2.4-windows-x64
-.\whirl.exe devices                                    # lists the Radeon 8060S (gfx1151) and/or the R9700 (gfx1201)
-.\whirl.exe chat C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf "Explain TCP slow start in two sentences." --max-tokens 400
-.\whirl-server.exe C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf --port 8080      # default mode: balance
-```
-
-The server speaks the OpenAI API at `http://127.0.0.1:8080/v1` (`/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`), so any OpenAI-compatible client works. Add `--precise` for bitwise-lossless output or `--fast` for maximum speed. Stop the server with Ctrl+C; reused sessions are written to the SSD tier first.
-
-For long documents give a slot a longer context, for example `--ctx-per-slot 262144`; see [recipes.md](docs/recipes.md#long-context).
-
-### Choosing the GPU
-
-- Without `--device`, WHIRL uses the GPU with the most GPU memory (integrated GPUs count their dedicated memory; if
-  equal, the first one in `--list-devices`); the startup log shows which GPU it uses.
-- To use another GPU, add `--device pci:<bus>:<device>`; the numbers are in Task Manager > Performance > (select the
-  GPU) > Physical location.
-- Example: Task Manager shows Physical location "PCI bus 71, device 0, function 0" →
-  `whirl-server.exe <model.gguf> --device pci:71:0`
-
-`-dev` and `WHIRL_DEVICE` do the same as `--device`, for `whirl` and `whirl-server`.
-
-`whirl devices` (or `--list-devices`) prints the same `pci:` numbers for every GPU. An index, `r9700`, `8060s` or a
-part of the name also work when only one GPU matches. An external USB4 / Thunderbolt GPU gets its bus number when it
-is connected, so check Task Manager again after replugging it.
-
-The first run with a model tunes the GPU kernels once and caches the result in `%LOCALAPPDATA%\whirl` (a few seconds for our MXFP4 files on the R9700; longer on the 8060S). Full walkthrough: [quick start](docs/quickstart.md). Every option: [usage reference](docs/usage.md).
-
-**Advanced: build from source** — for users who want to modify and tune WHIRL themselves: [building.md](docs/building.md).
-
 ## Three modes: speed and precision
 
-WHIRL 0.2.0 has three numerics modes. You pick one per process (`--precise`, `--balance`, `--fast`); with no flag it runs **balance**.
+WHIRL has three numerics modes. You pick one per process (`--precise`, `--balance`, `--fast`); with no flag it runs **balance**.
 
 | Mode | What it is | Output guarantee |
 |---|---|---|
 | **precise** | **bitwise lossless**: nothing is quantized beyond the GGUF's own weights; f16 KV cache, f16 / f32 activations everywhere | output **bitwise identical** to plain greedy decoding: the same bits with or without speculative drafts, alone or batched with other users, and from a prefix-cache hit or a restored session |
-| **balance** (default) | near-lossless, default | MTP / n-gram drafts and batching give the same tokens as plain greedy decoding in balance mode, and a restored session the same tokens as that session kept in VRAM; a conversation's next turn, continued from the cached end of the previous reply, is numerically equivalent to a cold run, not bitwise, so its reply can differ |
+| **balance** (default) | near-lossless by industry standard, default: only the allowed speed items (fp8 prefill matrix multiplies on the R9700, int8 decode activations, f16 intermediates, int8 KV cache on the dense model); accepted on task accuracy, KL / top-1 only a regression guard | not bitwise; MTP / n-gram drafts and batching give the same tokens as plain greedy decoding in balance mode, and a restored session the same tokens as that session kept in VRAM; a conversation's next turn, continued from the cached end of the previous reply, is numerically equivalent to a cold run, not bitwise, so its reply can differ |
 | **fast** (opt-in) | maximum speed within 4-bit-level quality: balance plus a 4-bit KV cache and relaxed MTP acceptance (on the Radeon 8060S the dense model keeps an int8 KV cache, which decodes faster there) | lossy; accepted when task accuracy recovers at least 95% of precise (KL limits are only a regression guard); the text can depend on the drafts and on other users |
 
 What this means in practice:
@@ -212,7 +214,7 @@ Image input works with a Qwen3-VL-style mmproj (F16 / BF16) via `--mmproj`, on b
 
 ## Performance
 
-WHIRL 0.2.0 against the official llama.cpp b11214 (ggml-org Windows binaries), ROCm and Vulkan builds side by side. Same GGUF files, same prompts (a document-QA prompt with a unique first line, so no prefix-cache hits; 256 generated tokens), greedy decoding, thinking off, one user, tok/s from each server's own timings. All three WHIRL modes are shown; the lead columns are for balance, the default. **precise and fast lead both llama.cpp builds in every cell as well.** Methods, flags and prompts: [benchmarks.md](docs/benchmarks.md).
+These are the 0.2.0 measurements (0.2.5 against llama.cpp b11960: [release notes](https://github.com/tsaipifong/whirl-llm/releases/tag/v0.2.5)). WHIRL 0.2.0 against the official llama.cpp b11214 (ggml-org Windows binaries), ROCm and Vulkan builds side by side. Same GGUF files, same prompts (a document-QA prompt with a unique first line, so no prefix-cache hits; 256 generated tokens), greedy decoding, thinking off, one user, tok/s from each server's own timings. All three WHIRL modes are shown; the lead columns are for balance, the default. **precise and fast lead both llama.cpp builds in every cell as well.** Methods, flags and prompts: [benchmarks.md](docs/benchmarks.md).
 
 <!-- gen:ranges.en -->
 | WHIRL balance lead, every measured length | Prefill vs ROCm | Prefill vs Vulkan | Decode vs ROCm | Decode vs Vulkan |
@@ -381,6 +383,17 @@ One run per cell, WHIRL measured on 2026-10-17; treat differences under about 5%
 - **Plain decoding without speculation** is memory-bandwidth bound in every engine; most of WHIRL's decode lead comes from MTP + n-gram speculative decoding.
 - **fast is not always faster than balance** (see [Three modes](#three-modes-speed-and-precision)), and **precise costs speed**, most of all in R9700 prefill.
 
+## What's new in 0.2.5
+
+No new feature; you run it exactly as 0.2.4 (same options, same server API, same model files), and precise output is bit-identical to 0.2.4.
+
+- **Ten bug fixes**, among them: stopping whirl-server with the RAM cache in use could end in an error; a continued conversation could be found only partly in the cache; very long install folders and Windows user names with non-English characters; a rare case where an image could be read incorrectly; two Ornith chat-template details; fast-only environment settings no longer leak into precise and balance.
+- **Measured again against the latest official llama.cpp**, b11960 (= v0.8.0), ROCm and Vulkan, on the same machine ([above](#whirl-025-against-the-latest-official-llamacpp-b11960-rocm-and-vulkan)).
+- **WHIRL is now fully modular**: every part is a separate module with its own tests, and whirl.exe and whirl-server share one speculative-decoding loop.
+- **Corrected mode descriptions** in this README and the guides (balance and fast are accepted on task accuracy; KL is a regression guard).
+
+Full list: [CHANGELOG.md](CHANGELOG.md).
+
 ## What's new in 0.2.0
 
 - **Radeon 8060S (Ryzen AI Max+ 395) support**, tuned: faster than llama.cpp ROCm and Vulkan at every measured prompt length on both models (tables above). Image input works on the 8060S, and the RAM and SSD cache tiers are on by default there (on Windows the BIOS VRAM carve-out and the OS RAM are separate pools, so a 128k-token session is restored from RAM or SSD instead of being prefilled again).
@@ -423,7 +436,7 @@ Full list: [CHANGELOG.md](CHANGELOG.md).
 
 1. **Built for AMD GPUs on Windows.** A native Windows C++/HIP inference engine with hand-written, hand-tuned kernels for RDNA. No WSL, no Docker, no Linux VM: install the AMD driver and run.
 2. **Fully open, kernels included.** Everything from host-side scheduling to every GPU kernel is open source under Apache-2.0, with no closed binary components. Bug reports, benchmark results and code contributions are all welcome.
-3. **Accuracy before speed.** In the precise and balance modes every speedup (speculative decoding, batching, prefix caching, cache restore) gives the same tokens as plain greedy decoding of that mode (in balance, a conversation's next turn is numerically equivalent to a cold run, not bitwise, so its reply can differ), enforced by standing tests. Anything lossier is opt-in (`--fast`) and gated by KL and accuracy limits.
+3. **Accuracy before speed.** In the precise and balance modes every speedup (speculative decoding, batching, prefix caching, cache restore) gives the same tokens as plain greedy decoding of that mode (in balance, a conversation's next turn is numerically equivalent to a cold run, not bitwise, so its reply can differ), enforced by standing tests. Anything lossier is opt-in (`--fast`) and accepted on task accuracy (at least 95% of precise), with KL only as a regression guard.
 4. **Few models, pushed to the limit.** WHIRL targets specific models on specific hardware and pushes them close to the hardware limit, adding architectures one at a time. The architectures supported today are `qwen35` (dense) and `qwen35moe` (mixture of experts).
 5. **Transparent, verifiable numbers.** Every figure is measured, with methods, commands and prompts published, including where WHIRL does not lead by much.
 6. **Designed for real workflows.** Coding agents and long contexts come first: fast long-prompt processing, a responsive main conversation while others share the GPU, and a VRAM → RAM → SSD cache that survives server restarts.

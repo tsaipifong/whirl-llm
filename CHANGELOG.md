@@ -3,6 +3,129 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
+## 0.2.5 — [TBD:date=release-day] (bug fixes and internal restructuring)
+
+No new feature (feature freeze until the modularization is done). This release finishes WHIRL's modularization and
+lists ten fixes below. You run it exactly as 0.2.4: same command-line options, same server API, same model files.
+precise mode gives the same output, bit for bit, as in 0.2.4.
+
+### Fixed
+
+- **whirl-server: stopping the server could end in an error.** With the RAM cache in use, the program could fail
+  a moment after "server stopped", and Windows then held it for about half a minute before it closed (seen on the
+  Radeon 8060S). It now closes cleanly with exit code 0. Answers were not affected. Affected versions:
+  [TBD:verify=srvexit-affected-versions].
+- **whirl-server: a continued conversation could be found only partly in the cache.** After the RAM or SSD cache had
+  removed older entries, a conversation that went on could reuse only part of its earlier turns, so part of the prompt
+  was processed again (slower; the answer was not affected). Affects v0.2.4, all three modes.
+- **whirl-server: a damaged SSD cache file was read again and again.** When reading a saved conversation from the SSD
+  failed, the same file could be tried again on later requests with the same beginning, each time falling back to
+  processing the prompt from scratch. The file is now dropped after the first failed read.
+  Affected versions: [TBD:verify=d7.3-affected-versions].
+- **Very long install folders.** When `whirl-server.exe` sat in a folder path of about 1,000 characters or more, the
+  SSD cache was never reused, and long lines in the server's start-up log were cut off. With a folder path of about
+  233 characters or more, the draft-vocabulary file next to the exe (`WHIRL_DRAFT_VOCAB=48k`) was not found. Starting
+  WHIRL through a `\\?\` path and SSD cache folders longer than 260 characters also work now.
+- **Windows user names with non-English characters.** With such a user folder, the tune cache, the server log and the
+  SSD cache could end up in a folder with a garbled name, and folders or files named in an environment variable (for
+  example `WHIRL_KV_SSD_DIR`) could be missed. WHIRL now reads these paths correctly. `whirl.exe` and
+  `whirl-server.exe` on Windows 10 version 1903 and later were not affected, and English paths do not change. Where
+  the old path was garbled, the first model load after the update tunes once more and the SSD cache starts empty; the
+  old folder can be deleted.
+- **An empty folder setting no longer writes to the root of the drive.** An empty `LOCALAPPDATA`, `--kv-ssd-dir ""`
+  or an empty `WHIRL_KV_SSD_DIR` could make WHIRL put its log or SSD cache files at the top of the drive (for example
+  `C:\whirl\server.log`). An empty `LOCALAPPDATA` now counts as not set, and an empty SSD cache folder is refused at
+  start with a message naming the right way to turn the SSD cache off (`--kv-ssd-mode off` or `--kv-ssd-gb 0`).
+- **Vision: an image could, rarely, be read incorrectly.** When the image encoder's weights were streamed into GPU
+  memory layer by layer instead of being kept there (WHIRL does this when there is not enough free GPU memory to keep
+  them, or with `--vis-mode stream` / `WHIRL_VIS_MODE=stream`), the answer about an image could in rare cases describe a
+  slightly different picture than the one sent. Fixed on both GPUs. With the encoder kept in GPU memory nothing
+  changes. Affected versions: all earlier versions with vision (since v0.1.0).
+- **Ornith-1.5-35B-A3B MXFP4: two chat-template details now match the model's own template.** Tool-call arguments
+  that are `true`, `false` or `null` were written to the model in Python spelling (`True`, `False`, `None`), and an
+  empty system message was left out instead of being sent as an empty system turn. Both now follow the template stored
+  in the GGUF file. Only requests with such arguments or an empty system message change; Swift-1.5 27B was already
+  correct.
+- **precise and balance no longer take fast-only settings from the environment.** Setting `WHIRL_KV=q4` or
+  `WHIRL_RELAX` could switch on fast-mode items (a 4-bit KV cache, relaxed draft acceptance) in precise or balance mode,
+  so precise was no longer bit-exact. They now apply only in fast mode; in precise and balance the setting is ignored
+  and the load log says so. fast mode is unchanged.
+- **A clearer message when no GPU is visible because of `HIP_VISIBLE_DEVICES`.** When this variable (or a similar
+  one) is set to an empty or non-matching value, WHIRL now says that the variable hides the GPUs and how to fix it,
+  instead of reporting that the AMD driver found no GPU.
+
+### Changed
+
+- **whirl-server log: a saved conversation too large for the RAM cache is now reported.** When an SSD cache entry is
+  larger than the whole RAM cache, the server cannot read it back and processes the prompt from scratch; it now writes
+  a warning line saying so (before, this happened silently). Raise `--kv-ram-mb` to use such entries.
+- **whirl.exe and whirl-server now share one speculative-decoding loop.** The rules for MTP and n-gram drafts,
+  accepting them and stopping are now one piece of code used by both. Output is unchanged in every mode (golden
+  references on both GPUs). Where the two used to differ, `whirl.exe` now follows `whirl-server`; this shows only
+  with some `WHIRL_*` environment settings (for example `WHIRL_PREFILL_BATCH`).
+
+### Corrections to earlier release text
+
+The README and the user guides shipped with v0.2.0 to v0.2.4 described the modes in words that do not match how WHIRL
+is built and accepted. The old release text stays as it was; the corrected README and guides ship with 0.2.5:
+
+- **"Decode is exact in both modes"** (quantization guide) was wrong for balance: balance decodes with 8-bit integer
+  activations, the same numeric level as llama.cpp's own decode. Only **precise** is bit-identical.
+- **fast** was described as "lossy within published KL limits". fast is accepted when its task accuracy is at least
+  95% of precise; KL and top-1 agreement are measured only as regression guards. balance likewise: near-lossless by
+  industry standard, defined by the items it may use, accepted on task accuracy, with KL as a guard.
+- The architecture guide described two modes chosen by the model file's format. WHIRL has three modes, chosen per
+  process: precise, balance (default) and fast.
+- The KV-cache guide gave only the KL result for an 8-bit KV cache on the MoE model; the same experiment's paired
+  question-answering test showed no difference in correct answers (the counts are in the KV-cache guide, section 3.3).
+  The MoE model keeps an f16 KV cache in balance for now.
+
+### Output and speed
+
+- Output: the golden references (Swift-1.5 27B MXFP4-A and Ornith-1.5-35B-A3B MXFP4; precise, balance and fast;
+  single prompts, prompt pairs, n-gram drafts and the server path: streaming, prefix cache, RAM and SSD restore,
+  vision) pass on the Radeon 8060S and the R9700 with the exes in this zip. No reference changed since 0.2.4
+  [TBD:verify=golden-unchanged-on-release-commit]. precise stays bit-identical.
+- Speed: the GPU kernels are the same as in 0.2.4 [TBD:verify=cosect-v0.2.4-zip-vs-release-zip]. balance was measured
+  on both GPUs for this release, against the latest official llama.cpp release, b11960 (= v0.8.0), ROCm and Vulkan
+  builds, on the same machine with the same model files (table in the release notes). llama.cpp runs with its fastest
+  decode on each card, model and build, chosen by a short probe before the measurement: Swift-1.5 27B with MTP +
+  n-gram drafts, Ornith-1.5-35B-A3B without speculation, on both GPUs. Releases 0.2.0 to 0.2.4 compared with
+  llama.cpp b11214; numbers from the two llama.cpp versions are not compared with each other. precise and fast use the
+  same kernels and the same GPU work as 0.2.4 and keep their earlier numbers [TBD:verify=carry-over-precise-fast].
+- Radeon 8060S numbers: max power (80 W), ASUS ROG Flow Z13; they are subject to the Z13's power limits and vary
+  slightly.
+
+### Changed (internal)
+
+Nothing changes in how you run WHIRL. Inside, every part of WHIRL is now a separate module with its own tests:
+
+- The engine is split into components (scheduler, slot start and end, prefill, speculative cycle, cache and tier
+  connection, memory governor, GPU-memory watch, job queue), each tested on its own.
+- The model is split along its users (weights, KV cache, scratch buffers, tuning, forward pass, loader), and the
+  forward pass is split into stage files; each part only sees the narrow interface it needs. `whirl.exe` now loads
+  models through the same architecture table as `whirl-server`.
+- One settings module reads the `WHIRL_*` environment settings for both programs; all environment, file, network,
+  path, console and time calls go through one platform layer.
+- Duplicate code merged: GPU kernels that existed in two copies (one per GPU family, or twice in one family) now come
+  from one shared source; the compiled GPU code is the same as before.
+- The server's start-up code now only assembles the modules; the rules it held (KV sizing, cache settings, argument
+  checks) moved into the modules that own them.
+
+### Tests and gates
+
+- Every product file belongs to exactly one registered module; gates check that each module builds and links on its
+  own (isolation), that includes go only in the declared direction (layering), and that the module list matches the
+  build. A change runs the tests of the modules it touches.
+- [MODE:bugfix] Mutation tests: deliberately broken copies of the code must be caught by the module's own tests.
+  [MODE:refactor] Mutation tests: deliberately broken copies of the code must be caught by the module's own tests; for
+  this release every mutation was run on the release commit, and every module has at least one that its tests catch.
+- C++ safety checks in the release gate: AddressSanitizer builds of the CPU tests, static analysis with a baseline,
+  clang thread-safety analysis of the server core and the cache tier, GPU / host allocation leak counting.
+- KL / top-1 checks are regression guards that report; precise golden stays bit-exact and blocking.
+- New gate steps for vision, the package smoke test, the GPU-memory sizing repro and the environment matrix; the server
+  gates check the exit code after every stop.
+
 ## 0.2.4 — 2026-10-25 (one bug fix and internal restructuring)
 
 No new feature (feature freeze until the modularization is done). This release is the second half of WHIRL's
