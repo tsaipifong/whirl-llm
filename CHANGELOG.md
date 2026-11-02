@@ -3,7 +3,7 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
-## 0.2.5 — [TBD:date=release-day] (bug fixes and internal restructuring)
+## 0.2.5 — 2026-11-03 (bug fixes and internal restructuring)
 
 No new feature (feature freeze until the modularization is done). This release finishes WHIRL's modularization and
 lists ten fixes below. You run it exactly as 0.2.4: same command-line options, same server API, same model files.
@@ -12,20 +12,19 @@ precise mode gives the same output, bit for bit, as in 0.2.4.
 ### Fixed
 
 - **whirl-server: stopping the server could end in an error.** With the RAM cache in use, the program could fail
-  a moment after "server stopped", and Windows then held it for about half a minute before it closed (seen on the
-  Radeon 8060S). It now closes cleanly with exit code 0. Answers were not affected. Affected versions:
-  [TBD:verify=srvexit-affected-versions].
+  a moment after "server stopped", and Windows then held it for a while before it closed (seen on the Radeon 8060S).
+  It now closes cleanly with exit code 0. Answers were not affected. Affected versions: v0.1.0 to v0.2.4.
 - **whirl-server: a continued conversation could be found only partly in the cache.** After the RAM or SSD cache had
   removed older entries, a conversation that went on could reuse only part of its earlier turns, so part of the prompt
   was processed again (slower; the answer was not affected). Affects v0.2.4, all three modes.
 - **whirl-server: a damaged SSD cache file was read again and again.** When reading a saved conversation from the SSD
   failed, the same file could be tried again on later requests with the same beginning, each time falling back to
   processing the prompt from scratch. The file is now dropped after the first failed read.
-  Affected versions: [TBD:verify=d7.3-affected-versions].
-- **Very long install folders.** When `whirl-server.exe` sat in a folder path of about 1,000 characters or more, the
-  SSD cache was never reused, and long lines in the server's start-up log were cut off. With a folder path of about
-  233 characters or more, the draft-vocabulary file next to the exe (`WHIRL_DRAFT_VOCAB=48k`) was not found. Starting
-  WHIRL through a `\\?\` path and SSD cache folders longer than 260 characters also work now.
+- **Long paths.** An SSD cache folder (`--kv-ssd-dir` / `WHIRL_KV_SSD_DIR`) longer than 260 characters now works, and
+  WHIRL now also works when it is started through a `\\?\` path (the draft-vocabulary file next to the exe,
+  `WHIRL_DRAFT_VOCAB=48k`, is found then too). Keep the WHIRL folder itself short (for example `C:\whirl`): with the
+  current AMD graphics driver (32.0.32015.7029), WHIRL stops right after it starts using the GPU when its own path is
+  several hundred characters long (346 characters was tested; 150 works).
 - **Windows user names with non-English characters.** With such a user folder, the tune cache, the server log and the
   SSD cache could end up in a folder with a garbled name, and folders or files named in an environment variable (for
   example `WHIRL_KV_SSD_DIR`) could be missed. WHIRL now reads these paths correctly. `whirl.exe` and
@@ -84,15 +83,15 @@ is built and accepted. The old release text stays as it was; the corrected READM
 
 - Output: the golden references (Swift-1.5 27B MXFP4-A and Ornith-1.5-35B-A3B MXFP4; precise, balance and fast;
   single prompts, prompt pairs, n-gram drafts and the server path: streaming, prefix cache, RAM and SSD restore,
-  vision) pass on the Radeon 8060S and the R9700 with the exes in this zip. No reference changed since 0.2.4
-  [TBD:verify=golden-unchanged-on-release-commit]. precise stays bit-identical.
-- Speed: the GPU kernels are the same as in 0.2.4 [TBD:verify=cosect-v0.2.4-zip-vs-release-zip]. balance was measured
+  vision) pass on the Radeon 8060S and the R9700 with the exes in this zip. No reference changed since 0.2.4.
+  precise stays bit-identical.
+- Speed: the GPU kernels are the same as in 0.2.4. balance was measured
   on both GPUs for this release, against the latest official llama.cpp release, b11960 (= v0.8.0), ROCm and Vulkan
   builds, on the same machine with the same model files (table in the release notes). llama.cpp runs with its fastest
   decode on each card, model and build, chosen by a short probe before the measurement: Swift-1.5 27B with MTP +
   n-gram drafts, Ornith-1.5-35B-A3B without speculation, on both GPUs. Releases 0.2.0 to 0.2.4 compared with
   llama.cpp b11214; numbers from the two llama.cpp versions are not compared with each other. precise and fast use the
-  same kernels and the same GPU work as 0.2.4 and keep their earlier numbers [TBD:verify=carry-over-precise-fast].
+  same kernels and the same GPU work as 0.2.4 and keep their earlier numbers.
 - Radeon 8060S numbers: max power (80 W), ASUS ROG Flow Z13; they are subject to the Z13's power limits and vary
   slightly.
 
@@ -117,9 +116,7 @@ Nothing changes in how you run WHIRL. Inside, every part of WHIRL is now a separ
 - Every product file belongs to exactly one registered module; gates check that each module builds and links on its
   own (isolation), that includes go only in the declared direction (layering), and that the module list matches the
   build. A change runs the tests of the modules it touches.
-- [MODE:bugfix] Mutation tests: deliberately broken copies of the code must be caught by the module's own tests.
-  [MODE:refactor] Mutation tests: deliberately broken copies of the code must be caught by the module's own tests; for
-  this release every mutation was run on the release commit, and every module has at least one that its tests catch.
+- Mutation tests: deliberately broken copies of the code must be caught by the module's own tests.
 - C++ safety checks in the release gate: AddressSanitizer builds of the CPU tests, static analysis with a baseline,
   clang thread-safety analysis of the server core and the cache tier, GPU / host allocation leak counting.
 - KL / top-1 checks are regression guards that report; precise golden stays bit-exact and blocking.

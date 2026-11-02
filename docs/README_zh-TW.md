@@ -5,11 +5,11 @@
 **Windows HIP Inference for RDNA LLMs**
 
 > ### WHIRL 0.2.5 對最新官方 llama.cpp（b11960）：ROCm 與 Vulkan
-> 0.2.5 在同一台機器、用同一組模型檔重新量測，對照最新的官方 llama.cpp 發布版 **b11960（= v0.8.0）** 的 ROCm 版與 Vulkan 版：預設模式（balance）下 WHIRL 領先 [TBD:cell=lead summary per GPU and model: balance lead vs ROCm / vs Vulkan, from release025\remeasured.json + margins.tsv after R1-R3]（[0.2.5 發布說明](https://github.com/tsaipifong/whirl-llm/releases/tag/v0.2.5)）。llama.cpp 在每張卡、每個模型、每個版本都用它最快的解碼方式（Swift 27B 用 MTP + n-gram 草稿，Ornith 35B-A3B 不用投機解碼）。Radeon 8060S 的數字為最大功率（80 W），ASUS ROG Flow Z13；受 Z13 功耗限制，數據略有浮動。
+> 0.2.5 在同一台機器、用同一組模型檔重新量測，對照最新的官方 llama.cpp 發布版 **b11960（= v0.8.0）** 的 ROCm 版與 Vulkan 版：預設模式（balance）下 WHIRL 在每個量過的格子都領先（2k、96k、128k token 提示的預填與解碼，以及寫程式對話）：Radeon 8060S 上，Swift-1.5 27B 對 ROCm 快 +18% 到 +49%、對 Vulkan 快 +19% 到 +93%，Ornith-1.5-35B-A3B 分別快 +40% 到 +54% 與 +41% 到 +114%；R9700 上，Swift-1.5 27B 對 ROCm 快 +59% 到 +177%、對 Vulkan 快 +42% 到 +299%，Ornith-1.5-35B-A3B 分別快 +82% 到 +180% 與 +100% 到 +326%（[0.2.5 發布說明](https://github.com/tsaipifong/whirl-llm/releases/tag/v0.2.5)）。llama.cpp 在每張卡、每個模型、每個版本都用它最快的解碼方式（Swift 27B 用 MTP + n-gram 草稿，Ornith 35B-A3B 不用投機解碼）。Radeon 8060S 的數字為最大功率（80 W），ASUS ROG Flow Z13；受 Z13 功耗限制，數據略有浮動。
 >
 > 0.2.5 本身沒有新功能：修正十個錯誤、引擎全面模組化，命令列選項與模型檔都不變，precise 的輸出與 0.2.4 逐位元相同（[更新內容](#025-更新內容)）。
 
-WHIRL 是 Windows 上 AMD GPU 的開源（Apache-2.0）LLM 推論引擎：原生 C++／HIP，每一支 kernel 都公開，不需要 WSL、Docker，也不用安裝 ROCm。**下載 zip、解壓縮、執行，只需要 AMD 驅動。** 支援 **AMD Ryzen AI Max+ 395** 的 **Radeon 8060S** 與 **AMD Radeon AI PRO R9700**（RDNA 4，32 GB），搭配我們的兩個 MXFP4 模型：**Swift-1.5 27B MXFP4**（稠密）與 **Ornith-1.5-35B-A3B MXFP4**（MoE）。兩張卡上，WHIRL 0.2.5 的預設模式都**比最新的官方 llama.cpp 快**，ROCm 與 Vulkan 版皆然，每個量過的提示長度都是如此 [TBD:verify=margins-no-loss]。WHIRL 0.2.0 對 llama.cpp b11214 時，三種模式、2k 到 ~250k token 的每個提示長度都領先（見下方表格與圖）。
+WHIRL 是 Windows 上 AMD GPU 的開源（Apache-2.0）LLM 推論引擎：原生 C++／HIP，每一支 kernel 都公開，不需要 WSL、Docker，也不用安裝 ROCm。**下載 zip、解壓縮、執行，只需要 AMD 驅動。** 支援 **AMD Ryzen AI Max+ 395** 的 **Radeon 8060S** 與 **AMD Radeon AI PRO R9700**（RDNA 4，32 GB），搭配我們的兩個 MXFP4 模型：**Swift-1.5 27B MXFP4**（稠密）與 **Ornith-1.5-35B-A3B MXFP4**（MoE）。兩張卡上，WHIRL 0.2.5 的預設模式都**比最新的官方 llama.cpp 快**，ROCm 與 Vulkan 版皆然，每個量過的提示長度都是如此。WHIRL 0.2.0 對 llama.cpp b11214 時，三種模式、2k 到 ~250k token 的每個提示長度都領先（見下方表格與圖）。
 
 ## 快速上手
 
@@ -47,7 +47,7 @@ server 在 `http://127.0.0.1:8080/v1` 提供 OpenAI API（`/v1/chat/completions`
 
 ## WHIRL 對 llama.cpp：一眼看
 
-本節的圖與表格是 **0.2.0 的量測**：WHIRL 0.2.0 預設模式（balance）對 ggml-org 官方 llama.cpp **b11214**，**ROCm** 與 **Vulkan** 兩個版本分開列。同一個 GGUF 檔、同一組提示、greedy 解碼、一個使用者。WHIRL 0.2.5 對 llama.cpp b11960（balance，兩張卡）的數字在 [0.2.5 發布說明](https://github.com/tsaipifong/whirl-llm/releases/tag/v0.2.5) [TBD:verify=readme-tables-0.2.0-or-regenerate]。
+本節的圖與表格是 **0.2.0 的量測**：WHIRL 0.2.0 預設模式（balance）對 ggml-org 官方 llama.cpp **b11214**，**ROCm** 與 **Vulkan** 兩個版本分開列。同一個 GGUF 檔、同一組提示、greedy 解碼、一個使用者。WHIRL 0.2.5 對 llama.cpp b11960（balance，兩張卡）的數字在 [0.2.5 發布說明](https://github.com/tsaipifong/whirl-llm/releases/tag/v0.2.5)。
 
 ![Radeon 8060S（Ryzen AI Max+ 395）prefill 速度：WHIRL 0.2.0 對 llama.cpp ROCm 與 Vulkan](images/bench020_prefill_s8.png)
 
@@ -155,6 +155,7 @@ Swift 27B，WHIRL balance。一段工作階段＝約 20k token 的系統＋工�
 | | |
 |---|---|
 | **下載就能跑** | 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 **`whirl-0.2.5-windows-x64.zip`**，解壓縮、執行。**只需要 AMD 驅動**：不需要 HIP SDK、ROCm，也不用另外安裝 Visual C++ 可轉散發套件（ROCm 10.1 驅動需要的幾個執行階段 DLL 已附在 zip 裡） |
+| 安裝資料夾 | **WHIRL 資料夾請放在短路徑**（例如 `C:\whirl`）：在目前的 AMD 顯示卡驅動（32.0.32015.7029）下，WHIRL 自己的路徑長達數百字元時，一開始使用 GPU 就會停止（測過 346 字元；150 字元可以正常使用） |
 | 驅動 | **AMD Software: Adrenalin Edition 26.8.1（驅動 32.0.31041.1004）或更新版**，兩張卡都一樣。更舊的版本未測試。使用 Adrenalin Edition for ROCm 10.1 驅動時，請讓 zip 裡的 `rocm_kpack.dll` 留在 `whirl.exe` 旁邊（該驅動的 GPU runtime 需要它，但驅動沒有安裝它），連同它用到的 Visual C++ 執行階段 DLL（`msvcp140.dll`、`vcruntime140.dll`、`vcruntime140_1.dll`，同樣附在 zip 裡） |
 | GPU | **Radeon 8060S**（RDNA 3.5，gfx1151，AMD Ryzen AI Max+ 395 內顯）或 **AMD Radeon AI PRO R9700**（RDNA 4，gfx1201，32 GB）；一個行程用一張 GPU |
 | Radeon 8060S：GPU 記憶體 | **先在 Armoury Crate 或 BIOS 設定 GPU 記憶體（UMA frame buffer 大小）**（其他筆電：AMD Software 的 *Variable Graphics Memory*），再重新開機。WHIRL 把模型、緩衝區和 KV 快取放在這塊專用記憶體；Windows 的「共用 GPU 記憶體」不拿來放這些（token 嵌入表和 RAM 快取層放在鎖定的系統 RAM，工作管理員會把它顯示成共用 GPU 記憶體）。**Swift-1.5 27B MXFP4 至少設 40 GB**（precise 模式搭配預設 KV 快取要 48 GB），**Ornith-1.5-35B-A3B MXFP4 至少 32 GB**（128 GB 的機器設 64 GB，任一模型、任一模式都能跑）。以 server 預設值量測（4 個 slot、262,144 token 的 KV 快取）：Swift 在 balance 用 29.9 GiB、fast 31.0 GiB、precise 38.2 GiB；Ornith 在 balance 與 precise 用 27.3 GiB、fast 23.4 GiB。設得比這少時，server 會縮小 KV 快取，或停下來並告訴你要設多大。`whirl devices` 會以「dedicated」顯示目前的大小 |
@@ -384,7 +385,7 @@ Ryzen AI Max+ 395。WHIRL 每格單次量測（2026-10-17）；llama.cpp 為 1 �
 
 沒有新功能；用法與 0.2.4 完全相同（命令列選項、server API、模型檔都不變），precise 的輸出與 0.2.4 逐位元相同。
 
-- **修正十個錯誤**，包括：在使用 RAM 快取時停止 whirl-server 可能以錯誤結束；接續的對話可能只有一部分找得到快取；安裝資料夾路徑很長、Windows 使用者名稱含非英文字元；圖片偶爾會被讀錯的罕見情況；Ornith 的兩個對話範本細節；fast 專用的環境變數設定不再滲入 precise 與 balance。
+- **修正十個錯誤**，包括：在使用 RAM 快取時停止 whirl-server 可能以錯誤結束；接續的對話可能只有一部分找得到快取；長路徑（超過 260 字元的 SSD 快取資料夾、透過 `\\?\` 路徑啟動）、Windows 使用者名稱含非英文字元；圖片偶爾會被讀錯的罕見情況；Ornith 的兩個對話範本細節；fast 專用的環境變數設定不再滲入 precise 與 balance。
 - **重新對照最新的官方 llama.cpp**：b11960（= v0.8.0），ROCm 與 Vulkan，同一台機器（見本頁開頭）。
 - **WHIRL 全面模組化**：每個部分都是獨立模組、有自己的測試；whirl.exe 與 whirl-server 共用同一套投機解碼迴圈。
 - **更正模式說明**：本 README 與使用指南已更正（balance 與 fast 以任務準確度驗收，KL 只作回歸守門）。
