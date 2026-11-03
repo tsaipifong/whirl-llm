@@ -8,10 +8,15 @@
 //     == the rows run one launch at a time, snapshots == the per-row states,
 //     replay of kept rows == running them, two segments in one launch ==
 //     separate launches, gdn_step_norm == gdn_step_norm_v0 (all bitwise), and
-//     vs CPU (tolerance).
+//     vs CPU (tolerance);
+//   * gdnref (on request): gdn_step_norm of this code object bit for bit
+//     against gdn_step_norm of a reference code object (WHIRL_KT_GDN_REF_HSACO).
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "cpu_ref.h"
 
@@ -600,6 +605,185 @@ void testGdn(Ctx& c) {
             c.rep.add(r);
         }
     }
+}
+
+// gdnref (v0251-a9port, on request: --only gdnref): the DeltaNet decode step gdn_step_norm of this code object bit for
+// bit against gdn_step_norm of a REFERENCE code object of the same arch (WHIRL_KT_GDN_REF_HSACO, e.g. the object of
+// the release a change must not alter): out, xq, xd, final states and every snapshot, for n = 0..20 rows in one
+// segment with and without snapshots (a snapshot per row up to wk::kGdnMaxSnap = 15), 2 / 3 / 8 segments in one launch
+// (one of them empty), on two input sets. The internal invariants of testGdn (segment == row by row, snapshots ==
+// per-row states) cannot see a change of the arithmetic that every launch shares; this family can.
+// Rows (review gdn-kernels act-on 2 / consider 6): the variable set but the object unreadable, not loadable or without
+// gdn_step_norm is a FAILING row, never a silent skip; buffers are compared byte for byte; a case whose reference
+// launch left an output row at the fill pattern fails as vacuous (a launch that did nothing would compare equal).
+void testGdnRef(Ctx& c) {
+    c.rep.family = "gdnref";
+    const char* hs = std::getenv("WHIRL_KT_GDN_REF_HSACO");
+    if (!hs || !*hs) {
+        c.rep.skip("gdnref", "gdn_step_norm == reference object", "WHIRL_KT_GDN_REF_HSACO not set");
+        return;
+    }
+    auto failRow = [&c](const std::string& name) {
+        Result r;
+        r.name = name;
+        r.kind = Kind::invariant;
+        r.pass = false;
+        c.rep.add(r);
+    };
+    if (!c.k.gdn_step_norm) {
+        failRow("gdnref: gdn_step_norm missing from the code object under test");
+        return;
+    }
+    std::vector<char> img;  // declared before the module: it must outlive it
+    if (std::FILE* fp = std::fopen(hs, "rb")) {
+        std::fseek(fp, 0, SEEK_END);
+        const long sz = std::ftell(fp);
+        std::fseek(fp, 0, SEEK_SET);
+        img.resize(sz > 0 ? static_cast<std::size_t>(sz) : 0);
+        if (img.empty() || std::fread(img.data(), 1, img.size(), fp) != img.size()) img.clear();
+        std::fclose(fp);
+    }
+    if (img.empty()) {
+        failRow(std::string("gdnref: cannot read the reference object ") + hs);
+        return;
+    }
+    hip::Module xm;
+    try {
+        xm = hip::Module::loadData(img.data(), c.mod.arch());
+    } catch (const std::exception& e) {
+        failRow(std::string("gdnref: cannot load the reference object ") + hs + ": " + e.what());
+        return;
+    }
+    const hip::Function fref = xm.getFunctionOpt("gdn_step_norm");
+    if (!fref) {
+        failRow(std::string("gdnref: no gdn_step_norm in the reference object ") + hs);
+        return;
+    }
+    const int nmax = 20;
+    struct Seg {
+        int row0, nrows, nsnap;
+    };
+    struct Out {
+        std::vector<float> y, d;
+        std::vector<std::int8_t> q;
+        std::vector<std::vector<float>> st, snaps;
+    };
+    const std::size_t no = static_cast<std::size_t>(nmax) * kDInner;
+    std::size_t cases = 0, bad = 0, vac = 0, rows_checked = 0;
+    std::string first_bad, first_vac;
+    for (int set = 0; set < 2; ++set) {
+        // two input sets drawn one after the other from the context's generator (fixed seed: reproducible)
+        const std::vector<float> qkv = makeQkv(c, nmax);
+        const std::vector<float> g = c.randu(static_cast<std::size_t>(nmax) * kNv, -1.5f, -0.01f);
+        const std::vector<float> beta = c.randu(static_cast<std::size_t>(nmax) * kNv, 0.05f, 0.95f);
+        const std::vector<float> z = c.randn(no);
+        const std::vector<float> wn = c.randu(kDv, 0.5f, 1.5f);
+        const std::vector<float> state0 = c.randn(static_cast<std::size_t>(kNv) * kDk * kDv, 0.3f);
+        const std::size_t ns = state0.size();
+        Buf dq(qkv), dg(g), db(beta), dz(z), dwn(wn);
+        auto run = [&](hip::Function f, const std::vector<Seg>& sg) {
+            Out o;
+            Buf y(no * 4), q(no), d(no / 32 * 4);
+            y.fill(0xff);
+            q.fill(0x7f);
+            d.fill(0xff);
+            std::vector<Buf> sts, snaps;
+            sts.reserve(sg.size());
+            snaps.reserve(sg.size() * static_cast<std::size_t>(wk::kGdnMaxSnap));
+            wk::GdnSegs s;
+            for (std::size_t i = 0; i < sg.size(); ++i) {
+                sts.emplace_back(state0);
+                s.s[i].state = sts.back().p();
+                s.s[i].row0 = sg[i].row0;
+                s.s[i].nrows = sg[i].nrows;
+                for (int t = 0; t < sg[i].nsnap; ++t) {
+                    snaps.emplace_back(ns * 4);
+                    snaps.back().fill(0xff);
+                    s.s[i].snap[t] = snaps.back().p();
+                }
+            }
+            hip::launch(f, {kNv, static_cast<unsigned>(sg.size()), 1}, {512, 1, 1}, 0, c.s, dq.p(), dg.p(), db.p(), dz.p(), dwn.p(), y.p(),
+                        q.p(), d.p(), kNk, kScale, kEps, kNv, kCh, s);
+            c.sync();
+            o.y = y.down<float>(no);
+            o.q = q.down<std::int8_t>(no);
+            o.d = d.down<float>(no / 32);
+            for (auto& b : sts) o.st.push_back(b.down<float>(ns));
+            for (auto& b : snaps) o.snaps.push_back(b.down<float>(ns));
+            return o;
+        };
+        auto bytesEq = [](const void* a, const void* b, std::size_t n) { return std::memcmp(a, b, n) == 0; };
+        auto vecEq = [&bytesEq](const std::vector<float>& a, const std::vector<float>& b) {
+            return a.size() == b.size() && bytesEq(a.data(), b.data(), a.size() * 4);
+        };
+        // first differing buffer, "" when every byte matches
+        auto diff = [&](const Out& a, const Out& b) -> std::string {
+            if (!vecEq(a.y, b.y)) return "out";
+            if (a.q.size() != b.q.size() || !bytesEq(a.q.data(), b.q.data(), a.q.size())) return "xq";
+            if (!vecEq(a.d, b.d)) return "xd";
+            if (a.st.size() != b.st.size()) return "state count";
+            for (std::size_t i = 0; i < a.st.size(); ++i)
+                if (!vecEq(a.st[i], b.st[i])) return "state " + std::to_string(i);
+            if (a.snaps.size() != b.snaps.size()) return "snapshot count";
+            for (std::size_t i = 0; i < a.snaps.size(); ++i)
+                if (!vecEq(a.snaps[i], b.snaps[i])) return "snapshot " + std::to_string(i);
+            return "";
+        };
+        // every out row a segment owns must have left the 0xff fill (NaN) pattern in the reference launch
+        auto vacuous = [&](const Out& r, const std::vector<Seg>& sg) {
+            for (const Seg& s : sg)
+                for (int t = 0; t < s.nrows; ++t) {
+                    const float* p = r.y.data() + static_cast<std::size_t>(s.row0 + t) * kDInner;
+                    for (int i = 0; i < kDInner; ++i) {
+                        std::uint32_t u;
+                        std::memcpy(&u, p + i, 4);
+                        if (u == 0xffffffffu) return true;
+                    }
+                    ++rows_checked;
+                }
+            return false;
+        };
+        auto check = [&](const std::string& name, const std::vector<Seg>& sg) {
+            const std::string tag = "set" + std::to_string(set) + " " + name;
+            const Out ref = run(fref, sg);
+            const Out got = run(c.k.gdn_step_norm, sg);
+            ++cases;
+            if (vacuous(ref, sg)) {
+                ++vac;
+                if (first_vac.empty()) first_vac = tag;
+            }
+            const std::string d = diff(got, ref);
+            if (!d.empty()) {
+                ++bad;
+                if (first_bad.empty()) first_bad = tag + " (" + d + ")";
+            }
+        };
+        for (int n = 0; n <= nmax; ++n) {
+            check("n" + std::to_string(n), {{0, n, 0}});
+            check("n" + std::to_string(n) + "+snap", {{0, n, std::min(n, wk::kGdnMaxSnap)}});
+        }
+        check("2seg 3+5", {{0, 3, 3}, {3, 5, 0}});
+        check("2seg 4+4 snap", {{0, 4, 4}, {4, 4, 4}});
+        check("3seg 1+4+2", {{0, 1, 1}, {1, 4, 4}, {5, 2, 0}});
+        check("3seg 0+7+13", {{0, 0, 0}, {0, 7, 7}, {7, 13, 13}});
+        check("8seg verify 4x4 + decode 1x4", {{0, 4, 4}, {4, 4, 4}, {8, 4, 4}, {12, 4, 4}, {16, 1, 1}, {17, 1, 0}, {18, 1, 1}, {19, 1, 0}});
+    }
+    Result r;
+    r.name = "gdn_step_norm == reference object gdn_step_norm (out, xq, xd, state, snapshots; bytes)";
+    r.kind = Kind::invariant;
+    r.n = cases;
+    r.mismatches = bad;
+    r.pass = cases > 0 && bad == 0;
+    r.note = "reference " + std::string(hs) + (first_bad.empty() ? "" : "; first mismatch: " + first_bad);
+    c.rep.add(r);
+    Result v;
+    v.name = "gdnref reference launches wrote every out row of every segment (vacuity guard)";
+    v.kind = Kind::invariant;
+    v.n = rows_checked;
+    v.mismatches = vac;
+    v.pass = rows_checked > 0 && vac == 0;
+    if (!first_vac.empty()) v.note = "first vacuous case: " + first_vac;
+    c.rep.add(v);
 }
 
 }  // namespace kt

@@ -13,7 +13,7 @@
 //   gemm  gemmhq_<T>, gemm_c0_<T> (f16 activations, n = 2048) Swift dense weights  flops = 2 n rows cols
 //   attn  attn_wsplit1 + attn_combine (f16 KV, 24 / 4 heads, hd 256, one decode query at L = 2k / 32k / 128k)
 //   moe   moe_gu_mxfp4[w], moe_down_mxfp4[w] (Ornith MXFP4 experts, n = 1, K routed experts per launch)
-//   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state)
+//   gdn   gdn_step_norm (one decode row, and 4 verify rows + 4 snapshots; 48 v heads x 128 x 128 state)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
 // without a model the cells use synthetic MXFP4 blocks of the same shapes (cell names start with "synthetic.").
 
@@ -842,94 +842,115 @@ void benchGdn(Env& e) {
         c.rep.skip("gdn", "bench gdn_step_norm", "kernel not in this code object");
         return;
     }
-    // inputs of one decode row: unit-norm q / k heads, v ~ N(0, 1); g in [-1.5, -0.01], beta in [0.05, 0.95]
-    std::vector<float> qkv = c.randn(static_cast<std::size_t>(ch));
-    for (int hh = 0; hh < 2 * nk; ++hh) {
-        float* p = qkv.data() + static_cast<std::size_t>(hh) * dk;
-        double s = 0;
-        for (int i = 0; i < dk; ++i) s += static_cast<double>(p[i]) * p[i];
-        const float r = static_cast<float>(1.0 / std::sqrt(s));
-        for (int i = 0; i < dk; ++i) p[i] *= r;
-    }
-    const std::vector<float> g = c.randu(nv, -1.5f, -0.01f), beta = c.randu(nv, 0.05f, 0.95f);
-    const std::vector<float> z = c.randn(static_cast<std::size_t>(dinner)), wn = c.randu(dv, 0.5f, 1.5f);
-    const std::vector<float> state0 = c.randn(static_cast<std::size_t>(nv) * dk * dv, 0.3f);
-    auto dq = std::make_shared<Buf>(qkv), dg = std::make_shared<Buf>(g), db = std::make_shared<Buf>(beta), dz = std::make_shared<Buf>(z),
-         dwn = std::make_shared<Buf>(wn);
-    auto out = std::make_shared<Buf>(static_cast<std::size_t>(dinner) * 4), xq = std::make_shared<Buf>(static_cast<std::size_t>(dinner)),
-         xd = std::make_shared<Buf>(static_cast<std::size_t>(dinner) / 32 * 4);
-    const std::uint64_t sbytes = state0.size() * 4;
-    const int R = rotationCopies(sbytes, e.target, e.o.rot_cap);
-    auto states = std::make_shared<std::vector<Buf>>();
-    for (int i = 0; i < R; ++i) states->emplace_back(state0);
-    Cell k;
-    k.ci = e.info("gdn", "gdn_step_norm", "swift.decode.n1", "nk16_nv48_dk128_dv128");
-    k.ci.settings = e.settings(sbytes * static_cast<std::uint64_t>(R), R);
-    k.ci.bytes = 2.0 * static_cast<double>(sbytes);
-    k.kernel = "gdn_step_norm";
-    k.fa = c.k.gdn_step_norm;
-    k.call = [&c, dq, dg, db, dz, dwn, out, xq, xd, states](hip::Function f, std::uint64_t r) {
-        wk::GdnSegs s;
-        s.s[0].state = (*states)[static_cast<std::size_t>(r % states->size())].p();
-        s.s[0].row0 = 0;
-        s.s[0].nrows = 1;
-        hip::launch(f, {nv, 1, 1}, {512, 1, 1}, 0, c.s, dq->p(), dg->p(), db->p(), dz->p(), dwn->p(), out->p(), xq->p(), xd->p(), nk, scale, eps, nv,
-                    ch, s);
+    // cells: one decode row (swift.decode.n1) and the 8060S MTP verify (4 rows, a state snapshot per row:
+    // swift.verify.n4s4, feat026-gdnnorm). Bytes: state read + write, plus one state write per snapshot.
+    struct GCfg {
+        int n, nsnap;
+        const char* cell;
     };
-    k.run = [&c, &k, out, states, &state0](hip::Function f) {
-        (*states)[0].up(state0);
-        out->fill(0xff);
-        k.call(f, 0);
-        c.sync();
-        std::vector<float> o = out->down<float>(static_cast<std::size_t>(dinner));
-        const auto st = (*states)[0].down<float>(state0.size());
-        o.insert(o.end(), st.begin(), st.end());
-        return o;
-    };
-    k.verify = [&qkv, &g, &beta, &z, &wn, &state0](const std::vector<float>& got) {
-        // delta rule, one row, in double; then gated RMSNorm with silu(z)
-        std::vector<double> S(state0.begin(), state0.end()), o(static_cast<std::size_t>(dinner));
-        for (int h = 0; h < nv; ++h) {
-            const int kh = h % nk;
-            const float* q = qkv.data() + static_cast<std::size_t>(kh) * dk;
-            const float* kk = qkv.data() + static_cast<std::size_t>(nk + kh) * dk;
-            const float* v = qkv.data() + static_cast<std::size_t>(2 * nk) * dk + static_cast<std::size_t>(h) * dv;
-            double* Sh = S.data() + static_cast<std::size_t>(h) * dk * dv;
-            const double decay = std::exp(static_cast<double>(g[static_cast<std::size_t>(h)])), b = beta[static_cast<std::size_t>(h)];
-            for (int i = 0; i < dk * dv; ++i) Sh[i] *= decay;
-            for (int j = 0; j < dv; ++j) {
-                double sk = 0;
-                for (int i = 0; i < dk; ++i) sk += Sh[i * dv + j] * kk[i];
-                const double delta = (v[j] - sk) * b;
-                double acc = 0;
-                for (int i = 0; i < dk; ++i) {
-                    Sh[i * dv + j] += kk[i] * delta;
-                    acc += Sh[i * dv + j] * q[i];
+    const GCfg cfgs[] = {{1, 0, "swift.decode.n1"}, {4, 4, "swift.verify.n4s4"}};
+    for (const GCfg& gc : cfgs) {
+        const int n = gc.n;
+        // inputs of n decode rows: unit-norm q / k heads, v ~ N(0, 1); g in [-1.5, -0.01], beta in [0.05, 0.95]
+        auto qkv = std::make_shared<std::vector<float>>(c.randn(static_cast<std::size_t>(n) * ch));
+        for (int t = 0; t < n; ++t)
+            for (int hh = 0; hh < 2 * nk; ++hh) {
+                float* p = qkv->data() + static_cast<std::size_t>(t) * ch + static_cast<std::size_t>(hh) * dk;
+                double s = 0;
+                for (int i = 0; i < dk; ++i) s += static_cast<double>(p[i]) * p[i];
+                const float r = static_cast<float>(1.0 / std::sqrt(s));
+                for (int i = 0; i < dk; ++i) p[i] *= r;
+            }
+        auto g = std::make_shared<std::vector<float>>(c.randu(static_cast<std::size_t>(n) * nv, -1.5f, -0.01f));
+        auto beta = std::make_shared<std::vector<float>>(c.randu(static_cast<std::size_t>(n) * nv, 0.05f, 0.95f));
+        auto z = std::make_shared<std::vector<float>>(c.randn(static_cast<std::size_t>(n) * dinner));
+        auto wn = std::make_shared<std::vector<float>>(c.randu(dv, 0.5f, 1.5f));
+        auto state0 = std::make_shared<std::vector<float>>(c.randn(static_cast<std::size_t>(nv) * dk * dv, 0.3f));
+        auto dq = std::make_shared<Buf>(*qkv), dg = std::make_shared<Buf>(*g), db = std::make_shared<Buf>(*beta), dz = std::make_shared<Buf>(*z),
+             dwn = std::make_shared<Buf>(*wn);
+        const std::size_t no = static_cast<std::size_t>(n) * dinner;
+        auto out = std::make_shared<Buf>(no * 4), xq = std::make_shared<Buf>(no), xd = std::make_shared<Buf>(no / 32 * 4);
+        const std::uint64_t sbytes = state0->size() * 4;
+        const int R = rotationCopies(sbytes, e.target, e.o.rot_cap);
+        auto states = std::make_shared<std::vector<Buf>>();
+        for (int i = 0; i < R; ++i) states->emplace_back(*state0);
+        auto snaps = std::make_shared<std::vector<Buf>>();
+        for (int i = 0; i < gc.nsnap; ++i) snaps->emplace_back(static_cast<std::size_t>(sbytes));
+        Cell k;
+        k.ci = e.info("gdn", "gdn_step_norm", gc.cell, "nk16_nv48_dk128_dv128");
+        k.ci.settings = e.settings(sbytes * static_cast<std::uint64_t>(R), R);
+        k.ci.bytes = (2.0 + gc.nsnap) * static_cast<double>(sbytes);
+        k.kernel = "gdn_step_norm";
+        k.fa = c.k.gdn_step_norm;
+        k.call = [&c, dq, dg, db, dz, dwn, out, xq, xd, states, snaps, n](hip::Function f, std::uint64_t r) {
+            wk::GdnSegs s;
+            s.s[0].state = (*states)[static_cast<std::size_t>(r % states->size())].p();
+            s.s[0].row0 = 0;
+            s.s[0].nrows = n;
+            for (std::size_t i = 0; i < snaps->size(); ++i) s.s[0].snap[i] = (*snaps)[i].p();
+            hip::launch(f, {nv, 1, 1}, {512, 1, 1}, 0, c.s, dq->p(), dg->p(), db->p(), dz->p(), dwn->p(), out->p(), xq->p(), xd->p(), nk, scale, eps, nv,
+                        ch, s);
+        };
+        k.run = [&c, &k, out, states, state0, no](hip::Function f) {
+            (*states)[0].up(*state0);
+            out->fill(0xff);
+            k.call(f, 0);
+            c.sync();
+            std::vector<float> o = out->down<float>(no);
+            const auto st = (*states)[0].down<float>(state0->size());
+            o.insert(o.end(), st.begin(), st.end());
+            return o;
+        };
+        k.verify = [qkv, g, beta, z, wn, state0, n](const std::vector<float>& got) {
+            // delta rule, n rows, in double; then gated RMSNorm with silu(z)
+            std::vector<double> S(state0->begin(), state0->end()), o(static_cast<std::size_t>(n) * dinner);
+            for (int t = 0; t < n; ++t)
+                for (int h = 0; h < nv; ++h) {
+                    const int kh = h % nk;
+                    const float* row = qkv->data() + static_cast<std::size_t>(t) * ch;
+                    const float* q = row + static_cast<std::size_t>(kh) * dk;
+                    const float* kk = row + static_cast<std::size_t>(nk + kh) * dk;
+                    const float* v = row + static_cast<std::size_t>(2 * nk) * dk + static_cast<std::size_t>(h) * dv;
+                    double* Sh = S.data() + static_cast<std::size_t>(h) * dk * dv;
+                    const std::size_t gi = static_cast<std::size_t>(t) * nv + static_cast<std::size_t>(h);
+                    const double decay = std::exp(static_cast<double>((*g)[gi])), b = (*beta)[gi];
+                    for (int i = 0; i < dk * dv; ++i) Sh[i] *= decay;
+                    for (int j = 0; j < dv; ++j) {
+                        double sk = 0;
+                        for (int i = 0; i < dk; ++i) sk += Sh[i * dv + j] * kk[i];
+                        const double delta = (v[j] - sk) * b;
+                        double acc = 0;
+                        for (int i = 0; i < dk; ++i) {
+                            Sh[i * dv + j] += kk[i] * delta;
+                            acc += Sh[i * dv + j] * q[i];
+                        }
+                        o[static_cast<std::size_t>(t) * dinner + static_cast<std::size_t>(h) * dv + j] = acc * scale;
+                    }
                 }
-                o[static_cast<std::size_t>(h) * dv + j] = acc * scale;
-            }
-        }
-        std::vector<double> ref(static_cast<std::size_t>(dinner) + S.size());
-        for (int h = 0; h < nv; ++h) {
-            const std::size_t b0 = static_cast<std::size_t>(h) * dv;
-            double ss = 0;
-            for (int j = 0; j < dv; ++j) ss += o[b0 + j] * o[b0 + j];
-            const double r = 1.0 / std::sqrt(ss / dv + eps);
-            for (int j = 0; j < dv; ++j) {
-                const double zz = z[b0 + j];
-                ref[b0 + j] = o[b0 + j] * r * wn[static_cast<std::size_t>(j)] * (zz / (1.0 + std::exp(-zz)));
-            }
-        }
-        std::copy(S.begin(), S.end(), ref.begin() + dinner);
-        // out: 1e-5 + 1e-4 |ref| (test_gdn cmpTolRel "gdn_step_norm out vs CPU"); state: 1e-4 of the state's rms (tolRms)
-        std::vector<double> sc(ref.size());
-        double rms = 0;
-        for (std::size_t i = dinner; i < ref.size(); ++i) rms += ref[i] * ref[i];
-        rms = std::sqrt(rms / static_cast<double>(S.size())) + 1e-30;
-        for (std::size_t i = 0; i < ref.size(); ++i) sc[i] = i < static_cast<std::size_t>(dinner) ? std::fabs(ref[i]) : rms;
-        return cmpTol("out + state vs CPU delta rule + gated norm", got, ref, sc, 1e-4, 1e-5);
-    };
-    runCell(e, k);
+            const std::size_t no2 = static_cast<std::size_t>(n) * dinner;
+            std::vector<double> ref(no2 + S.size());
+            for (int t = 0; t < n; ++t)
+                for (int h = 0; h < nv; ++h) {
+                    const std::size_t b0 = static_cast<std::size_t>(t) * dinner + static_cast<std::size_t>(h) * dv;
+                    double ss = 0;
+                    for (int j = 0; j < dv; ++j) ss += o[b0 + j] * o[b0 + j];
+                    const double r = 1.0 / std::sqrt(ss / dv + eps);
+                    for (int j = 0; j < dv; ++j) {
+                        const double zz = (*z)[b0 + j];
+                        ref[b0 + j] = o[b0 + j] * r * (*wn)[static_cast<std::size_t>(j)] * (zz / (1.0 + std::exp(-zz)));
+                    }
+                }
+            std::copy(S.begin(), S.end(), ref.begin() + static_cast<std::ptrdiff_t>(no2));
+            // out: 1e-5 + 1e-4 |ref| (test_gdn cmpTolRel "gdn_step_norm out vs CPU"); state: 1e-4 of the state's rms (tolRms)
+            std::vector<double> sc(ref.size());
+            double rms = 0;
+            for (std::size_t i = no2; i < ref.size(); ++i) rms += ref[i] * ref[i];
+            rms = std::sqrt(rms / static_cast<double>(S.size())) + 1e-30;
+            for (std::size_t i = 0; i < ref.size(); ++i) sc[i] = i < no2 ? std::fabs(ref[i]) : rms;
+            return cmpTol("out + state vs CPU delta rule + gated norm", got, ref, sc, 1e-4, 1e-5);
+        };
+        runCell(e, k);
+    }
 }
 
 }  // namespace
