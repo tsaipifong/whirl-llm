@@ -3,6 +3,7 @@
 
     python -I tools/gates/test_change_test.py        exit 0 = all pass
 """
+import glob
 import hashlib
 import json
 import os
@@ -735,5 +736,401 @@ check("n11b report: modules with catalog mutants are listed (hip.runtime, kernel
 check("n11b report: the report honours cards (kernels.common: n8-kt-common-wq8-gfx1201 is not 'not run on 8060s')",
       "n8-kt-common-wq8-gfx1201 not run on 8060s" not in lines.get("kernels.common", ""), lines.get("kernels.common"))
 check("n11b report: the report honours equivalent (device.profile: m6-uma-assert-drop not listed)", "m6-uma-assert-drop" not in lines.get("device.profile", "x"), lines.get("device.profile"))
+# ---------------------------------------------------------------------------------------------------------------------
+# v0251-d1b (0.2.5.1 D1(b), PLAN V1-03; progress/v0251.DISCOVERY.md §5.1 D1(b), REVIEW-v0251-discovery-v2 AO-2 / NA-1 /
+# NA-2): a diff that touches only gfx1151 kernel files (under kernels/gfx1151/, registered per architecture in
+# modules.json "arch") plus their registered kernel tests selects NO R9700 GPU step; the R9700 side is carried by a
+# work_equal --arch gfx1201 proof (every gfx1201 code object of the build equals the base build's, the report bound to
+# the build's exes). Without the proof the plan says so and --run refuses; a refused proof is the full matrix again.
+# The 8060S runs the module's gfx1151 steps (+ map / test-source steps), not the full matrix. A gfx1201 or shared kernel
+# file, a kernels/gfx1151 file that host code includes (attn_ws4_index.h), a host / contract / build file keeps today's
+# plan. Fixtures assert the WHOLE plan (both GPUs, level, carry), not one field: review AO-2 found R9700 still selected
+# 6 steps through modules.json gpus: 2 after the kernel CORE rule was taken out.
+R97_ALL = ["kt_full", "st_swift_precise", "golden_swift", "golden_moe", "seq_swift_precise", "srv_balance", "srv_fast",
+           "srv_cache_balance", "srv_gpu_select"]  # every available GPU step of GATES on the R9700 (srv_env_e2: 8060s only)
+S8_ALL = R97_ALL + ["srv_env_e2"]
+KSTEPS = ["kt_full", "golden_swift", "golden_moe", "st_swift_precise", "seq_swift_precise"]
+
+
+def kmod(paths, arch_paths, tests, steps=KSTEPS):
+    return {"paths": paths, "steps": ["cpu_tests"] + list(steps), "gpus": {s: 2 for s in steps},
+            "arch": {"gfx1151": {"paths": arch_paths, "tests": tests, "steps": list(steps)}}}
+
+
+MODSA = dict(MODS, **{
+    "kernels.gdn": kmod(["kernels/gdn_*.hip", "kernels/gfx1151/gdn*.hip"], ["kernels/gfx1151/gdn*.hip"], ["tests/kernels/test_gdn.cpp"]),
+    "kernels.common": kmod(["kernels/common.hip", "kernels/gfx1151/common.hip", "kernels/shared/common_warp.h"], ["kernels/gfx1151/common.hip"],
+                           ["tests/kernels/kt.h", "tests/kernels/kernel_test_main.cpp"]),
+    "kernels.attn": kmod(["kernels/attn*.hip", "kernels/gfx1151/attn*.hip", "kernels/gfx1151/attn_ws4_index.h"], ["kernels/gfx1151/attn*.hip"],
+                         ["tests/kernels/test_attn.cpp"]),
+    "kernels.x": {"paths": ["kernels/gfx1151/x.hip"], "steps": ["kt_full"], "gpus": {"kt_full": 2}},  # owns a gfx1151 file, no arch entry
+    "contract.abi": {"paths": ["include/whirl/kernels_abi.h"], "full": True},
+})
+UNITY = ["kernels/gfx1151/whirl_kernels_gfx1151.hip", "kernels/whirl_kernels.hip"]
+KG = "kernels/gfx1151/gdn_x.hip"
+MA = {"includers": {KG: UNITY, "kernels/gfx1151/common.hip": UNITY, "kernels/gfx1151/x.hip": UNITY,
+                    "kernels/gfx1151/attn_ws4_index.h": ["kernels/gfx1151/attn_ws4.hip"] + UNITY + ["src/ops/attention.cpp", "tests/kernels/test_attn.cpp"],
+                    "kernels/shared/common_warp.h": ["kernels/common.hip", "kernels/gfx1151/common.hip"] + UNITY,
+                    "tests/kernels/kt.h": ["tests/kernels/test_gdn.cpp", "tests/kernels/kernel_test_main.cpp", "tests/kernels/test_vision.cpp"]},
+      "executables": {"whirl-kernel-test": ["tests/kernels/test_gdn.cpp", "tests/kernels/kernel_test_main.cpp", "tests/kernels/test_attn.cpp",
+                                            "tests/kernels/test_vision.cpp"],
+                      "whirl-server-gate": ["tests/server/server_gate.cpp"], "whirl-tests": ["tests/unit/unit_tests.cpp"]}}
+
+
+def arep(modfiles, steps=(), gpus=("gfx1151",), gate=None):
+    return rep(modfiles, gate or ("release_gate.ps1 -Module " + ",".join(sorted(modfiles)) if modfiles else "none"), steps=steps, gpus=gpus)
+
+
+def aplan(files, r, **kw):
+    return tc.make_plan("t", "x", {f: {} for f in files}, r, kw.pop("mods", MODSA), kw.pop("m", MA), GATES, TIMES, gate_map=gm2,
+                        core_sets={}, **kw)
+
+
+def carry_of(p, dev="r9700"):
+    return (p.get("carry") or {}).get(dev) or {}
+
+
+def is_full_both(p):
+    return (p["level"] == "full" and p["gpu_steps"]["r9700"] == R97_ALL and p["gpu_steps"]["8060s"] == S8_ALL and not (p.get("carry") or {})
+            and not p.get("arch_scope"))
+
+
+GDN_ONLY = [KG, "tests/kernels/test_gdn.cpp", "tests/kernels/kt.h", "tools/impact_map.json"]
+R_GDN = arep({"kernels.gdn": [KG]}, steps=["srv_fast"])
+# (1) gfx1151-only registered kernel + its registered tests (+ the generated map): the whole plan
+p = aplan(GDN_ONLY, R_GDN)
+check("d1b gfx1151-only: level module, no full reason", p["level"] == "module" and p["full_reasons"] == [], (p["level"], p["full_reasons"]))
+check("d1b gfx1151-only: R9700 selects NO GPU step", p["gpu_steps"]["r9700"] == [], p["gpu_steps"]["r9700"])
+check("d1b gfx1151-only: 8060S = the module's gfx1151 steps + map step, in gate order (not the full matrix)",
+      p["gpu_steps"]["8060s"] == ["kt_full", "st_swift_precise", "golden_swift", "golden_moe", "seq_swift_precise", "srv_fast"], p["gpu_steps"]["8060s"])
+c = carry_of(p)
+check("d1b gfx1151-only: R9700 carried by a work_equal --arch gfx1201 proof, required", c.get("status") == "required" and "--arch gfx1201" in c.get("by", ""), c)
+check("d1b gfx1151-only: the carry replaces the R9700 full matrix", c.get("covers") == R97_ALL, c.get("covers"))
+check("d1b gfx1151-only: only the R9700 is carried", sorted(p.get("carry") or {}) == ["r9700"], p.get("carry"))
+check("d1b gfx1151-only: estimates R9700 0 min, full matrix estimate kept", p["est_gpu_min"]["r9700"] == 0 and p["est_full_gpu_min"]["r9700"] == 6.0,
+      (p["est_gpu_min"], p["est_full_gpu_min"]))
+sc = p.get("arch_scope") or {}
+check("d1b gfx1151-only: arch scope names the arch, its GPU and the registered file", sc.get("arch") == "gfx1151" and sc.get("device") == "8060s"
+      and (sc.get("registered") or {}).get("kernels.gdn") == [KG], sc)
+check("d1b gfx1151-only: no proof given, nothing skipped", p["proofs"] == {} and p["skipped_by_proof"] == {"r9700": [], "8060s": []}, (p["proofs"], p["skipped_by_proof"]))
+check("d1b gfx1151-only: 8060S steps say why (gfx1151 module / map), never 'full matrix'",
+      all(p["gpu_why"].get(f"8060s:{s}", "").startswith(("module kernels.gdn", "impact map", "test source")) for s in p["gpu_steps"]["8060s"]), p["gpu_why"])
+# --one-gpu does not move the arch steps
+p = aplan(GDN_ONLY, R_GDN, one_gpu="8060s")
+check("d1b gfx1151-only, --one-gpu 8060s: same plan", p["gpu_steps"]["r9700"] == [] and carry_of(p).get("status") == "required", (p["gpu_steps"], p.get("carry")))
+# a caller module with an arch entry (kernels.gemm callers rdeps -> kernels.unity) runs ITS gfx1151 steps on the 8060S only
+MODSU = dict(MODSA, **{"kernels.unity": kmod(UNITY[1:] + UNITY[:1], ["kernels/gfx1151/whirl_kernels_gfx1151.hip"], [], steps=["kt_full", "srv_balance"])})
+p = aplan([KG], dict(R_GDN, module_callers={"kernels.gdn": ["kernels.unity"]}), mods=MODSU)
+check("d1b caller with an arch entry: its gfx1151 steps on the 8060S, none on the R9700",
+      p["gpu_steps"]["r9700"] == [] and "srv_balance" in p["gpu_steps"]["8060s"] and carry_of(p).get("status") == "required", (p["gpu_steps"], p["full_reasons"]))
+# (2) an unregistered kernels/gfx1151 file (no module owns it; the documented "one kernel -> its GPU" exception): the
+# full matrix on the 8060S, the R9700 carried (the proof is required here too: no R9700 step is dropped without it)
+p = aplan(["kernels/gfx1151/new.hip"], arep({}, gate="full gate or the release steps above: 1 file(s) in no module (kernels/gfx1151/new.hip)"))
+check("d1b unregistered gfx1151 kernel: 8060S full matrix, R9700 none + carry required",
+      p["level"] == "full" and p["gpu_steps"]["8060s"] == S8_ALL and p["gpu_steps"]["r9700"] == [] and carry_of(p).get("status") == "required",
+      (p["level"], p["gpu_steps"], p.get("carry")))
+p = plan(["kernels/gfx1151/attn.hip"], rep({}, "full gate or the release steps above: 1 file(s) in no module (kernels/gfx1151/attn.hip)", gpus=("gfx1151",)))
+check("d1b test 10 (kernel 1151 only, no module) now names the R9700 carry", carry_of(p).get("status") == "required", p.get("carry"))
+# (3) not arch-only: today's plan (full matrix on both GPUs), no carry. gfx1201-only kernel (map: gfx1201)
+p = aplan(["kernels/common.hip"], arep({"kernels.common": ["kernels/common.hip"]}, gpus=("gfx1201",)))
+check("d1b gfx1201 kernel: R9700 steps selected (full matrix both GPUs, no carry)", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
+# a shared kernel header (compiled into both code objects)
+p = aplan(["kernels/shared/common_warp.h"], arep({"kernels.common": ["kernels/shared/common_warp.h"]}, gpus=("gfx1151", "gfx1201")))
+check("d1b shared kernel header: full matrix both GPUs, no carry", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
+# a shared header even when the map were to list one GPU only: the path is not under kernels/gfx1151/
+p = aplan(["kernels/shared/common_warp.h"], arep({"kernels.common": ["kernels/shared/common_warp.h"]}))
+check("d1b shared header with a one-GPU map: still full both", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
+# a kernels/gfx1151 header that HOST code includes (attn_ws4_index.h <- src/ops/attention.cpp): both GPUs
+p = aplan(["kernels/gfx1151/attn_ws4_index.h"], arep({"kernels.attn": ["kernels/gfx1151/attn_ws4_index.h"]}))
+check("d1b gfx1151 header with a host includer: full matrix both GPUs, no carry", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
+# the same header even if a module listed it as gfx1151-only: the includer check refuses it (fail closed)
+MODSW = dict(MODSA, **{"kernels.attn": kmod(MODSA["kernels.attn"]["paths"], ["kernels/gfx1151/attn*.hip", "kernels/gfx1151/attn_ws4_index.h"], [])})
+p = aplan(["kernels/gfx1151/attn_ws4_index.h"], arep({"kernels.attn": ["kernels/gfx1151/attn_ws4_index.h"]}), mods=MODSW)
+check("d1b host-included header registered as gfx1151 by mistake: still full both", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
+# a gfx1151 header whose includers are gfx1151 kernels only: arch-scoped although impact.py lists both GPUs for every .h
+# (its generic host-code rule); the map's steps then run on the 8060S only
+HG = "kernels/gfx1151/lds_x.h"
+MODSH = dict(MODSA, **{"kernels.common": kmod(MODSA["kernels.common"]["paths"] + [HG], ["kernels/gfx1151/common.hip", HG],
+                                              MODSA["kernels.common"]["arch"]["gfx1151"]["tests"])})
+MAH = dict(MA, includers=dict(MA["includers"], **{HG: ["kernels/gfx1151/common.hip"] + UNITY + ["tests/unit/unit_tests.cpp"]}))
+p = aplan([HG], arep({"kernels.common": [HG]}, steps=["srv_fast"], gpus=("gfx1151", "gfx1201")), mods=MODSH, m=MAH)
+check("d1b gfx1151 header with gfx1151-only includers (+ a CPU test): arch-scoped, map steps on the 8060S only",
+      p["level"] == "module" and p["gpu_steps"]["r9700"] == [] and "srv_fast" in p["gpu_steps"]["8060s"] and carry_of(p).get("status") == "required",
+      (p["level"], p["gpu_steps"], p["full_reasons"][:2]))
+# a GPU test source that includes the header is a changed test too: unregistered -> its R9700 step stays
+MAH2 = dict(MA, includers=dict(MA["includers"], **{HG: ["kernels/gfx1151/common.hip"] + UNITY + ["tests/kernels/test_vision.cpp"]}))
+p = aplan([HG], arep({"kernels.common": [HG]}, gpus=("gfx1151", "gfx1201")), mods=MODSH, m=MAH2)
+check("d1b gfx1151 header included by an unregistered kernel test: kt_full on the R9700", p["gpu_steps"]["r9700"] == ["kt_full"]
+      and carry_of(p).get("status") == "required", (p["gpu_steps"], p.get("carry")))
+# a gfx1151 kernel owned by a module that declares no gfx1151 part: fail closed (both GPUs)
+p = aplan(["kernels/gfx1151/x.hip"], arep({"kernels.x": ["kernels/gfx1151/x.hip"]}))
+check("d1b gfx1151 file of a module without an arch entry: full both", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
+# the impact map lists both GPUs for the diff (guard analysis disagrees with the path): fail closed
+p = aplan([KG], arep({"kernels.gdn": [KG]}, gpus=("gfx1151", "gfx1201")))
+check("d1b map lists both GPUs: full both", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
+# gfx1151 kernel + host file / contract.abi / build file / shared header: today's full matrix, no carry
+for extra, r in ((["src/ops/attention.cpp"], arep({"kernels.gdn": [KG]}, gate="full gate or the release steps above: 1 file(s) in no module (src/ops/attention.cpp)")),
+                 (["include/whirl/kernels_abi.h"], arep({"kernels.gdn": [KG], "contract.abi": ["include/whirl/kernels_abi.h"]},
+                                                        gate="full gate, both GPUs (contract module contract.abi)", gpus=("gfx1151", "gfx1201"))),
+                 (["cmake/kernels.cmake"], arep({"kernels.gdn": [KG]}, gate="full gate or the release steps above: 1 file(s) in no module (cmake/kernels.cmake); cmake/kernels.cmake is build-wide")),
+                 (["kernels/shared/common_warp.h"], arep({"kernels.gdn": [KG], "kernels.common": ["kernels/shared/common_warp.h"]}, gpus=("gfx1151", "gfx1201")))):
+    p = aplan([KG] + extra, r)
+    check(f"d1b gfx1151 kernel + {extra[0]}: full matrix both GPUs, no carry", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry"), p["full_reasons"][:2]))
+# (4) tests that are not the arch's registered kernel tests select their R9700 steps as today (the carry covers the rest)
+p = aplan([KG, "tests/server/server_gate.cpp"], R_GDN)
+check("d1b + unregistered server-gate test: its steps on the R9700, kernel part still carried",
+      p["gpu_steps"]["r9700"] == ["golden_swift", "srv_balance"] and carry_of(p).get("status") == "required"
+      and carry_of(p).get("covers") == [s for s in R97_ALL if s not in ("golden_swift", "srv_balance")], (p["gpu_steps"], p.get("carry")))
+p = aplan([KG, "tests/kernels/test_vision.cpp"], R_GDN)
+check("d1b + unregistered kernel test: kt_full on the R9700 (not carried)", p["gpu_steps"]["r9700"] == ["kt_full"] and carry_of(p).get("status") == "required",
+      (p["gpu_steps"], p.get("carry")))
+p = aplan([KG, "tests/unit/unit_tests.cpp"], R_GDN)
+check("d1b + CPU-only test source: no R9700 step", p["gpu_steps"]["r9700"] == [] and carry_of(p).get("status") == "required", (p["gpu_steps"], p.get("carry")))
+# (5) the R9700 proof: work_equal report (per-object targets, bound to --build's exes). The kernel-diff refusal stays for the
+# GPU whose kernels changed (8060S) and is lifted for the carried GPU (R9700).
+with tempfile.TemporaryDirectory() as td:
+    b = os.path.join(td, "build")
+    os.makedirs(b)
+    open(os.path.join(b, "whirl.exe"), "wb").write(b"exe-w")
+    open(os.path.join(b, "whirl-server.exe"), "wb").write(b"exe-s")
+    SW_, SS_ = hashlib.sha256(b"exe-w").hexdigest(), hashlib.sha256(b"exe-s").hexdigest()
+    O_OK = [{"index": 0, "target": "gfx1201", "same": True}, {"index": 1, "target": "gfx1151", "same": False, "differing_sections": [".text"]}]
+
+    def wrep(name, objs=O_OK, exes=None, **over):
+        ex = exes if exes is not None else {"whirl.exe": SW_, "whirl-server.exe": SS_}
+        r = {"format": "whirl-work-equal/1", "verdict": "NOT_EQUIVALENT", "checks": {"code_objects": "different", "launch_sequence": "missing", "golden": "missing"},
+             "a": {"exes": {k: "a" * 64 for k in ex}}, "b": {"exes": dict(ex)},
+             "exes": [{"name": k, "a": {"sha256": "a" * 64}, "b": {"sha256": v}, "code_objects": {"result": "different", "n_a": len(objs), "n_b": len(objs), "objects": objs}}
+                      for k, v in ex.items()]}
+        r.update(over)
+        f = os.path.join(td, name)
+        json.dump(r, open(f, "w"))
+        return f
+
+    def pplan(proofs, **kw):
+        return aplan(GDN_ONLY, R_GDN, build=b, proofs=proofs, **kw)
+
+    p = pplan({"r9700": wrep("ok.json")})
+    check("d1b proof: gfx1201 objects identical, bound -> carry proven, R9700 still none", carry_of(p).get("status") == "proven" and p["gpu_steps"]["r9700"] == []
+          and p["level"] == "module" and "ok.json" in carry_of(p).get("proof", ""), (carry_of(p), p["gpu_steps"]["r9700"], p["full_reasons"]))
+    p = pplan({"r9700": wrep("cuid.json", objs=[dict(O_OK[0], same=False, cuid_only=True, cuid="cuid-only"), O_OK[1]])})
+    check("d1b proof: gfx1201 identical-except-cuid counts as identical", carry_of(p).get("status") == "proven", carry_of(p))
+    p = pplan({"r9700": wrep("eq.json", arch="gfx1201", verdict="EQUIVALENT",
+                             checks={"code_objects": "identical", "launch_sequence": "missing", "golden": "missing"})})
+    check("d1b proof: an --arch gfx1201 report (EQUIVALENT) is accepted", carry_of(p).get("status") == "proven", carry_of(p))
+    p = pplan({"r9700": wrep("arch_ne.json", arch="gfx1201", verdict="NOT_EQUIVALENT")})
+    check("d1b proof: an --arch gfx1201 report saying NOT_EQUIVALENT is refused -> full both", carry_of(p).get("status") == "refused" and p["level"] == "full"
+          and p["gpu_steps"]["r9700"] == R97_ALL and p["gpu_steps"]["8060s"] == S8_ALL, (carry_of(p), p["level"]))
+    refused = [
+        ("gfx1201 object differs", wrep("diff.json", objs=[dict(O_OK[0], same=False, differing_sections=[".text"]), O_OK[1]])),
+        ("no gfx1201 object in the report", wrep("none.json", objs=[O_OK[1]])),
+        ("gfx1201 object on one side only", wrep("one.json", objs=[{"index": 0, "target": "gfx1201", "same": False, "only": "B"}, O_OK[1]])),
+        ("targets paired across archs", wrep("pair.json", objs=[{"index": 0, "target": "gfx1201/gfx1151", "same": False}])),
+        ("report for another arch", wrep("other.json", arch="gfx1151", verdict="EQUIVALENT")),
+        ("whirl.exe of the proof is not --build's", wrep("sha.json", exes={"whirl.exe": "0" * 64, "whirl-server.exe": SS_})),
+        ("whirl-server.exe of --build missing from the proof", wrep("nosrv.json", exes={"whirl.exe": SW_})),
+        ("launch sequence different", wrep("launch.json", checks={"code_objects": "different", "launch_sequence": "different", "golden": "missing"})),
+        ("golden different", wrep("golden.json", checks={"code_objects": "different", "launch_sequence": "missing", "golden": "different"})),
+        ("not a work_equal report", wrep("fmt.json", format="x")),
+    ]
+    for why, f in refused:
+        p = pplan({"r9700": f})
+        check(f"d1b proof refused ({why}) -> carry refused, full matrix both GPUs", carry_of(p).get("status") == "refused" and p["level"] == "full"
+              and p["gpu_steps"]["r9700"] == R97_ALL and p["gpu_steps"]["8060s"] == S8_ALL and any("carry" in r for r in p["full_reasons"]),
+              (why, carry_of(p), p["level"], p["full_reasons"][:2]))
+    p = aplan(GDN_ONLY, R_GDN, build=None, proofs={"r9700": wrep("nob.json")})
+    check("d1b proof without --build: refused (cannot be bound)", carry_of(p).get("status") == "refused" and p["level"] == "full", carry_of(p))
+    p = pplan({"r9700": os.path.join(td, "missing.json")})
+    check("d1b proof file missing: refused", carry_of(p).get("status") == "refused", carry_of(p))
+    p = pplan({"8060s": wrep("s8.json")})
+    check("d1b proof for the 8060S on a gfx1151 diff: not used (its kernels changed), R9700 carry still required",
+          "not used" in p["proofs"].get("8060s", "") and p["skipped_by_proof"]["8060s"] == [] and carry_of(p).get("status") == "required"
+          and p["gpu_steps"]["8060s"] == ["kt_full", "st_swift_precise", "golden_swift", "golden_moe", "seq_swift_precise", "srv_fast"], (p["proofs"], p.get("carry")))
+    # --base-build: test_change compares the code objects itself (work_equal compare, CPU) and uses that report
+    real_cmp = tc.compare_code_objects
+    seen = []
+
+    def fake_cmp(base, build, out_json, objs=O_OK):
+        seen.append((base, build))
+        os.replace(wrep("bb.json", objs=objs), out_json)
+        return "different", out_json
+
+    tc.compare_code_objects = fake_cmp
+    try:
+        p = pplan({}, base_build=os.path.join(td, "base"), scratch=td)
+        check("d1b --base-build: code objects compared, gfx1201 identical -> carry proven", seen and carry_of(p).get("status") == "proven"
+              and p["gpu_steps"]["r9700"] == [] and p["level"] == "module", (seen, carry_of(p), p["full_reasons"]))
+        tc.compare_code_objects = lambda base, build, out_json: fake_cmp(base, build, out_json, objs=[dict(O_OK[0], same=False), O_OK[1]])
+        p = pplan({}, base_build=os.path.join(td, "base"), scratch=td)
+        check("d1b --base-build: gfx1201 object differs -> refused, full both", carry_of(p).get("status") == "refused" and p["level"] == "full"
+              and p["gpu_steps"]["r9700"] == R97_ALL, (carry_of(p), p["level"]))
+    finally:
+        tc.compare_code_objects = real_cmp
+    # (6) --run: a required carry refuses before any gate call (exit 2); a proven carry runs the R9700 call with CPU steps only
+    calls = []
+
+    def fake_run2(cmd, stdout=None, stderr=None, **kw):
+        calls.append(cmd)
+        dev = cmd[cmd.index("-Device") + 1]
+        steps = cmd[cmd.index("-Steps") + 1].split(",")
+        tag = cmd[cmd.index("-Tag") + 1]
+        w = cmd[cmd.index("-Work") + 1]
+        os.makedirs(w, exist_ok=True)
+        with open(os.path.join(w, f"{tag}_summary.txt"), "w") as fh:
+            fh.write(f"release gate {tag} on {dev} (x)\n")
+            for s in steps:
+                fh.write(f"PASS {s:<22} exit   0     60 s  ok\n")
+
+        class R:
+            returncode = 0
+        return R()
+
+    class A2:
+        work = os.path.join(td, "w2")
+        force = False
+        build = b
+        ledger = os.path.join(td, "ledger2.tsv")
+    real_run = tc.subprocess.run
+    real_busy = tc.whirl_running
+    tc.whirl_running = lambda: []
+    tc.subprocess.run = fake_run2
+    try:
+        rc = tc.run_plan(aplan(GDN_ONLY, R_GDN), A2)
+        check("d1b --run with the R9700 carry still required: exit 2, no gate call", rc == 2 and not calls, (rc, calls))
+        rc = tc.run_plan(pplan({"r9700": wrep("ok_run.json")}), A2)
+        s97 = calls[0][calls[0].index("-Steps") + 1].split(",") if calls else []
+        s8 = calls[1][calls[1].index("-Steps") + 1].split(",") if len(calls) > 1 else []
+        check("d1b --run with a proven carry: R9700 call has no GPU step, 8060S call has the arch steps",
+              rc == 0 and len(calls) == 2 and not set(s97) & set(R97_ALL) and "kt_full" in s8 and "srv_fast" in s8, (rc, s97, s8))
+        res = json.load(open(os.path.join(A2.work, "test_change_summary.json")))
+        check("d1b --run summary keeps the carry and its proof", (res["plan"].get("carry") or {}).get("r9700", {}).get("status") == "proven", res["plan"].get("carry"))
+    finally:
+        tc.subprocess.run = real_run
+        tc.whirl_running = real_busy
+# (7) the modules.json "arch" entries are validated (an arch path outside kernels/<arch>/ or outside the module, an unknown
+# arch, a step the gate does not have / a CPU step, a test outside tests/ is an error): synthetic table, then the shipped one
+aerr = getattr(tc, "arch_entry_errors", None)
+check("d1b arch_entry_errors exists", callable(aerr), aerr)
+if callable(aerr):
+    GS = {"kt_full", "golden_swift", "golden_moe", "st_swift_precise", "seq_swift_precise", "srv_balance", "srv_fast"}
+    check("d1b arch entries: the synthetic table is valid", aerr(MODSA, GS) == [], aerr(MODSA, GS))
+    for why, bad in (("unknown arch", {"gfx1100": MODSA["kernels.gdn"]["arch"]["gfx1151"]}),
+                     ("path outside kernels/gfx1151/", {"gfx1151": dict(MODSA["kernels.gdn"]["arch"]["gfx1151"], paths=["kernels/gdn_*.hip"])}),
+                     ("path outside the module's paths", {"gfx1151": dict(MODSA["kernels.gdn"]["arch"]["gfx1151"], paths=["kernels/gfx1151/attn.hip"])}),
+                     ("no paths", {"gfx1151": dict(MODSA["kernels.gdn"]["arch"]["gfx1151"], paths=[])}),
+                     ("step not in the gate", {"gfx1151": dict(MODSA["kernels.gdn"]["arch"]["gfx1151"], steps=["kt_fulll"])}),
+                     ("a CPU step", {"gfx1151": dict(MODSA["kernels.gdn"]["arch"]["gfx1151"], steps=["kt_full", "cpu_tests"])}),
+                     ("no steps", {"gfx1151": dict(MODSA["kernels.gdn"]["arch"]["gfx1151"], steps=[])}),
+                     ("test outside tests/", {"gfx1151": dict(MODSA["kernels.gdn"]["arch"]["gfx1151"], tests=["kernels/gfx1151/gdn_x.hip"])})):
+        e = aerr(dict(MODSA, **{"kernels.gdn": dict(MODSA["kernels.gdn"], arch=bad)}), GS)
+        check(f"d1b arch entries: {why} is an error", len(e) >= 1 and all("kernels.gdn" in x for x in e), e)
+# (8) pins on THIS tree: the shipped modules.json registers the gfx1151 part of every kernel family, the F6 files of the
+# feat026 candidates (DISCOVERY §2c F6) and never a kernels/gfx1151 file that host code includes; the unity source includes
+# the gfx1151 set only for gfx1151
+RG = {d: tc.gate_steps(d, tc.REPO) for d in tc.DEVICES}
+RGPU = {s["name"] for d in tc.DEVICES for s in RG[d] if s["gpu"]}
+if callable(aerr):
+    check("d1b shipped: modules.json arch entries are valid", aerr(RMODS, RGPU) == [], aerr(RMODS, RGPU))
+ARCH_MODS = {k: d["arch"]["gfx1151"] for k, d in RMODS.items() if (d.get("arch") or {}).get("gfx1151")}
+G1151 = sorted("kernels/gfx1151/" + os.path.basename(f) for f in glob.glob(os.path.join(tc.REPO, "kernels", "gfx1151", "*.hip")))
+HOSTINC = {f for f, inc in RMAP["includers"].items() if f.startswith("kernels/gfx1151/")
+           and any(not (x.startswith(("kernels/gfx1151/", "tests/")) or x == "kernels/whirl_kernels.hip") for x in inc)}
+check("d1b shipped: attn_ws4_index.h is the kernels/gfx1151 file host code includes (map)", HOSTINC == {"kernels/gfx1151/attn_ws4_index.h"}, HOSTINC)
+own = lambda f: [k for k, d in RMODS.items() if tc.matches(f, d.get("paths") or [])]
+miss = [f for f in G1151 if not any(tc.matches(f, ARCH_MODS.get(k, {}).get("paths") or []) for k in own(f))]
+check("d1b shipped: every kernels/gfx1151/*.hip of the tree is in its module's gfx1151 arch paths", G1151 and not miss, miss)
+leak = sorted(f for f in HOSTINC if any(tc.matches(f, a.get("paths") or []) for a in ARCH_MODS.values()))
+check("d1b shipped: no arch path covers a kernels/gfx1151 file with a host includer", not leak, leak)
+F6 = {"kernels/gfx1151/gemv_hv8.hip": "kernels.gemm", "kernels/gfx1151/gemv_hv9.hip": "kernels.gemm", "kernels/gfx1151/mx_inject.h": "kernels.gemm",
+      "kernels/gfx1151/moe_down8.hip": "kernels.moe", "kernels/gfx1151/moe_prefill_mt.hip": "kernels.moe",
+      "kernels/gfx1151/gemv_gk.hip": "kernels.gemv", "kernels/gfx1151/lds_barrier.h": "kernels.common"}
+for f, mname in F6.items():
+    check(f"d1b shipped: F6 {f} is owned by {mname} only and is in its gfx1151 arch paths",
+          own(f) == [mname] and tc.matches(f, ARCH_MODS.get(mname, {}).get("paths") or []), (own(f), ARCH_MODS.get(mname)))
+check("d1b shipped: kernels/moep_map.h (feat026-moep, shared location) is owned by kernels.moe and is NOT gfx1151-only",
+      own("kernels/moep_map.h") == ["kernels.moe"] and not tc.matches("kernels/moep_map.h", ARCH_MODS.get("kernels.moe", {}).get("paths") or []), own("kernels/moep_map.h"))
+check("d1b shipped: the shared kernel test harness and each family's kernel tests are registered gfx1151 tests",
+      all(any(tc.matches(t, a.get("tests") or []) for a in ARCH_MODS.values()) for t in
+          ("tests/kernels/kt.h", "tests/kernels/kernel_test_main.cpp", "tests/kernels/bench_kernels.cpp", "tests/kernels/kt_bench.h",
+           "tests/kernels/test_gdn.cpp", "tests/kernels/test_gemvh.cpp", "tests/kernels/test_moe_down8.cpp", "tests/kernels/test_attn.cpp")),
+      {k: a.get("tests") for k, a in ARCH_MODS.items()})
+check("d1b shipped: vision kernel tests are not registered as gfx1151 tests (one source for both GPUs)",
+      not any(tc.matches("tests/kernels/test_vision.cpp", a.get("tests") or []) for a in ARCH_MODS.values()), "test_vision.cpp")
+ug = getattr(tc, "unity_guard_errors", None)
+check("d1b unity_guard_errors exists", callable(ug), ug)
+if callable(ug):
+    rk = lambda p_: open(os.path.join(tc.REPO, p_), encoding="utf-8", errors="replace").read()
+    check("d1b shipped: kernels/whirl_kernels.hip includes gfx1151/ only under #if defined(__gfx1151__)", ug(rk("kernels/whirl_kernels.hip")) == [],
+          ug(rk("kernels/whirl_kernels.hip")))
+    U0 = '#include "smoke.hip"\n#if !defined(__gfx1151__)\n#include "common.hip"\n#endif\n\n#if defined(__gfx1151__)\n#include "gfx1151/whirl_kernels_gfx1151.hip"  // set\n#endif\n'
+    check("d1b unity guard: the shipped shape passes", ug(U0) == [], ug(U0))
+    for why, mut in (("include outside the guard", U0 + '#include "gfx1151/attn.hip"\n'),
+                     ("guard inverted", U0.replace("#if defined(__gfx1151__)", "#if !defined(__gfx1151__)")),
+                     ("include in the gfx1201 block", U0.replace('#include "common.hip"', '#include "gfx1151/gdn.hip"')),
+                     ("guard widened with ||", U0.replace("#if defined(__gfx1151__)", "#if defined(__gfx1151__) || defined(__gfx1201__)"))):
+        check(f"d1b unity guard mutant ({why}) is caught", ug(mut) != [], (why, ug(mut)))
+    check("d1b unity guard: a commented-out include is not code", ug(U0 + '// #include "gfx1151/x.hip"\n/* #include "gfx1151/y.hip" */\n') == [], "comments")
+# (9) WHOLE-plan fixtures on THIS tree (real modules.json, impact map, gate lists; impact.analyze), from the review's plan-mode
+# ranges (file lists of `git diff --name-only`): kernel-only ranges -> R9700 none + carry required; host-class -> full both
+_imp.ROOT = tc.REPO
+FIX = {
+    "gdnvgpr 1a5a547..8d1f0b0": ["kernels/gfx1151/fused_decode.hip", "kernels/gfx1151/gdn_step_v.hip", "tests/kernels/bench_kernels.cpp",
+                                 "tests/kernels/kernel_test_main.cpp", "tests/kernels/kt.h", "tests/kernels/test_gdn.cpp", "tools/impact_map.json"],
+    "kcand-r2 1a5a547..5199628": ["kernels/gfx1151/gemv_h.hip", "kernels/gfx1151/gemv_hv8.hip", "kernels/gfx1151/gemv_hv9.hip", "kernels/gfx1151/moe.hip",
+                                  "kernels/gfx1151/moe_down8.hip", "kernels/gfx1151/whirl_kernels_gfx1151.hip", "tests/kernels/kernel_test_main.cpp",
+                                  "tests/kernels/kt.h", "tests/kernels/test_gemvh.cpp", "tests/kernels/test_moe_down8.cpp", "tools/impact_map.json"],
+}
+HOSTFIX = {
+    "attn8s 1a5a547..b4c8c28": ["include/whirl/kernels_abi.h", "kernels/gfx1151/attn_pf2.hip", "kernels/gfx1151/whirl_kernels_gfx1151.hip", "src/common/numerics.cpp",
+                                "src/kernels_host/kernels_abi.cpp", "src/ops/attention.cpp", "tests/kernels/bench_kernels.cpp", "tests/kernels/cpu/attn_pf2_emu.cpp",
+                                "tests/kernels/cpu/build_emu.bat", "tests/kernels/kernel_test_main.cpp", "tests/kernels/kt_bench.h", "tests/kernels/test_attn.cpp",
+                                "tests/ops/ops_tests.cpp", "tools/klgate/klgate.py", "tools/quick/pf2_resources.py"],
+    "fdq-p25 c72534e..5c962c0": ["include/whirl/kernels_abi.h", "include/whirl/model.h", "include/whirl/ops/matmul.h", "kernels/gfx1151/gemm_prefill.hip",
+                                 "kernels/gfx1151/mx_inject.h", "src/config/env_snapshot.cpp", "src/config/env_snapshot.h", "src/kernels_host/kernels_abi.cpp",
+                                 "src/model/config.cpp", "src/model/forward/dispatch.cpp", "src/model/loader.cpp", "src/ops/matmul.cpp", "src/release/release.cpp",
+                                 "tests/kernels/bench_kernels.cpp", "tests/kernels/test_gemm.cpp", "tests/model/model_tests.cpp", "tests/ops/ops_tests.cpp",
+                                 "tests/unit/unit_tests.cpp", "tools/impact_map.json"],
+    "ggemv-p25 c72534e..a20155c": ["cmake/server.cmake", "include/whirl/kernels_abi.h", "include/whirl/model.h", "include/whirl/ops/matmul.h", "kernels/gfx1151/gemv_gk.hip",
+                                   "kernels/gfx1151/whirl_kernels_gfx1151.hip", "src/config/env_snapshot.cpp", "src/config/env_snapshot.h", "src/kernels_host/kernels_abi.cpp",
+                                   "src/model/config.cpp", "src/model/exec_dump.cpp", "src/model/forward/dispatch.cpp", "src/model/tune.cpp", "src/ops/matmul.cpp",
+                                   "src/server/server_main.cpp", "tests/kernels/bench_kernels.cpp", "tests/kernels/kernel_test_main.cpp", "tests/kernels/kt.h",
+                                   "tests/kernels/kt_bench.h", "tests/kernels/test_gemvk.cpp", "tests/kernels/unit/gemvk_order_tests.cpp", "tests/model/model_tests.cpp",
+                                   "tests/ops/ops_tests.cpp", "tools/impact_map.json"],
+    "moep-p25 c72534e..0ea1474": ["cmake/kernels.cmake", "cmake/ops.cmake", "include/whirl/kernels_abi.h", "include/whirl/model.h", "include/whirl/numerics.h",
+                                  "include/whirl/ops/moe.h", "kernels/gfx1151/moe_prefill_mt.hip", "kernels/gfx1151/whirl_kernels_gfx1151.hip", "kernels/moep_map.h",
+                                  "src/common/numerics.cpp", "src/config/env_snapshot.cpp", "src/config/env_snapshot.h", "src/kernels_host/kernels_abi.cpp",
+                                  "src/model/forward/ffn.cpp", "src/model/loader.cpp", "src/model/tune.cpp", "src/ops/moe.cpp", "tests/cache/cache_tests.cpp",
+                                  "tests/kernels/bench_kernels.cpp", "tests/kernels/kernel_test_main.cpp", "tests/kernels/kt.h", "tests/kernels/kt_bench.h",
+                                  "tests/kernels/test_moe_mxfp4.cpp", "tests/kernels/test_moep.cpp", "tests/kernels/unit/moep_sched_tests.cpp", "tests/model/model_tests.cpp",
+                                  "tests/ops/ops_tests.cpp", "tests/unit/numerics_plan_tests.cpp", "tools/impact_map.json"],
+    "router-p25 c72534e..631ee2a": ["cmake/kernels.cmake", "include/whirl/kernels_abi.h", "include/whirl/model.h", "include/whirl/numerics.h", "kernels/moe_router.hip",
+                                    "kernels/whirl_kernels.hip", "src/common/numerics.cpp", "src/config/env_snapshot.cpp", "src/config/env_snapshot.h",
+                                    "src/kernels_host/kernels_abi.cpp", "src/model/forward/ffn.cpp", "src/model/loader.cpp", "tests/kernels/bench_kernels.cpp",
+                                    "tests/kernels/kernel_test_main.cpp", "tests/kernels/kt.h", "tests/kernels/kt_bench.h", "tests/kernels/test_moe_router.cpp",
+                                    "tests/model/model_tests.cpp", "tests/unit/numerics_plan_tests.cpp", "tools/impact_map.json"],
+}
+RFULL = {d: [s["name"] for s in RG[d] if s["gpu"] and not s["na"]] for d in tc.DEVICES}
+
+
+def rplan(files):
+    ch = {f: {"old_path": f, "new": [1], "old": [1]} for f in files}
+    r = _imp.analyze(ch, RMAP, None, None)
+    return tc.make_plan("t", "x", ch, r, RMODS, RMAP, RG, {}, gate_map=RGM, core_sets={})
+
+
+for name, files in FIX.items():
+    p = rplan(files)
+    mods_t = sorted(p["modules"])
+    want8 = sorted({s for k in mods_t for s in ARCH_MODS.get(k, {}).get("steps") or []})
+    check(f"d1b fixture {name}: whole plan: level module, R9700 NO GPU step, 8060S = gfx1151 steps (not full), R9700 carried (proof required)",
+          p["level"] == "module" and p["full_reasons"] == [] and p["gpu_steps"]["r9700"] == [] and want8 and set(want8) <= set(p["gpu_steps"]["8060s"])
+          and len(p["gpu_steps"]["8060s"]) < len(RFULL["8060s"]) and carry_of(p).get("status") == "required" and carry_of(p).get("covers") == RFULL["r9700"]
+          and sorted(p.get("carry") or {}) == ["r9700"] and (p.get("arch_scope") or {}).get("arch") == "gfx1151",
+          (p["level"], p["full_reasons"][:2], len(p["gpu_steps"]["r9700"]), len(p["gpu_steps"]["8060s"]), mods_t, p.get("carry")))
+for name, files in HOSTFIX.items():
+    p = rplan(files)
+    check(f"d1b fixture {name} (host class): whole plan unchanged: full matrix both GPUs, contract.abi named, no carry",
+          p["level"] == "full" and p["gpu_steps"]["r9700"] == RFULL["r9700"] and p["gpu_steps"]["8060s"] == RFULL["8060s"] and not (p.get("carry") or {})
+          and not p.get("arch_scope") and any("contract.abi" in r for r in p["full_reasons"]), (p["level"], p["full_reasons"][:2], p.get("carry")))
 print(f"test_change_test: {n - fails}/{n} passed")
 sys.exit(1 if fails else 0)
