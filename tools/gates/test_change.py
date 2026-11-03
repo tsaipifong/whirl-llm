@@ -15,9 +15,10 @@ One command takes a change and prints (and with --run executes) exactly:
   * v0251-d1b: for a diff whose product files all compile into ONE architecture's code object (kernels/gfx1151/, registered
     per module in modules.json "arch", included by nothing outside that set but tests; see arch_scope) plus registered
     kernel tests: that module's arch steps on that GPU only (the full matrix there when no module owns a file), and NO
-    GPU step on the other GPU, which is carried by a work_equal --arch proof instead (--proof r9700=FILE, or --base-build:
-    every gfx1201 code object of --build equal to the base build's). --run refuses while the carry is not proven; a
-    refused proof plans the full matrix on both GPUs.
+    GPU step on the other GPU, which is carried by a work_equal [--arch] proof instead: every gfx1201 code object of
+    --build equal to those of --base-build, a build stamped (--stamp-build) at the plan's base revision. The impact map
+    must be the planned version's (--worktree, or a root checked out clean at the --range / --commit end). --run refuses
+    while the carry is not proven; a refused proof plans the full matrix on both GPUs.
 Every --run appends one row to the test-cost ledger (internal_docs/TEST_COST_LEDGER.tsv of the workspace, or --ledger).
 DEV-TIME ONLY: a release / rc merge / bug-fix release still runs the full release gate on both GPUs (docs/dev/testing.md);
 the summaries are tagged change_<id>_<device> and never write PASS_gate_<device>.
@@ -27,6 +28,7 @@ the summaries are tagged change_<id>_<device> and never write PASS_gate_<device>
     python tools/gates/test_change.py --commit SHA                   plan for one commit
         [--build DIR] [--base-build DIR] [--proof r9700=FILE] [--proof 8060s=FILE] [--one-gpu r9700|8060s] [--json] [--all-cpu]
         [--run [--work DIR] [--force]] [--ledger FILE] [--record-plan]
+    python tools/gates/test_change.py --stamp-build DIR              record the commit DIR's exes were built from (carry base)
     python tools/gates/test_change.py --refresh-times [ROOT ...]      step durations from release-gate summaries -> STEP_TIMES.tsv
     python tools/gates/test_change.py --backtest N --rev REV [--out DIR]   plans for REV's last N non-merge product commits
 Exit: 0 plan printed / run passed; 1 a step failed; 2 setup error (bad args, another whirl process running, gate exit 2).
@@ -56,6 +58,8 @@ import impact_build  # noqa: E402
 DEVICES = ("r9700", "8060s")  # run order: one GPU after the other, never both at once
 ARCH = {"r9700": "gfx1201", "8060s": "gfx1151"}
 DEV_OF_ARCH = {v: k for k, v in ARCH.items()}
+# the names a gate / runner uses for a card (= tools/impact/work_equal.py GPU_ALIASES; test_change_test.py keeps them equal)
+GPU_ALIASES = {"r9700": ("r9700", "r97", "gfx1201", "pci:71:0"), "8060s": ("8060s", "s8", "8s", "gfx1151", "pci:196:0")}
 PER_DEVICE_CPU = ("cpu_golden_xcheck", "kl_guard")  # CPU steps that check one GPU's references: run with each GPU
 
 # Core modules (tools/gates/modules.json names): a change here runs the full matrix on both GPUs. The brief's list is
@@ -877,17 +881,44 @@ def check_proof(path, dev, build):
             return False, f"{exe}: missing in --build or not in the proof", set()
     arch = ARCH[dev]
     cov = set()
+    # v0251-d1b review AO-1: every run is attributed to its card in every form the gates write (release_gate passes
+    # --device r9700 / 8060s, pci ids and --device=X occur, the server gate picks the card with WHIRL_DEVICE); a run of the
+    # other card refuses the proof; a run that names no card is compared by work_equal but proves nothing for a card
+    # (ADR-0003 addendum 1), so its step is not covered and a report without a run of this card is no proof
+    mine = 0
     for L in r.get("launch") or []:
         for run in L.get("runs") or []:
             k = run.get("key", "") if isinstance(run, dict) else ""
-            if f"--device {arch}" in k or not re.search(r"--device gfx\d+", k):
-                cov.add(k.split("/", 1)[0])
-            if any(f"--device {a}" in k for a in ARCH.values() if a != arch):
+            d = run_device(k)
+            if d is None:
+                continue
+            if d != dev:
                 return False, f"launch run for another GPU in the proof: {k[:80]}", set()
-    if chk.get("golden") == "identical":
+            mine += 1
+            cov.add(k.split("/", 1)[0])
+    if not mine:
+        return False, f"no launch run of {dev} in the proof (a run that names no GPU is never proof for a card)", set()
+    # golden: only cases of this card's reference set ("<arch>:<model>/<mode>_<suite>") that are OK on both sides
+    gc = [c for c in ((r.get("golden") or {}).get("cases") or []) if isinstance(c, dict)]
+    if (chk.get("golden") == "identical" and any(str(c.get("case", "")).startswith(arch + ":") and c.get("same") for c in gc)
+            and not any(re.match(r"gfx\d+:", str(c.get("case", ""))) and not str(c.get("case", "")).startswith(arch + ":") for c in gc)):
         cov |= {"golden_swift", "golden_moe"}
     cov.add("kt_full")  # identical code objects: the kernel test runs the same kernels
-    return True, "EQUIVALENT, bound to --build", cov
+    return True, f"EQUIVALENT, bound to --build, {mine} run(s) of {dev}", cov
+
+
+def run_device(key):
+    """the card a launch run belongs to ("r9700" / "8060s" / another gfx name), from its key / command line: --device X,
+    --device=X or WHIRL_DEVICE=X with X a card name, an arch or a pci id (work_equal.norm_gpu aliases); None when the run
+    names no card (the last one wins, as for a repeated option)"""
+    found = re.findall(r"(?:--device[ =]|WHIRL_DEVICE=)\s*([A-Za-z0-9:._-]+)", key or "")
+    if not found:
+        return None
+    g = found[-1].lower()
+    for dev, aliases in GPU_ALIASES.items():
+        if g in aliases:
+            return dev
+    return g  # an unknown card / arch: never this card's evidence
 
 
 def compare_code_objects(base, build, out_json):
@@ -989,47 +1020,134 @@ def unity_guard_errors(text, arch="gfx1151"):
 
 
 def arch_file(f, arch, m):
-    """(ok, why): f compiles into arch's code object only: under ARCH_DIRS[arch], the impact map's arch of a .hip is
-    exactly [arch] (a file not in the map yet: its folder decides, as impact.py does), and every includer the map lists is
-    in that folder, the unity source (which includes the set only for arch: unity_guard_errors) or a test"""
+    """(ok, why): f compiles into arch's code object only, by the impact map OF THE PLANNED VERSION (arch_scope checks
+    that): under ARCH_DIRS[arch]; a type the map scans (review C-2: another extension has no includer list); a .hip whose
+    map arch is exactly [arch]; a header the map lists includers for; every includer in that folder, the unity source
+    (which includes the set only for arch: unity_guard_errors) or a test. A file the map does not know is not arch-only
+    (review AO-4: unknown is never a pass)"""
     root = ARCH_DIRS.get(arch)
     if not root or not f.startswith(root):
         return False, f"{f} is not under {root}"
-    h = ((m or {}).get("hip") or {}).get(f)
-    if h is not None and sorted(h.get("arch") or []) != [arch]:
-        return False, f"{f}: impact map arch {'/'.join(h.get('arch') or []) or '?'} (not {arch} only)"
-    bad = [x for x in ((m or {}).get("includers") or {}).get(f, []) if not (x.startswith((root, "tests/")) or x == ARCH_UNITY)]
+    if not f.endswith(impact_build.SRC_EXT):
+        return False, f"{f}: the impact map does not scan {os.path.splitext(f)[1] or 'extension-less'} files (who includes it is unknown)"
+    inc = ((m or {}).get("includers") or {})
+    if f.endswith(".hip"):
+        h = ((m or {}).get("hip") or {}).get(f)
+        if h is None:
+            return False, f"{f} is not in the impact map (its architecture is unknown)"
+        if sorted(h.get("arch") or []) != [arch]:
+            return False, f"{f}: impact map arch {'/'.join(h.get('arch') or []) or '?'} (not {arch} only)"
+    elif f not in inc:
+        return False, f"{f} has no includer in the impact map (who includes it is unknown)"
+    bad = [x for x in inc.get(f, []) if not (x.startswith((root, "tests/")) or x == ARCH_UNITY)]
     if bad:
         return False, f"{f} is included by {bad[0]} (not {arch} device code: it reaches both code objects / the host)"
     return True, ""
 
 
-def arch_scope(files, product, modules, callers, mods, m, rep, lists, bfiles):
+# v0251-d1b review C-1: the tools that select the steps and judge the carry; a diff that changes them would judge itself
+SELF_TOOLS = ["tools/gates/test_change.py", "tools/impact/work_equal.py", "tools/impact/impact.py", "tools/impact/impact_build.py",
+              "tools/impact/cxxscan.py", "tools/impact/launch_table.py"]
+# v0251-d1b review AO-6: kernel family manifest under kernels/: read by tools/gates/kernel_iso_check.py only (a CPU check),
+# compiled into no code object; a port must add its new fragments there
+FAMILIES = "kernels/families.json"
+
+
+def families_arch_change(old_text, new_text):
+    """(arch, why) of a kernels/families.json change: the architecture whose folder holds every path added to or removed
+    from a family ("" when no path changed); None when anything else changed (a family, desc, deps, _doc), a path outside
+    one architecture's folder changed, or a version cannot be parsed"""
+    try:
+        o, n = json.loads(old_text), json.loads(new_text)
+    except (TypeError, ValueError) as e:
+        return None, f"{FAMILIES}: cannot read both versions ({e})"
+    if not (isinstance(o, dict) and isinstance(n, dict)):
+        return None, f"{FAMILIES}: not a JSON object"
+    if {k: v for k, v in o.items() if k != "families"} != {k: v for k, v in n.items() if k != "families"}:
+        return None, f"{FAMILIES}: a key besides families changed"
+    fo, fn = o.get("families") or {}, n.get("families") or {}
+    if set(fo) != set(fn):
+        return None, f"{FAMILIES}: a family was added or removed"
+    changed = set()
+    for k in sorted(fo):
+        x, y = fo[k] or {}, fn[k] or {}
+        if {a: v for a, v in x.items() if a != "paths"} != {a: v for a, v in y.items() if a != "paths"}:
+            return None, f"{FAMILIES}: family {k}: a field besides paths changed"
+        changed |= set(x.get("paths") or []) ^ set(y.get("paths") or [])
+    if not changed:
+        return "", f"{FAMILIES}: no path changed"
+    a = next((x for x, d in sorted(ARCH_DIRS.items()) if all(p.startswith(d) for p in changed)), None)
+    if a is None:
+        return None, f"{FAMILIES}: paths outside one architecture's folder changed ({', '.join(sorted(changed)[:3])})"
+    return a, f"{FAMILIES}: {len(changed)} {a} path(s) only"
+
+
+def map_matches(root, new_rev):
+    """(ok, why): the impact map test_change uses (load_map: root's working tree) describes the planned version: always
+    for --worktree (new_rev None: the working tree is what is planned); for --range / --commit only when root's HEAD is
+    new_rev and nothing the map scans differs from it (v0251-d1b review AO-4)"""
+    if new_rev is None:
+        return True, ""
+    try:
+        head = impact.git("rev-parse", "HEAD", root=root).strip()
+        want = impact.git("rev-parse", f"{new_rev}^{{commit}}", root=root).strip()
+    except SystemExit as e:
+        return False, f"the planned revision {new_rev} cannot be resolved in {root} ({str(e)[:80]})"
+    if head != want:
+        return False, (f"the impact map is of {root} at {head[:9]}, not of the planned {new_rev} ({want[:9]}): plan from a tree checked "
+                       f"out at {new_rev} for the per-architecture plan")
+    dirty = impact.git("status", "--porcelain", "--untracked-files=all", "--", *impact_build.SCAN_DIRS, "cmake", "CMakeLists.txt", root=root)
+    if dirty.strip():
+        return False, f"the impact map is of {root}'s working tree, which differs from {new_rev} ({dirty.strip().splitlines()[0][:60]})"
+    return True, ""
+
+
+def arch_scope(files, product, modules, callers, mods, m, rep, lists, bfiles, changes=None, map_rev=(True, ""), read_file=None):
     """(scope, why not): scope when every changed product file compiles into ONE architecture's code object only
-    (arch_file) and no build file / build-wide input changed; every module the diff touches and every caller module must
-    register that part (modules.json arch.<a>); a product file no module owns is "unregistered" (the full matrix on that
-    GPU). scope = {arch, device, other, files, registered {module: [files]}, unregistered, test_includers}"""
+    (arch_file, by the planned version's impact map: map_rev) and no build file / build-wide input / selection or proof
+    tool changed; every module the diff touches and every caller module must register that part (modules.json
+    arch.<a>); a product file no module owns is "unregistered" (the full matrix on that GPU). kernels/families.json may
+    ride along when its change names that architecture's files only (families_arch_change on the two versions read_file
+    gives). scope = {arch, device, other, files, registered {module: [files]}, unregistered, test_includers}"""
     if not product:
         return None, "no product file"
+    if not map_rev[0]:
+        return None, map_rev[1]
+    own_tools = [f for f in files if matches(f, SELF_TOOLS)]
+    if own_tools:
+        return None, f"{own_tools[0]} changes the tools that select the steps / judge the carry (they would judge their own change)"
     if lists or bfiles or any(matches(f, impact.BUILD_WIDE) for f in files) or rep.get("build_wide"):
         return None, "a build file or a build-wide input changed"
-    found = {next((a for a, d in ARCH_DIRS.items() if f.startswith(d)), None) for f in product}
+    code = [f for f in product if f != FAMILIES]
+    if not code:
+        return None, f"only {FAMILIES} changed: no kernel file names the architecture"
+    found = {next((a for a, d in ARCH_DIRS.items() if f.startswith(d)), None) for f in code}
     if None in found:
-        f = next(f for f in product if not f.startswith(tuple(ARCH_DIRS.values())))
+        f = next(f for f in code if not f.startswith(tuple(ARCH_DIRS.values())))
         return None, f"{f} is not under {', '.join(sorted(ARCH_DIRS.values()))}"
     if len(found) != 1:
         return None, "files of more than one architecture"
     a = found.pop()
-    for f in product:
+    for f in code:
+        op = ((changes or {}).get(f) or {}).get("old_path")
+        if op and op != f and not op.startswith(ARCH_DIRS[a]):  # review N-2: renamed in from a place both sets compile
+            return None, f"{f} was {op}, which is not under {ARCH_DIRS[a]}"
         ok, w = arch_file(f, a, m)
         if not ok:
             return None, w
+    if FAMILIES in product:
+        old, new = (read_file("old", FAMILIES), read_file("new", FAMILIES)) if read_file else (None, None)
+        if old is None or new is None:
+            return None, f"{FAMILIES} changed and its two versions cannot be read"
+        fa, w = families_arch_change(old, new)
+        if fa is None or fa not in ("", a):
+            return None, w if fa is None else f"{w} (not {a})"
     # impact.py lists both GPUs for any header (its generic host-code rule): only arch_file's includer check can narrow a
     # header; anything else that adds a GPU to the map's list is not explained by these files (fail closed)
-    if set(rep.get("gpus") or []) - {a} and all(f.endswith(".hip") for f in product):
+    if set(rep.get("gpus") or []) - {a} and all(f.endswith(".hip") for f in code):
         return None, f"impact map lists {', '.join(rep.get('gpus') or [])} for the diff"
     reg, unreg = {}, []
-    for f in product:
+    for f in code:
         owners = [k for k, fl in (modules or {}).items() if f in (fl or [])]
         if not owners:
             unreg.append(f)
@@ -1041,7 +1159,7 @@ def arch_scope(files, product, modules, callers, mods, m, rep, lists, bfiles):
     for k in sorted(set(modules or {}) | {x for v in (callers or {}).values() for x in v}):
         if not ((((mods or {}).get(k) or {}).get("arch") or {}).get(a)):
             return None, f"module {k} has no {a} part (modules.json {k} arch.{a})"
-    tinc = sorted({x for f in product for x in ((m or {}).get("includers") or {}).get(f, []) if x.startswith("tests/")} - set(files))
+    tinc = sorted({x for f in code for x in ((m or {}).get("includers") or {}).get(f, []) if x.startswith("tests/")} - set(files))
     dev = DEV_OF_ARCH[a]
     return {"arch": a, "device": dev, "other": [d for d in DEVICES if d != dev], "files": sorted(product), "registered": reg,
             "unregistered": sorted(unreg), "test_includers": tinc}, ""
@@ -1055,14 +1173,106 @@ def file_sha256(path):
     return h.hexdigest()
 
 
-def carry_proof(path, arch, build):
-    """(ok, why): the work_equal report at path shows every `arch` code object of --build's exes (whirl.exe, and
-    whirl-server.exe when --build has it) equal to the base build's. Read per object (exes[].code_objects.objects[]: target,
-    same / cuid_only, only), so a plain `compare` report and a v0251-d1a `compare --arch` report count the same way; the
-    report's b exes must be --build's (sha256). Refused: another arch named by the report, --arch verdict NOT_EQUIVALENT,
-    a launch sequence or golden output that differs, an object of that arch that differs or sits on one side only, no
-    object of that arch. Launch / golden evidence is not required: the diff changed no host source (arch_scope), so the
-    host work on that GPU is the base build's."""
+MANIFEST = "whirl_build_manifest.json"  # v0251-d1b review AO-5: written by --stamp-build into a build folder
+
+
+# ninja's Windows .ninja_log mtime = FILETIME (100 ns since 1601) - 12622770400 s (ninja disk_interface.cc); unix ns / 100 +
+# 11644473600 s - 12622770400 s = unix ns / 100 - this constant (checked on wt_a25_rel/build/Release: 0.43 s apart)
+NINJA_EPOCH_100NS = 9782968000000000
+NINJA_SLACK_100NS = 10 * 10 ** 7  # an exe's mtime may trail its logged one (post-link resource step): 0.43 s measured
+
+
+def ninja_mtimes(build):
+    """{output base name (lower case): mtime} of the newest .ninja_log entry per output of build (100 ns since 2001)"""
+    out = {}
+    try:
+        lines = open(os.path.join(build, ".ninja_log"), encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return out
+    for ln in lines[1:]:
+        p = ln.split("\t")
+        if len(p) >= 4 and p[2].isdigit():
+            out[p[3].replace("\\", "/").rsplit("/", 1)[-1].lower()] = int(p[2])
+    return out
+
+
+def ninja_unlogged(build, names):
+    """the exes of build that are not the outputs its last ninja run wrote (copied / replaced after the build: an exe
+    copied into the folder gets the copy time, hours or days after the logged mtime)"""
+    logged = ninja_mtimes(build)
+    bad = []
+    for x in names:
+        t = os.stat(os.path.join(build, x)).st_mtime_ns // 100 - NINJA_EPOCH_100NS
+        if x.lower() not in logged or not 0 <= t - logged[x.lower()] <= NINJA_SLACK_100NS:
+            bad.append(x)
+    return bad
+
+
+def stamp_problems(head, dirty, src_newest, exe_oldest, unlogged=()):
+    """why a build folder cannot be stamped as the build of `head` (empty = it can): a git HEAD, no uncommitted product
+    file, no product source newer than the oldest exe (git checkout / an edit after the build makes the tree newer than
+    the exes: the build is not of this tree), and every exe the output ninja logged for this folder (unlogged: a copied
+    or replaced exe)"""
+    out = []
+    if unlogged:
+        out.append(f"{', '.join(unlogged)}: not the output ninja logged in this build folder (.ninja_log): copied or replaced after the build")
+    if not head:
+        out.append("the source tree has no git HEAD")
+    if dirty:
+        out.append(f"{len(dirty)} uncommitted product file(s) in the source tree ({', '.join(dirty[:3])})")
+    if src_newest is not None and exe_oldest is not None and src_newest > exe_oldest:
+        out.append("a product source is newer than the exes: the build is older than the tree (rebuild, then stamp)")
+    if exe_oldest is None:
+        out.append("no whirl.exe in the build folder")
+    return out
+
+
+PRODUCT_DIRS = ["src", "include", "kernels", "cmake", "CMakeLists.txt", "build.bat", "redist"]
+
+
+def stamp_build(build):
+    """--stamp-build DIR: record which commit the exes of DIR were built from (DIR/whirl_build_manifest.json): the source
+    tree comes from DIR/CMakeCache.txt (CMAKE_HOME_DIRECTORY); refused (exit 2) on stamp_problems"""
+    try:
+        cache = open(os.path.join(build, "CMakeCache.txt"), encoding="utf-8", errors="replace").read()
+    except OSError as e:
+        print(f"test_change: --stamp-build: no CMakeCache.txt in {build} ({e})")
+        return 2
+    mh = re.search(r"^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$", cache, re.M)
+    src = mh.group(1).strip() if mh else ""
+    try:
+        head = impact.git("rev-parse", "HEAD", root=src).strip() if src else ""
+        dirty = [ln[3:] for ln in impact.git("status", "--porcelain", "--untracked-files=all", "--", *PRODUCT_DIRS, root=src).splitlines() if ln.strip()]
+        tracked = impact.git("ls-files", "--", *PRODUCT_DIRS, root=src).splitlines()
+    except SystemExit as e:
+        print(f"test_change: --stamp-build: {src or '(no source dir)'} is not a git tree ({e})")
+        return 2
+    mt = [os.path.getmtime(os.path.join(src, f)) for f in tracked if os.path.isfile(os.path.join(src, f))]
+    exes = {x: os.path.join(build, x) for x in PROOF_EXES if os.path.isfile(os.path.join(build, x))}
+    probs = stamp_problems(head, dirty, max(mt) if mt else None, min(os.path.getmtime(p) for p in exes.values()) if "whirl.exe" in exes else None,
+                           ninja_unlogged(build, sorted(exes)))
+    if probs:
+        print(f"test_change: --stamp-build {build}: refused: " + "; ".join(probs))
+        return 2
+    doc = {"format": "whirl-build-manifest/1", "commit": head, "source": src, "clean": True, "stamped": now(),
+           "exes": {x: file_sha256(p) for x, p in sorted(exes.items())}, "tool": "tools/gates/test_change.py --stamp-build"}
+    with open(os.path.join(build, MANIFEST), "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(doc, fh, indent=1)
+        fh.write("\n")
+    print(f"test_change: stamped {build}: commit {head[:9]}, {', '.join(f'{k} {v[:12]}' for k, v in doc['exes'].items())}")
+    return 0
+
+
+def carry_proof(path, arch, build, base=None, base_rev=None):
+    """(ok, why): the work_equal report at path shows every `arch` code object of --build's exes (whirl.exe and
+    whirl-server.exe, both required: the carried steps run both) equal to the BASE build's. Read per object
+    (exes[].code_objects.objects[]: target, same / cuid_only, only), so a plain `compare` report and a v0251-d1a
+    `compare --arch` report count the same way; the report's b exes must be --build's (sha256) and (review AO-5) its a exes
+    the base build's: --base-build DIR stamped by --stamp-build at the plan's base revision (base_rev), unchanged since, and
+    not the B exes (a self-compare proves nothing). Refused: another arch named by the report, --arch verdict
+    NOT_EQUIVALENT, a launch sequence or golden output that differs, an object of that arch that differs or sits on one
+    side only, no object of that arch. Launch / golden evidence is not required: the diff changed no host source
+    (arch_scope), so the host work on that GPU is the base build's."""
     try:
         r = json.load(open(path, encoding="utf-8"))
     except (OSError, ValueError) as e:
@@ -1082,24 +1292,42 @@ def carry_proof(path, arch, build):
     if not build:
         return False, "no --build: the proof cannot be bound to the exe under test"
     bex = (r.get("b") or {}).get("exes") or {}
+    aex = (r.get("a") or {}).get("exes") or {}
     names = []
     for exe in PROOF_EXES:
         p = os.path.join(build, exe)
-        if not os.path.exists(p):
-            if exe == "whirl.exe":
-                return False, f"{exe} missing in --build"
-            continue
+        if not os.path.exists(p):  # review N-6: the carried steps run whirl.exe and whirl-server.exe: both must be proven
+            return False, f"{exe} missing in --build (the carried steps run it: it must be proven too)"
         if not bex.get(exe):
             return False, f"{exe} of --build is not in the proof"
         if file_sha256(p) != bex[exe]:
             return False, f"{exe} of --build is not the B exe of the proof"
+        if aex.get(exe) == bex[exe]:
+            return False, f"{exe}: A and B are the same file (a self-compare proves nothing)"
         names.append(exe)
+    # review AO-5: the A side is the base build of the plan's base revision
+    if not base:
+        return False, "the A side is not bound: give --base-build DIR (a base build stamped with test_change.py --stamp-build)"
+    try:
+        man = json.load(open(os.path.join(base, MANIFEST), encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, f"--base-build {base} has no stamp ({MANIFEST}): run test_change.py --stamp-build {base} right after building the base"
+    if man.get("format") != "whirl-build-manifest/1" or not man.get("clean"):
+        return False, f"{MANIFEST} of --base-build is not a clean stamp"
+    if not base_rev or str(man.get("commit", "")).lower() != str(base_rev).lower():
+        return False, f"--base-build is stamped at {str(man.get('commit', '?'))[:9]}, the plan's base revision is {str(base_rev or '?')[:9]}"
+    for exe in names:
+        st, p = (man.get("exes") or {}).get(exe), os.path.join(base, exe)
+        if not st or not os.path.exists(p) or file_sha256(p) != st:
+            return False, f"{exe} of --base-build is not the stamped one (rebuilt or replaced after the stamp)"
+        if aex.get(exe) != st:
+            return False, f"{exe}: the proof's A exe is not the stamped base build's"
     by = {e.get("name"): e for e in r.get("exes") or [] if isinstance(e, dict)}
     n = 0
     for exe in names:
         e = by.get(exe)
-        if not e or (e.get("b") or {}).get("sha256") not in (None, bex[exe]):
-            return False, f"{exe}: no code-object comparison for the B exe in the proof"
+        if not e or (e.get("b") or {}).get("sha256") not in (None, bex[exe]) or (e.get("a") or {}).get("sha256") not in (None, aex.get(exe)):
+            return False, f"{exe}: no code-object comparison for these A / B exes in the proof"
         objs = [o for o in (e.get("code_objects") or {}).get("objects") or [] if arch in str(o.get("target", "")).split("/")]
         if not objs:
             return False, f"{exe}: no {arch} code object in the proof"
@@ -1109,11 +1337,16 @@ def carry_proof(path, arch, build):
             if not (o.get("same") or o.get("cuid_only")):
                 return False, f"{exe}: {arch} code object #{o.get('index')} differs ({', '.join(o.get('differing_sections') or []) or 'header'})"
         n += len(objs)
-    return True, f"{n} {arch} code object(s) of {', '.join(names)} equal to the base build's, bound to --build"
+    return True, (f"{n} {arch} code object(s) of {', '.join(names)} equal to the base build's (stamped at {str(base_rev)[:9]}), "
+                  f"bound to --build")
 
 
 def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", build=None, base_build=None, proofs=None,
-              scratch=None, all_cpu=False, gate_map=None, cmake_graph=None, core_sets=None):
+              scratch=None, all_cpu=False, gate_map=None, cmake_graph=None, core_sets=None, map_rev=(True, ""), base_rev=None,
+              read_file=None):
+    """map_rev (v0251-d1b review AO-4): (ok, why) whether m is the impact map of the planned version (map_matches);
+    base_rev: the full sha of the plan's base revision (the carry's A side is bound to it, review AO-5); read_file(side,
+    path) -> text of a file at the base ("old") / planned ("new") version or None (kernels/families.json, review AO-6)"""
     files = sorted(changes)
     gm = gate_map if gate_map is not None else load_gate_map()
     graph_src = sorted({f for v in ((cmake_graph or {}).get("sources") or {}).values() for f in v})
@@ -1202,7 +1435,8 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
     # v0251-d1b: product files of one architecture's code object only (arch_scope): the full-matrix reasons those files
     # raise (CORE_GLOBS kernels/*, impact.py's file in no module) are replaced by the per-architecture plan below; any
     # other reason keeps today's plan
-    scope, scope_why = arch_scope(files, product, modules, callers, mods, m, rep, lists, bfiles)
+    scope, scope_why = arch_scope(files, product, modules, callers, mods, m, rep, lists, bfiles, changes=changes, map_rev=map_rev,
+                                  read_file=read_file)
     if scope:
         own = set(scope["files"])
         other = [r for r in full if not (any(r.startswith(f"core file {f}:") for f in own)
@@ -1280,10 +1514,11 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
             covers = [s for s in avail[dv] if s not in gpu[dv]]
             c = {"by": CARRY_BY.format(arch=ARCH[dv]), "status": "required", "proof": "", "covers": covers,
                  "covers_min": round(sum(step_seconds(times, dv, s) or 0 for s in covers) / 60, 1),
-                 "why": f"no proof yet: give --base-build DIR (the base revision's build: code objects compared on the CPU) or --proof {dv}=FILE"}
+                 "why": (f"no proof yet: give --base-build DIR (the base revision's build, stamped with --stamp-build; code objects compared "
+                         f"on the CPU), optionally with --proof {dv}=FILE (a work_equal [--arch {ARCH[dv]}] report of that base build)")}
             src = (proofs or {}).get(dv) or co_json
             if src:
-                ok, w = carry_proof(src, ARCH[dv], build)
+                ok, w = carry_proof(src, ARCH[dv], build, base=base_build, base_rev=base_rev)
                 c.update(status="proven" if ok else "refused", proof=src, why=w)
             carry[dv] = c
         refused = {dv: c for dv, c in carry.items() if c["status"] == "refused"}
@@ -1489,7 +1724,10 @@ def run_plan(p, a):
     tagid = re.sub(r"[^0-9A-Za-z]+", "_", p["id"])[:40]
     runs = []
     first = True
-    for dev in DEVICES:  # one GPU after the other
+    # v0251-d1b review C-4: a carried GPU without GPU steps runs last with its per-GPU CPU checks only, so a setup error
+    # there (exit 2, e.g. the eGPU not attached) never stops the other GPU's steps
+    carried = [d for d in DEVICES if ((p.get("carry") or {}).get(d) or {}).get("status") == "proven" and not p["gpu_steps"][d]]
+    for dev in [d for d in DEVICES if d not in carried] + carried:  # one GPU after the other
         steps = (p["cpu_steps"] if first else []) + list(PER_DEVICE_CPU) + p["gpu_steps"][dev]
         first = False
         tag = f"change_{tagid}_{dev}"
@@ -1596,7 +1834,8 @@ def backtest(a):
         rep = impact.analyze(changes, m, s, f"{s}^")
         title = g("log", "-1", "--format=%h %s", s).strip()
         p = plan_with_graph(f"commit {title}", s, changes, rep, mods, m, gates, times, root, f"{s}^", s,
-                            os.path.join(out, "cmake_graph"), use_graph=a.cmake_graph_backtest, one_gpu=a.one_gpu)
+                            os.path.join(out, "cmake_graph"), use_graph=a.cmake_graph_backtest, one_gpu=a.one_gpu,
+                            map_rev=(False, "back-test: the impact map is the root tree's, not each commit's"))
         rows.append(p)
         print(f"{s} {p['level']:<6} r97 {len(p['gpu_steps']['r9700']):>2} ({p['est_gpu_min']['r9700']:>5} min) "
               f"s8 {len(p['gpu_steps']['8060s']):>2} ({p['est_gpu_min']['8060s']:>5} min)  {title[8:70]}", flush=True)
@@ -1662,7 +1901,11 @@ def main():
     ap.add_argument("--core-steps-report", action="store_true", help="per core module: its GPU step set from mutation evidence, or why it stays full")
     ap.add_argument("--add-kill-records", nargs="+", metavar="KILL_TSV", help="append gpumut.ps1 kill_<card>.tsv rows to tools/gates/core_steps.json")
     ap.add_argument("--source", default="", help="--add-kill-records: what produced the rows (runner, tree, commit)")
+    ap.add_argument("--stamp-build", metavar="DIR", help="record the commit DIR's exes were built from (whirl_build_manifest.json; "
+                                                         "the base build of a carried GPU must be stamped, v0251-d1b review AO-5)")
     a = ap.parse_args()
+    if a.stamp_build:
+        return stamp_build(os.path.abspath(a.stamp_build))
     if a.add_kill_records:
         root = os.path.abspath(a.root or REPO)
         d = load_core_doc(root)
@@ -1720,9 +1963,27 @@ def main():
     scratch = a.work or os.path.join(root, "..", "scratch", "test_change")
     if a.base_build:
         os.makedirs(scratch, exist_ok=True)
+    # v0251-d1b review AO-4 / AO-5 / AO-6: is m the planned version's map; the base revision the carry's A side is bound
+    # to; the two versions of a data file (kernels/families.json)
+    map_rev = map_matches(root, new_rev)
+    try:
+        base_rev = impact.git("rev-parse", f"{old_rev}^{{commit}}", root=root).strip()
+    except SystemExit:
+        base_rev = None
+
+    def read_file(side, path):
+        if side == "old":
+            return impact.show(old_rev, path)
+        if new_rev:
+            return impact.show(new_rev, path)
+        try:
+            return open(os.path.join(root, path), encoding="utf-8").read()
+        except OSError:
+            return None
     p = plan_with_graph(title, cid, changes, rep, load_mods(root), m, gates, times, root, old_rev, new_rev,
                         os.path.join(scratch, "cmake_graph"), use_graph=not a.no_cmake_graph, one_gpu=a.one_gpu, build=a.build,
-                        base_build=a.base_build, proofs=proofs, scratch=scratch, all_cpu=a.all_cpu)
+                        base_build=a.base_build, proofs=proofs, scratch=scratch, all_cpu=a.all_cpu, map_rev=map_rev,
+                        base_rev=base_rev, read_file=read_file)
     if a.json:
         print(json.dumps(p, indent=1))
     else:

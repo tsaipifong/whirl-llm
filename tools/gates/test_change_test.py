@@ -321,6 +321,7 @@ check("empty change skips nothing", SAF <= set(p["cpu_steps"]), p["cpu_steps"])
 RMODS = tc.load_mods(tc.REPO)
 sys.path.insert(0, os.path.join(tc.REPO, "tools", "impact"))
 import impact as _imp  # noqa: E402
+import work_equal as _we  # noqa: E402
 for f, why in (("src/model/loader.cpp", "K8-2 ~Model"), ("include/whirl/model.h", "K8-2 Model member order"),
                ("include/whirl/kernels_abi.h", "K8-5 ABI struct member deletion")):
     g = _imp.module_gate({f: {"old_path": f, "new": [1], "old": [1]}}, RMODS)
@@ -1017,7 +1018,7 @@ with tempfile.TemporaryDirectory() as td:
     open(os.path.join(bns, "whirl.exe"), "wb").write(b"exe-w")
     p = aplan(GDN_ONLY, R_GDN, build=bns, base_build=bb, base_rev=BASE_REV, proofs={"r9700": wrep("ns.json", exes={"whirl.exe": SW_})})
     check("d1b N-6: --build without whirl-server.exe -> carry refused (the R9700 server steps are not proven)", carry_of(p).get("status") == "refused"
-          and "whirl-server.exe" in carry_of(p).get("why", ""), carry_of(p))
+          and "whirl-server.exe missing in --build" in carry_of(p).get("why", ""), carry_of(p))
     # stamp_problems: the facts --stamp-build checks before it writes the manifest (pure function, literal inputs)
     sp = getattr(tc, "stamp_problems", None)
     check("d1b AO-5: stamp_problems exists", callable(sp), sp)
@@ -1026,6 +1027,25 @@ with tempfile.TemporaryDirectory() as td:
         check("d1b stamp: uncommitted product files -> refused", sp("ab" * 20, ["src/x.cpp"], 100.0, 200.0) != [], sp("ab" * 20, ["src/x.cpp"], 100.0, 200.0))
         check("d1b stamp: a product source newer than an exe (stale build) -> refused", sp("ab" * 20, [], 300.0, 200.0) != [], sp("ab" * 20, [], 300.0, 200.0))
         check("d1b stamp: no HEAD (not a git tree) -> refused", sp("", [], 100.0, 200.0) != [], sp("", [], 100.0, 200.0))
+        check("d1b stamp: an exe that is not the output ninja logged (copied / replaced) -> refused", sp("ab" * 20, [], 100.0, 200.0, ["whirl.exe"]) != [],
+              sp("ab" * 20, [], 100.0, 200.0, ["whirl.exe"]))
+    # ninja_unlogged: .ninja_log (v7: start, end, mtime, output, hash) in 100 ns since 2001 vs the exe's mtime; literal pair
+    # from wt_a25_rel/build/Release (2026-11-02 build): logged 8153310070407046, file 1793627807469826900 ns (0.43 s later)
+    nu = getattr(tc, "ninja_unlogged", None)
+    check("d1b AO-5: ninja_unlogged exists", callable(nu), nu)
+    if callable(nu):
+        nb = os.path.join(td, "ninja_build")
+        os.makedirs(nb)
+        open(os.path.join(nb, "whirl.exe"), "wb").write(b"x")
+        open(os.path.join(nb, ".ninja_log"), "w").write("# ninja log v7\n557054\t557557\t8153310070407046\twhirl.exe\t8f652c35e0cfc37b\n")
+        os.utime(os.path.join(nb, "whirl.exe"), ns=(1793627807469826900, 1793627807469826900))
+        check("d1b stamp: the exe ninja logged (mtime 0.43 s after the logged one) is the build's output", nu(nb, ["whirl.exe"]) == [], nu(nb, ["whirl.exe"]))
+        os.utime(os.path.join(nb, "whirl.exe"), ns=(1793627807469826900 + 3600 * 10 ** 9,) * 2)
+        check("d1b stamp: the same exe copied an hour later is not", nu(nb, ["whirl.exe"]) == ["whirl.exe"], nu(nb, ["whirl.exe"]))
+        os.utime(os.path.join(nb, "whirl.exe"), ns=(1793627807469826900 - 60 * 10 ** 9,) * 2)
+        check("d1b stamp: an exe older than its log entry is not", nu(nb, ["whirl.exe"]) == ["whirl.exe"], nu(nb, ["whirl.exe"]))
+        open(os.path.join(nb, ".ninja_log"), "w").write("# ninja log v7\n")
+        check("d1b stamp: an exe the log does not list is not", nu(nb, ["whirl.exe"]) == ["whirl.exe"], nu(nb, ["whirl.exe"]))
 
     p = pplan({"r9700": wrep("ok.json")})
     check("d1b proof: gfx1201 objects identical, bound -> carry proven, R9700 still none", carry_of(p).get("status") == "proven" and p["gpu_steps"]["r9700"] == []
@@ -1111,6 +1131,14 @@ with tempfile.TemporaryDirectory() as td:
     p = plan([FA], CORE_R, build=b, proofs={"r9700": eqrep("ao1_gold1151.json", cases=["gfx1151:swift/precise_single", "swift/balance_pair"])}, core_sets={})
     check("d1b AO-1: golden cases of the 8060S reference set (or of none) do not cover the R9700 golden steps",
           set(p["skipped_by_proof"]["r9700"]) == {"kt_full", "st_swift_precise"}, (p["skipped_by_proof"]["r9700"], p["proofs"]))
+    p = plan([FA], CORE_R, build=b, proofs={"r9700": eqrep("ao1_goldnone.json", cases=["swift/balance_pair"])}, core_sets={})
+    check("d1b AO-1: golden cases of no reference set do not cover the R9700 golden steps", set(p["skipped_by_proof"]["r9700"]) == {"kt_full", "st_swift_precise"},
+          (p["skipped_by_proof"]["r9700"], p["proofs"]))
+    p = plan([FA], CORE_R, build=b, proofs={"r9700": eqrep("ao1_unknown.json", keys=["st_swift_precise/whirl.exe selftest x.gguf --device r9700",
+                                                                                     "seq_swift_precise/whirl.exe seqtest x.gguf --device gfx1100"])}, core_sets={})
+    check("d1b AO-1: a run of an unknown card (--device gfx1100) refuses the R9700 proof", p["skipped_by_proof"]["r9700"] == []
+          and "another GPU" in p["proofs"].get("r9700", ""), (p["skipped_by_proof"]["r9700"], p["proofs"]))
+    check("d1b AO-1: test_change's card aliases are work_equal's (one table of names)", tc.GPU_ALIASES == _we.GPU_ALIASES, (tc.GPU_ALIASES, _we.GPU_ALIASES))
     for why, keys in (("--device r9700", ["st_swift_precise/whirl.exe selftest x.gguf --device r9700"]),
                       ("--device pci:71:0", ["st_swift_precise/whirl.exe selftest x.gguf --device pci:71:0"]),
                       ("--device=gfx1201", ["st_swift_precise/whirl.exe selftest x.gguf --device=gfx1201"]),
@@ -1282,8 +1310,29 @@ mm = getattr(tc, "map_matches", None)
 check("d1b AO-4: map_matches exists", callable(mm), mm)
 if callable(mm):
     check("d1b AO-4: --worktree plans the working tree itself (its map)", mm(tc.REPO, None)[0] is True, mm(tc.REPO, None))
-    ok_, why_ = mm(tc.REPO, "HEAD~1")
-    check("d1b AO-4: --range / --commit to a revision that is not the root's HEAD -> the map is not that version's", ok_ is False and "HEAD~1" in why_, (ok_, why_))
+    real_git = tc.impact.git
+
+    def fake_git(head, want, dirty):
+        def g(*a, root=None):
+            if a[:2] == ("rev-parse", "HEAD"):
+                return head + "\n"
+            if a[0] == "rev-parse":
+                return want + "\n"
+            if a[0] == "status":
+                return dirty
+            raise AssertionError(a)
+        return g
+    try:
+        tc.impact.git = fake_git("a" * 40, "b" * 40, "")
+        ok_, why_ = mm("R", "feat")
+        check("d1b AO-4: --range / --commit to a revision that is not the root's HEAD -> the map is not that version's", ok_ is False and "feat" in why_, (ok_, why_))
+        tc.impact.git = fake_git("a" * 40, "a" * 40, " M kernels/gfx1151/gdn.hip\n")
+        ok_, why_ = mm("R", "feat")
+        check("d1b AO-4: HEAD is the planned revision but the scanned folders differ -> not that version's map", ok_ is False and "differs" in why_, (ok_, why_))
+        tc.impact.git = fake_git("a" * 40, "a" * 40, "")
+        check("d1b AO-4: HEAD is the planned revision and clean -> the map is that version's", mm("R", "feat") == (True, ""), mm("R", "feat"))
+    finally:
+        tc.impact.git = real_git
 # review C-1: a diff that also changes the proof / selection tools proves itself: no arch scope
 p = aplan(GDN_ONLY + ["tools/gates/test_change.py"], R_GDN)
 check("d1b C-1: + tools/gates/test_change.py -> no arch scope (the tool would judge its own change)", is_full_both(p), (p["level"], p.get("arch_scope_note")))
@@ -1319,6 +1368,20 @@ if callable(fac):
                      ("_doc changed", json.dumps(dict(FAM0, _doc="e"), indent=1)),
                      ("not JSON", "{"), ("a family added", json.dumps(dict(FAM0, families=dict(FAM0["families"], **{"kernels.x": {"paths": ["kernels/gfx1151/x.hip"], "deps": []}}))))):
         check(f"d1b AO-6: families.json change ({why}) -> not one architecture's", fac(T0, new)[0] is None, (why, fac(T0, new)))
+    MIXED = famtxt(kernels_moe=("paths", FAM0["families"]["kernels.moe"]["paths"] + ["kernels/gfx1151/moe_down8.hip", "kernels/moe_router.hip"]))
+    check("d1b AO-6: a gfx1151 and a shared fragment added together -> not one architecture's", fac(T0, MIXED)[0] is None, fac(T0, MIXED))
+    _ad = dict(tc.ARCH_DIRS)
+    tc.ARCH_DIRS["gfx1201"] = "kernels/gfx1201/"  # a second per-arch folder (none exists today): the generic rule
+    try:
+        OTHER = famtxt(kernels_moe=("paths", FAM0["families"]["kernels.moe"]["paths"] + ["kernels/gfx1201/moe_x.hip"]))
+        rdo = {("old", "kernels/families.json"): T0, ("new", "kernels/families.json"): OTHER}
+        MODSF0 = dict(MODSA, **{"kernels.common": dict(MODSA["kernels.common"], paths=MODSA["kernels.common"]["paths"] + ["kernels/families.json"])})
+        p = aplan(GDN_ONLY + ["kernels/families.json"], arep({"kernels.gdn": [KG], "kernels.common": ["kernels/families.json"]}), mods=MODSF0,
+                  read_file=lambda side, path: rdo.get((side, path)))
+        check("d1b AO-6: families.json naming another architecture's fragment than the kernel files' -> full both", is_full_both(p), (p["level"], p.get("arch_scope_note")))
+    finally:
+        tc.ARCH_DIRS.clear()
+        tc.ARCH_DIRS.update(_ad)
     MOVED = famtxt(kernels_moe=("paths", ["kernels/moe*.hip"]), kernels_gdn=("paths", FAM0["families"]["kernels.gdn"]["paths"] + ["kernels/gfx1151/moe.hip"]))
     check("d1b AO-6: a gfx1151 fragment moved between families (paths under kernels/gfx1151/ only) -> gfx1151", fac(T0, MOVED)[0] == "gfx1151", fac(T0, MOVED))
     check("d1b AO-6: an unchanged families.json (formatting only) -> no architecture of its own", fac(T0, json.dumps(FAM0))[0] == "", fac(T0, json.dumps(FAM0)))
