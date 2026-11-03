@@ -73,10 +73,24 @@ extern "C" __global__ void __launch_bounds__(128)
 // Block = one v head of one segment (grid.y), 512 threads = 128 columns j x
 // 4 key-dim quarters. Thread (j, qi) keeps S[i][j] for i in [32 qi, 32 qi + 32)
 // in registers.
-extern "C" __global__ void __launch_bounds__(512)
-    gdn_step_norm(const float *qkv, const float *g, const float *beta, const float *z, const float *wn, float *out,
-                  int8_t *xq, float *xd, int n_k_heads, float scale, float eps, int n_v_heads, int qkv_stride,
-                  GdnSegs segs) {
+// Register diet (0.2.5.1 A9, from feat026-gdnvgpr 8d1f0b0 tune id 3; progress/v0251-a9port.PRIOR_ART.md): the float
+// work needs S[32], k / q from LDS and a few temps, but with plain indexing LLVM hoisted one 32-bit index per state
+// element and 32 64-bit final-store addresses out of the token loop: 208 VGPRs = 7 waves / SIMD, so one 16-wave block
+// per WGP and the 48 heads of a launch ran in 3 rounds over the 20 WGPs of the 8060S. The state and the z / wn / out
+// accesses below take a uniform base plus one per-lane byte offset that gdn_opq makes opaque, so each use re-forms its
+// address: 120 VGPRs (granule 24 of the 1536-VGPR file), 0 spill, 12 waves / SIMD = 3 blocks per WGP, one round.
+// Every float expression and its order is the one of the kernel before it: the output is bit-identical in every mode.
+// opaque copy: the value is unchanged, but LLVM must treat it as new here (no hoisting / CSE across the uses)
+__device__ __forceinline__ unsigned gdn_opq(unsigned x) {
+    asm volatile("" : "+v"(x));
+    return x;
+}
+
+__device__ __forceinline__ void gdn_step_norm_impl(const float *qkv, const float *g, const float *beta, const float *z,
+                                                   const float *wn, float *out, int8_t *xq, float *xd, int n_k_heads,
+                                                   float scale, float eps, int n_v_heads, int qkv_stride,
+                                                   const GdnSegs &segs, float (&ks)[128], float (&qs)[128],
+                                                   float (&red)[4][128], float (&ov)[128]) {
     constexpr int DK = 128, DV = 128, QI = 4, PER = DK / QI;
     const GdnSeg &sgm = segs.s[blockIdx.y];
     const int r0 = sgm.row0, n_tok = sgm.nrows;
@@ -84,13 +98,15 @@ extern "C" __global__ void __launch_bounds__(512)
     const int j = threadIdx.x % DV, qi = threadIdx.x / DV;
     const int kh = h % n_k_heads;
     const int d_inner = n_v_heads * DV;
-    __shared__ float ks[DK], qs[DK];
-    __shared__ float red[QI][DV];
-    __shared__ float ov[DV];
     float *Sg = sgm.state + (size_t)h * DK * DV;
+    // byte offset of this thread's S[0] inside a head's state: ((qi * PER) * DV + j) * 4 <= 65532 (< 64 KiB)
+    const unsigned ob = (unsigned)((qi * PER) * DV + j) * 4u;
     float S[PER];
+    {
+        const unsigned o = gdn_opq(ob);
 #pragma unroll
-    for (int e = 0; e < PER; ++e) S[e] = Sg[(size_t)(qi * PER + e) * DV + j];
+        for (int e = 0; e < PER; ++e) S[e] = *(const float *)((const char *)Sg + o + (unsigned)e * DV * 4u);
+    }
     for (int tl = 0; tl < n_tok; ++tl) {
         const int t = r0 + tl;
         const float *row = qkv + (size_t)t * qkv_stride;
@@ -121,8 +137,9 @@ extern "C" __global__ void __launch_bounds__(512)
         float *sp = tl < GDN_MAX_SNAP ? sgm.snap[tl] : nullptr;
         if (sp != nullptr) {
             float *Ss = sp + (size_t)h * DK * DV;
+            const unsigned so = gdn_opq(ob);
 #pragma unroll
-            for (int e = 0; e < PER; ++e) Ss[(size_t)(qi * PER + e) * DV + j] = S[e];
+            for (int e = 0; e < PER; ++e) *(float *)((char *)Ss + so + (unsigned)e * DV * 4u) = S[e];
         }
         __syncthreads();
         red[qi][j] = o;
@@ -134,14 +151,31 @@ extern "C" __global__ void __launch_bounds__(512)
         const float ss = block_sum(threadIdx.x < DV ? y * y : 0.f);
         if (threadIdx.x < DV) {
             const float r = rsqrtf(ss / DV + eps);
-            const float zz = z[(size_t)t * d_inner + (size_t)h * DV + threadIdx.x];
-            y = y * r * wn[threadIdx.x] * (zz / (1.f + __expf(-zz)));
-            out[(size_t)t * d_inner + (size_t)h * DV + threadIdx.x] = y;
+            // same values as z[rb + i], wn[i], out[rb + i]: uniform bases + one opaque lane byte offset
+            const unsigned tb = gdn_opq(threadIdx.x * 4u);
+            const size_t rb = (size_t)t * d_inner + (size_t)h * DV;
+            const float zz = *(const float *)((const char *)(z + rb) + tb);
+            y = y * r * *(const float *)((const char *)wn + tb) * (zz / (1.f + __expf(-zz)));
+            *(float *)((char *)(out + rb) + tb) = y;
             wave_q8(y, xq + (size_t)t * d_inner, xd + (size_t)t * (d_inner / 32), (h * DV + threadIdx.x) >> 5);
         }
     }
+    {
+        const unsigned fo = gdn_opq(ob);
 #pragma unroll
-    for (int e = 0; e < PER; ++e) Sg[(size_t)(qi * PER + e) * DV + j] = S[e];
+        for (int e = 0; e < PER; ++e) *(float *)((char *)Sg + fo + (unsigned)e * DV * 4u) = S[e];
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(512)
+    gdn_step_norm(const float *qkv, const float *g, const float *beta, const float *z, const float *wn, float *out,
+                  int8_t *xq, float *xd, int n_k_heads, float scale, float eps, int n_v_heads, int qkv_stride,
+                  GdnSegs segs) {
+    __shared__ float ks[128], qs[128];
+    __shared__ float red[4][128];
+    __shared__ float ov[128];
+    gdn_step_norm_impl(qkv, g, beta, z, wn, out, xq, xd, n_k_heads, scale, eps, n_v_heads, qkv_stride, segs, ks, qs, red,
+                       ov);
 }
 
 // Dequantize rows `ids[t]` of W into out[t][ncols] (embedding lookup).
