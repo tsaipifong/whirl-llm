@@ -386,9 +386,10 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
      does not know, or an extension it does not scan, never qualifies. `kernels/gfx1151/attn_ws4_index.h` is included
      by `src/ops/attention.cpp` (host code in `whirl.exe` for both GPUs), so it never qualifies. A file renamed into
      `kernels/gfx1151/` from another place does not qualify either. A build file, a CMake source list, a build-wide
-     input, a host / contract file, a module without a gfx1151 part, or a change to the selection / proof tools
-     (`test_change.py`, `work_equal.py`, `impact.py`, `impact_build.py`, `cxxscan.py`, `launch_table.py`) keeps the
-     plan of item 3.
+     input, a host / contract file, a module without a gfx1151 part, or a change to the selection / proof tools or
+     their selection data (`test_change.py`, `work_equal.py`, `impact.py`, `impact_build.py`, `cxxscan.py`,
+     `launch_table.py`, `tools/gates/modules.json`: a diff that edits the modules' arch steps would choose its own
+     steps) keeps the plan of item 3.
    - **`kernels/families.json`** (the kernel family manifest, read only by `kernel_iso_check.py`) may come along: a port
      adds each new fragment there. It qualifies when the two versions differ only in paths under `kernels/gfx1151/`
      (added to, removed from or moved between families); a changed family, `desc`, `deps` or `_doc`, or a path elsewhere,
@@ -410,12 +411,26 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
      when all of these hold:
      - every gfx1201 code object of `--build`'s `whirl.exe` and `whirl-server.exe` equals the base build's (identical
        or identical-except-cuid, read per object). Both exes must be in `--build`;
-     - the report's B exes are `--build`'s;
+     - the report's B exes are `--build`'s, and `--build` is the planned version's build. For `--range` / `--commit`
+       it is stamped (`--stamp-build`) at the planned revision (the range end / the commit), clean, its exes unchanged
+       since. For `--worktree`, which has no commit to stamp, it was configured from this tree (`CMakeCache.txt`
+       `CMAKE_HOME_DIRECTORY`), no product source of the tree (tracked or untracked) is newer than its exes, and the exes
+       are the outputs `.ninja_log` recorded. An unstamped build, a build of another branch or tree, or one older than
+       the last edit refuses the carry;
      - its A exes are the base build's, and that build was stamped at the plan's base revision. Stamp it right after
        building the base with `python tools/gates/test_change.py --stamp-build DIR`. The stamp
        (`DIR/whirl_build_manifest.json`) records the commit and the exe sha256 values. It refuses a source tree with
        uncommitted product files, or with a product source newer than the exes. An exe rebuilt after the stamp, a stamp
        of another commit, or A equal to B (a self-compare) refuses the carry.
+     - How the stamp knows the exes are this folder's build: ninja (log v7) writes each output's line as start ms, end
+       ms, logged mtime, output, command hash, and the logged mtime is the command's START. An exe's file time must lie
+       between that start and start + its run time (end − start) + 2 s. A copied exe (the copy time) or an older one is
+       refused; a link that runs longer than 10 s is not. The commit is inferred from git and file times, not embedded
+       into the exe at build time (llama.cpp's `build-info.cpp` way). Limits: the stamp must be taken in the build
+       folder right after the build and before any checkout or edit (a checkout or edit makes sources newer than the
+       exes and the stamp is refused: safe, but the build must be redone); a tool that sets old file times (an archive
+       extract, `touch -d`), a source deleted after a `--worktree` build, a clock change, or a configure-time option
+       (CMake cache, environment) is not seen.
 
      No launch or golden evidence is needed: the diff changed no host source. A report for another arch, an
      `--arch gfx1201` verdict NOT_EQUIVALENT, a differing launch sequence or golden output, or a differing / one-sided /
