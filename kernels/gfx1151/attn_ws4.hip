@@ -191,7 +191,8 @@ template <int F, int PD, bool BF, int TU0 = 0>
 __device__ __forceinline__ void attn_ws4_impl(const float *q, const KvArgs &kv, float *part_ml, float *part_acc, int n_head, int n_kv,
                                               int q_stride, const int *pos, float scale, const int *skip, const AwGroups &groups) {
 #pragma clang fp contract(off)
-    constexpr int TU = F == 0 ? (TU0 & 1) : TU0;
+    // AD8S_Q8ONLY (bit 32, q8m): only the int8 entry (F == 1) takes TU0; f16 / q4 stay shipped (TU 0)
+    constexpr int TU = AD8S_Q8ONLY ? (F == 1 ? TU0 : 0) : (F == 0 ? (TU0 & 1) : TU0);
     if (skip != nullptr && *skip) return;
     __shared__ __align__(16) _Float16 Qs[16][ws4::kQs];
     __shared__ __align__(16) _Float16 Ks[AW_K][ws4::kQs];
@@ -436,7 +437,8 @@ template <int F, int CG, int TU0 = 0>
 __device__ __forceinline__ void attn_ws4g_impl(const float *q, const KvArgs &kv, float *part_ml, float *part_acc, int n_head, int n_kv,
                                                int q_stride, const int *pos, float scale, const int *skip, const AwGroups &groups) {
 #pragma clang fp contract(off)
-    constexpr int TU = F == 0 ? (TU0 & 1) : TU0;
+    // AD8S_Q8ONLY (bit 32, q8m): only the int8 entries (F == 1) take TU0; f16 stays shipped (TU 0)
+    constexpr int TU = AD8S_Q8ONLY ? (F == 1 ? TU0 : 0) : (F == 0 ? (TU0 & 1) : TU0);
     if (skip != nullptr && *skip) return;
     // CG 3: Qs 25.3 KB + Ks 16.9 + Vt 21 = 63.2 KB, so p / alpha live in the Ks space (one
     // more LDS barrier per chunk: every wave's QK reads of Ks done before they are written)

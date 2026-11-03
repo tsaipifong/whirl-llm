@@ -862,6 +862,11 @@ extern "C" __global__ void __launch_bounds__(128)
 #define AD8S_WS4_TU ((WHIRL_ATTNDEC8S & 1) | (((WHIRL_ATTNDEC8S >> 2) & 1) << 1))
 #define AD8S_WS4G_TU (((WHIRL_ATTNDEC8S >> 1) & 1) | (((WHIRL_ATTNDEC8S >> 3) & 1) << 1))
 #define AD8S_DQ4_DLA ((WHIRL_ATTNDEC8S >> 4) & 1)
+// 32 (v0251-q8m, 2026-11-03): only the int8-KV instantiations (F == 1: attn_ws4_q8, attn_ws4g1/2/3_q8) take the
+//    attn_ws4 / attn_ws4g bits; f16 (F == 0) and q4 (F == 2) keep TU 0 = the shipped code. 8060S screening
+//    (progress\v0251-judge3.md): the asm barrier made the DRAM-bound f16 attn_ws4 3-5 % and attn_ws4_q4 17 % slower
+//    at 32k / 128k, while the int8 kernels got faster. Candidate q8m = 1|2|4|8|32 = 47.
+#define AD8S_Q8ONLY ((WHIRL_ATTNDEC8S >> 5) & 1)
 __device__ __forceinline__ int dq_per(int n_keys, int n_split) {
     const int ns = min(n_split, DQ_MAXS);
     return max(DQ_NW * 32, (n_keys + ns * 64 - 1) / (ns * 64) * 64);
