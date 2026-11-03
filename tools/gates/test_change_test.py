@@ -979,10 +979,16 @@ with tempfile.TemporaryDirectory() as td:
         json.dump(r, open(f, "w"))
         return f
 
+    # review C-11: the B side (--build) is the planned version's build: stamped at the planned head revision (--range end /
+    # --commit), or (--worktree) a build of the planned tree with no source newer than its exes
+    HEAD_REV = "556aa8bee" + "0" * 31
+    manifest(b, commit=HEAD_REV)
+
     def pplan(proofs, **kw):
         kw.setdefault("base_build", bb)
         kw.setdefault("base_rev", BASE_REV)
-        return aplan(GDN_ONLY, R_GDN, build=b, proofs=proofs, **kw)
+        kw.setdefault("head_rev", HEAD_REV)
+        return aplan(GDN_ONLY, R_GDN, build=kw.pop("build", b), proofs=proofs, **kw)
 
     # AO-5 block / pass: the A side of the carry is bound to the base revision through the stamped base build
     p = pplan({"r9700": wrep("self.json", aexes={"whirl.exe": SW_, "whirl-server.exe": SS_})})
@@ -1012,6 +1018,84 @@ with tempfile.TemporaryDirectory() as td:
     p = pplan({"r9700": wrep("dirtybase2.json")})
     check("d1b AO-5: a base build stamped from a dirty tree -> refused", carry_of(p).get("status") == "refused", carry_of(p))
     manifest(bb)
+    # review C-11 block / pass: the B side bound to the planned version
+    bx = os.path.join(td, "build_other")  # same exes as --build, but no stamp (scratch/v0251_review_d1r2/probe_carry_ab.py)
+    os.makedirs(bx)
+    open(os.path.join(bx, "whirl.exe"), "wb").write(b"exe-w")
+    open(os.path.join(bx, "whirl-server.exe"), "wb").write(b"exe-s")
+    p = pplan({"r9700": wrep("c11_nostamp.json")}, build=bx)
+    check("d1b C-11: --build without a stamp (another branch's build) -> refused", carry_of(p).get("status") == "refused"
+          and "--build" in carry_of(p).get("why", "") and "stamp" in carry_of(p).get("why", ""), carry_of(p))
+    manifest(bx, commit="c72534ea9" + "0" * 31)
+    p = pplan({"r9700": wrep("c11_otherrev.json")}, build=bx)
+    check("d1b C-11: --build stamped at another commit than the planned head -> refused", carry_of(p).get("status") == "refused"
+          and "c72534ea9" in carry_of(p).get("why", ""), carry_of(p))
+    manifest(bx, commit=HEAD_REV, clean=False)
+    p = pplan({"r9700": wrep("c11_dirty.json")}, build=bx)
+    check("d1b C-11: --build stamped from a dirty tree -> refused", carry_of(p).get("status") == "refused", carry_of(p))
+    manifest(bx, commit=HEAD_REV, exes={"whirl.exe": "d" * 64, "whirl-server.exe": SS_})
+    p = pplan({"r9700": wrep("c11_rebuilt.json")}, build=bx)
+    check("d1b C-11: --build exe rebuilt after its stamp -> refused", carry_of(p).get("status") == "refused" and "stamp" in carry_of(p).get("why", ""), carry_of(p))
+    manifest(bx, commit=HEAD_REV)
+    p = pplan({"r9700": wrep("c11_ok.json")}, build=bx)
+    check("d1b C-11: --build stamped at the planned head -> proven", carry_of(p).get("status") == "proven", carry_of(p))
+    p = pplan({"r9700": wrep("c11_nohead.json")}, head_rev=None)
+    check("d1b C-11: the planned version unknown (no head revision, no tree) -> refused", carry_of(p).get("status") == "refused", carry_of(p))
+    # --worktree: the planned version is root's working tree (no commit to stamp): --build must be configured from that tree
+    # (CMakeCache CMAKE_HOME_DIRECTORY), no product source of it newer than the exes, the exes ninja's outputs
+    tp = getattr(tc, "tree_build_problems", None)
+    check("d1b C-11: tree_build_problems exists", callable(tp), tp)
+    if callable(tp):
+        R_ = os.path.join(td, "tree")
+        check("d1b C-11 tree: built from the planned tree, exes newer than every source -> no problem", tp(R_, R_, 100.0, 200.0, []) == [], tp(R_, R_, 100.0, 200.0, []))
+        check("d1b C-11 tree: built from another tree -> refused", tp(os.path.join(td, "elsewhere"), R_, 100.0, 200.0, []) != [], tp(os.path.join(td, "elsewhere"), R_, 100.0, 200.0, []))
+        check("d1b C-11 tree: the same tree spelled with other case / slashes -> no problem", tp(R_.upper().replace("\\", "/"), R_, 100.0, 200.0, []) == [],
+              tp(R_.upper().replace("\\", "/"), R_, 100.0, 200.0, []))
+        check("d1b C-11 tree: no source tree recorded -> refused", tp("", R_, 100.0, 200.0, []) != [], tp("", R_, 100.0, 200.0, []))
+        check("d1b C-11 tree: a source edited after the build -> refused", tp(R_, R_, 300.0, 200.0, []) != [], tp(R_, R_, 300.0, 200.0, []))
+        check("d1b C-11 tree: an exe ninja did not log (copied in) -> refused", tp(R_, R_, 100.0, 200.0, ["whirl.exe"]) != [], tp(R_, R_, 100.0, 200.0, ["whirl.exe"]))
+        check("d1b C-11 tree: no whirl.exe -> refused", tp(R_, R_, 100.0, None, []) != [], tp(R_, R_, 100.0, None, []))
+        real_bf = tc.build_facts if hasattr(tc, "build_facts") else None
+        try:
+            tc.build_facts = lambda build, untracked=False: (os.path.join(td, "elsewhere"), "f" * 40, [], 100.0, 200.0, [])
+            p = pplan({"r9700": wrep("c11_tree_other.json")}, head_rev=None, head_tree=R_)
+            check("d1b C-11: --worktree, --build configured from another tree -> refused", carry_of(p).get("status") == "refused", carry_of(p))
+            tc.build_facts = lambda build, untracked=False: (R_, "f" * 40, ["src/x.cpp"], 100.0, 200.0, [])
+            p = pplan({"r9700": wrep("c11_tree_ok.json")}, head_rev=None, head_tree=R_)
+            check("d1b C-11: --worktree, --build of the planned tree (uncommitted edits built in) -> proven", carry_of(p).get("status") == "proven", carry_of(p))
+        finally:
+            if real_bf is not None:
+                tc.build_facts = real_bf
+            elif hasattr(tc, "build_facts"):
+                del tc.build_facts
+    # --worktree end to end on a throw-away git tree (temp dir; build_facts reads CMakeCache, git, .ninja_log): an untracked
+    # product source created after the build is part of the planned tree, so it makes the build stale
+    hbp = getattr(tc, "head_build_problems", None)
+    if callable(hbp):
+        gt = os.path.join(td, "gtree")
+        gb = os.path.join(gt, "build", "Release")
+        os.makedirs(os.path.join(gt, "src"))
+        os.makedirs(gb)
+        open(os.path.join(gt, "src", "a.cpp"), "w").write("int a;\n")
+        open(os.path.join(gt, ".gitignore"), "w").write("build/\n")
+        G_ = ["git", "-C", gt, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.autocrlf=false"]
+        for c_ in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "x"]):
+            subprocess.run(G_ + c_, check=True, capture_output=True)
+        open(os.path.join(gb, "CMakeCache.txt"), "w").write(f"CMAKE_HOME_DIRECTORY:INTERNAL={gt.replace(os.sep, '/')}\n")
+        T0 = 1793627807469826900  # exe mtime (unix ns); the source 100 s older, the logged start 0.4 s earlier, 0.5 s run
+        os.utime(os.path.join(gt, "src", "a.cpp"), ns=(T0 - 100 * 10 ** 9,) * 2)
+        lines_ = ["# ninja log v7"]
+        for x_ in ("whirl.exe", "whirl-server.exe"):
+            open(os.path.join(gb, x_), "wb").write(b"e")
+            os.utime(os.path.join(gb, x_), ns=(T0,) * 2)
+            lines_.append(f"1000\t1500\t{T0 // 100 - tc.NINJA_EPOCH_100NS - 4 * 10 ** 6}\t{x_}\tab")
+        open(os.path.join(gb, ".ninja_log"), "w").write("\n".join(lines_) + "\n")
+        check("d1b C-11 worktree e2e: a build of the planned tree, newer than its sources -> bound", hbp(gb, head_tree=gt) == [], hbp(gb, head_tree=gt))
+        check("d1b C-11 worktree e2e: the same build for another tree -> refused", hbp(gb, head_tree=os.path.join(td, "tree")) != [],
+              hbp(gb, head_tree=os.path.join(td, "tree")))
+        open(os.path.join(gt, "src", "new.cpp"), "w").write("int b;\n")
+        os.utime(os.path.join(gt, "src", "new.cpp"), ns=(T0 + 60 * 10 ** 9,) * 2)
+        check("d1b C-11 worktree e2e: an untracked source written after the build -> refused", hbp(gb, head_tree=gt) != [], hbp(gb, head_tree=gt))
     # review N-6: a --build without whirl-server.exe proves only whirl.exe, but the R9700 server steps would be carried
     bns = os.path.join(td, "build_nosrv")
     os.makedirs(bns)
@@ -1044,8 +1128,31 @@ with tempfile.TemporaryDirectory() as td:
         check("d1b stamp: the same exe copied an hour later is not", nu(nb, ["whirl.exe"]) == ["whirl.exe"], nu(nb, ["whirl.exe"]))
         os.utime(os.path.join(nb, "whirl.exe"), ns=(1793627807469826900 - 60 * 10 ** 9,) * 2)
         check("d1b stamp: an exe older than its log entry is not", nu(nb, ["whirl.exe"]) == ["whirl.exe"], nu(nb, ["whirl.exe"]))
+        # review C-12: ninja v7 records the COMMAND START as an output's mtime (build.cc FinishCommand: record_mtime =
+        # command_start_time_), so file mtime - logged = the command's run time (end - start, ms, same line); the bound is
+        # that run time + a small slack, not a fixed 10 s (a link > 10 s is a real build)
+        L30 = 8153310070407046  # logged start; a 30 s link (start 0, end 30000 ms)
+        F30 = (L30 + 9782968000000000) * 100  # unix ns of the logged value
+        open(os.path.join(nb, ".ninja_log"), "w").write(f"# ninja log v7\n0\t30000\t{L30}\twhirl.exe\t8f652c35e0cfc37b\n")
+        os.utime(os.path.join(nb, "whirl.exe"), ns=(F30 + 29_900_000_000,) * 2)
+        check("d1b C-12: an exe whose link ran 30 s (file 29.9 s after the logged start) is the build's output", nu(nb, ["whirl.exe"]) == [], nu(nb, ["whirl.exe"]))
+        os.utime(os.path.join(nb, "whirl.exe"), ns=(F30 + 36 * 10 ** 9,) * 2)
+        check("d1b C-12: 6 s past the end of that 30 s link -> not the logged output", nu(nb, ["whirl.exe"]) == ["whirl.exe"], nu(nb, ["whirl.exe"]))
+        open(os.path.join(nb, ".ninja_log"), "w").write("# ninja log v7\n557054\t557557\t8153310070407046\twhirl.exe\t8f652c35e0cfc37b\n")
+        os.utime(os.path.join(nb, "whirl.exe"), ns=(1793627807469826900 + 5 * 10 ** 9,) * 2)
+        check("d1b C-12: a 0.5 s link but the file 5.4 s after the logged start -> not the logged output (bound follows end - start)",
+              nu(nb, ["whirl.exe"]) == ["whirl.exe"], nu(nb, ["whirl.exe"]))
         open(os.path.join(nb, ".ninja_log"), "w").write("# ninja log v7\n")
         check("d1b stamp: an exe the log does not list is not", nu(nb, ["whirl.exe"]) == ["whirl.exe"], nu(nb, ["whirl.exe"]))
+    # review C-12 on real data: wt_a25_rel/build/Release (the 0.2.5 release build, ninja log v7): outputs whose command ran
+    # longer than 10 s (whirl_kernels_gfx1201.cpp.obj 19.5 s, server_tests.cpp.obj 14.5 s, test_attn.cpp.obj 13.1 s:
+    # scratch/v0251_review_d1r2/probe_buildlog_out.txt) and the exes are all the outputs ninja logged
+    REAL_B = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "wt_a25_rel", "build", "Release")
+    REAL_LONG = ["CMakeFiles/whirl_hip.dir/kernels/whirl_kernels_gfx1201.cpp.obj", "CMakeFiles/whirl-server-tests.dir/tests/server/server_tests.cpp.obj",
+                 "CMakeFiles/whirl-kernel-test.dir/tests/kernels/test_attn.cpp.obj", "whirl.exe", "whirl-server.exe"]
+    check("d1b C-12 real data: the 0.2.5 release build folder is there", all(os.path.isfile(os.path.join(REAL_B, x)) for x in REAL_LONG), REAL_B)
+    if callable(nu) and all(os.path.isfile(os.path.join(REAL_B, x)) for x in REAL_LONG):
+        check("d1b C-12 real data: outputs whose command ran > 10 s are ninja's outputs", nu(REAL_B, REAL_LONG) == [], nu(REAL_B, REAL_LONG))
 
     p = pplan({"r9700": wrep("ok.json")})
     check("d1b proof: gfx1201 objects identical, bound -> carry proven, R9700 still none", carry_of(p).get("status") == "proven" and p["gpu_steps"]["r9700"] == []
@@ -1338,6 +1445,15 @@ p = aplan(GDN_ONLY + ["tools/gates/test_change.py"], R_GDN)
 check("d1b C-1: + tools/gates/test_change.py -> no arch scope (the tool would judge its own change)", is_full_both(p), (p["level"], p.get("arch_scope_note")))
 p = aplan(GDN_ONLY + ["tools/impact/work_equal.py"], R_GDN)
 check("d1b C-1: + tools/impact/work_equal.py -> no arch scope", is_full_both(p), (p["level"], p.get("arch_scope_note")))
+# review C-10: tools/gates/modules.json is the selection data (arch steps per module): a diff that edits it would plan itself
+# (reviewer's probe: attn.hip + modules.json with kernels.attn's GPU steps emptied -> 8060S 15 -> 13 steps,
+# scratch/v0251_review_d1r2/harness2_out.txt section C)
+p = aplan(GDN_ONLY + ["tools/gates/modules.json"], R_GDN)
+check("d1b C-10: + tools/gates/modules.json -> no arch scope (the selection data would select its own steps)", is_full_both(p)
+      and "modules.json" in (p.get("arch_scope_note") or ""), (p["level"], p.get("arch_scope_note")))
+p = aplan(GDN_ONLY, R_GDN)
+check("d1b C-10: the same kernel change without modules.json keeps the per-arch plan", p.get("arch_scope") and p["gpu_steps"]["r9700"] == [],
+      (p["level"], p.get("arch_scope_note")))
 # review N-2: a file renamed into kernels/gfx1151/ from a shared place is not gfx1151-only (the old path compiled for both)
 ch_ = {KG: {"old_path": "kernels/shared/gdn_x.h", "new": [1], "old": [1]}}
 p = tc.make_plan("t", "x", ch_, R_GDN, MODSA, MA, GATES, TIMES, gate_map=gm2, core_sets={})
