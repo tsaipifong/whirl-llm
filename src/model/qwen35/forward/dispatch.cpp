@@ -203,6 +203,9 @@ void Context::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
         case ops::GemmKind::gemmhq:
             hip::launch(p.f, p.grid, p.block, 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n), acc);
             return;
+        case ops::GemmKind::gemmfq:  // v0251-a3port: gfx1151 fused-dequant MXFP4 GEMM (same ABI as gemm_c)
+            hip::launch(p.f, p.grid, p.block, 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n), acc);
+            return;
         default:
             break;
     }
@@ -233,6 +236,9 @@ ops::GemmFlags Context::gemmFlags() const {
     f.prec_gs = prec_gs;
     f.gemvh_cap = device::profile(arch).gemvh_grid_by_rows ? kernels::gemvhCap() : 0;
     f.gemms_tie_larger_bm = device::profile(arch).gemms_tie_larger_bm;
+    // v0251-a3port: the gemmfq slot, WHIRL_FDQ8S when set (Model::load -> fdq >= 0), else the device default
+    f.fdq = fdq >= 0 ? fdq : static_cast<int>(device::profile(arch).fdq_default);
+    f.fdq_min = fdq_min;
     f.gv_max = gvMax();
     return f;
 }

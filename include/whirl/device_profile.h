@@ -89,7 +89,7 @@ inline constexpr Profile k_profile_gfx1151{
     .gemvh_grid_by_rows = true,
     .h16_from_candidates = true,
     .gemms_tie_larger_bm = true,
-    .fdq_default = 0,  // v0251-a3port TEST-FIRST STATE (commit 1): the port sets 2 (t2)
+    .fdq_default = 2,  // t2 (v0251-a3port; v0251-judge1 sec 1 screening)
     .attn_dq4_dynamic_splits = true,
     .tune_fast = true,
     .tune_cache_suffix = "-gfx1151r2",

@@ -234,6 +234,8 @@ void loadMatmul(MatmulKernels& k, const Loader& L) {
         k.dequant_f16[i] = L.opt("dequant_f16_mxfp4");
         k.gemmhq[i] = L.opt("gemmhq_mxfp4");
         k.gemmhqh[i] = L.opt("gemmhqh_mxfp4");
+        // v0251-a3port: the gfx1151 fused-dequant GEMMs (absent from the gfx1201 object: null there)
+        for (std::size_t fi = 0; fi < kGemmFqCfgs.size(); ++fi) k.gemmfq[fi] = L.opt(std::string("gemmfq_") + kGemmFqNames[fi] + "_mxfp4");
         for (int ci = 0; ci < static_cast<int>(kGemmCfgs.size()); ++ci) k.gemmc[ci][i] = L.opt(gemmcName(t, ci));
         k.gemvq[i] = L.opt("gemvq_mxfp4");
         for (int nt = 2; nt <= kMaxSmallBatch; ++nt) {

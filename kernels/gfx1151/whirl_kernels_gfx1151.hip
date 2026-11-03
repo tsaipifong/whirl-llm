@@ -34,3 +34,4 @@
 #include "sample_cand.hip"         // sampling candidates
 #include "prefill_fused.hip"       // prefill activation fusions (f16)
 #include "../moe_f.hip"            // precise MoE decode experts (f32 activations; shared with gfx1201)
+#include "gemm_fq.hip"             // fused-dequant MXFP4 prefill GEMM gemmfq_c2 / _t2 (gemm family; v0251-a3port, LAST: no existing kernel moves)
