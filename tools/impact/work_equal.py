@@ -58,9 +58,10 @@ import launch_table  # noqa: E402
 
 FORMAT = "whirl-work-equal/1"
 EM_AMDGPU = 224
-# EF_AMDGPU_MACH (low byte of e_flags), the targets WHIRL builds and their neighbours (llvm/BinaryFormat/ELF.h)
-MACH = {0x41: "gfx1100", 0x42: "gfx1101", 0x43: "gfx1102", 0x44: "gfx1103", 0x48: "gfx1200", 0x4A: "gfx1151",
-        0x4C: "gfx1150", 0x4E: "gfx1201", 0x30: "gfx1030"}
+# EF_AMDGPU_MACH (low byte of e_flags), the targets WHIRL builds and their neighbours (llvm/BinaryFormat/ELF.h; LLVM
+# AMDGPUUsage "AMDGPU EF_AMDGPU_MACH Values"; REVIEW-v0251-d1 N-1 fixed 0x30 / 0x42 / 0x43 / 0x4C, which only named reports)
+MACH = {0x30: "gfx908", 0x36: "gfx1030", 0x41: "gfx1100", 0x42: "gfx1013", 0x43: "gfx1150", 0x44: "gfx1103", 0x46: "gfx1101",
+        0x47: "gfx1102", 0x48: "gfx1200", 0x4A: "gfx1151", 0x4C: "gfx942", 0x4E: "gfx1201"}
 
 
 GPU_ALIASES = {"r9700": ("r9700", "r97", "gfx1201", "pci:71:0"), "8060s": ("8060s", "s8", "8s", "gfx1151", "pci:196:0")}
@@ -540,9 +541,10 @@ def _exe_of(cmd):
     return t[0].strip('"') if t else ""
 
 
-def load_side(src, include_all=False, server_seq=False, ignore=(), db=None, scope="test"):
+def load_side(src, include_all=False, server_seq=False, ignore=(), db=None, scope="test", log_gpu_only=False):
     """-> (runs {key: run}, info {kind, logs: [(path, exe, mtime_ns)] }). src: launch folder (flat or step sub-folders),
-    a saved table file, or 'db:<exe sha>' (results.db work_traces rows of that exe)."""
+    a saved table file, or 'db:<exe sha>' (results.db work_traces rows of that exe). log_gpu_only (--arch, REVIEW-v0251-d1
+    C-6): a db row's GPU is only the log's own --device (work_json.gpu), as a folder log's: never the run's gpu column."""
     if src.startswith("db:"):
         h, _, gpu = src[3:].lower().partition("@")
         runs = {}
@@ -550,7 +552,8 @@ def load_side(src, include_all=False, server_seq=False, ignore=(), db=None, scop
             con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
             # gpu: the log's --device (lt_import work_json.gpu) or the run's gpu; "db:<sha>@gfx1201" keeps one GPU
             q = ("SELECT w.component, w.cell, w.work_hash, w.seq_hash, w.arg_hash, w.launches, "
-                 "COALESCE(NULLIF(json_extract(w.work_json, '$.gpu'), ''), r.gpu, '') FROM work_traces w "
+                 + ("COALESCE(json_extract(w.work_json, '$.gpu'), '')" if log_gpu_only else
+                    "COALESCE(NULLIF(json_extract(w.work_json, '$.gpu'), ''), r.gpu, '')") + " FROM work_traces w "
                  "LEFT JOIN runs r ON r.run_id = w.run_id WHERE lower(w.exe_sha256) = ? AND w.scope = ?")
             for comp, cell, wh, sq, ah, n, g in con.execute(q, (h, scope)):
                 if gpu and norm_gpu(gpu) != norm_gpu(g):
@@ -662,8 +665,8 @@ def compare_launch(a_src, b_src, server=False, ignore=(), a_exes=None, b_exes=No
         if why:
             reasons.append(why)
         srcs.append((s2, why))
-    sides = [load_side(s2, False, server, ignore, db, scope) if not why else ({}, {"kind": "none", "logs": [], "cmds": {}})
-             for s2, why in srcs]
+    sides = [load_side(s2, False, server, ignore, db, scope, log_gpu_only=bool(arch)) if not why else
+             ({}, {"kind": "none", "logs": [], "cmds": {}}) for s2, why in srcs]
     (ra, ia), (rb, ib) = sides
     other, on = set(), set()
     if arch:
