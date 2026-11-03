@@ -11,7 +11,13 @@ One command takes a change and prints (and with --run executes) exactly:
     for each), a contract module, a build-wide file, product code in no module, or when work equivalence cannot be shown
     (code objects of --base-build and --build differ although no kernel source changed),
   * minus the GPU steps a work-equivalence proof covers (--proof DEV=report.json: an EQUIVALENT tools/impact/work_equal.py
-    report bound to this build's whirl.exe sha256), only when the diff touches no kernel source.
+    report bound to this build's whirl.exe sha256), only when the diff touches no kernel source,
+  * v0251-d1b: for a diff whose product files all compile into ONE architecture's code object (kernels/gfx1151/, registered
+    per module in modules.json "arch", included by nothing outside that set but tests; see arch_scope) plus registered
+    kernel tests: that module's arch steps on that GPU only (the full matrix there when no module owns a file), and NO
+    GPU step on the other GPU, which is carried by a work_equal --arch proof instead (--proof r9700=FILE, or --base-build:
+    every gfx1201 code object of --build equal to the base build's). --run refuses while the carry is not proven; a
+    refused proof plans the full matrix on both GPUs.
 Every --run appends one row to the test-cost ledger (internal_docs/TEST_COST_LEDGER.tsv of the workspace, or --ledger).
 DEV-TIME ONLY: a release / rc merge / bug-fix release still runs the full release gate on both GPUs (docs/dev/testing.md);
 the summaries are tagged change_<id>_<device> and never write PASS_gate_<device>.
@@ -96,9 +102,23 @@ CORE_GLOBS = [
     ("src/model/kv.*", "kv"),
     ("src/model/*/kv.*", "kv"),
 ]
+# (v0251-d1b: a kernels/gfx1151/ file of an arch-scoped diff, arch_scope below, is planned per architecture instead.)
 # A change to one of these (or to a header that a .hip file includes) can change the code objects: no work-equivalence
 # short-cut.
 KERNEL_GLOBS = ["kernels/*", "*.hip", "include/whirl/kernels_abi.h", "include/whirl/kernels_abi_layout.h", "src/kernels_host/*"]
+# v0251-d1b (0.2.5.1 D1(b), PLAN V1-03): per-architecture kernel scope. A file under ARCH_DIRS[arch] compiles into that
+# architecture's code object only: ARCH_UNITY (the one translation unit CMakeLists.txt compiles per --offload-arch)
+# includes kernels/gfx1151/whirl_kernels_gfx1151.hip only inside #if defined(__gfx1151__) (unity_guard_errors, pinned on
+# this tree by test_change_test.py), and the impact map's includers name anything else that includes the file (a host
+# includer, e.g. src/ops/attention.cpp -> kernels/gfx1151/attn_ws4_index.h, puts it into whirl.exe for both GPUs: never
+# arch-scoped). The other GPU's side is carried by a code-object proof (carry_proof) instead of GPU steps.
+ARCH_DIRS = {"gfx1151": "kernels/gfx1151/"}
+ARCH_UNITY = "kernels/whirl_kernels.hip"
+# GPU steps of the other card that the carry covers when only registered kernel tests (modules.json arch.<a>.tests) select
+# them: the kernel test of identical code objects runs the same kernels (check_proof below counts kt_full the same way)
+CARRY_TEST_STEPS = ("kt_full",)
+CARRY_BY = ("tools/impact/work_equal.py compare --arch {arch} (v0251-d1a): every {arch} code object of --build equal to the "
+            "base build's, the report bound to --build's exes")
 # build files can change code objects too (flags, offload archs): no static "cannot change" claim, but a binary proof
 # (work_equal code objects identical) still counts for them
 BUILD_GLOBS = ["cmake/*", "CMakeLists.txt", "build.bat", "redist/*"]
@@ -835,6 +855,11 @@ def check_proof(path, dev, build):
         return False, f"cannot read: {e}", set()
     if r.get("format") != "whirl-work-equal/1":
         return False, "not a work_equal report (format)", set()
+    # v0251-d1b (v0251-d1a interface): a work_equal --arch report ("arch": gfx1151 / gfx1201) judges only that
+    # architecture's code objects and counts only that card's runs, so it proves nothing about the other card even with
+    # untagged runs: null (a whole-exe report) or this card's own arch only
+    if r.get("arch") not in (None, ARCH[dev]):
+        return False, f"a work_equal --arch {r.get('arch')} report is no proof for {dev} ({ARCH[dev]})", set()
     if r.get("verdict") != "EQUIVALENT":
         return False, f"verdict {r.get('verdict')} (only EQUIVALENT skips GPU steps)", set()
     chk = r.get("checks", {})
@@ -887,6 +912,204 @@ def no_gpu_file(f, mods):
     """arch025-n11b: f is owned (modules.json paths) only by NO_GPU_MODULES modules"""
     owners = [k for k, d in (mods or {}).items() if matches(f, (d or {}).get("paths") or [])]
     return bool(owners) and all(k in NO_GPU_MODULES for k in owners)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# v0251-d1b: per-architecture scope (modules.json "arch": {"<arch>": {"paths": [globs under kernels/<arch>/, a subset of
+# the module's paths], "tests": [tests/ globs: the registered kernel tests of that part], "steps": [GPU steps run on that
+# architecture's GPU]}})
+
+def arch_entry_errors(mods, gpu_steps):
+    """problems of the modules.json "arch" entries (gpu_steps: the GPU step names of release_gate.ps1 -List)"""
+    errs = []
+    for n, d in sorted((mods or {}).items()):
+        ar = (d or {}).get("arch")
+        if ar is None:
+            continue
+        if not isinstance(ar, dict) or not ar:
+            errs.append(f"{n}: arch must be a non-empty object {{arch: {{paths, tests, steps}}}}")
+            continue
+        for a, e in sorted(ar.items()):
+            root = ARCH_DIRS.get(a)
+            if root is None:
+                errs.append(f"{n}: arch {a}: unknown architecture (known: {', '.join(sorted(ARCH_DIRS))}, test_change.py ARCH_DIRS)")
+                continue
+            if not isinstance(e, dict):
+                errs.append(f"{n}: arch {a}: must be an object")
+                continue
+            if not e.get("paths"):
+                errs.append(f"{n}: arch {a}: no paths")
+            for g in e.get("paths") or []:
+                if not str(g).startswith(root):
+                    errs.append(f"{n}: arch {a}: path {g} is not under {root} (only that folder compiles into the {a} code object alone)")
+                elif not any(g == mg or fnmatch.fnmatch(g, mg) for mg in (d.get("paths") or [])):
+                    errs.append(f"{n}: arch {a}: path {g} is not one of the module's paths")
+            for t in e.get("tests") or []:
+                if not str(t).startswith("tests/"):
+                    errs.append(f"{n}: arch {a}: test {t} is not under tests/")
+            if not e.get("steps"):
+                errs.append(f"{n}: arch {a}: no steps")
+            for s in e.get("steps") or []:
+                if s not in gpu_steps:
+                    errs.append(f"{n}: arch {a}: step {s} is not a GPU step of release_gate.ps1")
+    return errs
+
+
+def unity_guard_errors(text, arch="gfx1151"):
+    """ARCH_UNITY text -> problems: every #include of an "<arch>/..." file must sit in a branch whose condition is exactly
+    defined(__<arch>__) (#if / #elif) or #ifdef __<arch>__ (not its #else), so another architecture's code object never
+    compiles a kernels/<arch>/ file (comments stripped; a stricter shape than the preprocessor needs, on purpose)"""
+    src = re.sub(r"/\*.*?\*/", lambda mm: "\n" * mm.group(0).count("\n"), text, flags=re.S)
+    src = re.sub(r"//[^\n]*", "", src)
+    exact = re.compile(r"^(?:defined\s*\(\s*__%s__\s*\)|defined\s+__%s__)$" % (arch, arch))
+    stack, errs = [], []
+    for no, ln in enumerate(src.splitlines(), 1):
+        s = ln.strip()
+        d = re.match(r"#\s*(if|ifdef|ifndef|elif|else|endif)\b\s*(.*)$", s)
+        if d:
+            kw, rest = d.group(1), re.sub(r"\s+", " ", d.group(2).strip())
+            if kw == "if":
+                stack.append([rest, False])
+            elif kw == "ifdef":
+                stack.append([f"defined({rest})", False])
+            elif kw == "ifndef":
+                stack.append([f"!defined({rest})", False])
+            elif kw == "elif" and stack:
+                stack[-1] = [rest, False]
+            elif kw == "else" and stack:
+                stack[-1][1] = True
+            elif kw == "endif" and stack:
+                stack.pop()
+            continue
+        inc = re.match(r'#\s*include\s*"([^"]+)"', s)
+        if inc and (inc.group(1).startswith(f"{arch}/") or f"/{arch}/" in inc.group(1)):
+            if not any(exact.match(c) and not in_else for c, in_else in stack):
+                errs.append(f"line {no}: #include \"{inc.group(1)}\" outside #if defined(__{arch}__)")
+    return errs
+
+
+def arch_file(f, arch, m):
+    """(ok, why): f compiles into arch's code object only: under ARCH_DIRS[arch], the impact map's arch of a .hip is
+    exactly [arch] (a file not in the map yet: its folder decides, as impact.py does), and every includer the map lists is
+    in that folder, the unity source (which includes the set only for arch: unity_guard_errors) or a test"""
+    root = ARCH_DIRS.get(arch)
+    if not root or not f.startswith(root):
+        return False, f"{f} is not under {root}"
+    h = ((m or {}).get("hip") or {}).get(f)
+    if h is not None and sorted(h.get("arch") or []) != [arch]:
+        return False, f"{f}: impact map arch {'/'.join(h.get('arch') or []) or '?'} (not {arch} only)"
+    bad = [x for x in ((m or {}).get("includers") or {}).get(f, []) if not (x.startswith((root, "tests/")) or x == ARCH_UNITY)]
+    if bad:
+        return False, f"{f} is included by {bad[0]} (not {arch} device code: it reaches both code objects / the host)"
+    return True, ""
+
+
+def arch_scope(files, product, modules, callers, mods, m, rep, lists, bfiles):
+    """(scope, why not): scope when every changed product file compiles into ONE architecture's code object only
+    (arch_file) and no build file / build-wide input changed; every module the diff touches and every caller module must
+    register that part (modules.json arch.<a>); a product file no module owns is "unregistered" (the full matrix on that
+    GPU). scope = {arch, device, other, files, registered {module: [files]}, unregistered, test_includers}"""
+    if not product:
+        return None, "no product file"
+    if lists or bfiles or any(matches(f, impact.BUILD_WIDE) for f in files) or rep.get("build_wide"):
+        return None, "a build file or a build-wide input changed"
+    found = {next((a for a, d in ARCH_DIRS.items() if f.startswith(d)), None) for f in product}
+    if None in found:
+        f = next(f for f in product if not f.startswith(tuple(ARCH_DIRS.values())))
+        return None, f"{f} is not under {', '.join(sorted(ARCH_DIRS.values()))}"
+    if len(found) != 1:
+        return None, "files of more than one architecture"
+    a = found.pop()
+    for f in product:
+        ok, w = arch_file(f, a, m)
+        if not ok:
+            return None, w
+    # impact.py lists both GPUs for any header (its generic host-code rule): only arch_file's includer check can narrow a
+    # header; anything else that adds a GPU to the map's list is not explained by these files (fail closed)
+    if set(rep.get("gpus") or []) - {a} and all(f.endswith(".hip") for f in product):
+        return None, f"impact map lists {', '.join(rep.get('gpus') or [])} for the diff"
+    reg, unreg = {}, []
+    for f in product:
+        owners = [k for k, fl in (modules or {}).items() if f in (fl or [])]
+        if not owners:
+            unreg.append(f)
+        for k in owners:
+            e = (((mods or {}).get(k) or {}).get("arch") or {}).get(a)
+            if not e or not matches(f, e.get("paths") or []):
+                return None, f"{f}: module {k} does not register it for {a} (modules.json {k} arch.{a}.paths)"
+            reg.setdefault(k, []).append(f)
+    for k in sorted(set(modules or {}) | {x for v in (callers or {}).values() for x in v}):
+        if not ((((mods or {}).get(k) or {}).get("arch") or {}).get(a)):
+            return None, f"module {k} has no {a} part (modules.json {k} arch.{a})"
+    tinc = sorted({x for f in product for x in ((m or {}).get("includers") or {}).get(f, []) if x.startswith("tests/")} - set(files))
+    dev = DEV_OF_ARCH[a]
+    return {"arch": a, "device": dev, "other": [d for d in DEVICES if d != dev], "files": sorted(product), "registered": reg,
+            "unregistered": sorted(unreg), "test_includers": tinc}, ""
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for b in iter(lambda: fh.read(8 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def carry_proof(path, arch, build):
+    """(ok, why): the work_equal report at path shows every `arch` code object of --build's exes (whirl.exe, and
+    whirl-server.exe when --build has it) equal to the base build's. Read per object (exes[].code_objects.objects[]: target,
+    same / cuid_only, only), so a plain `compare` report and a v0251-d1a `compare --arch` report count the same way; the
+    report's b exes must be --build's (sha256). Refused: another arch named by the report, --arch verdict NOT_EQUIVALENT,
+    a launch sequence or golden output that differs, an object of that arch that differs or sits on one side only, no
+    object of that arch. Launch / golden evidence is not required: the diff changed no host source (arch_scope), so the
+    host work on that GPU is the base build's."""
+    try:
+        r = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return False, f"cannot read the proof: {e}"
+    if not isinstance(r, dict) or r.get("format") != "whirl-work-equal/1":
+        return False, "not a work_equal report (format)"
+    ra = r.get("arch")  # v0251-d1a: top-level "arch" of a compare --arch report, null for a whole-exe report
+    if isinstance(ra, str) and ra:
+        if ra != arch:
+            return False, f"the report is for {ra}, not {arch}"
+        if r.get("verdict") == "NOT_EQUIVALENT":
+            return False, f"--arch {arch} verdict NOT_EQUIVALENT"
+    chk = r.get("checks") or {}
+    for k in ("launch_sequence", "golden"):
+        if chk.get(k) == "different":
+            return False, f"{k.replace('_', ' ')} different"
+    if not build:
+        return False, "no --build: the proof cannot be bound to the exe under test"
+    bex = (r.get("b") or {}).get("exes") or {}
+    names = []
+    for exe in PROOF_EXES:
+        p = os.path.join(build, exe)
+        if not os.path.exists(p):
+            if exe == "whirl.exe":
+                return False, f"{exe} missing in --build"
+            continue
+        if not bex.get(exe):
+            return False, f"{exe} of --build is not in the proof"
+        if file_sha256(p) != bex[exe]:
+            return False, f"{exe} of --build is not the B exe of the proof"
+        names.append(exe)
+    by = {e.get("name"): e for e in r.get("exes") or [] if isinstance(e, dict)}
+    n = 0
+    for exe in names:
+        e = by.get(exe)
+        if not e or (e.get("b") or {}).get("sha256") not in (None, bex[exe]):
+            return False, f"{exe}: no code-object comparison for the B exe in the proof"
+        objs = [o for o in (e.get("code_objects") or {}).get("objects") or [] if arch in str(o.get("target", "")).split("/")]
+        if not objs:
+            return False, f"{exe}: no {arch} code object in the proof"
+        for o in objs:
+            if o.get("target") != arch or o.get("only"):
+                return False, f"{exe}: {arch} code object #{o.get('index')} is not on both sides ({o.get('target')}, only {o.get('only')})"
+            if not (o.get("same") or o.get("cuid_only")):
+                return False, f"{exe}: {arch} code object #{o.get('index')} differs ({', '.join(o.get('differing_sections') or []) or 'header'})"
+        n += len(objs)
+    return True, f"{n} {arch} code object(s) of {', '.join(names)} equal to the base build's, bound to --build"
 
 
 def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", build=None, base_build=None, proofs=None,
@@ -968,11 +1191,26 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
         f"kernel sources touched: {', '.join(kernel[:4])}" if kernel else
         f"build files touched (code objects may change; a binary proof decides): {', '.join(bfiles[:4])}" if bfiles else
         "no kernel source, no header a .hip file includes and no build file changed: code objects cannot change (source closure)")}
+    co_json = None
     if base_build and build and scratch:
         co, src = compare_code_objects(base_build, build, os.path.join(scratch, f"code_objects_{cid.replace('+', '_').replace('..', '_')}.json"))
         weq["code_objects"] = f"{co} ({src})"
         if co not in ("identical", "identical-except-cuid") and not kernel:
             full.append(f"work equivalence cannot be shown: code objects {co} although no kernel source changed ({src})")
+        if co is not None and src and os.path.isfile(str(src)):
+            co_json = src  # v0251-d1b: the same report carries the other GPU of an arch-scoped diff (carry_proof)
+    # v0251-d1b: product files of one architecture's code object only (arch_scope): the full-matrix reasons those files
+    # raise (CORE_GLOBS kernels/*, impact.py's file in no module) are replaced by the per-architecture plan below; any
+    # other reason keeps today's plan
+    scope, scope_why = arch_scope(files, product, modules, callers, mods, m, rep, lists, bfiles)
+    if scope:
+        own = set(scope["files"])
+        other = [r for r in full if not (any(r.startswith(f"core file {f}:") for f in own)
+                                         or (scope["unregistered"] and r.startswith("impact.py: full gate or the release steps above")))]
+        if other:
+            scope, scope_why = None, f"another full-matrix reason: {other[0][:120]}"
+        elif not scope["unregistered"]:
+            scope["replaced"], full = full, []
     # GPU selection
     names = set()
     for n in list(modules) + [k for v in callers.values() for k in v]:
@@ -986,15 +1224,80 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
     map_devs = [DEV_OF_ARCH[a] for a in rep.get("gpus") or ARCH.values() if a in DEV_OF_ARCH] or list(DEVICES)
     gpu = {d: [] for d in DEVICES}
     why = {}
-    if full:
-        devs = list(DEVICES)
-        kfiles = [f for f in product if matches(f, ["kernels/*", "*.hip"])]
-        if (kfiles and kfiles == product and len(map_devs) == 1 and not modules
-                and not any(matches(f, ["cmake/*", "CMakeLists.txt", "build.bat", "redist/*"]) for f in files)
-                and not any(r.startswith("work equivalence") for r in full)):
-            devs = map_devs  # every core reason is an arch-specific kernel (testing.md: one kernel -> its GPU)
-        for d in devs:
-            gpu[d] = [s["name"] for s in gates[d] if s["gpu"] and not s["na"]]
+    carry = {}
+    avail = {d: [s["name"] for s in gates[d] if s["gpu"] and not s["na"]] for d in DEVICES}
+    if scope:
+        # v0251-d1b (replaces the arch025-modsel shortcut "full matrix on the kernel's GPU", which needed `not modules` and
+        # so never applied once every kernel file had a module): the architecture's GPU runs the arch steps of the touched
+        # modules and their callers (modules.json arch.<a>.steps; the full matrix when a file is in no module), the map's
+        # steps and the test-source / gate-script steps; the other GPU runs only what the carry cannot cover
+        a, dev = scope["arch"], scope["device"]
+
+        def add(dv, st, w):
+            if st in avail[dv] and st not in gpu[dv]:
+                gpu[dv].append(st)
+                why[(dv, st)] = w
+        if scope["unregistered"]:
+            for st in avail[dev]:
+                add(dev, st, f"full matrix ({a} kernel file(s) in no module: {', '.join(scope['unregistered'][:3])})")
+            level = "full"
+        else:
+            for n in sorted(set(scope["registered"]) | {k for v in callers.values() for k in v}):
+                for st in mods[n]["arch"][a].get("steps") or []:
+                    add(dev, st, f"module {n} ({a})")
+                ev = core_used.get(n) or cset.get(n)
+                for st in (ev or {}).get(dev) or []:
+                    add(dev, st, f"core module {n}: GPU mutation evidence ({', '.join(ev.get('mutants') or [])})")
+                for f, sts in ((mods.get(n) or {}).get("when") or {}).items():
+                    if f in changes:
+                        for st in expand_gpu(sts, gates)[dev]:
+                            add(dev, st, f"module {n} when {f}")
+            for st in sorted(map_gpu):
+                add(dev, st, "impact map")  # the map's GPUs: this architecture's only (arch_scope checked the files)
+            level = "module"
+        reg_tests = [g for d in (mods or {}).values() for g in ((((d or {}).get("arch") or {}).get(a) or {}).get("tests") or [])]
+        exe_files = {}
+        for f, es in sorted(test_source_exes(files + scope["test_includers"] + [x for x in graph_src if x.startswith("tests/")], m).items()):
+            for e in es:
+                exe_files.setdefault(e, []).append(f)
+        carried_tests = set()
+        for e, fl in sorted(exe_files.items()):
+            globs = (gm.get("exes") or {}).get(e) or set()
+            for dv in (DEVICES if e in EXE_BOTH_GPUS else (one_gpu,)):
+                for st in avail[dv]:
+                    if not any(fnmatch.fnmatch(st, g) for g in globs):
+                        continue
+                    if dv != dev and st in CARRY_TEST_STEPS and all(matches(f, reg_tests) for f in fl):
+                        carried_tests |= set(fl)  # registered kernel tests: the carry's code-object proof covers kt_full
+                        continue
+                    add(dv, st, f"test source {fl[0]} of {e}")
+        for f, sel in sorted(gate_script_steps(files, changes, gm).items()):
+            for st in avail[one_gpu]:
+                if sel == "ALL" or any(fnmatch.fnmatch(st, g) for g in sel):
+                    add(one_gpu, st, f"gate script {f}" + (" (common code: every GPU step)" if sel == "ALL" else ""))
+        scope["tests_carried"] = sorted(carried_tests)
+        for dv in scope["other"]:
+            covers = [s for s in avail[dv] if s not in gpu[dv]]
+            c = {"by": CARRY_BY.format(arch=ARCH[dv]), "status": "required", "proof": "", "covers": covers,
+                 "covers_min": round(sum(step_seconds(times, dv, s) or 0 for s in covers) / 60, 1),
+                 "why": f"no proof yet: give --base-build DIR (the base revision's build: code objects compared on the CPU) or --proof {dv}=FILE"}
+            src = (proofs or {}).get(dv) or co_json
+            if src:
+                ok, w = carry_proof(src, ARCH[dv], build)
+                c.update(status="proven" if ok else "refused", proof=src, why=w)
+            carry[dv] = c
+        refused = {dv: c for dv, c in carry.items() if c["status"] == "refused"}
+        if refused:  # fail closed: the binary evidence contradicts the per-architecture scope -> today's full matrix
+            full = list(scope.get("replaced") or full) + [
+                f"{dv} carry refused ({c['why']}): the {ARCH[dv]} code objects are not shown equal to the base build's"
+                for dv, c in sorted(refused.items())]
+            gpu = {d: list(avail[d]) for d in DEVICES}
+            why = {(d, s): "full matrix" for d in DEVICES for s in gpu[d]}
+            scope["tests_carried"] = []
+            level = "full"
+    elif full:
+        for d in DEVICES:
+            gpu[d] = list(avail[d])
             for s in gpu[d]:
                 why[(d, s)] = "full matrix"
         level = "full"
@@ -1064,6 +1367,9 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
     skipped = {d: [] for d in DEVICES}
     proof_notes = {}
     for dv, p in (proofs or {}).items():
+        if dv in carry:  # v0251-d1b: the proof of the carried GPU (its kernels did not change; carry_proof read it above)
+            proof_notes[dv] = f"{p}: {dv} carry {carry[dv]['status']}: {carry[dv]['why']}"
+            continue
         if kernel:
             proof_notes[dv] = f"{p}: not used (kernel sources touched: {', '.join(kernel[:3])})"
             continue
@@ -1108,6 +1414,8 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
         "est_full_gpu_min": {d: round(v / 60, 1) for d, v in full_s.items()}, "est_unknown": unknown,
         "one_gpu": one_gpu, "cmake_graph": cmake_graph,
         "core_sets": {k: {"mutants": v.get("mutants"), "proof": v.get("proof")} for k, v in sorted(core_used.items())},
+        "arch_scope": scope or None, "carry": carry,
+        "arch_scope_note": "" if scope or not any(f.startswith(tuple(ARCH_DIRS.values())) for f in product) else scope_why,
     }
 
 
@@ -1128,6 +1436,17 @@ def print_plan(p):
               + (f": {', '.join(st)}" if st and p["level"] != "full" else ""))
         if p["skipped_by_proof"][d]:
             print(f"            skipped by work-equivalence proof: {', '.join(p['skipped_by_proof'][d])}")
+    sc = p.get("arch_scope")
+    if sc:
+        reg = "; ".join(f"{k} {len(v)} file(s)" for k, v in sorted((sc.get("registered") or {}).items()))
+        print(f"   arch     {sc['arch']} only ({sc['device']}): " + (f"registered {reg}: their {sc['arch']} steps" if not sc.get("unregistered") else
+              f"in no module: {', '.join(sc['unregistered'][:3])}: the full matrix on {sc['device']}")
+              + (f"; registered kernel tests carried: {', '.join(sc.get('tests_carried') or [])}" if sc.get("tests_carried") else ""))
+    elif p.get("arch_scope_note"):
+        print(f"   arch     not one architecture's kernels only: {p['arch_scope_note']}")
+    for d, c in sorted((p.get("carry") or {}).items()):
+        print(f"   carry    {d}: {c['status'].upper()}: {c['by']}; replaces {len(c['covers'])} GPU step(s), ~{c['covers_min']} min [est]"
+              + (f"; proof {c['proof']}" if c.get("proof") else "") + f" ({c['why']})")
     for d, n in p["proofs"].items():
         print(f"   proof    {d}: {n}")
     print(f"   work-eq  {p['work_equivalence']['static']}; code objects: {p['work_equivalence']['code_objects']}")
@@ -1155,6 +1474,11 @@ def whirl_running():
 
 
 def run_plan(p, a):
+    need = sorted(d for d, c in (p.get("carry") or {}).items() if c.get("status") == "required")
+    if need:  # v0251-d1b: a GPU whose steps the plan drops runs nothing only with its proof (fail closed, before any step)
+        print(f"test_change: refused: {', '.join(need)} carried by a work_equal --arch proof that is not given: "
+              f"{p['carry'][need[0]]['why']}")
+        return 2
     work = a.work or os.path.join(REPO, "..", "scratch", "test_change", datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
     work = os.path.abspath(work)
     os.makedirs(work, exist_ok=True)

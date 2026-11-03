@@ -823,6 +823,11 @@ MODSU = dict(MODSA, **{"kernels.unity": kmod(UNITY[1:] + UNITY[:1], ["kernels/gf
 p = aplan([KG], dict(R_GDN, module_callers={"kernels.gdn": ["kernels.unity"]}), mods=MODSU)
 check("d1b caller with an arch entry: its gfx1151 steps on the 8060S, none on the R9700",
       p["gpu_steps"]["r9700"] == [] and "srv_balance" in p["gpu_steps"]["8060s"] and carry_of(p).get("status") == "required", (p["gpu_steps"], p["full_reasons"]))
+# a module's "when" steps for a changed gfx1151 file run on the 8060S only
+MODSWH = dict(MODSA, **{"kernels.gdn": dict(MODSA["kernels.gdn"], when={KG: ["srv_cache_balance"]})})
+p = aplan([KG], R_GDN, mods=MODSWH)
+check("d1b when-steps of a gfx1151 file: on the 8060S only", "srv_cache_balance" in p["gpu_steps"]["8060s"] and p["gpu_steps"]["r9700"] == []
+      and p["gpu_why"].get("8060s:srv_cache_balance", "").startswith("module kernels.gdn when"), (p["gpu_steps"], p["gpu_why"].get("8060s:srv_cache_balance")))
 # (2) an unregistered kernels/gfx1151 file (no module owns it; the documented "one kernel -> its GPU" exception): the
 # full matrix on the 8060S, the R9700 carried (the proof is required here too: no R9700 step is dropped without it)
 p = aplan(["kernels/gfx1151/new.hip"], arep({}, gate="full gate or the release steps above: 1 file(s) in no module (kernels/gfx1151/new.hip)"))
@@ -865,10 +870,44 @@ check("d1b gfx1151 header included by an unregistered kernel test: kt_full on th
 # a gfx1151 kernel owned by a module that declares no gfx1151 part: fail closed (both GPUs)
 p = aplan(["kernels/gfx1151/x.hip"], arep({"kernels.x": ["kernels/gfx1151/x.hip"]}))
 check("d1b gfx1151 file of a module without an arch entry: full both", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
+# mutation-check additions (scratch/v0251_d1b/mutate.txt): every reason arch_scope refuses on, each on its own
+# (a) a kernels/gfx1151 file its module owns but does not list in arch.gfx1151.paths (only gfx1151 includers): both GPUs
+MODSO = dict(MODSA, **{"kernels.gdn": dict(MODSA["kernels.gdn"], paths=MODSA["kernels.gdn"]["paths"] + ["kernels/gfx1151/gdn_y.h"])})
+MAO = dict(MA, includers=dict(MA["includers"], **{"kernels/gfx1151/gdn_y.h": ["kernels/gfx1151/gdn_x.hip"] + UNITY}))
+p = aplan(["kernels/gfx1151/gdn_y.h"], arep({"kernels.gdn": ["kernels/gfx1151/gdn_y.h"]}, gpus=("gfx1151", "gfx1201")), mods=MODSO, m=MAO)
+check("d1b gfx1151 file owned but not in the module's arch paths: full both", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
+# (b) a caller module (rdeps) that declares no gfx1151 part: both GPUs
+p = aplan([KG], dict(R_GDN, module_callers={"kernels.gdn": ["kernels.x"]}))
+check("d1b caller module without an arch part: full both", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
+# (c) a touched module without an arch part that owns no product file of the diff (a build input's owner): both GPUs
+p = aplan([KG, "data/x.bin"], arep({"kernels.gdn": [KG], "page_pool": ["data/x.bin"]}, gate="full gate, both GPUs (cross-module: kernels.gdn, page_pool)"))
+check("d1b touched module without an arch part (no product file of its own): full both", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
+# (d) impact.py's full gate for a reason these files do not explain (an includer in no module, all files registered)
+p = aplan([KG], arep({"kernels.gdn": [KG]}, gate="full gate or the release steps above: 1 file(s) in no module (kernels/gfx1151/orphan.hip); "
+                                                  "kernels/gfx1151/orphan.hip includes kernels/gfx1151/gdn_x.hip and is in no module"))
+check("d1b impact full gate not explained by the arch files: full both", is_full_both(p), (p["level"], p["gpu_steps"], p["full_reasons"][:2]))
+# (e) arch_scope itself: a build file / a CMake source list / a build-wide input refuses the scope (impact.py reports them too)
+for why, kw in (("build file", {"bfiles": ["build.bat"]}), ("CMake source list", {"lists": {"cmake/kernels.cmake": [KG]}}),
+                ("build-wide input", {"rep": dict(R_GDN, build_wide=["tools/bin2c/main.cpp"])})):
+    args = dict(files=[KG], product=[KG], modules={"kernels.gdn": [KG]}, callers={}, mods=MODSA, m=MA, rep=R_GDN, lists={}, bfiles=[])
+    args.update(kw)
+    s_, w_ = tc.arch_scope(**args)
+    check(f"d1b arch_scope refuses a {why}", s_ is None and ("build" in w_), (why, s_, w_))
+s_, w_ = tc.arch_scope(files=[KG], product=[KG], modules={"kernels.gdn": [KG]}, callers={}, mods=MODSA, m=MA, rep=R_GDN, lists={}, bfiles=[])
+check("d1b arch_scope accepts the registered gfx1151 file", s_ and s_["arch"] == "gfx1151" and s_["registered"] == {"kernels.gdn": [KG]}, (s_, w_))
+# (f) a .hip under kernels/gfx1151/ that the map compiles for both archs, next to a gfx1151 header (which lifts the
+# diff-level GPU check): the per-file map check refuses it
+MAF = dict(MAH, hip={KG: {"arch": ["gfx1151", "gfx1201"]}})
+p = aplan([KG, HG], arep({"kernels.gdn": [KG], "kernels.common": [HG]}, gpus=("gfx1151", "gfx1201")), mods=MODSH, m=MAF)
+check("d1b gfx1151 .hip the map builds for both archs (+ a header): full both", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
+p = aplan([KG, HG], arep({"kernels.gdn": [KG], "kernels.common": [HG]}, gpus=("gfx1151", "gfx1201")), mods=MODSH, m=dict(MAH, hip={KG: {"arch": ["gfx1151"]}}))
+check("d1b the same pair when the map says gfx1151 only: arch-scoped", p["gpu_steps"]["r9700"] == [] and carry_of(p).get("status") == "required", (p["gpu_steps"], p["full_reasons"][:2]))
 # the impact map lists both GPUs for the diff (guard analysis disagrees with the path): fail closed
 p = aplan([KG], arep({"kernels.gdn": [KG]}, gpus=("gfx1151", "gfx1201")))
 check("d1b map lists both GPUs: full both", is_full_both(p), (p["level"], p["gpu_steps"], p.get("carry")))
 # gfx1151 kernel + host file / contract.abi / build file / shared header: today's full matrix, no carry
+p = aplan([KG, "src/ops/attention.cpp"], arep({"kernels.gdn": [KG]}, gate="full gate or the release steps above: 1 file(s) in no module (src/ops/attention.cpp)"))
+check("d1b the plan says which file keeps a gfx1151 kernel diff off the per-arch plan", "src/ops/attention.cpp" in p.get("arch_scope_note", ""), p.get("arch_scope_note"))
 for extra, r in ((["src/ops/attention.cpp"], arep({"kernels.gdn": [KG]}, gate="full gate or the release steps above: 1 file(s) in no module (src/ops/attention.cpp)")),
                  (["include/whirl/kernels_abi.h"], arep({"kernels.gdn": [KG], "contract.abi": ["include/whirl/kernels_abi.h"]},
                                                         gate="full gate, both GPUs (contract module contract.abi)", gpus=("gfx1151", "gfx1201"))),
@@ -913,6 +952,10 @@ with tempfile.TemporaryDirectory() as td:
     p = pplan({"r9700": wrep("ok.json")})
     check("d1b proof: gfx1201 objects identical, bound -> carry proven, R9700 still none", carry_of(p).get("status") == "proven" and p["gpu_steps"]["r9700"] == []
           and p["level"] == "module" and "ok.json" in carry_of(p).get("proof", ""), (carry_of(p), p["gpu_steps"]["r9700"], p["full_reasons"]))
+    check("d1b proof: the plan's proof note is the carry's (not 'not used: kernel sources touched')",
+          "carry proven" in p["proofs"].get("r9700", "") and "not used" not in p["proofs"].get("r9700", ""), p["proofs"])
+    p = pplan({"r9700": wrep("xpair.json", objs=[{"index": 0, "target": "gfx1201/gfx1151", "same": True}, O_OK[1]])})
+    check("d1b proof: a gfx1201 object paired with another arch is refused even if marked same", carry_of(p).get("status") == "refused", carry_of(p))
     p = pplan({"r9700": wrep("cuid.json", objs=[dict(O_OK[0], same=False, cuid_only=True, cuid="cuid-only"), O_OK[1]])})
     check("d1b proof: gfx1201 identical-except-cuid counts as identical", carry_of(p).get("status") == "proven", carry_of(p))
     p = pplan({"r9700": wrep("eq.json", arch="gfx1201", verdict="EQUIVALENT",
@@ -938,10 +981,33 @@ with tempfile.TemporaryDirectory() as td:
         check(f"d1b proof refused ({why}) -> carry refused, full matrix both GPUs", carry_of(p).get("status") == "refused" and p["level"] == "full"
               and p["gpu_steps"]["r9700"] == R97_ALL and p["gpu_steps"]["8060s"] == S8_ALL and any("carry" in r for r in p["full_reasons"]),
               (why, carry_of(p), p["level"], p["full_reasons"][:2]))
+    p = pplan({"r9700": refused[0][1]})
+    check("d1b proof refused: no kernel test is reported as carried any more", (p.get("arch_scope") or {}).get("tests_carried") == []
+          and carry_of(p).get("status") == "refused", (p.get("arch_scope") or {}).get("tests_carried"))
     p = aplan(GDN_ONLY, R_GDN, build=None, proofs={"r9700": wrep("nob.json")})
     check("d1b proof without --build: refused (cannot be bound)", carry_of(p).get("status") == "refused" and p["level"] == "full", carry_of(p))
     p = pplan({"r9700": os.path.join(td, "missing.json")})
     check("d1b proof file missing: refused", carry_of(p).get("status") == "refused", carry_of(p))
+    # v0251-d1a interface (coordinator 13:52): a work_equal --arch report has a top-level "arch"; the ADR-0003 short-cut
+    # (check_proof, a diff without kernel sources) takes a report only when its "arch" is null or the card's own arch:
+    # an --arch gfx1151 report judges no gfx1201 object and counts gfx1151 runs only, so with untagged runs it must never
+    # skip R9700 steps (block), while a --arch gfx1201 or whole-exe report still does (pass)
+    def eqrep(name, **over):
+        r = {"format": "whirl-work-equal/1", "verdict": "EQUIVALENT", "checks": {"code_objects": "identical", "launch_sequence": "identical", "golden": "identical"},
+             "b": {"exes": {"whirl.exe": SW_, "whirl-server.exe": SS_}}, "launch": [{"runs": [{"key": "st_swift_precise/whirl.exe selftest x.gguf"}]}]}
+        r.update(over)
+        f = os.path.join(td, name)
+        json.dump(r, open(f, "w"))
+        return f
+
+    CORE_R = rep({"forward.attn": [FA]}, "release_gate.ps1 -Module forward.attn")
+    for dv_, arch_, ok_ in (("r9700", None, True), ("r9700", "gfx1201", True), ("r9700", "gfx1151", False),
+                            ("8060s", "gfx1151", True), ("8060s", "gfx1201", False)):
+        p = plan([FA], CORE_R, build=b, proofs={dv_: eqrep(f"eq_{dv_}_{arch_}.json", **({"arch": arch_} if arch_ else {}))}, core_sets={})
+        sk = p["skipped_by_proof"][dv_]
+        check(f"d1b check_proof: a report with arch {arch_} on the {dv_} " + ("skips its covered steps" if ok_ else "is refused (another card's report)"),
+              (set(sk) == {"kt_full", "st_swift_precise", "golden_swift", "golden_moe"}) if ok_ else (sk == [] and str(arch_) in p["proofs"].get(dv_, "")),
+              (dv_, arch_, sk, p["proofs"]))
     p = pplan({"8060s": wrep("s8.json")})
     check("d1b proof for the 8060S on a gfx1151 diff: not used (its kernels changed), R9700 carry still required",
           "not used" in p["proofs"].get("8060s", "") and p["skipped_by_proof"]["8060s"] == [] and carry_of(p).get("status") == "required"
@@ -1035,7 +1101,8 @@ ARCH_MODS = {k: d["arch"]["gfx1151"] for k, d in RMODS.items() if (d.get("arch")
 G1151 = sorted("kernels/gfx1151/" + os.path.basename(f) for f in glob.glob(os.path.join(tc.REPO, "kernels", "gfx1151", "*.hip")))
 HOSTINC = {f for f, inc in RMAP["includers"].items() if f.startswith("kernels/gfx1151/")
            and any(not (x.startswith(("kernels/gfx1151/", "tests/")) or x == "kernels/whirl_kernels.hip") for x in inc)}
-check("d1b shipped: attn_ws4_index.h is the kernels/gfx1151 file host code includes (map)", HOSTINC == {"kernels/gfx1151/attn_ws4_index.h"}, HOSTINC)
+check("d1b shipped: the impact map records the host includer of kernels/gfx1151/attn_ws4_index.h (src/ops/attention.cpp)",
+      "kernels/gfx1151/attn_ws4_index.h" in HOSTINC and "src/ops/attention.cpp" in RMAP["includers"].get("kernels/gfx1151/attn_ws4_index.h", []), sorted(HOSTINC))
 own = lambda f: [k for k, d in RMODS.items() if tc.matches(f, d.get("paths") or [])]
 miss = [f for f in G1151 if not any(tc.matches(f, ARCH_MODS.get(k, {}).get("paths") or []) for k in own(f))]
 check("d1b shipped: every kernels/gfx1151/*.hip of the tree is in its module's gfx1151 arch paths", G1151 and not miss, miss)
