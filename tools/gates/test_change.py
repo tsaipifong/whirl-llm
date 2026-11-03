@@ -16,8 +16,11 @@ One command takes a change and prints (and with --run executes) exactly:
     per module in modules.json "arch", included by nothing outside that set but tests; see arch_scope) plus registered
     kernel tests: that module's arch steps on that GPU only (the full matrix there when no module owns a file), and NO
     GPU step on the other GPU, which is carried by a work_equal [--arch] proof instead: every gfx1201 code object of
-    --build equal to those of --base-build, a build stamped (--stamp-build) at the plan's base revision. The impact map
-    must be the planned version's (--worktree, or a root checked out clean at the --range / --commit end). --run refuses
+    --build equal to those of --base-build, a build stamped (--stamp-build) at the plan's base revision; --build itself
+    the planned version's (stamped at the --range end / --commit, or for --worktree configured from this tree with no
+    source newer than its exes; v0251-d1b3). The impact map and the selection data (modules.json) must be the planned
+    version's (--worktree, or a root checked out clean at the --range / --commit end; a diff that edits modules.json or a
+    selection tool gets the full matrix). --run refuses
     while the carry is not proven; a refused proof plans the full matrix on both GPUs.
 Every --run appends one row to the test-cost ledger (internal_docs/TEST_COST_LEDGER.tsv of the workspace, or --ledger).
 DEV-TIME ONLY: a release / rc merge / bug-fix release still runs the full release gate on both GPUs (docs/dev/testing.md);
@@ -1045,9 +1048,11 @@ def arch_file(f, arch, m):
     return True, ""
 
 
-# v0251-d1b review C-1: the tools that select the steps and judge the carry; a diff that changes them would judge itself
+# v0251-d1b review C-1: the tools that select the steps and judge the carry; a diff that changes them would judge itself.
+# v0251-d1b3 (review C-10): and the selection data they read from the working tree: tools/gates/modules.json (the
+# modules' arch steps; an edit in the same diff narrowed its own 8060S plan 15 -> 13 steps in the reviewer's probe)
 SELF_TOOLS = ["tools/gates/test_change.py", "tools/impact/work_equal.py", "tools/impact/impact.py", "tools/impact/impact_build.py",
-              "tools/impact/cxxscan.py", "tools/impact/launch_table.py"]
+              "tools/impact/cxxscan.py", "tools/impact/launch_table.py", "tools/gates/modules.json"]
 # v0251-d1b review AO-6: kernel family manifest under kernels/: read by tools/gates/kernel_iso_check.py only (a CPU check),
 # compiled into no code object; a port must add its new fragments there
 FAMILIES = "kernels/families.json"
@@ -1115,7 +1120,7 @@ def arch_scope(files, product, modules, callers, mods, m, rep, lists, bfiles, ch
         return None, map_rev[1]
     own_tools = [f for f in files if matches(f, SELF_TOOLS)]
     if own_tools:
-        return None, f"{own_tools[0]} changes the tools that select the steps / judge the carry (they would judge their own change)"
+        return None, f"{own_tools[0]} changes the tools / data that select the steps and judge the carry (they would judge their own change)"
     if lists or bfiles or any(matches(f, impact.BUILD_WIDE) for f in files) or rep.get("build_wide"):
         return None, "a build file or a build-wide input changed"
     code = [f for f in product if f != FAMILIES]
@@ -1179,11 +1184,18 @@ MANIFEST = "whirl_build_manifest.json"  # v0251-d1b review AO-5: written by --st
 # ninja's Windows .ninja_log mtime = FILETIME (100 ns since 1601) - 12622770400 s (ninja disk_interface.cc); unix ns / 100 +
 # 11644473600 s - 12622770400 s = unix ns / 100 - this constant (checked on wt_a25_rel/build/Release: 0.43 s apart)
 NINJA_EPOCH_100NS = 9782968000000000
-NINJA_SLACK_100NS = 10 * 10 ** 7  # an exe's mtime may trail its logged one (post-link resource step): 0.43 s measured
+# v0251-d1b3 (review C-12): a .ninja_log v7 line is start_ms, end_ms, mtime, output, command hash (ninja build_log.cc), and
+# for a normal rule the logged mtime is the COMMAND START (build.cc FinishCommand: record_mtime = command_start_time_; restat
+# / generator rules log the output's own mtime). So the output's mtime lies between the logged value and the logged value
+# plus the command's run time (end - start of the same line): on wt_a25_rel/build/Release 1701 of 1720 outputs sit within
+# 0.2 s of their run time, whirl.exe 0.43 s of a 0.50 s link, three > 10 s (19.4 s the longest). The slack covers the file
+# system's timestamp write after the command returns, not the link time.
+NINJA_SLACK_100NS = 2 * 10 ** 7
 
 
 def ninja_mtimes(build):
-    """{output base name (lower case): mtime} of the newest .ninja_log entry per output of build (100 ns since 2001)"""
+    """{output base name (lower case): (logged mtime, run time)} of the newest .ninja_log entry per output of build (100 ns
+    units; mtime since 2001, run time = end - start of that line)"""
     out = {}
     try:
         lines = open(os.path.join(build, ".ninja_log"), encoding="utf-8", errors="replace").read().splitlines()
@@ -1191,19 +1203,21 @@ def ninja_mtimes(build):
         return out
     for ln in lines[1:]:
         p = ln.split("\t")
-        if len(p) >= 4 and p[2].isdigit():
-            out[p[3].replace("\\", "/").rsplit("/", 1)[-1].lower()] = int(p[2])
+        if len(p) >= 4 and p[0].isdigit() and p[1].isdigit() and p[2].isdigit():
+            out[p[3].replace("\\", "/").rsplit("/", 1)[-1].lower()] = (int(p[2]), max(0, int(p[1]) - int(p[0])) * 10 ** 4)
     return out
 
 
 def ninja_unlogged(build, names):
-    """the exes of build that are not the outputs its last ninja run wrote (copied / replaced after the build: an exe
-    copied into the folder gets the copy time, hours or days after the logged mtime)"""
+    """the outputs of build that are not what its last ninja run wrote: the file's mtime must lie in [logged start,
+    logged start + run time + NINJA_SLACK] (copied / replaced after the build: the copy time, hours or days later; an
+    older file: not that run's)"""
     logged = ninja_mtimes(build)
     bad = []
     for x in names:
         t = os.stat(os.path.join(build, x)).st_mtime_ns // 100 - NINJA_EPOCH_100NS
-        if x.lower() not in logged or not 0 <= t - logged[x.lower()] <= NINJA_SLACK_100NS:
+        k = x.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if k not in logged or not 0 <= t - logged[k][0] <= logged[k][1] + NINJA_SLACK_100NS:
             bad.append(x)
     return bad
 
@@ -1230,27 +1244,92 @@ def stamp_problems(head, dirty, src_newest, exe_oldest, unlogged=()):
 PRODUCT_DIRS = ["src", "include", "kernels", "cmake", "CMakeLists.txt", "build.bat", "redist"]
 
 
-def stamp_build(build):
-    """--stamp-build DIR: record which commit the exes of DIR were built from (DIR/whirl_build_manifest.json): the source
-    tree comes from DIR/CMakeCache.txt (CMAKE_HOME_DIRECTORY); refused (exit 2) on stamp_problems"""
+class BuildFactsError(Exception):
+    pass
+
+
+def build_facts(build, untracked=False):
+    """(source tree, HEAD, dirty product files, newest product source mtime, oldest exe mtime, exes ninja did not log) of
+    a build folder: the source tree is DIR/CMakeCache.txt's CMAKE_HOME_DIRECTORY; untracked=True also times the untracked
+    product files (a --worktree build compiles them). Raises BuildFactsError (no CMakeCache, not a git tree)."""
     try:
         cache = open(os.path.join(build, "CMakeCache.txt"), encoding="utf-8", errors="replace").read()
     except OSError as e:
-        print(f"test_change: --stamp-build: no CMakeCache.txt in {build} ({e})")
-        return 2
+        raise BuildFactsError(f"no CMakeCache.txt in {build} ({e})")
     mh = re.search(r"^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$", cache, re.M)
     src = mh.group(1).strip() if mh else ""
     try:
         head = impact.git("rev-parse", "HEAD", root=src).strip() if src else ""
         dirty = [ln[3:] for ln in impact.git("status", "--porcelain", "--untracked-files=all", "--", *PRODUCT_DIRS, root=src).splitlines() if ln.strip()]
         tracked = impact.git("ls-files", "--", *PRODUCT_DIRS, root=src).splitlines()
+        if untracked:
+            tracked += impact.git("ls-files", "--others", "--exclude-standard", "--", *PRODUCT_DIRS, root=src).splitlines()
     except SystemExit as e:
-        print(f"test_change: --stamp-build: {src or '(no source dir)'} is not a git tree ({e})")
-        return 2
+        raise BuildFactsError(f"{src or '(no source dir)'} is not a git tree ({e})")
     mt = [os.path.getmtime(os.path.join(src, f)) for f in tracked if os.path.isfile(os.path.join(src, f))]
     exes = {x: os.path.join(build, x) for x in PROOF_EXES if os.path.isfile(os.path.join(build, x))}
-    probs = stamp_problems(head, dirty, max(mt) if mt else None, min(os.path.getmtime(p) for p in exes.values()) if "whirl.exe" in exes else None,
-                           ninja_unlogged(build, sorted(exes)))
+    return (src, head, dirty, max(mt) if mt else None, min(os.path.getmtime(p) for p in exes.values()) if "whirl.exe" in exes else None,
+            ninja_unlogged(build, sorted(exes)))
+
+
+def same_dir(a, b):
+    return bool(a) and bool(b) and os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def tree_build_problems(src, tree, src_newest, exe_oldest, unlogged=()):
+    """why a build folder is not the build of the working tree `tree` (--worktree: no commit to stamp; empty = it is): it
+    was configured from that tree (src: CMakeCache CMAKE_HOME_DIRECTORY), no product source of the tree (tracked or
+    untracked) is newer than the oldest exe, every exe is the output ninja logged (v0251-d1b3, review C-11)"""
+    out = []
+    if not same_dir(src, tree):
+        out.append(f"--build was configured from {src or '(no source tree recorded)'}, not the planned tree {tree}")
+    if unlogged:
+        out.append(f"{', '.join(unlogged)} of --build: not the output ninja logged (.ninja_log): copied or replaced after the build")
+    if exe_oldest is None:
+        out.append("no whirl.exe in --build")
+    elif src_newest is not None and src_newest > exe_oldest:
+        out.append("a product source of the planned tree is newer than --build's exes: rebuild after the last edit")
+    return out
+
+
+def head_build_problems(build, head_rev=None, head_tree=None):
+    """why --build is not the planned version's build (empty = it is; v0251-d1b3, review C-11): --range / --commit
+    (head_rev, the planned revision's full sha): build stamped by --stamp-build at head_rev, clean, its exes unchanged
+    since; --worktree (head_tree, the planned working tree): tree_build_problems on build_facts; neither known: refused"""
+    if head_rev:
+        try:
+            man = json.load(open(os.path.join(build, MANIFEST), encoding="utf-8"))
+        except (OSError, ValueError):
+            return [f"--build {build} has no stamp ({MANIFEST}): run test_change.py --stamp-build {build} right after building the planned version"]
+        if man.get("format") != "whirl-build-manifest/1" or not man.get("clean"):
+            return [f"{MANIFEST} of --build is not a clean stamp"]
+        if str(man.get("commit", "")).lower() != str(head_rev).lower():
+            return [f"--build is stamped at {str(man.get('commit', '?'))[:9]}, the planned revision is {str(head_rev)[:9]}"]
+        out = []
+        for exe in PROOF_EXES:
+            st, p = (man.get("exes") or {}).get(exe), os.path.join(build, exe)
+            if not st or not os.path.exists(p) or file_sha256(p) != st:
+                out.append(f"{exe} of --build is not the stamped one (rebuilt or replaced after the stamp)")
+        return out
+    if head_tree:
+        try:
+            src, _head, _dirty, newest, oldest, unlogged = build_facts(build, untracked=True)
+        except BuildFactsError as e:
+            return [f"--build: {e}"]
+        return tree_build_problems(src, head_tree, newest, oldest, unlogged)
+    return ["the planned version is not known (no head revision, no working tree): --build cannot be bound to it"]
+
+
+def stamp_build(build):
+    """--stamp-build DIR: record which commit the exes of DIR were built from (DIR/whirl_build_manifest.json): the source
+    tree comes from DIR/CMakeCache.txt (CMAKE_HOME_DIRECTORY); refused (exit 2) on stamp_problems"""
+    try:
+        src, head, dirty, newest, oldest, unlogged = build_facts(build)
+    except BuildFactsError as e:
+        print(f"test_change: --stamp-build: {e}")
+        return 2
+    exes = {x: os.path.join(build, x) for x in PROOF_EXES if os.path.isfile(os.path.join(build, x))}
+    probs = stamp_problems(head, dirty, newest, oldest, unlogged)
     if probs:
         print(f"test_change: --stamp-build {build}: refused: " + "; ".join(probs))
         return 2
@@ -1263,13 +1342,14 @@ def stamp_build(build):
     return 0
 
 
-def carry_proof(path, arch, build, base=None, base_rev=None):
+def carry_proof(path, arch, build, base=None, base_rev=None, head_rev=None, head_tree=None):
     """(ok, why): the work_equal report at path shows every `arch` code object of --build's exes (whirl.exe and
     whirl-server.exe, both required: the carried steps run both) equal to the BASE build's. Read per object
     (exes[].code_objects.objects[]: target, same / cuid_only, only), so a plain `compare` report and a v0251-d1a
     `compare --arch` report count the same way; the report's b exes must be --build's (sha256) and (review AO-5) its a exes
     the base build's: --base-build DIR stamped by --stamp-build at the plan's base revision (base_rev), unchanged since, and
-    not the B exes (a self-compare proves nothing). Refused: another arch named by the report, --arch verdict
+    not the B exes (a self-compare proves nothing); (v0251-d1b3, review C-11) --build itself the planned version's
+    (head_build_problems: stamped at head_rev, or for --worktree a build of head_tree). Refused: another arch named by the report, --arch verdict
     NOT_EQUIVALENT, a launch sequence or golden output that differs, an object of that arch that differs or sits on one
     side only, no object of that arch. Launch / golden evidence is not required: the diff changed no host source
     (arch_scope), so the host work on that GPU is the base build's."""
@@ -1305,6 +1385,11 @@ def carry_proof(path, arch, build, base=None, base_rev=None):
         if aex.get(exe) == bex[exe]:
             return False, f"{exe}: A and B are the same file (a self-compare proves nothing)"
         names.append(exe)
+    # v0251-d1b3 (review C-11): the B side is the planned version's build (a stamp at the planned revision, or for
+    # --worktree a build of that tree newer than its sources), not any folder whose exes the report happens to name
+    hp = head_build_problems(build, head_rev=head_rev, head_tree=head_tree)
+    if hp:
+        return False, "the B side is not the planned version's build: " + "; ".join(hp)
     # review AO-5: the A side is the base build of the plan's base revision
     if not base:
         return False, "the A side is not bound: give --base-build DIR (a base build stamped with test_change.py --stamp-build)"
@@ -1343,9 +1428,11 @@ def carry_proof(path, arch, build, base=None, base_rev=None):
 
 def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", build=None, base_build=None, proofs=None,
               scratch=None, all_cpu=False, gate_map=None, cmake_graph=None, core_sets=None, map_rev=(True, ""), base_rev=None,
-              read_file=None):
+              read_file=None, head_rev=None, head_tree=None):
     """map_rev (v0251-d1b review AO-4): (ok, why) whether m is the impact map of the planned version (map_matches);
-    base_rev: the full sha of the plan's base revision (the carry's A side is bound to it, review AO-5); read_file(side,
+    base_rev: the full sha of the plan's base revision (the carry's A side is bound to it, review AO-5); head_rev / head_tree
+    (v0251-d1b3, review C-11): the planned revision's full sha (--range / --commit) or the planned working tree
+    (--worktree); the carry's B side (--build) is bound to it; read_file(side,
     path) -> text of a file at the base ("old") / planned ("new") version or None (kernels/families.json, review AO-6)"""
     files = sorted(changes)
     gm = gate_map if gate_map is not None else load_gate_map()
@@ -1515,10 +1602,12 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
             c = {"by": CARRY_BY.format(arch=ARCH[dv]), "status": "required", "proof": "", "covers": covers,
                  "covers_min": round(sum(step_seconds(times, dv, s) or 0 for s in covers) / 60, 1),
                  "why": (f"no proof yet: give --base-build DIR (the base revision's build, stamped with --stamp-build; code objects compared "
-                         f"on the CPU), optionally with --proof {dv}=FILE (a work_equal [--arch {ARCH[dv]}] report of that base build)")}
+                         f"on the CPU), optionally with --proof {dv}=FILE (a work_equal [--arch {ARCH[dv]}] report of that base build); "
+                         f"--build must be the planned version's (stamped with --stamp-build at the --range end / --commit; for "
+                         f"--worktree a build of this tree)")}
             src = (proofs or {}).get(dv) or co_json
             if src:
-                ok, w = carry_proof(src, ARCH[dv], build, base=base_build, base_rev=base_rev)
+                ok, w = carry_proof(src, ARCH[dv], build, base=base_build, base_rev=base_rev, head_rev=head_rev, head_tree=head_tree)
                 c.update(status="proven" if ok else "refused", proof=src, why=w)
             carry[dv] = c
         refused = {dv: c for dv, c in carry.items() if c["status"] == "refused"}
@@ -1970,6 +2059,12 @@ def main():
         base_rev = impact.git("rev-parse", f"{old_rev}^{{commit}}", root=root).strip()
     except SystemExit:
         base_rev = None
+    # v0251-d1b3 (review C-11): the planned version the carry's B side (--build) is bound to
+    head_tree = root if new_rev is None else None
+    try:
+        head_rev = impact.git("rev-parse", f"{new_rev}^{{commit}}", root=root).strip() if new_rev else None
+    except SystemExit:
+        head_rev = None
 
     def read_file(side, path):
         if side == "old":
@@ -1983,7 +2078,7 @@ def main():
     p = plan_with_graph(title, cid, changes, rep, load_mods(root), m, gates, times, root, old_rev, new_rev,
                         os.path.join(scratch, "cmake_graph"), use_graph=not a.no_cmake_graph, one_gpu=a.one_gpu, build=a.build,
                         base_build=a.base_build, proofs=proofs, scratch=scratch, all_cpu=a.all_cpu, map_rev=map_rev,
-                        base_rev=base_rev, read_file=read_file)
+                        base_rev=base_rev, read_file=read_file, head_rev=head_rev, head_tree=head_tree)
     if a.json:
         print(json.dumps(p, indent=1))
     else:
