@@ -728,6 +728,28 @@ with tempfile.TemporaryDirectory() as td:
     expect("d1a db: --arch gfx1201 keeps the gfx1201 rows of both exes (the gfx1151 rows differ) -> identical", L.get("result") == "identical", L)
     L = _arch(we.compare_launch, f"db:{SH[A]}", f"db:{SH[B8]}@gfx1151", db=db, arch="gfx1201")
     expect("d1a db: B's evidence named @gfx1151 under --arch gfx1201 -> missing", L.get("result") == "missing", L)
+    # v0251-d1a round 2, REVIEW-v0251-d1 C-6: lt_import.py stores work_json.gpu = the log's own --device ('' without one);
+    # under --arch a db row is attributed only by that, never by the run's gpu column (a folder log without --device
+    # proves nothing either)
+    db2 = J("arch_runsgpu.db")
+    con = sqlite3.connect(db2)
+    con.execute("CREATE TABLE work_traces (id INTEGER PRIMARY KEY, run_id TEXT, measurement_id INTEGER, scope TEXT, component TEXT, cell TEXT, "
+                "exe_sha256 TEXT, work_hash TEXT, seq_hash TEXT, arg_hash TEXT, launches INTEGER, launch_table TEXT, work_json TEXT, recorded_at TEXT)")
+    con.execute("CREATE TABLE runs (run_id TEXT PRIMARY KEY, gpu TEXT)")
+    con.execute("INSERT INTO runs VALUES ('run97', 'gfx1201')")
+    for sha_ in (SH[A], SH[B8]):
+        con.execute("INSERT INTO work_traces (run_id, scope, component, cell, exe_sha256, work_hash, seq_hash, arg_hash, launches, work_json) "
+                    "VALUES ('run97','test','golden_swift','k1',?,'w1','s','a',5,'{\"gpu\": \"\"}')", (sha_,))
+    con.commit(); con.close()
+    L = _arch(we.compare_launch, f"db:{SH[A]}", f"db:{SH[B8]}", db=db2, arch="gfx1201")
+    expect("C-6 db rows whose log named no GPU (runs.gpu gfx1201 only): --arch gfx1201 -> missing, not proof", L.get("result") == "missing", L)
+    L = we.compare_launch(f"db:{SH[A]}@gfx1201", f"db:{SH[B8]}@gfx1201", db=db2)
+    expect("C-6 pin: without --arch, db:<sha>@gfx1201 still falls back to the run's gpu (identical)", L.get("result") == "identical", L)
+    # REVIEW-v0251-d1 N-1: neighbour target names as LLVM AMDGPUUsage EF_AMDGPU_MACH (gfx1151 0x4a / gfx1201 0x4e unchanged)
+    names = {m: (we.amdgpu_objects(mk_elf(mach=m)) or [{}])[0].get("target") for m in (0x30, 0x36, 0x42, 0x43, 0x46, 0x47, 0x4C, 0x4A, 0x4E)}
+    expect("N-1 EF_AMDGPU_MACH names: 0x30 gfx908, 0x36 gfx1030, 0x42 gfx1013, 0x43 gfx1150, 0x46 gfx1101, 0x47 gfx1102, 0x4C gfx942",
+           names == {0x30: "gfx908", 0x36: "gfx1030", 0x42: "gfx1013", 0x43: "gfx1150", 0x46: "gfx1101", 0x47: "gfx1102", 0x4C: "gfx942",
+                     0x4A: "gfx1151", 0x4E: "gfx1201"}, names)
 
     # CLI: the interface v0251-d1b (test_change) relies on: --arch, EQUIVALENT / NOT_EQUIVALENT for that target, exit 0 / 1 / 2 / 3
     WE = os.path.join(HERE, "work_equal.py")
