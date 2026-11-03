@@ -232,8 +232,9 @@ python tools/impact/cmake_graph_test.py                       # build-graph diff
 python tools/impact/cmake_graph.py --old A --new B --work DIR # the build-graph diff of two revisions (JSON)
 ```
 
-`cpu_modules_check` runs `impact_cmake_test.py`, `cmake_graph_test.py` and `test_change_test.py`, so a change to
-these selection rules is tested by the release gate as well.
+`cpu_modules_check` runs `impact_cmake_test.py`, `cmake_graph_test.py`, `test_change_test.py` and `work_equal_test.py`
+(the work-equivalence checker, also `--arch gfx1201|gfx1151` for one GPU), so a change to these selection and
+equivalence rules is tested by the release gate as well.
 
 How the plan is built, from the impact map (`impact.py`) and `modules.json`:
 
