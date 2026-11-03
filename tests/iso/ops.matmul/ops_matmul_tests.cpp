@@ -14,6 +14,7 @@ int main(int argc, char** argv) {
                      {"matmul_path", testMatmulPath},
                      {"gemv_tile", testGemvTile},
                      {"gemv_wide", testGemvWide},
-                     {"gemm", testOpsGemm}},
+                     {"gemm", testOpsGemm},
+                     {"gemmfq", testOpsGemmFq}},
                     argc, argv);
 }

@@ -118,9 +118,15 @@ struct GemmFlags {
     // (kernels::gemvhCap(), read by the caller: the choice stays a pure function); 0: one block per 16 rows
     unsigned gemvh_cap = 0;
     bool gemms_tie_larger_bm = false; // device::Profile: precise gemms ties go to the larger row block
+    // fused-dequant MXFP4 GEMM slot (gfx1151 gemmfq, v0251-a3port; bitwise == dequant_f16 + gemm_c<i>_f16): an MXFP4
+    // dequant choice at n >= fdq_min rows runs gemmfq_<kGemmFqNames[fdq - 1]>_mxfp4 when the code object has it;
+    // 0 = the old dequant + f16 GEMM. Context::gemmFlags: the device default (device::Profile::fdq_default) unless
+    // WHIRL_FDQ8S / WHIRL_FDQ8S_MIN set it (config::fdqEnv at the load)
+    int fdq = 0;
+    std::uint32_t fdq_min = 1025;
     std::uint32_t gv_max = 16;
 };
-enum class GemmKind : std::uint8_t { gemvh, gemms, gemmhq, gemmh, gemmc };
+enum class GemmKind : std::uint8_t { gemvh, gemms, gemmhq, gemmh, gemmc, gemmfq };
 struct GemmPlan {
     GemmKind kind = GemmKind::gemmc;
     Function f = nullptr;

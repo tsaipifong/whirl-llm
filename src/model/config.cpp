@@ -290,6 +290,9 @@ void applyGemvEnv(Model& m) {
     if (const auto& v = env->gemv_wh) parseGemvWHead(m, *v);
 }
 
+// v0251-a3port TEST-FIRST STATE (commit 1): the interface only; commit 2 parses WHIRL_FDQ8S / _MIN (model.h)
+FdqEnv fdqEnv(const whirl::config::EnvSnapshot&) { return FdqEnv{}; }
+
 // mtpDefaults: src/spec/policy.cpp (arch025-M4)
 
 namespace {

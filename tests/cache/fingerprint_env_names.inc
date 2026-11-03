@@ -30,6 +30,8 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_DRAFT_VOCAB",  // src/cli/build_model.cpp
     "WHIRL_DRAFT_WINDOW",  // src/common/numerics.cpp
     "WHIRL_DRAFT_WINDOW_MIN",  // src/common/numerics.cpp
+    "WHIRL_FDQ8S",  // src/config/env_snapshot.cpp (v0251-a3port: gemmfq slot; bitwise-equal, hashed like ACT_FUSE / GEMMH)
+    "WHIRL_FDQ8S_MIN",  // src/config/env_snapshot.cpp (v0251-a3port: gemmfq row threshold)
     "WHIRL_FD_SPLITS",  // src/config/env_snapshot.cpp
     "WHIRL_FFN_H16",  // src/common/numerics.cpp
     "WHIRL_FLOAT_GEMV",  // src/common/numerics.cpp

@@ -269,6 +269,17 @@ void parseGemvW(Model& m, std::string_view list);
 void parseGemvWHead(Model& m, std::string_view list);
 void applyGemvEnv(Model& m);
 
+// v0251-a3port (feat026-fdq): the fused-dequant MXFP4 prefill GEMM switches of a load's snapshot (Model::load ->
+// Context::fdq / fdq_min). WHIRL_FDQ8S: unset or "" -> -1 (the device default, device::Profile::fdq_default);
+// "c2" / "1" -> 1, "t2" / "2" -> 2 (kernels::kGemmFqNames); any other value ("0", "off", the source branch's
+// screening-only probes c2l / t2l / c2f, a typo) -> 0 = the old dequant + f16 GEMM (the source's rule: unknown =
+// off). WHIRL_FDQ8S_MIN: unset or "" -> 1025 (the tune bucket boundary, n > tune_small_max = 1024), else strtoul.
+struct FdqEnv {
+    int fdq = -1;
+    std::uint32_t fdq_min = 1025;
+};
+FdqEnv fdqEnv(const whirl::config::EnvSnapshot& env);
+
 // ---------------------------------------------------------------------------
 // device selection: qwen35::pickDevice / restrictDevice are declared in whirl/device_pick.h (included above;
 // arch025-lane1 leg 3: config.device needs them without this header)

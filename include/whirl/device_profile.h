@@ -37,6 +37,11 @@ struct Profile {
     bool h16_from_candidates;
     // small-batch WMMA GEMM selection: ties between row blocks go to the larger BM (GEMVH-2)
     bool gemms_tie_larger_bm;
+    // fused-dequant MXFP4 prefill GEMM (gemmfq, v0251-a3port): the default slot of ops::GemmFlags::fdq for an MXFP4
+    // dequant choice at >= WHIRL_FDQ8S_MIN rows (1 c2, 2 t2 = kernels::kGemmFqNames[slot - 1]; 0 = the old
+    // dequant_f16 + gemm_c<i>_f16); WHIRL_FDQ8S overrides it. Only the gfx1151 code object has the kernels, so a
+    // slot here is also never selected on a family whose object lacks them (bitwise either way)
+    std::uint8_t fdq_default;
     // q4 KV decode through attn_dq4: the smallest split count with the same key partition (FAST-8S-1)
     bool attn_dq4_dynamic_splits;
     // ---- tuning (src/model/tune.cpp)
@@ -64,6 +69,7 @@ inline constexpr Profile k_profile_gfx1201{
     .gemvh_grid_by_rows = false,
     .h16_from_candidates = false,
     .gemms_tie_larger_bm = false,
+    .fdq_default = 0,
     .attn_dq4_dynamic_splits = false,
     .tune_fast = false,
     .tune_cache_suffix = "",
@@ -83,6 +89,7 @@ inline constexpr Profile k_profile_gfx1151{
     .gemvh_grid_by_rows = true,
     .h16_from_candidates = true,
     .gemms_tie_larger_bm = true,
+    .fdq_default = 0,  // v0251-a3port TEST-FIRST STATE (commit 1): the port sets 2 (t2)
     .attn_dq4_dynamic_splits = true,
     .tune_fast = true,
     .tune_cache_suffix = "-gfx1151r2",

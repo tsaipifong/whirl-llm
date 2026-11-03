@@ -182,6 +182,9 @@ void testProfiles() {
     CHECK(b.prefill_exec_moe == 4096 && b.prefill_fill_batch && b.vision_attn_threads == 256);
     const std::array<std::uint8_t, 17> rb = {1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
     CHECK(b.gemv_r == rb);
+    // v0251-a3port: the fused-dequant MXFP4 prefill GEMM is the 8060S default (slot 2 = t2), off on the R9700
+    CHECK(b.fdq_default == 2);
+    CHECK(a.fdq_default == 0);
     // constexpr: the field reads fold like the arch comparisons they replaced
     static_assert(d::profile(Arch::gfx1151).prefill_exec_moe == 4096 && !d::profile(Arch::gfx1201).tune_fast);
     // REVIEW-ARCH3 P3-3: a value with no row throws instead of getting the gfx1201 row (a new enumerator without a

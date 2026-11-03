@@ -202,9 +202,13 @@ struct BenchOpts {
     int moe_layers = 2;                  // --moe-layers: real expert layers rotated (with 64 routing sets)
     bool no_anchor = false;              // --no-anchor
     std::string state = "burst";         // declared power state (DESIGN (d))
+    // family fdq (v0251-a3port): rows per cell (--fdq-n, default 1024,1280,2048,4096) and gemmfq slots (--fdq-v,
+    // default c2,t2 = kernels::kGemmFqNames); A = the shipped dequant_f16_mxfp4 + gemm_c<i>_f16 pair, B = the slot
+    std::vector<int> fdq_n;
+    std::vector<std::string> fdq_v;
     std::string tool_ver, code_hash, code_hash_b, gpu_arch, gpu_pci;
 };
-extern const char* const kBenchFamilies[6];
+extern const char* const kBenchFamilies[7];
 bool benchFamilyKnown(const std::string& f);
 struct Ctx;
 void runBench(Ctx& c, const BenchOpts& o);

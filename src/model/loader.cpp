@@ -151,6 +151,10 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         m.head_gemvx = fe.head_gemvx;
         m.prec_gemvh = fe.prec_gemvh;
         m.prec_gs = fe.prec_gs;
+        // v0251-a3port: the gemmfq switches, once per load (read by Context::gemmFlags)
+        const FdqEnv fq = fdqEnv(env);
+        m.fdq = fq.fdq;
+        m.fdq_min = fq.fdq_min;
     }
     m.cfg = Config::fromGguf(f);
     const Config& cfg = m.cfg;

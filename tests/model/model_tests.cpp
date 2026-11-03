@@ -1937,6 +1937,15 @@ void testBaselineDumps() {
         BCHECK(d.find("D exec: prec_gemvh=0\n") != std::string::npos);
         BCHECK(d.find("D exec: prec_gs=2\n") != std::string::npos);
     }
+    // v0251-a3port: the gemmfq switches are in the dump (defaults: -1 = the device default, 1025)
+    for (const char* k : {"D exec: fdq=-1\n", "D exec: fdq_min=1025\n"}) BCHECK(a.find(k) != std::string::npos);
+    {
+        q::Model m3;
+        m3.fdq = 0;
+        m3.fdq_min = 2048;
+        const std::string d = q::execDump(m3);
+        BCHECK(d.find("D exec: fdq=0\n") != std::string::npos && d.find("D exec: fdq_min=2048\n") != std::string::npos);
+    }
     m.fixFormat(whirl::KvFormat::q8h);  // one property changes one line (q8 -> q8h: the rotation)
     const std::string b = q::execDump(m);
     BCHECK(b != a);
@@ -2440,7 +2449,8 @@ void testEnvSnapshot() {
     // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
     const std::vector<std::string> covered = envtab::namesCovered();
     const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
-                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};  // the last three: Model::load -> forwardEnv (testForwardEnv)
+                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS",  // these three: Model::load -> forwardEnv (testForwardEnv)
+                                     "FDQ8S", "FDQ8S_MIN"};  // v0251-a3port: Model::load -> fdqEnv (testFdqEnv)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -2495,6 +2505,68 @@ bool oldHeadGemvx(const char* v) {  // envFlag("HEAD_GEMVX", false)
 bool oldPrecGemvh(const char* v) { return v == nullptr || *v != '0'; }
 int oldPrecGs(const char* v) { return v != nullptr && *v != 0 ? std::atoi(v) : -1; }
 }  // namespace f7
+
+// v0251-a3port: WHIRL_FDQ8S / WHIRL_FDQ8S_MIN (qwen35::fdqEnv at Model::load -> Context::fdq / fdq_min) and their use in
+// Context::gemmFlags. Literal expectations (include/whirl/model.h FdqEnv): FDQ8S unset / "" -> -1 (the device default),
+// "c2" / "1" -> slot 1, "t2" / "2" -> slot 2, anything else -> 0 (the old dequant + f16 GEMM; the screening-only probe
+// names of feat026-fdq c2l / t2l / c2f included); FDQ8S_MIN unset / "" -> 1025, else strtoul.
+void testFdqEnv() {
+    using whirl::config::EnvSnapshot;
+    using V = EnvSnapshot::Value;
+    struct S {
+        const char* v;
+        int fdq;
+    };
+    const S slots[] = {{nullptr, -1}, {"", -1}, {"c2", 1}, {"t2", 2}, {"1", 1}, {"2", 2}, {"0", 0}, {"off", 0}, {"3", 0}, {"5", 0},
+                       {"-1", 0}, {"c2l", 0}, {"t2l", 0}, {"c2f", 0}, {"T2", 0}, {"t2 ", 0}, {"abc", 0}, {"2x", 2}, {"2048", 0}};
+    struct M {
+        const char* v;
+        std::uint32_t min;
+    };
+    const M mins[] = {{nullptr, 1025u}, {"", 1025u}, {"2048", 2048u}, {"1025", 1025u}, {"512", 512u}, {"0", 0u}, {"abc", 0u}, {"4096x", 4096u}};
+    std::size_t n = 0;
+    for (const S& s : slots)
+        for (const M& mm : mins) {
+            std::vector<std::pair<std::string, V>> in;
+            if (s.v) in.push_back({"FDQ8S", V(s.v)});
+            if (mm.v) in.push_back({"FDQ8S_MIN", V(mm.v)});
+            const q::FdqEnv fe = q::fdqEnv(EnvSnapshot::fromValues(in));
+            check(fe.fdq == s.fdq && fe.fdq_min == mm.min,
+                  std::format("fdq env: FDQ8S={} FDQ8S_MIN={} -> slot {} min {} (got {} {})", s.v ? s.v : "(unset)", mm.v ? mm.v : "(unset)", s.fdq,
+                              mm.min, fe.fdq, fe.fdq_min));
+            ++n;
+        }
+    check(n == std::size(slots) * std::size(mins), "fdq env: table size");
+    // through the process environment ("" removes the variable): capture -> fdqEnv
+    _putenv_s("WHIRL_FDQ8S", "c2");
+    _putenv_s("WHIRL_FDQ8S_MIN", "2048");
+    {
+        const q::FdqEnv fe = q::fdqEnv(EnvSnapshot::capture());
+        check(fe.fdq == 1 && fe.fdq_min == 2048, "fdq env: process env WHIRL_FDQ8S=c2 WHIRL_FDQ8S_MIN=2048 -> slot 1 min 2048");
+    }
+    _putenv_s("WHIRL_FDQ8S", "");
+    _putenv_s("WHIRL_FDQ8S_MIN", "");
+    {
+        const q::FdqEnv fe = q::fdqEnv(EnvSnapshot::capture());
+        check(fe.fdq == -1 && fe.fdq_min == 1025, "fdq env: process env unset -> the device default, 1025");
+    }
+    // a Model's defaults = not set; Context::gemmFlags passes an explicit slot through and resolves -1 to the device
+    // default (device::Profile::fdq_default: gfx1201 0 here; gfx1151 2 is pinned by tests/device testProfiles; the
+    // gfx1151 row is not called here because gemmFlags then asks the HIP device for the gemvh cap)
+    {
+        q::Model m;
+        check(m.fdq == -1 && m.fdq_min == 1025, "fdq: a Model's defaults = not set (-1, 1025)");
+        check(m.arch == whirl::hip::Arch::gfx1201, "fdq: a fresh Model is the gfx1201 row");
+        check(m.gemmFlags().fdq == 0 && m.gemmFlags().fdq_min == 1025, "fdq: gfx1201 default = off (slot 0), threshold 1025");
+        m.fdq = 2;
+        check(m.gemmFlags().fdq == 2, "fdq: WHIRL_FDQ8S=t2 reaches GemmFlags (gfx1201 has no gemmfq kernel: ops keeps the old plan)");
+        m.fdq = 1;
+        m.fdq_min = 2048;
+        check(m.gemmFlags().fdq == 1 && m.gemmFlags().fdq_min == 2048, "fdq: WHIRL_FDQ8S=c2 WHIRL_FDQ8S_MIN=2048 reach GemmFlags");
+        m.fdq = 0;
+        check(m.gemmFlags().fdq == 0, "fdq: WHIRL_FDQ8S=0 -> off");
+    }
+}
 
 void testForwardEnv() {
     namespace fs = std::filesystem;
@@ -2764,6 +2836,8 @@ void testPlanVsLoadOrTune() {
         {"HEAD_GEMVX", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
         {"PREC_GEMVH", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
         {"PREC_GS", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
+        {"FDQ8S", "loader.cpp Model::load -> fdqEnv: bit-neutral gemmfq slot (v0251-a3port)"},
+        {"FDQ8S_MIN", "loader.cpp Model::load -> fdqEnv: gemmfq row threshold (v0251-a3port)"},
     };
     for (const auto& e : EnvSnapshot::names()) {
         nu::EnvValues v;
@@ -4233,6 +4307,7 @@ int main(int argc, char** argv) {
     testEnvTable();
     testEnvSnapshot();
     testForwardEnv();
+    testFdqEnv();  // v0251-a3port
     testPlanVsLoadOrTune();  // arch025-N2a
     testLoadFlagsWithoutTune();  // arch025-N2b-r2
     testFloatGemvDispatch();

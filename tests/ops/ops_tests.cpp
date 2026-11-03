@@ -229,6 +229,7 @@ int main() {
     testGemvTile();
     testGemvWide();
     testOpsGemm();
+    testOpsGemmFq();  // v0251-a3port
     testAttnDecode();
     testAttnPrefill();
     testOpsMoe();

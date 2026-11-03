@@ -181,6 +181,11 @@ public:
     bool head_gemvx = false;
     bool prec_gemvh = true;
     int prec_gs = -1;
+    // fused-dequant MXFP4 prefill GEMM (gemmfq, v0251-a3port): WHIRL_FDQ8S / WHIRL_FDQ8S_MIN of the load's snapshot
+    // (qwen35::fdqEnv, set by Model::load); gemmFlags reads them. fdq: -1 = the device default
+    // (device::Profile::fdq_default), 0 = the old dequant + f16 GEMM, 1 / 2 = slot c2 / t2 (kernels::kGemmFqNames)
+    int fdq = -1;
+    std::uint32_t fdq_min = 1025;
     // precise decode: the kernels every weight type of this model needs; "" = all present
     std::string precMissing() const;
 
