@@ -307,8 +307,8 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
      `include/whirl/kernels_abi.h` (K8-5) to the full matrix.
    - **a change whose work equivalence cannot be shown.** With `--base-build DIR`, the code objects of both builds
      are compared (`work_equal.py`, CPU). If they differ although no kernel source changed, the full matrix runs.
-   - **Exception:** when every changed product file is a kernel for one architecture (the map lists one GPU), the
-     full matrix runs on that GPU only.
+   - **Exception:** a change whose product files are all kernels of one architecture is planned per architecture
+     (item 5): that GPU only, the other GPU carried by a code-object proof.
    <a id="core-sets"></a>**Core modules with GPU mutation evidence** (arch025 N11). A core module, a `modules.json`
    `full: true` module that is not a contract (`model.core`, `forward.state`, `model.types`, `device.profile`,
    `platform.args`), or a module owning a core path (`ops.*`) plans **its own GPU step set** instead of the full
@@ -367,7 +367,41 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
    - the diff touches no kernel source and no header that a `.hip` file includes.
 
    The skipped steps are the launch-covered steps (`<step>/<command>` keys), `golden_*` when golden is identical,
-   and `kt_full`. The plan names the proof file. Server steps the proof does not cover still run.
+   and `kt_full`. The plan names the proof file. Server steps the proof does not cover still run. A
+   `work_equal.py compare --arch <arch>` report (top-level `"arch"`) counts only for that architecture's own GPU: it
+   judges no other code object and counts only that GPU's runs (v0251-d1b).
+5. **Per-architecture kernels** (v0251-d1b, 0.2.5.1 D1(b)). A change whose product files all compile into one
+   architecture's code object only, plus that architecture's registered kernel tests, runs **no GPU step on the other
+   GPU**; the other GPU is carried by a code-object proof instead.
+   - **Which files:** files under `kernels/gfx1151/` (`kernels/whirl_kernels.hip` includes the gfx1151 set only inside
+     `#if defined(__gfx1151__)`; `test_change_test.py` checks that shape on the tree). Each file must also pass the
+     impact map: a `.hip` file must have arch gfx1151 only, and every file that includes it must be in
+     `kernels/gfx1151/`, be `kernels/whirl_kernels.hip`, or be a test. `kernels/gfx1151/attn_ws4_index.h` is included by
+     `src/ops/attention.cpp` (host code in `whirl.exe` for both GPUs), so it never qualifies. A build file, a CMake
+     source list, a build-wide input, a host / contract file, or a module without a gfx1151 part keeps the plan of item
+     3.
+   - **modules.json `arch`:** each kernel family lists its gfx1151 part as
+     `"arch": {"gfx1151": {"paths", "tests", "steps"}}`. `paths` are globs under `kernels/gfx1151/` that are also
+     paths of the module, `tests` are the registered kernel tests (the shared harness `tests/kernels/kt*`,
+     `kernel_test_main.cpp` and `bench_kernels.cpp` sit under `kernels.common`), and `steps` are the GPU steps for that
+     part. `test_change_test.py` validates the entries (`arch_entry_errors`) and pins the tree: every
+     `kernels/gfx1151/*.hip` is registered, `attn_ws4_index.h` is not, and the new kernel files of the feat026
+     candidates are registered before they land. `kernels/families.json` still needs each new fragment
+     (`kernel_iso_check.py` fails without it).
+   - **The 8060S** runs the `arch.gfx1151.steps` of the touched modules and their callers, the map's steps and the
+     test-source / gate-script steps (the full 8060S matrix when a gfx1151 file is in no module).
+   - **The R9700** runs only the steps that the carry cannot cover. These are the steps of unregistered tests and of
+     gate scripts. `kt_full`, when registered kernel tests select it, is carried.
+   - **The carry** is the R9700 entry under `carry` in the plan. It is `required` until a proof is given:
+     `--base-build DIR` (test_change compares the code objects of both builds on the CPU) or `--proof r9700=FILE` (a
+     `work_equal.py compare [--arch gfx1201]` report). It is `proven` when every gfx1201 code object of `--build`'s
+     `whirl.exe` and `whirl-server.exe` equals the base build's (identical or identical-except-cuid, read per object)
+     and the report's B exes are `--build`'s. No launch or golden evidence is needed: the diff changed no host source.
+     A report for another arch, an `--arch gfx1201` verdict NOT_EQUIVALENT, a differing launch sequence or golden
+     output, or a differing / one-sided / missing gfx1201 object **refuses** the carry, and the full matrix runs on both
+     GPUs. `--run` refuses (exit 2) while the carry is `required`.
+   - The plan prints `arch gfx1151 only (8060s): ...` and `carry r9700: REQUIRED|PROVEN|REFUSED ...`. A change that
+     touches `kernels/gfx1151/` but does not qualify prints why (`arch not one architecture's kernels only: ...`).
 
 `--run` calls `release_gate.ps1 -Steps <plan> -Tag change_<id>_<device> -LaunchLog ...` once per GPU, R9700 first,
 then 8060S. It refuses (exit 2) while any `whirl*` process runs, and `--force` overrides that. It writes
