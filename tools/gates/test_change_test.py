@@ -94,8 +94,10 @@ check("unmapped full", p["level"] == "full" and tc.reason_class(p["full_reasons"
 # 9. contract module (modules.json full) -> full via impact text and CORE
 p = plan(["src/device/backend.h"], rep({"contract.device": ["src/device/backend.h"]}, "full gate, both GPUs (contract module contract.device)"))
 check("contract full", p["level"] == "full" and any("core module contract.device" in r for r in p["full_reasons"]), p["full_reasons"])
-# 10. arch-specific kernel -> full matrix on that GPU only
-p = plan(["kernels/gfx1151/attn.hip"], rep({}, "full gate or the release steps above: 1 file(s) in no module (kernels/gfx1151/attn.hip)", gpus=("gfx1151",)))
+# 10. arch-specific kernel -> full matrix on that GPU only (v0251-d1b review AO-4: the impact map must know the file)
+M10 = {"includers": {}, "hip": {"kernels/gfx1151/attn.hip": {"arch": ["gfx1151"]}}}
+R10 = rep({}, "full gate or the release steps above: 1 file(s) in no module (kernels/gfx1151/attn.hip)", gpus=("gfx1151",))
+p = tc.make_plan("t", "x", {"kernels/gfx1151/attn.hip": {}}, R10, MODS, M10, GATES, TIMES)
 check("kernel 1151 only", p["level"] == "full" and p["gpu_steps"]["r9700"] == [] and len(p["gpu_steps"]["8060s"]) == 10, p["gpu_steps"])
 # 10b. the kernel ABI layout table (host + device, arch025 N13) -> full matrix on both GPUs, counted as a kernel source
 p = plan(["include/whirl/kernels_abi_layout.h"], rep({"kernels.abi": ["include/whirl/kernels_abi_layout.h"]}, "full gate, both GPUs (contract module kernels.abi)"))
@@ -109,9 +111,10 @@ with tempfile.TemporaryDirectory() as td:
     open(os.path.join(b, "whirl.exe"), "wb").write(b"exe-b")
     sha = hashlib.sha256(b"exe-b").hexdigest()
 
-    def proof(name, **over):
+    def proof(name, **over):  # v0251-d1b review AO-1: golden counts for a card only through cases of its reference set
         r = {"format": "whirl-work-equal/1", "verdict": "EQUIVALENT", "checks": {"code_objects": "identical-except-cuid", "launch_sequence": "identical", "golden": "identical"},
-             "b": {"exes": {"whirl.exe": sha}}, "launch": [{"runs": [{"key": "st_swift_precise/whirl.exe selftest x.gguf --device gfx1201"}]}]}
+             "b": {"exes": {"whirl.exe": sha}}, "launch": [{"runs": [{"key": "st_swift_precise/whirl.exe selftest x.gguf --device gfx1201"}]}],
+             "golden": {"cases": [{"case": "gfx1201:swift/precise_single", "a": "OK", "b": "OK", "same": True}]}}
         r.update(over)
         f = os.path.join(td, name)
         json.dump(r, open(f, "w"))
@@ -768,7 +771,9 @@ MODSA = dict(MODS, **{
 })
 UNITY = ["kernels/gfx1151/whirl_kernels_gfx1151.hip", "kernels/whirl_kernels.hip"]
 KG = "kernels/gfx1151/gdn_x.hip"
-MA = {"includers": {KG: UNITY, "kernels/gfx1151/common.hip": UNITY, "kernels/gfx1151/x.hip": UNITY,
+MA = {"hip": {f: {"arch": ["gfx1151"]} for f in (KG, "kernels/gfx1151/common.hip", "kernels/gfx1151/x.hip", "kernels/gfx1151/new.hip",
+                                                 "kernels/gfx1151/attn.hip", "kernels/gfx1151/attn_ws4.hip")} | {"kernels/common.hip": {"arch": ["gfx1201"]}},
+      "includers": {KG: UNITY, "kernels/gfx1151/common.hip": UNITY, "kernels/gfx1151/x.hip": UNITY,
                     "kernels/gfx1151/attn_ws4_index.h": ["kernels/gfx1151/attn_ws4.hip"] + UNITY + ["src/ops/attention.cpp", "tests/kernels/test_attn.cpp"],
                     "kernels/shared/common_warp.h": ["kernels/common.hip", "kernels/gfx1151/common.hip"] + UNITY,
                     "tests/kernels/kt.h": ["tests/kernels/test_gdn.cpp", "tests/kernels/kernel_test_main.cpp", "tests/kernels/test_vision.cpp"]},
@@ -777,12 +782,22 @@ MA = {"includers": {KG: UNITY, "kernels/gfx1151/common.hip": UNITY, "kernels/gfx
                       "whirl-server-gate": ["tests/server/server_gate.cpp"], "whirl-tests": ["tests/unit/unit_tests.cpp"]}}
 
 
+import inspect  # noqa: E402
+_MP_ARGS = set(inspect.signature(tc.make_plan).parameters)
+
+
+def mp(*a, **kw):
+    """tc.make_plan without the keyword arguments an older make_plan does not take (the test-first run on the unfixed tool
+    then fails on behaviour, not on a TypeError)"""
+    return tc.make_plan(*a, **{k: v for k, v in kw.items() if k in _MP_ARGS})
+
+
 def arep(modfiles, steps=(), gpus=("gfx1151",), gate=None):
     return rep(modfiles, gate or ("release_gate.ps1 -Module " + ",".join(sorted(modfiles)) if modfiles else "none"), steps=steps, gpus=gpus)
 
 
 def aplan(files, r, **kw):
-    return tc.make_plan("t", "x", {f: {} for f in files}, r, kw.pop("mods", MODSA), kw.pop("m", MA), GATES, TIMES, gate_map=gm2,
+    return mp("t", "x", {f: {} for f in files}, r, kw.pop("mods", MODSA), kw.pop("m", MA), GATES, TIMES, gate_map=gm2,
                         core_sets={}, **kw)
 
 
@@ -834,7 +849,7 @@ p = aplan(["kernels/gfx1151/new.hip"], arep({}, gate="full gate or the release s
 check("d1b unregistered gfx1151 kernel: 8060S full matrix, R9700 none + carry required",
       p["level"] == "full" and p["gpu_steps"]["8060s"] == S8_ALL and p["gpu_steps"]["r9700"] == [] and carry_of(p).get("status") == "required",
       (p["level"], p["gpu_steps"], p.get("carry")))
-p = plan(["kernels/gfx1151/attn.hip"], rep({}, "full gate or the release steps above: 1 file(s) in no module (kernels/gfx1151/attn.hip)", gpus=("gfx1151",)))
+p = tc.make_plan("t", "x", {"kernels/gfx1151/attn.hip": {}}, R10, MODS, M10, GATES, TIMES)
 check("d1b test 10 (kernel 1151 only, no module) now names the R9700 carry", carry_of(p).get("status") == "required", p.get("carry"))
 # (3) not arch-only: today's plan (full matrix on both GPUs), no carry. gfx1201-only kernel (map: gfx1201)
 p = aplan(["kernels/common.hip"], arep({"kernels.common": ["kernels/common.hip"]}, gpus=("gfx1201",)))
@@ -934,20 +949,83 @@ with tempfile.TemporaryDirectory() as td:
     open(os.path.join(b, "whirl-server.exe"), "wb").write(b"exe-s")
     SW_, SS_ = hashlib.sha256(b"exe-w").hexdigest(), hashlib.sha256(b"exe-s").hexdigest()
     O_OK = [{"index": 0, "target": "gfx1201", "same": True}, {"index": 1, "target": "gfx1151", "same": False, "differing_sections": [".text"]}]
+    # review AO-5: the A side is the base build, stamped by test_change.py --stamp-build with the commit it was built from
+    # (whirl_build_manifest.json); the plan's base revision must be that commit
+    BASE_REV = "1a5a547ca" + "0" * 31
+    bb = os.path.join(td, "base")
+    os.makedirs(bb)
+    open(os.path.join(bb, "whirl.exe"), "wb").write(b"base-w")
+    open(os.path.join(bb, "whirl-server.exe"), "wb").write(b"base-s")
+    AW_, AS_ = hashlib.sha256(b"base-w").hexdigest(), hashlib.sha256(b"base-s").hexdigest()
 
-    def wrep(name, objs=O_OK, exes=None, **over):
+    def manifest(d, commit=BASE_REV, **over):
+        m_ = {"format": "whirl-build-manifest/1", "commit": commit, "clean": True,
+              "exes": {"whirl.exe": hashlib.sha256(open(os.path.join(d, "whirl.exe"), "rb").read()).hexdigest(),
+                       "whirl-server.exe": hashlib.sha256(open(os.path.join(d, "whirl-server.exe"), "rb").read()).hexdigest()}}
+        m_.update(over)
+        json.dump(m_, open(os.path.join(d, "whirl_build_manifest.json"), "w"))
+    manifest(bb)
+
+    def wrep(name, objs=O_OK, exes=None, aexes=None, **over):
         ex = exes if exes is not None else {"whirl.exe": SW_, "whirl-server.exe": SS_}
+        ax = aexes if aexes is not None else {"whirl.exe": AW_, "whirl-server.exe": AS_}
         r = {"format": "whirl-work-equal/1", "verdict": "NOT_EQUIVALENT", "checks": {"code_objects": "different", "launch_sequence": "missing", "golden": "missing"},
-             "a": {"exes": {k: "a" * 64 for k in ex}}, "b": {"exes": dict(ex)},
-             "exes": [{"name": k, "a": {"sha256": "a" * 64}, "b": {"sha256": v}, "code_objects": {"result": "different", "n_a": len(objs), "n_b": len(objs), "objects": objs}}
-                      for k, v in ex.items()]}
+             "a": {"exes": {k: ax.get(k, "a" * 64) for k in ex}}, "b": {"exes": dict(ex)},
+             "exes": [{"name": k, "a": {"sha256": ax.get(k, "a" * 64)}, "b": {"sha256": v},
+                       "code_objects": {"result": "different", "n_a": len(objs), "n_b": len(objs), "objects": objs}} for k, v in ex.items()]}
         r.update(over)
         f = os.path.join(td, name)
         json.dump(r, open(f, "w"))
         return f
 
     def pplan(proofs, **kw):
+        kw.setdefault("base_build", bb)
+        kw.setdefault("base_rev", BASE_REV)
         return aplan(GDN_ONLY, R_GDN, build=b, proofs=proofs, **kw)
+
+    # AO-5 block / pass: the A side of the carry is bound to the base revision through the stamped base build
+    p = pplan({"r9700": wrep("self.json", aexes={"whirl.exe": SW_, "whirl-server.exe": SS_})})
+    check("d1b AO-5: A == B (a self-compare) is refused", carry_of(p).get("status") == "refused" and "same" in carry_of(p).get("why", "")
+          and p["gpu_steps"]["r9700"] == R97_ALL, carry_of(p))
+    p = pplan({"r9700": wrep("nobase.json")}, base_build=None)
+    check("d1b AO-5: no --base-build (A side unbound) -> refused", carry_of(p).get("status") == "refused" and "--base-build" in carry_of(p).get("why", ""), carry_of(p))
+    p = pplan({"r9700": wrep("otherrev.json")}, base_rev="c72534ea9" + "0" * 31)
+    check("d1b AO-5: base build stamped at another commit than the plan's base -> refused", carry_of(p).get("status") == "refused"
+          and "c72534ea9" in carry_of(p).get("why", ""), carry_of(p))
+    bb2 = os.path.join(td, "base2")
+    os.makedirs(bb2)
+    open(os.path.join(bb2, "whirl.exe"), "wb").write(b"base-w")
+    open(os.path.join(bb2, "whirl-server.exe"), "wb").write(b"base-s")
+    p = pplan({"r9700": wrep("nomanifest.json")}, base_build=bb2)
+    check("d1b AO-5: base build without a stamp (whirl_build_manifest.json) -> refused", carry_of(p).get("status") == "refused"
+          and "stamp" in carry_of(p).get("why", ""), carry_of(p))
+    manifest(bb2)
+    open(os.path.join(bb2, "whirl.exe"), "wb").write(b"base-w rebuilt after the stamp")
+    p = pplan({"r9700": wrep("rebuilt.json")}, base_build=bb2)
+    check("d1b AO-5: base exe rebuilt after the stamp -> refused", carry_of(p).get("status") == "refused", carry_of(p))
+    p = pplan({"r9700": wrep("othera.json", aexes={"whirl.exe": "e" * 64, "whirl-server.exe": AS_})})
+    check("d1b AO-5: the report's A exe is not the stamped base build's -> refused", carry_of(p).get("status") == "refused", carry_of(p))
+    p = pplan({"r9700": wrep("bound.json")})
+    check("d1b AO-5: A bound to the base revision, gfx1201 equal -> proven", carry_of(p).get("status") == "proven", carry_of(p))
+    manifest(bb, clean=False)
+    p = pplan({"r9700": wrep("dirtybase2.json")})
+    check("d1b AO-5: a base build stamped from a dirty tree -> refused", carry_of(p).get("status") == "refused", carry_of(p))
+    manifest(bb)
+    # review N-6: a --build without whirl-server.exe proves only whirl.exe, but the R9700 server steps would be carried
+    bns = os.path.join(td, "build_nosrv")
+    os.makedirs(bns)
+    open(os.path.join(bns, "whirl.exe"), "wb").write(b"exe-w")
+    p = aplan(GDN_ONLY, R_GDN, build=bns, base_build=bb, base_rev=BASE_REV, proofs={"r9700": wrep("ns.json", exes={"whirl.exe": SW_})})
+    check("d1b N-6: --build without whirl-server.exe -> carry refused (the R9700 server steps are not proven)", carry_of(p).get("status") == "refused"
+          and "whirl-server.exe" in carry_of(p).get("why", ""), carry_of(p))
+    # stamp_problems: the facts --stamp-build checks before it writes the manifest (pure function, literal inputs)
+    sp = getattr(tc, "stamp_problems", None)
+    check("d1b AO-5: stamp_problems exists", callable(sp), sp)
+    if callable(sp):
+        check("d1b stamp: clean tree, exes newer than every product source -> no problem", sp("ab" * 20, [], 100.0, 200.0) == [], sp("ab" * 20, [], 100.0, 200.0))
+        check("d1b stamp: uncommitted product files -> refused", sp("ab" * 20, ["src/x.cpp"], 100.0, 200.0) != [], sp("ab" * 20, ["src/x.cpp"], 100.0, 200.0))
+        check("d1b stamp: a product source newer than an exe (stale build) -> refused", sp("ab" * 20, [], 300.0, 200.0) != [], sp("ab" * 20, [], 300.0, 200.0))
+        check("d1b stamp: no HEAD (not a git tree) -> refused", sp("", [], 100.0, 200.0) != [], sp("", [], 100.0, 200.0))
 
     p = pplan({"r9700": wrep("ok.json")})
     check("d1b proof: gfx1201 objects identical, bound -> carry proven, R9700 still none", carry_of(p).get("status") == "proven" and p["gpu_steps"]["r9700"] == []
@@ -992,22 +1070,53 @@ with tempfile.TemporaryDirectory() as td:
     # (check_proof, a diff without kernel sources) takes a report only when its "arch" is null or the card's own arch:
     # an --arch gfx1151 report judges no gfx1201 object and counts gfx1151 runs only, so with untagged runs it must never
     # skip R9700 steps (block), while a --arch gfx1201 or whole-exe report still does (pass)
-    def eqrep(name, **over):
+    def eqrep(name, keys=None, cases=None, dev="r9700", **over):
+        a_ = tc.ARCH[dev]
         r = {"format": "whirl-work-equal/1", "verdict": "EQUIVALENT", "checks": {"code_objects": "identical", "launch_sequence": "identical", "golden": "identical"},
-             "b": {"exes": {"whirl.exe": SW_, "whirl-server.exe": SS_}}, "launch": [{"runs": [{"key": "st_swift_precise/whirl.exe selftest x.gguf"}]}]}
+             "b": {"exes": {"whirl.exe": SW_, "whirl-server.exe": SS_}},
+             "launch": [{"runs": [{"key": k} for k in (keys if keys is not None else [f"st_swift_precise/whirl.exe selftest x.gguf --device {dev}"])]}],
+             "golden": {"cases": [{"case": c, "a": "OK", "b": "OK", "same": True} for c in (cases if cases is not None else [f"{a_}:swift/precise_single"])]}}
         r.update(over)
         f = os.path.join(td, name)
         json.dump(r, open(f, "w"))
         return f
 
     CORE_R = rep({"forward.attn": [FA]}, "release_gate.ps1 -Module forward.attn")
+    COV = {"kt_full", "st_swift_precise", "golden_swift", "golden_moe"}
     for dv_, arch_, ok_ in (("r9700", None, True), ("r9700", "gfx1201", True), ("r9700", "gfx1151", False),
                             ("8060s", "gfx1151", True), ("8060s", "gfx1201", False)):
-        p = plan([FA], CORE_R, build=b, proofs={dv_: eqrep(f"eq_{dv_}_{arch_}.json", **({"arch": arch_} if arch_ else {}))}, core_sets={})
+        p = plan([FA], CORE_R, build=b, proofs={dv_: eqrep(f"eq_{dv_}_{arch_}.json", dev=dv_, **({"arch": arch_} if arch_ else {}))}, core_sets={})
         sk = p["skipped_by_proof"][dv_]
         check(f"d1b check_proof: a report with arch {arch_} on the {dv_} " + ("skips its covered steps" if ok_ else "is refused (another card's report)"),
-              (set(sk) == {"kt_full", "st_swift_precise", "golden_swift", "golden_moe"}) if ok_ else (sk == [] and str(arch_) in p["proofs"].get(dv_, "")),
-              (dv_, arch_, sk, p["proofs"]))
+              (set(sk) == COV) if ok_ else (sk == [] and str(arch_) in p["proofs"].get(dv_, "")), (dv_, arch_, sk, p["proofs"]))
+    # review AO-1 (block): release_gate writes --device r9700 / 8060s (release_gate.ps1 -Device), pci ids and --device=X
+    # occur too, and the server gate picks the card with WHIRL_DEVICE: every form is attributed to its card; a run of the
+    # other card refuses the proof; runs that name no GPU are compared by work_equal but never prove anything for a card
+    # (ADR-0003 addendum 1), so a report with only such runs skips nothing; golden counts only through cases of the card's
+    # own reference set
+    for why, keys in (("--device 8060s", ["st_swift_precise/whirl.exe selftest x.gguf --device 8060s"]),
+                      ("--device pci:196:0", ["seq_swift_precise/whirl.exe seqtest x.gguf --device pci:196:0"]),
+                      ("--device=8060s", ["st_swift_precise/whirl.exe selftest x.gguf --device=8060s"]),
+                      ("--device gfx1151", ["st_swift_precise/whirl.exe selftest x.gguf --device gfx1151"]),
+                      ("WHIRL_DEVICE=8060s", ["srv_balance/whirl-server.exe --model x.gguf WHIRL_DEVICE=8060s"]),
+                      ("an 8060S run next to an R9700 run", ["st_swift_precise/whirl.exe selftest x.gguf --device r9700",
+                                                             "seq_swift_precise/whirl.exe seqtest x.gguf --device 8060s"])):
+        p = plan([FA], CORE_R, build=b, proofs={"r9700": eqrep(f"ao1_{len(why)}_{keys[0][:3]}.json", keys=keys)}, core_sets={})
+        check(f"d1b AO-1: a run of the 8060S ({why}) is no R9700 proof: refused, nothing skipped", p["skipped_by_proof"]["r9700"] == []
+              and "another GPU" in p["proofs"].get("r9700", ""), (why, p["skipped_by_proof"]["r9700"], p["proofs"]))
+    p = plan([FA], CORE_R, build=b, proofs={"r9700": eqrep("ao1_untagged.json", keys=["st_swift_precise/whirl.exe selftest x.gguf",
+                                                                                      "srv_balance/whirl-server.exe --model x.gguf"])}, core_sets={})
+    check("d1b AO-1: a whole-exe report with untagged runs only proves nothing for the R9700 (nothing skipped)", p["skipped_by_proof"]["r9700"] == []
+          and "no launch run" in p["proofs"].get("r9700", ""), (p["skipped_by_proof"]["r9700"], p["proofs"]))
+    p = plan([FA], CORE_R, build=b, proofs={"r9700": eqrep("ao1_gold1151.json", cases=["gfx1151:swift/precise_single", "swift/balance_pair"])}, core_sets={})
+    check("d1b AO-1: golden cases of the 8060S reference set (or of none) do not cover the R9700 golden steps",
+          set(p["skipped_by_proof"]["r9700"]) == {"kt_full", "st_swift_precise"}, (p["skipped_by_proof"]["r9700"], p["proofs"]))
+    for why, keys in (("--device r9700", ["st_swift_precise/whirl.exe selftest x.gguf --device r9700"]),
+                      ("--device pci:71:0", ["st_swift_precise/whirl.exe selftest x.gguf --device pci:71:0"]),
+                      ("--device=gfx1201", ["st_swift_precise/whirl.exe selftest x.gguf --device=gfx1201"]),
+                      ("tagged + untagged runs", ["st_swift_precise/whirl.exe selftest x.gguf --device r9700", "srv_balance/whirl-server.exe --model x.gguf"])):
+        p = plan([FA], CORE_R, build=b, proofs={"r9700": eqrep(f"ao1p_{len(why)}.json", keys=keys)}, core_sets={})
+        check(f"d1b AO-1 pass: an R9700 run ({why}) covers its step; untagged runs cover nothing", set(p["skipped_by_proof"]["r9700"]) == COV, (why, p["skipped_by_proof"]["r9700"], p["proofs"]))
     p = pplan({"8060s": wrep("s8.json")})
     check("d1b proof for the 8060S on a gfx1151 diff: not used (its kernels changed), R9700 carry still required",
           "not used" in p["proofs"].get("8060s", "") and p["skipped_by_proof"]["8060s"] == [] and carry_of(p).get("status") == "required"
@@ -1035,6 +1144,8 @@ with tempfile.TemporaryDirectory() as td:
     # (6) --run: a required carry refuses before any gate call (exit 2); a proven carry runs the R9700 call with CPU steps only
     calls = []
 
+    setup_fail = set()  # devices whose release_gate call ends with exit 2 (setup error, e.g. the eGPU not attached)
+
     def fake_run2(cmd, stdout=None, stderr=None, **kw):
         calls.append(cmd)
         dev = cmd[cmd.index("-Device") + 1]
@@ -1048,8 +1159,12 @@ with tempfile.TemporaryDirectory() as td:
                 fh.write(f"PASS {s:<22} exit   0     60 s  ok\n")
 
         class R:
-            returncode = 0
+            returncode = 2 if dev in setup_fail else 0
         return R()
+
+    def steps_of(dev):
+        c_ = [c for c in calls if c[c.index("-Device") + 1] == dev]
+        return c_[0][c_[0].index("-Steps") + 1].split(",") if c_ else None
 
     class A2:
         work = os.path.join(td, "w2")
@@ -1064,12 +1179,21 @@ with tempfile.TemporaryDirectory() as td:
         rc = tc.run_plan(aplan(GDN_ONLY, R_GDN), A2)
         check("d1b --run with the R9700 carry still required: exit 2, no gate call", rc == 2 and not calls, (rc, calls))
         rc = tc.run_plan(pplan({"r9700": wrep("ok_run.json")}), A2)
-        s97 = calls[0][calls[0].index("-Steps") + 1].split(",") if calls else []
-        s8 = calls[1][calls[1].index("-Steps") + 1].split(",") if len(calls) > 1 else []
+        s97, s8 = steps_of("r9700") or [], steps_of("8060s") or []
         check("d1b --run with a proven carry: R9700 call has no GPU step, 8060S call has the arch steps",
               rc == 0 and len(calls) == 2 and not set(s97) & set(R97_ALL) and "kt_full" in s8 and "srv_fast" in s8, (rc, s97, s8))
         res = json.load(open(os.path.join(A2.work, "test_change_summary.json")))
         check("d1b --run summary keeps the carry and its proof", (res["plan"].get("carry") or {}).get("r9700", {}).get("status") == "proven", res["plan"].get("carry"))
+        # review C-4: the carried GPU (no GPU step) runs after the GPU with steps and only its per-GPU CPU checks, so a setup
+        # error there (exit 2: the eGPU not attached) never stops the 8060S steps
+        calls.clear()
+        setup_fail.add("r9700")
+        rc = tc.run_plan(pplan({"r9700": wrep("ok_run2.json")}), A2)
+        devs_ = [c[c.index("-Device") + 1] for c in calls]
+        check("d1b C-4: the carried R9700 is called last, a setup error there does not stop the 8060S", devs_ == ["8060s", "r9700"] and rc == 2, (devs_, rc))
+        check("d1b C-4: the CPU steps run once with the 8060S call; the carried R9700 call holds only its per-GPU CPU checks",
+              "cpu_tests" in (steps_of("8060s") or []) and set(steps_of("r9700") or []) == set(tc.PER_DEVICE_CPU), (steps_of("8060s"), steps_of("r9700")))
+        setup_fail.clear()
     finally:
         tc.subprocess.run = real_run
         tc.whirl_running = real_busy
@@ -1137,6 +1261,80 @@ if callable(ug):
                      ("guard widened with ||", U0.replace("#if defined(__gfx1151__)", "#if defined(__gfx1151__) || defined(__gfx1201__)"))):
         check(f"d1b unity guard mutant ({why}) is caught", ug(mut) != [], (why, ug(mut)))
     check("d1b unity guard: a commented-out include is not code", ug(U0 + '// #include "gfx1151/x.hip"\n/* #include "gfx1151/y.hip" */\n') == [], "comments")
+# (8b) review AO-4: the per-architecture plan needs the impact map OF THE PLANNED VERSION (its includers decide that no
+# host file includes a kernels/gfx1151 file): a map of another tree refuses the scope, and a file the map does not know
+# (a .hip without arch, a header without includers, an extension the map does not scan: C-2) is not gfx1151-only
+p = aplan(GDN_ONLY, R_GDN, map_rev=(False, "the impact map is of the root tree at 2421013, not of 8d1f0b0"))
+check("d1b AO-4: impact map of another version -> no arch scope, full both, the note says why", is_full_both(p)
+      and "impact map" in p.get("arch_scope_note", ""), (p["level"], p.get("arch_scope_note")))
+MAU = dict(MA, hip={k: v for k, v in MA["hip"].items() if k != KG})
+p = aplan(GDN_ONLY, R_GDN, m=MAU)
+check("d1b AO-4: a gfx1151 .hip the map does not know -> not gfx1151-only (full both)", is_full_both(p)
+      and "impact map" in p.get("arch_scope_note", ""), (p["level"], p.get("arch_scope_note")))
+p = aplan([HG], arep({"kernels.common": [HG]}, gpus=("gfx1151", "gfx1201")), mods=MODSH, m=MA)
+check("d1b AO-4: a gfx1151 header with no includer in the map -> not gfx1151-only (full both)", is_full_both(p), (p["level"], p.get("arch_scope_note")))
+MODSC = dict(MODSA, **{"kernels.gdn": dict(MODSA["kernels.gdn"], paths=MODSA["kernels.gdn"]["paths"] + ["kernels/gfx1151/gdn_z.cuh"],
+                                           arch={"gfx1151": dict(MODSA["kernels.gdn"]["arch"]["gfx1151"], paths=["kernels/gfx1151/gdn*"])})})
+p = aplan(["kernels/gfx1151/gdn_z.cuh"], arep({"kernels.gdn": ["kernels/gfx1151/gdn_z.cuh"]}), mods=MODSC,
+          m=dict(MA, includers=dict(MA["includers"], **{"kernels/gfx1151/gdn_z.cuh": [KG] + UNITY})))
+check("d1b C-2: an extension the impact map does not scan (.cuh) -> not gfx1151-only", is_full_both(p), (p["level"], p.get("arch_scope_note")))
+mm = getattr(tc, "map_matches", None)
+check("d1b AO-4: map_matches exists", callable(mm), mm)
+if callable(mm):
+    check("d1b AO-4: --worktree plans the working tree itself (its map)", mm(tc.REPO, None)[0] is True, mm(tc.REPO, None))
+    ok_, why_ = mm(tc.REPO, "HEAD~1")
+    check("d1b AO-4: --range / --commit to a revision that is not the root's HEAD -> the map is not that version's", ok_ is False and "HEAD~1" in why_, (ok_, why_))
+# review C-1: a diff that also changes the proof / selection tools proves itself: no arch scope
+p = aplan(GDN_ONLY + ["tools/gates/test_change.py"], R_GDN)
+check("d1b C-1: + tools/gates/test_change.py -> no arch scope (the tool would judge its own change)", is_full_both(p), (p["level"], p.get("arch_scope_note")))
+p = aplan(GDN_ONLY + ["tools/impact/work_equal.py"], R_GDN)
+check("d1b C-1: + tools/impact/work_equal.py -> no arch scope", is_full_both(p), (p["level"], p.get("arch_scope_note")))
+# review N-2: a file renamed into kernels/gfx1151/ from a shared place is not gfx1151-only (the old path compiled for both)
+ch_ = {KG: {"old_path": "kernels/shared/gdn_x.h", "new": [1], "old": [1]}}
+p = tc.make_plan("t", "x", ch_, R_GDN, MODSA, MA, GATES, TIMES, gate_map=gm2, core_sets={})
+check("d1b N-2: renamed from kernels/shared/ into kernels/gfx1151/ -> not gfx1151-only", is_full_both(p), (p["level"], p.get("arch_scope_note")))
+# review AO-6: a real port adds its new fragments to kernels/families.json (kernel_iso_check fails without them); a change
+# of that file that only adds / removes kernels/gfx1151/ paths stays per-architecture, anything else is the full matrix
+fac = getattr(tc, "families_arch_change", None)
+check("d1b AO-6: families_arch_change exists", callable(fac), fac)
+FAM0 = {"_doc": "d", "families": {"kernels.moe": {"desc": "moe", "paths": ["kernels/moe*.hip", "kernels/gfx1151/moe.hip"], "deps": ["kernels.common"]},
+                                  "kernels.gdn": {"desc": "gdn", "paths": ["kernels/gdn_*.hip", "kernels/gfx1151/gdn*.hip"], "deps": ["kernels.common"]}}}
+
+
+def famtxt(**edit):
+    d_ = json.loads(json.dumps(FAM0))
+    for k, (field, val) in edit.items():
+        d_["families"][k.replace("_", ".")][field] = val
+    return json.dumps(d_, indent=1)
+
+
+if callable(fac):
+    T0 = json.dumps(FAM0, indent=1)
+    check("d1b AO-6: a gfx1151 fragment added to a family -> gfx1151",
+          fac(T0, famtxt(kernels_moe=("paths", FAM0["families"]["kernels.moe"]["paths"] + ["kernels/gfx1151/moe_down8.hip"])))[0] == "gfx1151",
+          fac(T0, famtxt(kernels_moe=("paths", FAM0["families"]["kernels.moe"]["paths"] + ["kernels/gfx1151/moe_down8.hip"]))))
+    for why, new in (("a gfx1201 / shared fragment added", famtxt(kernels_moe=("paths", FAM0["families"]["kernels.moe"]["paths"] + ["kernels/moe_router.hip"]))),
+                     ("deps changed", famtxt(kernels_moe=("deps", ["kernels.common", "kernels.gdn"]))),
+                     ("desc changed", famtxt(kernels_moe=("desc", "moe 2"))),
+                     ("_doc changed", json.dumps(dict(FAM0, _doc="e"), indent=1)),
+                     ("not JSON", "{"), ("a family added", json.dumps(dict(FAM0, families=dict(FAM0["families"], **{"kernels.x": {"paths": ["kernels/gfx1151/x.hip"], "deps": []}}))))):
+        check(f"d1b AO-6: families.json change ({why}) -> not one architecture's", fac(T0, new)[0] is None, (why, fac(T0, new)))
+    MOVED = famtxt(kernels_moe=("paths", ["kernels/moe*.hip"]), kernels_gdn=("paths", FAM0["families"]["kernels.gdn"]["paths"] + ["kernels/gfx1151/moe.hip"]))
+    check("d1b AO-6: a gfx1151 fragment moved between families (paths under kernels/gfx1151/ only) -> gfx1151", fac(T0, MOVED)[0] == "gfx1151", fac(T0, MOVED))
+    check("d1b AO-6: an unchanged families.json (formatting only) -> no architecture of its own", fac(T0, json.dumps(FAM0))[0] == "", fac(T0, json.dumps(FAM0)))
+    FAMNEW = famtxt(kernels_moe=("paths", FAM0["families"]["kernels.moe"]["paths"] + ["kernels/gfx1151/moe_down8.hip"]))
+    MODSF = dict(MODSA, **{"kernels.common": dict(MODSA["kernels.common"], paths=MODSA["kernels.common"]["paths"] + ["kernels/families.json"])})
+    RF = arep({"kernels.gdn": [KG], "kernels.common": ["kernels/families.json"]})
+    rd = {("old", "kernels/families.json"): T0, ("new", "kernels/families.json"): FAMNEW}
+    p = aplan(GDN_ONLY + ["kernels/families.json"], RF, mods=MODSF, read_file=lambda side, path: rd.get((side, path)))
+    check("d1b AO-6: gfx1151 kernel + families.json adding a gfx1151 fragment: R9700 none + carry required, 8060S per-arch",
+          p["level"] == "module" and p["gpu_steps"]["r9700"] == [] and carry_of(p).get("status") == "required" and p["full_reasons"] == []
+          and "kernels/families.json" in (p.get("arch_scope") or {}).get("files", []), (p["level"], p["gpu_steps"], p["full_reasons"][:2], p.get("arch_scope_note")))
+    rd2 = {**rd, ("new", "kernels/families.json"): famtxt(kernels_moe=("paths", FAM0["families"]["kernels.moe"]["paths"] + ["kernels/moe_router.hip"]))}
+    p = aplan(GDN_ONLY + ["kernels/families.json"], RF, mods=MODSF, read_file=lambda side, path: rd2.get((side, path)))
+    check("d1b AO-6: families.json naming a gfx1201 / shared fragment: full both", is_full_both(p), (p["level"], p.get("arch_scope_note")))
+    p = aplan(GDN_ONLY + ["kernels/families.json"], RF, mods=MODSF)
+    check("d1b AO-6: families.json changed but its two versions cannot be read: full both", is_full_both(p), (p["level"], p.get("arch_scope_note")))
 # (9) WHOLE-plan fixtures on THIS tree (real modules.json, impact map, gate lists; impact.analyze), from the review's plan-mode
 # ranges (file lists of `git diff --name-only`): kernel-only ranges -> R9700 none + carry required; host-class -> full both
 _imp.ROOT = tc.REPO
@@ -1179,21 +1377,46 @@ HOSTFIX = {
 RFULL = {d: [s["name"] for s in RG[d] if s["gpu"] and not s["na"]] for d in tc.DEVICES}
 
 
-def rplan(files):
+def rplan(files, read_file=None):
     ch = {f: {"old_path": f, "new": [1], "old": [1]} for f in files}
     r = _imp.analyze(ch, RMAP, None, None)
-    return tc.make_plan("t", "x", ch, r, RMODS, RMAP, RG, {}, gate_map=RGM, core_sets={})
+    return mp("t", "x", ch, r, RMODS, RMAP, RG, {}, gate_map=RGM, core_sets={}, read_file=read_file)
 
 
+# review AO-4: the review's kernel-only ranges are of OTHER versions (1a5a547-based branches): this tree's map does not know
+# their new files (kernels/gfx1151/gdn_step_v.hip, gemv_hv8.hip ...), so judged with it they are not gfx1151-only
 for name, files in FIX.items():
     p = rplan(files)
+    check(f"d1b fixture {name} against THIS tree's map (another version): not arch-scoped, full both, the note names the unknown file",
+          p["level"] == "full" and p["gpu_steps"]["r9700"] == RFULL["r9700"] and not (p.get("carry") or {}) and "impact map" in p.get("arch_scope_note", ""),
+          (p["level"], p.get("arch_scope_note")))
+# review AO-6: what a port onto THIS tree looks like (existing gfx1151 files, their kernel tests, and the kernels/families.json
+# edit a new fragment needs): the whole plan per architecture
+FAMT = open(os.path.join(tc.REPO, "kernels", "families.json"), encoding="utf-8").read()
+_fd = json.loads(FAMT)
+_fd["families"]["kernels.moe"]["paths"] = _fd["families"]["kernels.moe"]["paths"] + ["kernels/gfx1151/moe_down8.hip"]
+_fd["families"]["kernels.gemv"]["paths"] = _fd["families"]["kernels.gemv"]["paths"] + ["kernels/gfx1151/gemv_gk.hip"]
+FAMP = json.dumps(_fd, indent=1)
+RDF = {("old", "kernels/families.json"): FAMT, ("new", "kernels/families.json"): FAMP}
+PORT = {
+    "gdn-like port": ["kernels/gfx1151/fused_decode.hip", "kernels/gfx1151/gdn.hip", "tests/kernels/bench_kernels.cpp", "tests/kernels/kernel_test_main.cpp",
+                      "tests/kernels/kt.h", "tests/kernels/test_gdn.cpp", "tools/impact_map.json"],
+    "kcand-like port + families.json": ["kernels/gfx1151/gemv_h.hip", "kernels/gfx1151/moe.hip", "kernels/gfx1151/whirl_kernels_gfx1151.hip", "kernels/families.json",
+                                        "tests/kernels/kernel_test_main.cpp", "tests/kernels/kt.h", "tests/kernels/test_gemvh.cpp", "tests/kernels/test_moe.cpp",
+                                        "tools/impact_map.json"],
+}
+for name, files in PORT.items():
+    p = rplan(files, read_file=lambda side, path: RDF.get((side, path)))
     mods_t = sorted(p["modules"])
     want8 = sorted({s for k in mods_t for s in ARCH_MODS.get(k, {}).get("steps") or []})
-    check(f"d1b fixture {name}: whole plan: level module, R9700 NO GPU step, 8060S = gfx1151 steps (not full), R9700 carried (proof required)",
+    check(f"d1b fixture {name} (this tree): whole plan: level module, R9700 NO GPU step, 8060S = gfx1151 steps (not full), R9700 carried (proof required)",
           p["level"] == "module" and p["full_reasons"] == [] and p["gpu_steps"]["r9700"] == [] and want8 and set(want8) <= set(p["gpu_steps"]["8060s"])
           and len(p["gpu_steps"]["8060s"]) < len(RFULL["8060s"]) and carry_of(p).get("status") == "required" and carry_of(p).get("covers") == RFULL["r9700"]
           and sorted(p.get("carry") or {}) == ["r9700"] and (p.get("arch_scope") or {}).get("arch") == "gfx1151",
-          (p["level"], p["full_reasons"][:2], len(p["gpu_steps"]["r9700"]), len(p["gpu_steps"]["8060s"]), mods_t, p.get("carry")))
+          (p["level"], p["full_reasons"][:2], len(p["gpu_steps"]["r9700"]), len(p["gpu_steps"]["8060s"]), mods_t, p.get("carry"), p.get("arch_scope_note")))
+p = rplan(PORT["kcand-like port + families.json"])
+check("d1b fixture kcand-like port, families.json versions not readable: full both", p["level"] == "full" and p["gpu_steps"]["r9700"] == RFULL["r9700"],
+      (p["level"], p.get("arch_scope_note")))
 for name, files in HOSTFIX.items():
     p = rplan(files)
     check(f"d1b fixture {name} (host class): whole plan unchanged: full matrix both GPUs, contract.abi named, no carry",
