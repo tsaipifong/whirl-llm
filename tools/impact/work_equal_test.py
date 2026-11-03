@@ -520,6 +520,234 @@ with tempfile.TemporaryDirectory() as td:
     r = _co(A, mutant("same", cuid=CUID1))
     expect("same cuid, same bytes: plain identical", r["result"] == "identical", r["result"])
 
+# ---------------- v0251-d1a (D1(a), PLAN V1-02): --arch judges ONE GPU. One exe carries gfx1201 and gfx1151 code objects
+# (whirl_kernels + whirl_vision per arch: CMakeLists.txt:62-93, cmake/vision.cmake), so before d1a any 8060S kernel change
+# made the whole report NOT_EQUIVALENT and R9700 numbers could never be carried over. With --arch A only A's code objects
+# count, and only A's launch runs (--device) and golden cases (reference set A); launch sequence and golden stay required.
+# Fixture layout = the shipped 0.2.5 whirl.exe: gfx1201, gfx1151, gfx1201, gfx1151 (scratch\v0251_d1a\bundle_probe_025.txt).
+
+
+def golden_arch(path, exe, sha, arch_cases, refs=None):
+    """a golden.ps1-style summary holding one reference set per arch (cases keyed <arch>:<model>/<mode>_<suite>)"""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"golden: exe {exe} sha256 {sha}\n")
+        for arch, cases in arch_cases.items():
+            ref = (refs or {}).get(arch, ("ab" if arch == "gfx1201" else "ba") * 32)
+            f.write(f"golden: reference set {arch} sha256 {'cd' * 32} (13 files; all files of {arch}: {ref})\n")
+            for name, st in cases.items():
+                f.write(f"{st:5s} {name:24s} 43 lines, 20 s\n")
+        f.write("PASS\n" if all(s == "OK" for c in arch_cases.values() for s in c.values()) else "FAIL\n")
+    return path
+
+
+def _arch(fn, *a, **kw):
+    """fn(..., arch=...) on the pre-d1a tool raises TypeError (no arch parameter): a FAIL row, not a crash"""
+    try:
+        return fn(*a, **kw)
+    except TypeError as e:
+        return {"verdict": f"TypeError {e}", "exit": None, "checks": {}, "result": f"TypeError {e}", "reasons": [str(e)],
+                "runs": [], "cases": [], "objects": [], "launch": [], "golden": {}, "exes": []}
+
+
+GCMD = '"{exe}" golden m.gguf --suite {suite} --precise --device {dev}'
+G_OK = {"swift/precise_single": "OK", "swift/precise_pair": "OK"}
+
+with tempfile.TemporaryDirectory() as td:
+    J = lambda *p: os.path.join(td, *p)
+    K97, K8 = mk_elf(text=b"\x01\x02\x03\x04" * 8, mach=0x4E), mk_elf(text=b"\x05" * 40, mach=0x4A)
+    V97, V8 = mk_elf(text=b"\x21\x22" * 8, mach=0x4E, note=b"vision 1201"), mk_elf(text=b"\x25" * 12, mach=0x4A, note=b"vision 1151")
+    K8x = mk_elf(text=b"\x06" * 40, mach=0x4A)                                    # an 8060S kernel change
+    K97x = mk_elf(text=b"\x01\x02\x03\x05" + b"\x01\x02\x03\x04" * 7, mach=0x4E)   # an R9700 kernel change
+
+    def exe(side, objs, ts):
+        os.makedirs(J(side), exist_ok=True)
+        return mk_pe(J(side, "whirl.exe"), elfs=objs, ts=ts, guid=bytes([65 + ts]) * 16)
+    A = exe("a", (K97, K8, V97, V8), 1)           # the release whose numbers are carried
+    B8 = exe("b8", (K97, K8x, V97, V8), 2)        # only a gfx1151 object changed (kernel-only 8060S item)
+    B97 = exe("b97", (K97x, K8, V97, V8), 3)      # a gfx1201 object changed
+    SH = {x: we.file_sha(x) for x in (A, B8, B97)}
+
+    def launch(name, x, r97=("c0c0", "c1c1"), r8=("c0c0", "c1c1"), runs=("97", "pci", "8"), extra=None):
+        """step folder golden_swift: gfx1201 single, pci:71:0 (= R9700) pair, gfx1151 single (+ extra runs)"""
+        t = os.stat(x).st_mtime_ns + 10**9
+        f = J(name, "golden_swift")
+        if "97" in runs:
+            ll(f, 1, GCMD.format(exe=x, suite="single", dev="gfx1201"), 5, r97[0], ROWS, r97[1], ARGS, mtime=t)
+        if "pci" in runs:
+            ll(f, 2, GCMD.format(exe=x, suite="pair", dev="pci:71:0"), 5, "d0d0", ROWS, "d1d1", ARGS, mtime=t + 1)
+        if "8" in runs:
+            ll(f, 3, GCMD.format(exe=x, suite="single", dev="gfx1151"), 5, r8[0], ROWS, r8[1], ARGS, mtime=t + 2)
+        for i, (cmd, seq) in enumerate(extra or [], 4):
+            ll(f, i, cmd.format(exe=x), 5, seq, ROWS, "e1e1", ARGS, mtime=t + i)
+        return J(name)
+    LA, LB8 = launch("la", A), launch("lb8", B8, r8=("8888", "8889"))   # B8: the 8060S launch sequence changed too (A1-type)
+    LB97 = launch("lb97", B97)
+    GA = golden_arch(J("ga.txt"), A, SH[A], {"gfx1201": G_OK, "gfx1151": G_OK})
+    GB8 = golden_arch(J("gb8.txt"), B8, SH[B8], {"gfx1201": G_OK, "gfx1151": G_OK})
+    GB97 = golden_arch(J("gb97.txt"), B97, SH[B97], {"gfx1201": G_OK, "gfx1151": G_OK})
+
+    # D1(a) fixture (1): only the gfx1151 object (and the 8060S launch sequence) changed
+    r = _arch(we.report, [A], [B8], launch=(LA, LB8), golden_a=[GA], golden_b=[GB8], arch="gfx1201")
+    expect("d1a (1) only gfx1151 changed: --arch gfx1201 EQUIVALENT (exit 0)", r["verdict"] == "EQUIVALENT" and r["exit"] == 0,
+           (r["verdict"], r["checks"], r["reasons"]))
+    expect("d1a (1) --arch gfx1201: code objects identical (gfx1201 objects only), launch identical, golden identical",
+           r["checks"] == {"code_objects": "identical", "launch_sequence": "identical", "golden": "identical", "host_code": r["checks"].get("host_code")}
+           and "host_code" in r["checks"], r["checks"])
+    rw = we.report([A], [B8], launch=(LA, LB8), golden_a=[GA], golden_b=[GB8])
+    expect("d1a (1) pin: without --arch the same pair stays NOT_EQUIVALENT (whole-exe rule unchanged)", rw["verdict"] == "NOT_EQUIVALENT", rw["checks"])
+    r8 = _arch(we.report, [A], [B8], launch=(LA, LB8), golden_a=[GA], golden_b=[GB8], arch="gfx1151")
+    expect("d1a (1) --arch gfx1151 on the same pair: NOT_EQUIVALENT (exit 1)", r8["verdict"] == "NOT_EQUIVALENT" and r8["exit"] == 1, (r8["verdict"], r8["checks"]))
+    expect("d1a (1) --arch gfx1151: code objects and launch both different (the gfx1151 run changed)",
+           r8["checks"].get("code_objects") == "different" and r8["checks"].get("launch_sequence") == "different", r8["checks"])
+    expect("d1a JSON: top-level arch gfx1201, format unchanged; whole-exe report arch None",
+           r.get("arch") == "gfx1201" and r.get("format") == "whirl-work-equal/1" and "arch" in rw and rw["arch"] is None, (r.get("arch"), rw.get("arch")))
+    co = (r.get("exes") or [{}])[0].get("code_objects", {})
+    expect("d1a JSON: only gfx1201 objects compared (2 per side), the 2 gfx1151 objects of each side listed as ignored",
+           [o.get("target") for o in co.get("objects", [])] == ["gfx1201", "gfx1201"] and (co.get("n_a"), co.get("n_b")) == (2, 2)
+           and [o.get("target") for o in co.get("ignored_a", [])] == ["gfx1151", "gfx1151"]
+           and [o.get("target") for o in co.get("ignored_b", [])] == ["gfx1151", "gfx1151"], co)
+    lr = (r.get("launch") or [{}])[0]
+    keys = [x.get("key", "") for x in lr.get("runs", [])]
+    expect("d1a JSON: launch runs hold no other-GPU run (test_change.check_proof reads --device in run keys, test_change.py:855-861)",
+           len(keys) == 2 and not any("--device gfx1151" in k for k in keys) and any("--device pci:71:0" in k for k in keys), keys)
+    expect("d1a JSON: the gfx1151 run is listed in other_arch_runs", any("--device gfx1151" in k for k in lr.get("other_arch_runs", [])), lr.get("other_arch_runs"))
+
+    # D1(a) fixture (2): the gfx1201 object changed (launch + golden identical)
+    r = _arch(we.report, [A], [B97], launch=(LA, LB97), golden_a=[GA], golden_b=[GB97], arch="gfx1201")
+    expect("d1a (2) gfx1201 object changed: --arch gfx1201 NOT_EQUIVALENT (exit 1)", r["verdict"] == "NOT_EQUIVALENT" and r["exit"] == 1, (r["verdict"], r["checks"]))
+    expect("d1a (2) reason names the gfx1201 object", any("gfx1201" in x and "differ" in x for x in r["reasons"]), r["reasons"])
+    r = _arch(we.report, [A], [B97], launch=(LA, LB97), golden_a=[GA], golden_b=[GB97], arch="gfx1151")
+    expect("d1a (2) same pair --arch gfx1151: EQUIVALENT (its objects, runs and cases are the same)", r["verdict"] == "EQUIVALENT", (r["verdict"], r["checks"], r["reasons"]))
+
+    # D1(a) fixture (3): the gfx1201 launch sequence changed (objects identical): host code changed what R9700 runs
+    LB8s = launch("lb8s", B8, r97=("9999", "c1c1"))
+    r = _arch(we.report, [A], [B8], launch=(LA, LB8s), golden_a=[GA], golden_b=[GB8], arch="gfx1201")
+    expect("d1a (3) gfx1201 launch sequence changed: --arch gfx1201 NOT_EQUIVALENT", r["verdict"] == "NOT_EQUIVALENT"
+           and r["checks"].get("launch_sequence") == "different", (r["verdict"], r["checks"]))
+    LB8a = launch("lb8a", B8, r97=("c0c0", "c1c9"))
+    r = _arch(we.report, [A], [B8], launch=(LA, LB8a), golden_a=[GA], golden_b=[GB8], arch="gfx1201")
+    expect("d1a (3) gfx1201 kernel-argument sequence changed: NOT_EQUIVALENT", r["verdict"] == "NOT_EQUIVALENT", (r["verdict"], r["checks"]))
+
+    # evidence of the other GPU only: nothing is proved about gfx1201
+    L8a, L8b = launch("l8a", A, runs=("8",)), launch("l8b", B8, runs=("8",))
+    r = _arch(we.report, [A], [B8], launch=(L8a, L8b), golden_a=[GA], golden_b=[GB8], arch="gfx1201")
+    expect("d1a launch evidence only on gfx1151: --arch gfx1201 INCOMPLETE (exit 2), reason names gfx1201",
+           r["verdict"] == "INCOMPLETE" and r["exit"] == 2 and r["checks"].get("launch_sequence") == "missing"
+           and any("gfx1201" in x for x in r["reasons"]), (r["verdict"], r["checks"], r["reasons"]))
+    G8a = golden_arch(J("g8a.txt"), A, SH[A], {"gfx1151": G_OK})
+    G8b = golden_arch(J("g8b.txt"), B8, SH[B8], {"gfx1151": G_OK})
+    r = _arch(we.report, [A], [B8], launch=(LA, LB8), golden_a=[G8a], golden_b=[G8b], arch="gfx1201")
+    expect("d1a golden only on gfx1151: --arch gfx1201 INCOMPLETE, golden missing", r["verdict"] == "INCOMPLETE"
+           and r["checks"].get("golden") == "missing", (r["verdict"], r["checks"]))
+    GB8d = golden_arch(J("gb8d.txt"), B8, SH[B8], {"gfx1201": G_OK, "gfx1151": {"swift/precise_single": "OK", "swift/precise_pair": "DIFF"}})
+    r = _arch(we.report, [A], [B8], launch=(LA, LB8), golden_a=[GA], golden_b=[GB8d], arch="gfx1201")
+    expect("d1a golden DIFF only in a gfx1151 case: --arch gfx1201 golden identical, EQUIVALENT",
+           r["verdict"] == "EQUIVALENT" and r["checks"].get("golden") == "identical", (r["verdict"], r["checks"], r["reasons"]))
+    expect("d1a golden: the gfx1151 cases are listed as other-GPU cases", sorted(r.get("golden", {}).get("other_arch_cases", []))
+           == ["gfx1151:swift/precise_pair", "gfx1151:swift/precise_single"], r.get("golden", {}).get("other_arch_cases"))
+    GB8e = golden_arch(J("gb8e.txt"), B8, SH[B8], {"gfx1201": {"swift/precise_single": "DIFF", "swift/precise_pair": "OK"}, "gfx1151": G_OK})
+    r = _arch(we.report, [A], [B8], launch=(LA, LB8), golden_a=[GA], golden_b=[GB8e], arch="gfx1201")
+    expect("d1a golden DIFF in a gfx1201 case: --arch gfx1201 NOT_EQUIVALENT", r["verdict"] == "NOT_EQUIVALENT"
+           and r["checks"].get("golden") == "different", (r["verdict"], r["checks"]))
+    GB8r = golden_arch(J("gb8r.txt"), B8, SH[B8], {"gfx1201": G_OK, "gfx1151": G_OK}, refs={"gfx1201": "ef" * 32})
+    r = _arch(we.report, [A], [B8], launch=(LA, LB8), golden_a=[GA], golden_b=[GB8r], arch="gfx1201")
+    expect("d1a golden: another gfx1201 reference set -> INCOMPLETE (OK on both sides proves nothing)", r["verdict"] == "INCOMPLETE"
+           and r["checks"].get("golden") == "missing", (r["verdict"], r["checks"]))
+    GB8o = golden_arch(J("gb8o.txt"), B8, SH[B8], {"gfx1201": G_OK, "gfx1151": G_OK}, refs={"gfx1151": "ef" * 32})
+    r = _arch(we.report, [A], [B8], launch=(LA, LB8), golden_a=[GA], golden_b=[GB8o], arch="gfx1201")
+    expect("d1a golden: another gfx1151 reference set does not matter for --arch gfx1201", r["verdict"] == "EQUIVALENT", (r["verdict"], r["checks"], r["reasons"]))
+
+    # runs without --device: compared (a difference fails), never positive evidence
+    UN = '"{exe}" selftest m.gguf --precise'
+    LAu, LB8u = launch("lau", A, extra=[(UN, "a0a0")]), launch("lb8u", B8, r8=("8888", "8889"), extra=[(UN, "a0a1")])
+    r = _arch(we.report, [A], [B8], launch=(LAu, LB8u), golden_a=[GA], golden_b=[GB8], arch="gfx1201")
+    expect("d1a run without --device that differs: --arch gfx1201 NOT_EQUIVALENT (fail closed)", r["verdict"] == "NOT_EQUIVALENT"
+           and r["checks"].get("launch_sequence") == "different", (r["verdict"], r["checks"]))
+    LAo, LBo = launch("lao", A, runs=(), extra=[(UN, "a0a0")]), launch("lbo", B8, runs=(), extra=[(UN, "a0a0")])
+    r = _arch(we.report, [A], [B8], launch=(LAo, LBo), golden_a=[GA], golden_b=[GB8], arch="gfx1201")
+    expect("d1a only runs without --device (identical): --arch gfx1201 INCOMPLETE (no run attributed to gfx1201)",
+           r["verdict"] == "INCOMPLETE" and r["checks"].get("launch_sequence") == "missing", (r["verdict"], r["checks"], r["reasons"]))
+
+    # mutation check (mutate_d1a.py M11 / M12): golden cases that no reference-set line attributes; another GPU's stale log
+    def golden_unattributed(path, x, sha_):
+        """the cases come before the only reference-set line: none of them is keyed gfx1201"""
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"golden: exe {x} sha256 {sha_}\n")
+            for name, st in G_OK.items():
+                f.write(f"{st:5s} {name:24s} 43 lines, 20 s\n")
+            f.write(f"golden: reference set gfx1201 sha256 {'cd' * 32} (13 files; all files of gfx1201: {'ab' * 32})\nPASS\n")
+        return path
+    GuA, GuB = golden_unattributed(J("gua.txt"), A, SH[A]), golden_unattributed(J("gub.txt"), B8, SH[B8])
+    r = _arch(we.report, [A], [B8], launch=(LA, LB8), golden_a=[GuA], golden_b=[GuB], arch="gfx1201")
+    expect("d1a golden: cases no reference set attributes (gfx1201 ref line only after them) -> --arch gfx1201 INCOMPLETE",
+           r["verdict"] == "INCOMPLETE" and r["checks"].get("golden") == "missing", (r["verdict"], r["checks"], r["reasons"]))
+    OLD = exe("old", (K97, K8, V97, V8), 10)   # another build of the same sources (other stamp, other sha)
+    LAs = launch("las", A)
+    ll(J("las", "golden_swift"), 3, GCMD.format(exe=OLD, suite="single", dev="gfx1151"), 5, "c0c0", ROWS, "c1c1", ARGS,
+       mtime=os.stat(OLD).st_mtime_ns + 10**9)   # A's gfx1151 log now names the other build
+    r = _arch(we.report, [A], [B8], launch=(LAs, LB8), golden_a=[GA], golden_b=[GB8], arch="gfx1201")
+    expect("d1a a gfx1151 log of another exe in A's folder: not gfx1201 evidence, the binding still holds -> EQUIVALENT",
+           r["verdict"] == "EQUIVALENT" and not any(J("las", "golden_swift", "launch_3.txt") == e.get("path") for e in r.get("evidence", [])),
+           (r["verdict"], r["checks"], r["reasons"]))
+    rw = we.report([A], [B8], launch=(LAs, LB8), golden_a=[GA], golden_b=[GB8])
+    expect("d1a pin: without --arch that log is evidence: A's launch binding is mismatch",
+           rw["launch"][0]["binding"]["a"]["state"] == "mismatch", rw["launch"][0]["binding"])
+
+    # code objects: pairing inside one arch, count changes, no object of the arch, cuid
+    B8p = exe("b8p", (K8, K97, K8, V97, V8), 4)   # one more gfx1151 object in front: whole-exe index pairing shifts
+    c = _arch(we.compare_exe, A, B8p, arch="gfx1201")
+    expect("d1a objects: an extra gfx1151 object -> --arch gfx1201 identical (objects paired inside the arch)",
+           c.get("code_objects", {}).get("result") == "identical", c.get("code_objects"))
+    c = _arch(we.compare_exe, A, B8p, arch="gfx1151")
+    expect("d1a objects: the extra gfx1151 object -> --arch gfx1151 different (2 vs 3)", c.get("code_objects", {}).get("result") == "different"
+           and (c["code_objects"].get("n_a"), c["code_objects"].get("n_b")) == (2, 3), c.get("code_objects"))
+    expect("d1a objects pin: the extra object -> whole-exe different", we.compare_exe(A, B8p)["code_objects"]["result"] == "different")
+    B97p = exe("b97p", (K97, K8, V97, V8, K97x), 5)
+    c = _arch(we.compare_exe, A, B97p, arch="gfx1201")
+    expect("d1a objects: an extra gfx1201 object -> --arch gfx1201 different", c.get("code_objects", {}).get("result") == "different", c.get("code_objects"))
+    O8a, O8b = exe("o8a", (K8, V8), 6), exe("o8b", (K8, V8), 7)   # a gfx1151-only build (-DWHIRL_GPU_ARCHS=gfx1151)
+    c = _arch(we.compare_exe, O8a, O8b, arch="gfx1201")
+    expect("d1a objects: no gfx1201 object on either side -> missing (fail closed)", c.get("code_objects", {}).get("result") == "missing", c.get("code_objects"))
+    r = _arch(we.report, [O8a], [O8b], launch=(LA, LB8), golden_a=[GA], golden_b=[GB8], arch="gfx1201")
+    expect("d1a report: gfx1151-only builds -> --arch gfx1201 INCOMPLETE", r["verdict"] == "INCOMPLETE", (r["verdict"], r["checks"]))
+    Ca, Cb = exe("cua", (mk_cuid_elf(CUID1), K8), 8), exe("cub", (mk_cuid_elf(CUID2), K8x), 9)
+    c = _arch(we.compare_exe, Ca, Cb, arch="gfx1201")
+    expect("d1a objects: gfx1201 object differs only by __hip_cuid -> identical-except-cuid", c.get("code_objects", {}).get("result") == "identical-except-cuid", c.get("code_objects"))
+
+    # db mode: the stored traces of one exe on both GPUs; --arch keeps that GPU's rows
+    db = J("arch.db")
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE work_traces (id INTEGER PRIMARY KEY, run_id TEXT, measurement_id INTEGER, scope TEXT, component TEXT, cell TEXT, "
+                "exe_sha256 TEXT, work_hash TEXT, seq_hash TEXT, arg_hash TEXT, launches INTEGER, launch_table TEXT, work_json TEXT, recorded_at TEXT)")
+    con.execute("CREATE TABLE runs (run_id TEXT PRIMARY KEY, gpu TEXT)")
+    for sha_, g, wh in ((SH[A], "gfx1201", "w1"), (SH[B8], "gfx1201", "w1"), (SH[A], "gfx1151", "w8"), (SH[B8], "gfx1151", "w8x")):
+        con.execute("INSERT INTO work_traces (scope, component, cell, exe_sha256, work_hash, seq_hash, arg_hash, launches, work_json) "
+                    "VALUES ('test','golden_swift','k1',?,?,'s','a',5,?)", (sha_, wh, json.dumps({"gpu": g})))
+    con.commit(); con.close()
+    L = _arch(we.compare_launch, f"db:{SH[A]}", f"db:{SH[B8]}", db=db, arch="gfx1201")
+    expect("d1a db: --arch gfx1201 keeps the gfx1201 rows of both exes (the gfx1151 rows differ) -> identical", L.get("result") == "identical", L)
+    L = _arch(we.compare_launch, f"db:{SH[A]}", f"db:{SH[B8]}@gfx1151", db=db, arch="gfx1201")
+    expect("d1a db: B's evidence named @gfx1151 under --arch gfx1201 -> missing", L.get("result") == "missing", L)
+
+    # CLI: the interface v0251-d1b (test_change) relies on: --arch, EQUIVALENT / NOT_EQUIVALENT for that target, exit 0 / 1 / 2 / 3
+    WE = os.path.join(HERE, "work_equal.py")
+    outj = J("arch.json")
+    p = subprocess.run([sys.executable, "-I", WE, "compare", "--arch", "gfx1201", "--a-exe", A, "--b-exe", B8, "--a-launch", LA,
+                        "--b-launch", LB8, "--a-golden", GA, "--b-golden", GB8, "-o", outj], capture_output=True, text=True)
+    js = json.load(open(outj, encoding="utf-8")) if os.path.isfile(outj) else {}
+    expect("d1a CLI --arch gfx1201: exit 0, first line 'work_equal: EQUIVALENT' naming gfx1201, JSON arch gfx1201",
+           p.returncode == 0 and p.stdout.startswith("work_equal: EQUIVALENT") and "gfx1201" in p.stdout.splitlines()[0]
+           and js.get("arch") == "gfx1201" and js.get("verdict") == "EQUIVALENT" and js.get("format") == "whirl-work-equal/1", p.stdout + p.stderr)
+    p = subprocess.run([sys.executable, "-I", WE, "compare", "--arch", "gfx1151", "--a-exe", A, "--b-exe", B8, "--a-launch", LA,
+                        "--b-launch", LB8, "--a-golden", GA, "--b-golden", GB8], capture_output=True, text=True)
+    expect("d1a CLI --arch gfx1151 on the same pair: exit 1, NOT_EQUIVALENT", p.returncode == 1 and p.stdout.startswith("work_equal: NOT_EQUIVALENT"), p.stdout + p.stderr)
+    p = subprocess.run([sys.executable, "-I", WE, "compare", "--arch", "gfx1201", "--a-exe", A, "--b-exe", B8, "-o", outj], capture_output=True, text=True)
+    js = json.load(open(outj, encoding="utf-8")) if os.path.isfile(outj) else {}
+    expect("d1a CLI --arch gfx1201 with exes only: exit 2 (INCOMPLETE), checks.code_objects identical (code-object-only use)",
+           p.returncode == 2 and js.get("checks", {}).get("code_objects") == "identical" and js.get("arch") == "gfx1201", p.stdout + p.stderr)
+    p = subprocess.run([sys.executable, "-I", WE, "compare", "--arch", "gfx9999", "--a-exe", A, "--b-exe", B8], capture_output=True, text=True)
+    expect("d1a CLI --arch gfx9999 (not a WHIRL target): usage error exit 3", p.returncode == 3, p.stdout + p.stderr)
+
 # ---------------- stored evidence on the owner's machine (skipped elsewhere): the two manual proofs this tool replaces
 RW = r"C:\ClaudeWorkspace\whirl-work"
 ra_, rb_ = os.path.join(RW, r"wt_arch025\build\Release\whirl.exe"), os.path.join(RW, r"wt_a25_int\build\Release\whirl.exe")
