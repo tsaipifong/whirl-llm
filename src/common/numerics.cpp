@@ -214,6 +214,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOE_MXW", &S::moe_mxw},
         {"MOE_WIDE", &S::moe_wide},
         {"MOE_RBF", &S::moe_rbf},
+        {"MOE_RFUSE", &S::moe_rfuse},
     }};
     return t;
 }

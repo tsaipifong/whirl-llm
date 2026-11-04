@@ -108,6 +108,7 @@ Result invariant(const std::string& name, std::size_t n, std::size_t bad) {
 
 void testMoeMx(Ctx& c) {
     c.rep.family = "moemx";
+    testMoeRouter(c);  // v0251-a11port: the fused router (the 8060S default), Ornith's router from --moemx
     const int ti = static_cast<int>(QType::mxfp4);
     if (!c.k.moe_gu[ti] || !c.k.moe_down[ti]) {
         c.rep.skip("moemx", "kernels", "MXFP4 MoE kernels not in this code object");

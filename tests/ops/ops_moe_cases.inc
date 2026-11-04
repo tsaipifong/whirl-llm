@@ -32,6 +32,8 @@ kn::KernelTable moeTable(bool g1151) {
         k.moe_tiles = tag("moe_tiles");
         k.gemm_moegu[mx] = tag("gemm_moegu_mxfp4");
         k.gemm_moe32r[mx] = tag("gemm_moe32r_mxfp4");
+        k.moe_router_fused_i16 = tag("moe_router_fused_i16");  // v0251-a11port: gfx1151 code object only
+        k.moe_router_fused_i24 = tag("moe_router_fused_i24");
     } else {
         k.gemmr_moegu = tag("gemmr_moegu");
         k.gemmr_moegu32 = tag("gemmr_moegu32");
@@ -49,6 +51,76 @@ kn::KernelTable moeTable(bool g1151) {
         k.silu_mul_x8h = tag("silu_mul_x8h");
     }
     return k;
+}
+
+// v0251-a11port (feat026-router): the fused router choice (ops::MoePlan::router), qwen35::Context::moeBlock's launch
+// decision, as the screened host condition (feat026-router-p25 f06b245 forward/ffn.cpp): flag on, a small batch of one
+// piece (n <= max_small_batch), R <= 256, K <= 32, E % 4 == 0, ceil(E / 128) = 16 (i16) or 24 (i24), the counter
+// buffer, and the kernel in the code object (only the gfx1151 one has it). Everything else: null = moe_logits_f32 +
+// moe_topk, the 0.2.5 path. Fails before the port (chooseMoe never sets router).
+void testOpsMoeRouter(ops::MoeProblem p, const kn::KernelTable& k97, const kn::KernelTable& k8) {
+    p.rcnt_buf = true;
+    ops::MoeFlags bal, pre;
+    bal.moe_fp8 = true;
+    bal.moe_rfuse = pre.moe_rfuse = true;
+    pre.prec_dec = true;
+    CHECK(!ops::MoeFlags{}.moe_rfuse && !ops::MoeProblem{}.rcnt_buf);  // the defaults: off (callers set them)
+    // 8060S, balance and precise: decode and verify pieces up to 16 rows take the i16 entry (Ornith E 2048, R 256, K 8)
+    for (const std::uint32_t n : {1u, 2u, 4u, 5u, 16u}) {
+        p.n = n;
+        CHECK(nameOf(ops::chooseMoe(p, bal, k8, k8.silu_mul_x8h).router) == "moe_router_fused_i16");
+        CHECK(nameOf(ops::chooseMoe(p, pre, k8, k8.silu_mul_x8h).router) == "moe_router_fused_i16");
+    }
+    // the plan's other fields do not move with the router choice
+    {
+        p.n = 2;
+        ops::MoeFlags off = bal;
+        off.moe_rfuse = false;
+        const ops::MoePlan a = ops::chooseMoe(p, off, k8, k8.silu_mul_x8h), b = ops::chooseMoe(p, bal, k8, k8.silu_mul_x8h);
+        CHECK(a.router == nullptr && nameOf(b.router) == "moe_router_fused_i16");  // WHIRL_MOE_RFUSE=0: the 0.2.5 path
+        CHECK(a.small == b.small && a.small_q8 == b.small_q8 && a.gu == b.gu && a.down == b.down && a.logits_grid.x == b.logits_grid.x &&
+              b.logits_grid.x == 32);
+    }
+    // more than one piece: the two-kernel path (balance wide verify 17..32 rows; precise verify up to max_verify_rows)
+    {
+        ops::MoeFlags wide = bal;
+        wide.small_max = 32;
+        p.n = 17;
+        const ops::MoePlan w = ops::chooseMoe(p, wide, k8, k8.silu_mul_x8h);
+        CHECK(w.small && w.router == nullptr);
+        p.n = 24;
+        const ops::MoePlan v = ops::chooseMoe(p, pre, k8, k8.silu_mul_x8h);
+        CHECK(v.small && v.router == nullptr);
+    }
+    // prefill: never
+    p.n = 4096;
+    CHECK(ops::chooseMoe(p, bal, k8, k8.silu_mul_x8h).router == nullptr && ops::chooseMoe(p, pre, k8, k8.silu_mul_x8h).router == nullptr);
+    // the R9700 table has no fused router: the two-kernel path even with the flag on
+    p.n = 2;
+    CHECK(ops::chooseMoe(p, bal, k97, k97.silu_mul_x8h).router == nullptr && ops::chooseMoe(p, pre, k97, k97.silu_mul_x8h).router == nullptr);
+    // no counter buffer: the two-kernel path
+    {
+        ops::MoeProblem q = p;
+        q.rcnt_buf = false;
+        CHECK(ops::chooseMoe(q, bal, k8, k8.silu_mul_x8h).router == nullptr);
+    }
+    // shapes: E 3072 -> i24, E 2000 -> i16 (ceil 16), E 2050 (not % 4) / 4096 (32 iterations) / R 257 / K 33 -> null
+    struct S {
+        std::uint32_t E, R, K;
+        const char* want;
+    };
+    for (const S s : {S{3072, 256, 8, "moe_router_fused_i24"}, S{2000, 256, 8, "moe_router_fused_i16"}, S{2048, 128, 8, "moe_router_fused_i16"},
+                      S{2048, 256, 32, "moe_router_fused_i16"}, S{2050, 256, 8, "null"}, S{4096, 256, 8, "null"}, S{1024, 256, 8, "null"},
+                      S{2048, 257, 8, "null"}, S{2048, 256, 33, "null"}}) {
+        ops::MoeProblem q = p;
+        q.E = s.E;
+        q.R = s.R;
+        q.K = s.K;
+        q.n = 3;
+        const std::string got = nameOf(ops::chooseMoe(q, bal, k8, k8.silu_mul_x8h).router);
+        CHECK_DETAIL(got == s.want, "router shape E " + std::to_string(s.E) + " R " + std::to_string(s.R) + " K " + std::to_string(s.K) +
+                                        ": got " + got + ", want " + s.want);
+    }
 }
 
 void testOpsMoe() {
@@ -117,6 +189,7 @@ void testOpsMoe() {
     p.n = 512;
     CHECK(ops::chooseMoe(p, bn64, k97, k97.silu_mul_x8h).bn == 64);
     CHECK(ops::moeTile(512, 8, 256) == 32 && ops::moeTile(4096, 8, 256) == 64);
+    testOpsMoeRouter(p, k97, k8);
 }
 
 }  // namespace

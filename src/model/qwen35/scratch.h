@@ -52,6 +52,10 @@ struct Scratch {
     // prefill experts on the MXFP4 x fp8 grouped GEMM (WHIRL_MOE_FP8=0 -> f16 gemm_moe);
     // decode experts on the whole-block kernels (WHIRL_MOE_MXW=0 -> generic moe_gu / moe_down).
     DevPtr moe_sx = 0;
+    // v0251-a11port (feat026-router): the fused router's block counter, one zeroed u32 the kernel resets (graph-capture
+    // safe). Not an allocation of its own: bytes 8..11 of the zeroed 16-byte moe_ntiles (moe_route writes bytes 0..3
+    // only), so no buffer size or estimate changes on either card
+    DevPtr moe_rcnt = 0;
 };
 
 }  // namespace whirl::qwen35
