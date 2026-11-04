@@ -211,11 +211,20 @@ std::string tuneCandidateKey(const device::Profile& p) {
     return s;
 }
 
-// (test-first interface: no selection suffix yet)
-std::string tuneSelectionSuffix(int, std::uint32_t, bool) { return std::string(); }
+// The parsed values (Model::fdq / fdq_min), so "t2" and "2" share a table and no raw environment text reaches the file
+// name. Without a gemmfq kernel in the code object the switches change nothing (ops::chooseGemmF16 keeps the old plan).
+std::string tuneSelectionSuffix(int fdq, std::uint32_t fdq_min, bool has_gemmfq) {
+    const FdqEnv def;
+    if (!has_gemmfq || (fdq == def.fdq && fdq_min == def.fdq_min)) return std::string();
+    if (fdq == 0) return "-fdq0";
+    return (fdq < 0 ? std::string("-fdqd-") : fmt("-fdq%d-", fdq)) + std::to_string(fdq_min);
+}
 
 std::string tuneCacheStem(const Model& m, const std::string& file_name, std::uintmax_t file_size) {
-    return file_name + "-" + std::to_string(file_size) + device::profile(m.arch).tune_cache_suffix + ".txt";
+    bool has_fq = false;
+    for (const auto fn : m.k.gemmfq) has_fq = has_fq || fn != nullptr;
+    return file_name + "-" + std::to_string(file_size) + device::profile(m.arch).tune_cache_suffix +
+           tuneSelectionSuffix(m.fdq, m.fdq_min, has_fq) + ".txt";
 }
 
 // Per quant type: int8-activation GEMV vs f32 GEMV on one real matrix.
@@ -898,11 +907,12 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         const auto fsz = std::filesystem::file_size(widen(model_path), ec);
         if (!ec) {
             // the R9700 (gfx1201) keeps the plain file name; other code objects get their own.
-            // gfx1151 table revision 2: the small-batch WMMA GEMMs (gemms) became candidates,
-            // so tables written before them are tuned again.
-            const std::string sfx = device::profile(m.arch).tune_cache_suffix;
+            // gfx1151 table revision 2: the small-batch WMMA GEMMs (gemms) became candidates; revision 3
+            // (v0251-a3key): the fused-dequant gemmfq joined the dequant family. Tables written before are
+            // tuned again (and kept: user files); tests/model testTuneCacheKey fails when the candidate set
+            // changes without a new revision. WHIRL_FDQ8S / _MIN set: a table of its own (tuneSelectionSuffix).
             const std::string bname = narrow(std::filesystem::path(widen(model_path)).filename().wstring());
-            const std::string stem = bname + "-" + std::to_string(fsz) + sfx + ".txt";
+            const std::string stem = tuneCacheStem(m, bname, fsz);
             const std::string dir = platform::paths::whirlDir(base);
             std::filesystem::create_directories(widen(dir), ec);
             cache_path = platform::paths::tuneCachePath(base, stem);

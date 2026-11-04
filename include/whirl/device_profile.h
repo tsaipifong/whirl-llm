@@ -48,7 +48,9 @@ struct Profile {
     bool attn_dq4_dynamic_splits;
     // ---- tuning (src/model/tune.cpp)
     bool tune_fast;                 // each kernel timed once per shape, slow candidates rejected early
-    const char* tune_cache_suffix;  // tune cache file name suffix (table revision)
+    // tune cache file name suffix (table revision). A change to what the tuner times on this family (candidates, slots,
+    // thresholds: qwen35::tuneCandidateKey) needs a new revision: tests/model testTuneCacheKey pins each one
+    const char* tune_cache_suffix;
     const char* tune_time_hint;     // first-run message: how long the tune takes
     // f16-WMMA chunked DeltaNet prefill from strix-llama.cpp (GDN-8S; where gdn_wmma's kernels do not exist)
     bool gdn_strix;
@@ -96,7 +98,7 @@ inline constexpr Profile k_profile_gfx1151{
     .fdq_big = 1,      // c2 from 2305 rows (v0251-a3fix; scratch/v0251_a3/gpu/8060s_20261104-0439/results.txt:106-124)
     .attn_dq4_dynamic_splits = true,
     .tune_fast = true,
-    .tune_cache_suffix = "-gfx1151r2",
+    .tune_cache_suffix = "-gfx1151r3",  // r3: gemmfq in the dequant family (v0251-a3key; tests/model testTuneCacheKey)
     .tune_time_hint = "8 minutes on the Radeon 8060S (less for MXFP4 models)",
     .gdn_strix = true,
     .numerics_8060s = true,
