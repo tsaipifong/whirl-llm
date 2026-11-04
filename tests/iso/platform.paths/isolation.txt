@@ -15,6 +15,8 @@ src       src/platform/env_win.cpp
 src       src/common/util.cpp
 src       src/platform/args_win.cpp
 src       src/platform/fs_win.cpp
+src       src/platform/path_budget_win.cpp
+src       src/platform/proc_win.cpp
 # headers (include closure of the sources above)
 hdr       include/whirl/common.h
 hdr       src/platform/args.h
@@ -23,6 +25,7 @@ hdr       src/platform/fs.h
 hdr       src/platform/fs_fake.h
 hdr       src/platform/path_budget.h
 hdr       src/platform/paths.h
+hdr       src/platform/proc.h
 # test program
 testsrc   tests/unit/platform_paths_tests.cpp
 testhdr   tests/test_check.h

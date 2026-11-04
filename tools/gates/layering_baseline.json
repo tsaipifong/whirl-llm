@@ -109,6 +109,14 @@
   ],
   [
    "cli",
+   "platform.path_budget"
+  ],
+  [
+   "cli",
+   "platform.paths"
+  ],
+  [
+   "cli",
    "prefill.plan"
   ],
   [
@@ -621,6 +629,14 @@
   ],
   [
    "model.core",
+   "platform.fs"
+  ],
+  [
+   "model.core",
+   "platform.path_budget"
+  ],
+  [
+   "model.core",
    "platform.paths"
   ],
   [
@@ -813,6 +829,10 @@
   ],
   [
    "platform.headers",
+   "platform.path_budget"
+  ],
+  [
+   "platform.headers",
    "platform.paths"
   ],
   [
@@ -828,8 +848,16 @@
    "platform.time"
   ],
   [
+   "platform.path_budget",
+   "platform.proc"
+  ],
+  [
    "platform.paths",
    "platform.env"
+  ],
+  [
+   "platform.paths",
+   "platform.path_budget"
   ],
   [
    "prefill.plan",
@@ -958,6 +986,10 @@
   [
    "server.args",
    "model.types"
+  ],
+  [
+   "server.args",
+   "platform.path_budget"
   ],
   [
    "server.cycle_prof",
@@ -1893,6 +1925,10 @@
   ],
   [
    "server.startup",
+   "platform.path_budget"
+  ],
+  [
+   "server.startup",
    "platform.paths"
   ],
   [
@@ -2202,6 +2238,10 @@
   [
    "vision",
    "platform.env"
+  ],
+  [
+   "vision",
+   "platform.path_budget"
   ]
  ],
  "cycles": []
