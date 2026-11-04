@@ -300,8 +300,51 @@ bool copyNoReplace(const wchar_t* from, const wchar_t* to) {
     return CopyFileExW(longPathForm(from).c_str(), longPathForm(to).c_str(), nullptr, nullptr, nullptr, COPY_FILE_FAIL_IF_EXISTS) != 0;
 }
 
-// PATH-256 test-first stub (v0251-patha commit 3): no note yet
-std::string pathLengthNote(const std::string&) { return std::string(); }
+// PATH-256 (pathlen256.DISCOVERY.md v3.1 2c #5 / #6): the length an open / write failure names. Measured as
+// path_budget measures (src/platform/path_budget_win.cpp: GetFullPathNameW, no \\?\ / \\?\UNC\ prefix, UTF-16 units),
+// written out here because every caller of this layer (util.cpp, log.cpp, weights.cpp) already links fs_win.cpp and
+// nothing else of the platform layer. The Chinese text as UTF-8 escapes: " / 路徑長 N 字元（UTF-16）" and
+// "，Windows 未開長路徑支援時上限 259 字元".
+// An empty path has no length to report: no note, so the original message stays as it was (2c #5 "only add the
+// length sentence, do not change the original error"; e.g. a memory-backed gguf::File has path() == "", and llama.cpp
+// names that case "(file*)" instead of a path, llama-model-loader.cpp:724). Before 2026-11-04 GREEN it said
+// "the path is 0 characters long" (model_tests "weights error table: file not openable").
+std::string pathLengthNote(const std::string& path) {
+    if (path.empty()) return std::string();
+    std::wstring w;
+    {
+        const int wn = MultiByteToWideChar(CP_UTF8, 0, path.data(), static_cast<int>(path.size()), nullptr, 0);  // widen's flags
+        if (wn > 0) {
+            w.resize(static_cast<std::size_t>(wn));
+            MultiByteToWideChar(CP_UTF8, 0, path.data(), static_cast<int>(path.size()), w.data(), wn);
+        }
+    }
+    std::wstring full;
+    if (!w.empty()) {
+        const DWORD need = GetFullPathNameW(w.c_str(), 0, nullptr, nullptr);
+        if (need > 0) {
+            full.resize(need);
+            const DWORD got = GetFullPathNameW(w.c_str(), need, full.data(), nullptr);
+            if (got > 0 && got < need) full.resize(got);
+            else full.clear();
+        }
+    }
+    if (full.empty()) full = w;  // GetFullPathNameW could not read it: the text as given
+    if (full.size() >= 8 && full.compare(0, 4, L"\\\\?\\") == 0 && (full[4] == L'U' || full[4] == L'u') && (full[5] == L'N' || full[5] == L'n') &&
+        (full[6] == L'C' || full[6] == L'c') && full[7] == L'\\')
+        full = L"\\\\" + full.substr(8);
+    else if (full.size() >= 4 && full.compare(0, 4, L"\\\\?\\") == 0)
+        full = full.substr(4);
+    const std::string n = std::to_string(full.size());
+    const bool over = full.size() >= 260;  // MAX_PATH with its NUL
+    std::string out = " (the path is " + n + " characters long in UTF-16";
+    if (over) out += "; Windows without long path support allows at most 259";
+    out += " / \xe8\xb7\xaf\xe5\xbe\x91\xe9\x95\xb7 " + n + " \xe5\xad\x97\xe5\x85\x83\xef\xbc\x88UTF-16\xef\xbc\x89";
+    if (over)
+        out += "\xef\xbc\x8cWindows \xe6\x9c\xaa\xe9\x96\x8b\xe9\x95\xb7\xe8\xb7\xaf\xe5\xbe\x91\xe6\x94\xaf\xe6\x8f\xb4\xe6\x99\x82\xe4\xb8\x8a\xe9\x99\x90 259 "
+               "\xe5\xad\x97\xe5\x85\x83";
+    return out + ")";
+}
 
 bool utf8ToWideStrict(std::string_view s, std::wstring* out) {
     if (s.empty()) {

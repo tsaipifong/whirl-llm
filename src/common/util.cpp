@@ -36,7 +36,7 @@ std::vector<std::string> narrowArgs(int argc, const wchar_t* const* wargv) {
 MappedFile::MappedFile(const std::string& path) : path_(path) {
     namespace pfs = platform::fs;
     pfs::Handle f = pfs::open(widen(path).c_str(), pfs::kGenericRead, pfs::kShareRead, pfs::kOpenExisting, pfs::kAttrNormal);
-    if (!pfs::valid(f)) throw std::runtime_error("cannot open " + path);
+    if (!pfs::valid(f)) throw std::runtime_error("cannot open " + path + pfs::pathLengthNote(path));  // PATH-256 2c #5
     file_ = f;
     std::int64_t sz = 0;
     if (!pfs::size(f, &sz)) {
@@ -90,7 +90,7 @@ void MappedFile::close() {
 
 std::string readFile(const std::string& path) {
     std::FILE* f = platform::fs::openStdio(widen(path).c_str(), L"rb");
-    if (!f) throw std::runtime_error("cannot open " + path);
+    if (!f) throw std::runtime_error("cannot open " + path + platform::fs::pathLengthNote(path));  // PATH-256 2c #5
     std::string data;
     char buf[1 << 16];
     std::size_t n;
@@ -101,7 +101,7 @@ std::string readFile(const std::string& path) {
 
 void writeFile(const std::string& path, std::string_view data) {
     std::FILE* f = platform::fs::openStdio(widen(path).c_str(), L"wb");
-    if (!f) throw std::runtime_error("cannot write " + path);
+    if (!f) throw std::runtime_error("cannot write " + path + platform::fs::pathLengthNote(path));  // PATH-256 2c #5 / #6
     std::fwrite(data.data(), 1, data.size(), f);
     std::fclose(f);
 }
