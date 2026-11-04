@@ -6,6 +6,7 @@
 // `db_record.py jsonl FILE --dry-run`). Exit 0 = all pass.
 
 #include "../kt_bench.h"
+#include "../kt_families.h"
 
 #include <cmath>
 #include <cstdio>
@@ -13,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -691,6 +693,30 @@ static void test_rows() {
           ja);
 }
 
+// v0251-harness (PLAN B26-33 item 1): the whirl-kernel-test family table (kt_families.h) is the only list; --only accepts
+// exactly its names. Guards the A11 defect: the 0.2.5.1 router port added "router" to the run table but not to the
+// --only list, so `--only router` exited 2 and the screening round ran no kernel check (progress/v0251-judge5.md 2, 6.1).
+static void test_families() {
+    std::set<std::string> seen;
+    bool unique = true;
+    for (const FamilyName& f : kFamilyNames) unique = seen.insert(f.name).second && unique;
+    check("families: names unique", unique);
+    // every family a screening runner or gate passes to --only (feat026_router_ab kt "router,moe"; release_gate kt steps)
+    const char* need[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "router", "misc", "gemvh", "dflash",
+                          "ws4", "ws4g", "vision"};
+    std::string miss;
+    for (const char* n : need)
+        if (!familyKnown(n)) miss += std::string(miss.empty() ? "" : ",") + n;
+    check("families: --only accepts every runner family (router included)", miss.empty(), miss);
+    check("families: unknown name rejected", !familyKnown("nosuch") && !familyKnown("") && !familyKnown("Router"));
+    std::string req;
+    for (const FamilyName& f : kFamilyNames)
+        if (f.on_request) req += std::string(req.empty() ? "" : ",") + f.name;
+    check("families: on-request (timing only) = attnbench,gemvhbench,ws4bench,ws4gbench", req == "attnbench,gemvhbench,ws4bench,ws4gbench", req);
+    check("families: familyOnRequest agrees with the table", familyOnRequest("ws4bench") && !familyOnRequest("router") && !familyOnRequest("nosuch"));
+    check("families: count = table rows", kFamilyCount == seen.size() && kFamilyCount > 0, std::to_string(kFamilyCount));
+}
+
 static void test_jsonl_file(const std::string& emit) {
     namespace fs = std::filesystem;
     const fs::path p = emit.empty() ? fs::temp_directory_path() / "kt_bench_tests.jsonl" : fs::path(emit);
@@ -764,6 +790,7 @@ int main(int argc, char** argv) {
         test_sha256();
         test_roof();
         test_rows();
+        test_families();
         test_jsonl_file(emit);
     } catch (const std::exception& e) {
         check(std::string("exception: ") + e.what(), false);
