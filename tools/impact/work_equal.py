@@ -13,6 +13,17 @@ A stored speed cell may be carried over from build A to build B only when, for t
      sha256 equal when both output folders are given).
 Missing evidence never passes: the verdict is EQUIVALENT (exit 0), NOT_EQUIVALENT (1) or INCOMPLETE (2); usage error 3.
 
+--arch gfx1201|gfx1151 (v0251-d1a, D1(a) of progress\v0251.DISCOVERY.md; Sir Pifeng 2026-11-03 11:4x 「三、前者」 = R9700 cells
+carried by a per-arch equivalence proof): judge ONE GPU. One exe embeds a raw code object per arch (CMakeLists.txt
+--offload-arch=<arch> --cuda-device-only --no-gpu-bundle-output + bin2c; no offload bundle), so an 8060S kernel change
+made every whole-exe report NOT_EQUIVALENT. With --arch A: (1) only the code objects whose ELF e_flags name A
+(EF_AMDGPU_MACH) are compared, paired in order inside A; the other targets' objects are listed as ignored; (2) the launch
+sequence and (3) golden are still required, on A: launch runs whose --device names another GPU and golden cases of
+another reference set are left out and listed (other_arch_runs / other_arch_cases); runs without --device and cases
+without a reference set are still compared (a difference fails) but never count as evidence: at least one run and one
+case attributed to A must be identical, else INCOMPLETE. db:<sha> sources get @A. The JSON says "arch": A (null for the
+whole-exe judgement); a per-arch report never stands for whole-exe equivalence (release_check R1 equivalent_exes refuses it).
+
 Every piece of evidence is bound to the exe it claims to be about (REVIEW-R5-024 C1): both exe sha256 are in the report;
 launch logs are bound through the exe path in their command line (file sha256 == the side's exe and the exe unchanged since
 the log was written) or through results.db work_traces.exe_sha256 ("db:<sha>"); golden summaries through their
@@ -20,9 +31,9 @@ the log was written) or through results.db work_traces.exe_sha256 ("db:<sha>"); 
 code-object ranges excluded) and reported as identical / stamp_only / differs with the differing strings: ADR-0003 does not
 make host equality a condition, so it is information for release_check (P7), which may require it.
 
-    python tools/impact/work_equal.py compare --a-exe A\\whirl.exe [--a-exe A\\whirl-server.exe ...] --b-exe B\\whirl.exe ...
-        [--a-launch DIR|TABLE|db:<sha> --b-launch ...] [--db results.db] [--server] [--ignore RX] [--allow-unbound-launch]
-        [--a-golden FILE ... --b-golden FILE ...] [--a-golden-out DIR --b-golden-out DIR]
+    python tools/impact/work_equal.py compare [--arch gfx1201|gfx1151] --a-exe A\\whirl.exe [--a-exe A\\whirl-server.exe ...]
+        --b-exe B\\whirl.exe ... [--a-launch DIR|TABLE|db:<sha> --b-launch ...] [--db results.db] [--server] [--ignore RX]
+        [--allow-unbound-launch] [--a-golden FILE ... --b-golden FILE ...] [--a-golden-out DIR --b-golden-out DIR]
         [--repo R --a-commit C --b-commit C] [-o report.json]
     python tools/impact/work_equal.py scan EXE          # code objects + PE sections of one exe (JSON)
 
@@ -47,12 +58,15 @@ import launch_table  # noqa: E402
 
 FORMAT = "whirl-work-equal/1"
 EM_AMDGPU = 224
-# EF_AMDGPU_MACH (low byte of e_flags), the targets WHIRL builds and their neighbours (llvm/BinaryFormat/ELF.h)
-MACH = {0x41: "gfx1100", 0x42: "gfx1101", 0x43: "gfx1102", 0x44: "gfx1103", 0x48: "gfx1200", 0x4A: "gfx1151",
-        0x4C: "gfx1150", 0x4E: "gfx1201", 0x30: "gfx1030"}
+# EF_AMDGPU_MACH (low byte of e_flags), the targets WHIRL builds and their neighbours (llvm/BinaryFormat/ELF.h; LLVM
+# AMDGPUUsage "AMDGPU EF_AMDGPU_MACH Values"; REVIEW-v0251-d1 N-1 fixed 0x30 / 0x42 / 0x43 / 0x4C, which only named reports)
+MACH = {0x30: "gfx908", 0x36: "gfx1030", 0x41: "gfx1100", 0x42: "gfx1013", 0x43: "gfx1150", 0x44: "gfx1103", 0x46: "gfx1101",
+        0x47: "gfx1102", 0x48: "gfx1200", 0x4A: "gfx1151", 0x4C: "gfx942", 0x4E: "gfx1201"}
 
 
 GPU_ALIASES = {"r9700": ("r9700", "r97", "gfx1201", "pci:71:0"), "8060s": ("8060s", "s8", "8s", "gfx1151", "pci:196:0")}
+ARCHS = ("gfx1201", "gfx1151")  # the targets WHIRL builds (CMakeLists.txt WHIRL_GPU_ARCHS): the values of --arch
+ARCH_OF_GPU = {"r9700": "gfx1201", "8060s": "gfx1151"}
 
 
 def norm_gpu(g):
@@ -426,24 +440,29 @@ def _section_diff(xa, xb, code, stamp):
     return nd, ns, sa, sb, ""
 
 
-def compare_exe(a_path, b_path, data=None, allow_cuid_length=True):
+def compare_exe(a_path, b_path, data=None, allow_cuid_length=True, arch=None):
     """Code objects and host code of one exe pair. code_objects.result: identical / identical-except-cuid (every differing
-    object passes cuid_equivalent: work-equivalent for ADR-0003) / different / missing."""
+    object passes cuid_equivalent: work-equivalent for ADR-0003) / different / missing. arch (v0251-d1a): only the objects
+    whose ELF e_flags name that target are compared, paired in order inside the arch (another target's extra object does
+    not shift the pairing); the others are listed in ignored_a / ignored_b. Host bytes leave out every object either way."""
     da = open(a_path, "rb").read()
     db_ = open(b_path, "rb").read()
-    oa, ob = amdgpu_objects(da), amdgpu_objects(db_)
+    all_a, all_b = amdgpu_objects(da), amdgpu_objects(db_)
+    oa = [o for o in all_a if arch is None or o["target"] == arch]
+    ob = [o for o in all_b if arch is None or o["target"] == arch]
     objs = []
     for i in range(max(len(oa), len(ob))):
         x, y = (oa[i] if i < len(oa) else None), (ob[i] if i < len(ob) else None)
+        at = {"index_a": x and x["index"], "index_b": y and y["index"]} if arch else {}  # positions in the whole exe
         if x is None or y is None:
             objs.append({"index": i, "same": False, "only": "B" if x is None else "A",
-                         "target": (x or y)["target"], "size_a": x and x["size"], "size_b": y and y["size"]})
+                         "target": (x or y)["target"], "size_a": x and x["size"], "size_b": y and y["size"], **at})
             continue
         dif = sorted(n for n in set(x["sections"]) | set(y["sections"]) if x["sections"].get(n) != y["sections"].get(n))
         objs.append({"index": i, "target": x["target"] if x["target"] == y["target"] else f"{x['target']}/{y['target']}",
                      "same": x["sha256"] == y["sha256"], "sha_a": x["sha256"], "sha_b": y["sha256"], "size_a": x["size"],
                      "size_b": y["size"], "sections": len(x["sections"]), "differing_sections": dif,
-                     "header_only": x["sha256"] != y["sha256"] and not dif})
+                     "header_only": x["sha256"] != y["sha256"] and not dif, **at})
         if objs[-1]["same"] is False and set(dif) <= CUID_SECTIONS:
             okc, why = cuid_equivalent(da[x["offset"]:x["offset"] + x["size"]], db_[y["offset"]:y["offset"] + y["size"]], allow_cuid_length)
             objs[-1].update(cuid_only=okc and why != "identical", cuid=why)  # sha differs: "identical" would be a parser gap
@@ -463,8 +482,8 @@ def compare_exe(a_path, b_path, data=None, allow_cuid_length=True):
         if pa is None or pb is None:
             host.update(result="differs", note="not a PE file on one side: whole-file comparison only")
         else:
-            skip_a = [(o["offset"], o["size"]) for o in oa]
-            skip_b = [(o["offset"], o["size"]) for o in ob]
+            skip_a = [(o["offset"], o["size"]) for o in all_a]  # every object, also the other arch's: never host bytes
+            skip_b = [(o["offset"], o["size"]) for o in all_b]
             st_a = [(o, n) for o, n, _ in pa["stamps"]]
             sb_names = {s["name"]: s for s in pb["sections"]}
             sa_only, sb_only = set(), set()
@@ -498,10 +517,13 @@ def compare_exe(a_path, b_path, data=None, allow_cuid_length=True):
             host["result"] = "differs" if host["unexplained_bytes"] else "stamp_only"
     txt = [s for s in host["sections"] if s["name"] == ".text"]
     host["text_same"] = True if da == db_ else (bool(txt) and txt[0]["same"]) if txt else None
+    cobj = {"result": co, "n_a": len(oa), "n_b": len(ob), "objects": objs, "allow_cuid_length": allow_cuid_length, "arch": arch}
+    if arch:
+        ign = lambda objs_all: [{"index": o["index"], "target": o["target"], "size": o["size"]} for o in objs_all if o["target"] != arch]
+        cobj.update(ignored_a=ign(all_a), ignored_b=ign(all_b))
     return {"name": os.path.basename(b_path).lower(), "a": {"path": os.path.abspath(a_path), "sha256": sha(da), "size": len(da)},
             "b": {"path": os.path.abspath(b_path), "sha256": sha(db_), "size": len(db_)},
-            "code_objects": {"result": co, "n_a": len(oa), "n_b": len(ob), "objects": objs, "allow_cuid_length": allow_cuid_length},
-            "host": host}
+            "code_objects": cobj, "host": host}
 
 
 # ---------------------------------------------------------------- launch tables
@@ -519,9 +541,10 @@ def _exe_of(cmd):
     return t[0].strip('"') if t else ""
 
 
-def load_side(src, include_all=False, server_seq=False, ignore=(), db=None, scope="test"):
+def load_side(src, include_all=False, server_seq=False, ignore=(), db=None, scope="test", log_gpu_only=False):
     """-> (runs {key: run}, info {kind, logs: [(path, exe, mtime_ns)] }). src: launch folder (flat or step sub-folders),
-    a saved table file, or 'db:<exe sha>' (results.db work_traces rows of that exe)."""
+    a saved table file, or 'db:<exe sha>' (results.db work_traces rows of that exe). log_gpu_only (--arch, REVIEW-v0251-d1
+    C-6): a db row's GPU is only the log's own --device (work_json.gpu), as a folder log's: never the run's gpu column."""
     if src.startswith("db:"):
         h, _, gpu = src[3:].lower().partition("@")
         runs = {}
@@ -529,7 +552,8 @@ def load_side(src, include_all=False, server_seq=False, ignore=(), db=None, scop
             con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
             # gpu: the log's --device (lt_import work_json.gpu) or the run's gpu; "db:<sha>@gfx1201" keeps one GPU
             q = ("SELECT w.component, w.cell, w.work_hash, w.seq_hash, w.arg_hash, w.launches, "
-                 "COALESCE(NULLIF(json_extract(w.work_json, '$.gpu'), ''), r.gpu, '') FROM work_traces w "
+                 + ("COALESCE(json_extract(w.work_json, '$.gpu'), '')" if log_gpu_only else
+                    "COALESCE(NULLIF(json_extract(w.work_json, '$.gpu'), ''), r.gpu, '')") + " FROM work_traces w "
                  "LEFT JOIN runs r ON r.run_id = w.run_id WHERE lower(w.exe_sha256) = ? AND w.scope = ?")
             for comp, cell, wh, sq, ah, n, g in con.execute(q, (h, scope)):
                 if gpu and norm_gpu(gpu) != norm_gpu(g):
@@ -547,10 +571,10 @@ def load_side(src, include_all=False, server_seq=False, ignore=(), db=None, scop
             del r["hashes"]
         return runs, {"kind": "db", "exe": h, "gpu": gpu, "logs": []}
     if os.path.isfile(src):
-        return launch_table.apply_ignore(launch_table.read_table(src), ignore), {"kind": "table", "logs": [(src, "", 0)]}
+        return launch_table.apply_ignore(launch_table.read_table(src), ignore), {"kind": "table", "logs": [(src, "", 0)], "cmds": {}}
     if not os.path.isdir(src):
-        return {}, {"kind": "none", "logs": []}
-    runs, logs = {}, []
+        return {}, {"kind": "none", "logs": [], "cmds": {}}
+    runs, logs, cmds = {}, [], {}
     dirs = sorted({os.path.dirname(p) for p in _log_files(src)})
     for d in dirs:
         rel = os.path.relpath(d, src).replace("\\", "/")
@@ -565,7 +589,37 @@ def load_side(src, include_all=False, server_seq=False, ignore=(), db=None, scop
                 if srv and not (include_all or server_seq):
                     continue
                 logs.append((p, _exe_of(cmd), os.stat(p).st_mtime_ns))
-    return runs, {"kind": "folder", "logs": logs}
+                cmds[p] = launch_table.norm_cmd(cmd)  # v0251-d1a: the log's GPU (--device) for --arch
+    return runs, {"kind": "folder", "logs": logs, "cmds": cmds}
+
+
+# v0251-d1a: the GPU of a launch run = its command's --device (release_gate / golden.ps1 / runners pass it explicitly)
+DEVICE_RX = re.compile(r"(?:^|\s)--device[ =](\S+)")
+
+
+def run_arch(key):
+    """target of a launch run key / normalized command from its --device: "gfx1201" (gfx1201 / r9700 / pci:71:0),
+    "gfx1151" (gfx1151 / 8060s / pci:196:0), another gfx target as named, or None when it names no GPU we know (no
+    --device, a device index, an unknown PCI address): such a run is compared under --arch but proves nothing."""
+    m = DEVICE_RX.search(key or "")
+    if not m:
+        return None
+    g = norm_gpu(m.group(1))
+    if g in ARCH_OF_GPU:
+        return ARCH_OF_GPU[g]
+    return g if re.fullmatch(r"gfx[0-9a-f]+", g) else None
+
+
+def _db_arch(src, arch):
+    """--arch for a db:<sha>[@gpu] source: no @gpu -> @arch; @gpu of another GPU -> (src, why not)"""
+    if not arch or not src.startswith("db:"):
+        return src, None
+    h, sep, g = src[3:].partition("@")
+    if not sep:
+        return f"db:{h}@{arch}", None
+    if norm_gpu(g) != norm_gpu(arch):
+        return src, f"launch: {src} is evidence of {g}, not {arch}"
+    return src, None
 
 
 def bind(info, exes, cache):
@@ -599,31 +653,68 @@ def bind(info, exes, cache):
     return {"state": state, "detail": det}
 
 
-def compare_launch(a_src, b_src, server=False, ignore=(), a_exes=None, b_exes=None, db=None, allow_unbound=False, scope="test"):
-    ra, ia = load_side(a_src, False, server, ignore, db, scope)
-    rb, ib = load_side(b_src, False, server, ignore, db, scope)
+def compare_launch(a_src, b_src, server=False, ignore=(), a_exes=None, b_exes=None, db=None, allow_unbound=False, scope="test",
+                   arch=None):
+    """arch (v0251-d1a): runs whose --device names another GPU are left out (other_arch_runs) and their logs are not
+    evidence (binding, evidence list); runs without a known GPU are compared but prove nothing: "identical" needs >= 1
+    identical run attributed to arch. db sources are read with @arch."""
+    reasons = []
+    srcs = []
+    for src in (a_src, b_src):
+        s2, why = _db_arch(src, arch)
+        if why:
+            reasons.append(why)
+        srcs.append((s2, why))
+    sides = [load_side(s2, False, server, ignore, db, scope, log_gpu_only=bool(arch)) if not why else
+             ({}, {"kind": "none", "logs": [], "cmds": {}}) for s2, why in srcs]
+    (ra, ia), (rb, ib) = sides
+    other, on = set(), set()
+    if arch:
+        def keep(runs, info):
+            if info["kind"] == "db":  # rows selected by @arch: every run is on the arch
+                on.update(runs)
+                return runs
+            out = {}
+            for k, v in runs.items():
+                t = run_arch(k)
+                if t is not None and t != arch:
+                    other.add(k); continue
+                out[k] = v
+                if t == arch:
+                    on.add(k)
+            return out
+        ra, rb = keep(ra, ia), keep(rb, ib)
+        for info in (ia, ib):  # the other GPU's logs are no evidence here: neither bound nor listed
+            info["logs"] = [x for x in info["logs"] if run_arch(info.get("cmds", {}).get(x[0], "")) in (None, arch)]
     cache = {}
     ba, bb = bind(ia, a_exes, cache), bind(ib, b_exes, cache)
     res = launch_table.compare(ra, rb) if ra and rb else []
     runs = [{k: v for k, v in e.items() if k not in ("rows_diff", "args_diff")} | ({"rows_diff": e["rows_diff"][:20], "args_diff": e["args_diff"][:20]} if e["status"] == "DIFF" else {})
             for e in res]
-    reasons = []
+    left = f" on {arch} ({len(other)} run(s) of another GPU left out)" if arch else ""
     if not ra or not rb:
-        result = "missing"; reasons.append(f"launch: no runs for {'A' if not ra else 'B'} ({(a_src if not ra else b_src)})")
+        result = "missing"; reasons.append(f"launch: no runs for {'A' if not ra else 'B'} ({(a_src if not ra else b_src)}){left}")
     elif any(e["status"] == "DIFF" for e in res):
-        result = "different"; reasons.append(f"launch: {sum(e['status'] == 'DIFF' for e in res)} run(s) differ")
+        result = "different"; reasons.append(f"launch: {sum(e['status'] == 'DIFF' for e in res)} run(s) differ" + (f" on {arch}" if arch else ""))
     elif any(e["status"] != "SAME" for e in res):
         result = "missing"; reasons.append(f"launch: {sum(e['status'] != 'SAME' for e in res)} run(s) on one side only")
     else:
         result = "identical"
+    if result == "identical" and arch and not any(e["status"] == "SAME" and e["key"] in on for e in res):
+        result = "missing"; reasons.append(f"launch: no run attributed to {arch} (--device {arch} / {norm_gpu(arch)}); "
+                                           f"{len(res)} run(s) without a known GPU compared, {len(other)} of another GPU left out")
     if result == "identical":
         for side, b in (("A", ba), ("B", bb)):
             if b["state"] == "mismatch" or (b["state"] not in ("sha", "db") and not allow_unbound):
                 result = "missing"; reasons.append(f"launch: evidence of {side} not bound to its exe ({b['state']}: {b['detail']})")
-    return {"result": result, "a": a_src, "b": b_src, "server": server, "ignore": list(ignore), "runs": runs,
-            "n_same": sum(e["status"] == "SAME" for e in res), "n_runs": len(res),
-            "args_compared": sum(1 for e in res if e.get("args_compared")),
-            "binding": {"a": ba, "b": bb, "allow_unbound": allow_unbound}, "reasons": reasons, "_logs": (ia["logs"], ib["logs"])}
+    out = {"result": result, "a": a_src, "b": b_src, "server": server, "ignore": list(ignore), "runs": runs,
+           "n_same": sum(e["status"] == "SAME" for e in res), "n_runs": len(res),
+           "args_compared": sum(1 for e in res if e.get("args_compared")),
+           "binding": {"a": ba, "b": bb, "allow_unbound": allow_unbound}, "reasons": reasons, "_logs": (ia["logs"], ib["logs"])}
+    if arch:
+        out.update(arch=arch, other_arch_runs=sorted(other), unattributed_runs=sorted(e["key"] for e in res if e["key"] not in on),
+                   n_on_arch=sum(1 for e in res if e["status"] == "SAME" and e["key"] in on))
+    return out
 
 
 # ---------------------------------------------------------------- golden
@@ -668,9 +759,24 @@ def _out_hashes(d):
             if fn.endswith(".txt") and not fn.endswith(".diag.txt") and os.path.isfile(os.path.join(d, fn))}
 
 
-def compare_golden(a_files, b_files, a_out=None, b_out=None, a_exes=None, b_exes=None):
+def case_arch(case):
+    """the reference-set arch a golden case key "<arch>:<model>/<mode>_<suite>" names, None for a key without one"""
+    head, sep, _rest = case.partition(":")
+    return head if sep and "/" not in head else None
+
+
+def compare_golden(a_files, b_files, a_out=None, b_out=None, a_exes=None, b_exes=None, arch=None):
+    """arch (v0251-d1a): cases of another reference set are left out (other_arch_cases) and only arch's reference set
+    must match; cases without a reference set are compared but prove nothing ("identical" needs >= 1 case of arch)."""
     ga, gb = parse_golden(a_files or []), parse_golden(b_files or [])
     reasons = []
+    other = []
+    if arch:
+        for g in (ga, gb):
+            for c in [c for c in g["cases"] if case_arch(c) not in (None, arch)]:
+                other.append(c)
+                del g["cases"][c]
+            g["ref_all"] = {k: v for k, v in g["ref_all"].items() if k == arch}
 
     def binding(g, exes):
         """the exes that produced the golden outputs: whirl.exe always, whirl-server.exe when a server case ran
@@ -698,7 +804,9 @@ def compare_golden(a_files, b_files, a_out=None, b_out=None, a_exes=None, b_exes
         if oa[fn] != ob[fn]:
             outs["differing"].append(fn)
     if not cases:
-        result = "missing"; reasons.append("golden: no golden summary for " + ("A and B" if not ga["cases"] and not gb["cases"] else "A" if not ga["cases"] else "B"))
+        result = "missing"; reasons.append(("golden: no golden summary for " if not arch else f"golden: no case on {arch} for ")
+                                           + ("A and B" if not ga["cases"] and not gb["cases"] else "A" if not ga["cases"] else "B")
+                                           + (f" ({len(set(other))} case(s) of another GPU left out)" if arch else ""))
     elif any(c["a"] not in ("OK", None) or c["b"] not in ("OK", None) for c in cases) or outs["differing"]:
         result = "different"; reasons.append(f"golden: {sum(1 for c in cases if c['a'] not in ('OK', None) or c['b'] not in ('OK', None))} case(s) not OK, "
                                              f"{len(outs['differing'])} output file(s) differ")
@@ -708,16 +816,21 @@ def compare_golden(a_files, b_files, a_out=None, b_out=None, a_exes=None, b_exes
                                            f"{sum(c['same'] for c in cases)} compared")
     elif any(gb["ref_all"].get(k) != v or v == "conflict" for k, v in ga["ref_all"].items()) or not ga["ref_all"]:
         result = "missing"; reasons.append(f"golden: reference sets differ or unnamed (A {ga['ref_all']} vs B {gb['ref_all']}): OK on both sides does not prove equal outputs")
+    elif arch and not any(c["same"] and case_arch(c["case"]) == arch for c in cases):
+        result = "missing"; reasons.append(f"golden: no case of the {arch} reference set compared ({len(cases)} case(s) without a reference set)")
     else:
         result = "identical"
     if result == "identical":
         for side in ("a", "b"):
             if bnd[side] != "sha":
                 result = "missing"; reasons.append(f"golden: evidence of {side.upper()} not bound to its exe ({bnd[side]}; named {(ga if side == 'a' else gb)['exes']})")
-    return {"result": result, "cases": cases, "only_a": [c["case"] for c in cases if c["b"] is None],
-            "only_b": [c["case"] for c in cases if c["a"] is None], "ref_all": {"a": ga["ref_all"], "b": gb["ref_all"]},
-            "exes_named": {"a": ga["exes"], "b": gb["exes"]}, "binding": bnd, "outputs": outs, "reasons": reasons,
-            "files": {"a": list(a_files or []), "b": list(b_files or [])}}
+    out = {"result": result, "cases": cases, "only_a": [c["case"] for c in cases if c["b"] is None],
+           "only_b": [c["case"] for c in cases if c["a"] is None], "ref_all": {"a": ga["ref_all"], "b": gb["ref_all"]},
+           "exes_named": {"a": ga["exes"], "b": gb["exes"]}, "binding": bnd, "outputs": outs, "reasons": reasons,
+           "files": {"a": list(a_files or []), "b": list(b_files or [])}}
+    if arch:
+        out.update(arch=arch, other_arch_cases=sorted(set(other)))
+    return out
 
 
 # ---------------------------------------------------------------- git (host-code diff summary, read only)
@@ -746,9 +859,13 @@ def _evidence(paths):
 
 
 def report(a_exes, b_exes, launch=None, golden_a=None, golden_b=None, golden_out=(None, None), server=False, ignore=(),
-           db=None, allow_unbound=False, git=None, extra_launch=(), allow_cuid_length=True):
+           db=None, allow_unbound=False, git=None, extra_launch=(), allow_cuid_length=True, arch=None):
     """a_exes / b_exes: exe paths, paired by base name. launch: (a_src, b_src) or None; extra_launch: more pairs.
-    checks.code_objects: identical / identical-except-cuid (both count as equal for the verdict) / different / missing."""
+    checks.code_objects: identical / identical-except-cuid (both count as equal for the verdict) / different / missing.
+    arch (v0251-d1a, --arch): judge that GPU only (code objects of that target, its launch runs and golden cases); the
+    report says "arch" (None = the whole exe, every target)."""
+    if arch is not None and arch not in ARCHS:
+        raise ValueError(f"arch {arch!r} is not one of {ARCHS}")
     pa = {os.path.basename(p).lower(): p for p in a_exes}
     pb = {os.path.basename(p).lower(): p for p in b_exes}
     reasons, exes = [], []
@@ -758,7 +875,7 @@ def report(a_exes, b_exes, launch=None, golden_a=None, golden_b=None, golden_out
             reasons.append(f"code objects: {n} " + (f"file not found: {gone}" if gone else f"only on side {'A' if n in pa else 'B'}"))
             exes.append({"name": n, "code_objects": {"result": "missing"}, "host": {"result": "missing"}})
             continue
-        exes.append(compare_exe(pa[n], pb[n], allow_cuid_length=allow_cuid_length))
+        exes.append(compare_exe(pa[n], pb[n], allow_cuid_length=allow_cuid_length, arch=arch))
     sha_a = {e["name"]: e["a"]["sha256"] for e in exes if "a" in e}
     sha_b = {e["name"]: e["b"]["sha256"] for e in exes if "b" in e}
     cos = [e["code_objects"]["result"] for e in exes]
@@ -771,9 +888,11 @@ def report(a_exes, b_exes, launch=None, golden_a=None, golden_b=None, golden_out
                            + ", ".join(f"#{o['index']} {o['target']} {o.get('differing_sections') or o.get('only') or 'header'}"
                                        + (f" (not cuid-only: {o['cuid']})" if o.get("cuid") else "") for o in bad[:4]))
         elif e["code_objects"]["result"] == "missing" and "a" in e:
-            reasons.append(f"code objects: {e['name']} has no embedded AMDGPU code object")
+            reasons.append(f"code objects: {e['name']} has no embedded AMDGPU code object" + (
+                f" for {arch} (other targets: {sorted({o['target'] for o in e['code_objects']['ignored_a'] + e['code_objects']['ignored_b']})})"
+                if arch else ""))
     pairs = ([launch] if launch else []) + list(extra_launch)
-    ls = [compare_launch(x, y, server, ignore, sha_a, sha_b, db, allow_unbound) for x, y in pairs]
+    ls = [compare_launch(x, y, server, ignore, sha_a, sha_b, db, allow_unbound, arch=arch) for x, y in pairs]
     if not ls:
         lr = "missing"; reasons.append("launch: no launch-table evidence given (--a-launch / --b-launch)")
     else:
@@ -781,7 +900,7 @@ def report(a_exes, b_exes, launch=None, golden_a=None, golden_b=None, golden_out
         lr = "different" if "different" in rs else "missing" if "missing" in rs else "identical"
         for x in ls:
             reasons += x["reasons"]
-    gl = compare_golden(golden_a, golden_b, golden_out[0], golden_out[1], sha_a, sha_b)
+    gl = compare_golden(golden_a, golden_b, golden_out[0], golden_out[1], sha_a, sha_b, arch=arch)
     reasons += gl["reasons"]
     checks = {"code_objects": co, "launch_sequence": lr, "golden": gl["result"]}
     hosts = [e["host"]["result"] for e in exes]
@@ -797,8 +916,10 @@ def report(a_exes, b_exes, launch=None, golden_a=None, golden_b=None, golden_out
     rep = {"format": FORMAT, "tool": "tools/impact/work_equal.py", "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
            "rule": "ADR-0003 decision 3: code objects + launch sequence + golden bitwise identical (host code: information); "
                    "code objects that differ only in the per-TU __hip_cuid_<hex> symbol count as identical (identical-except-cuid"
-                   + (", cuid length changes allowed" if allow_cuid_length else "") + ")",
-           "verdict": verdict, "exit": {"EQUIVALENT": 0, "NOT_EQUIVALENT": 1, "INCOMPLETE": 2}[verdict], "checks": checks,
+                   + (", cuid length changes allowed" if allow_cuid_length else "") + ")"
+                   + (f"; per-arch (--arch {arch}, v0251-d1a): only {arch} code objects, launch runs and golden cases; this report "
+                      f"proves nothing about another GPU" if arch else ""),
+           "arch": arch, "verdict": verdict, "exit": {"EQUIVALENT": 0, "NOT_EQUIVALENT": 1, "INCOMPLETE": 2}[verdict], "checks": checks,
            "reasons": reasons, "a": {"exes": sha_a}, "b": {"exes": sha_b}, "exes": exes, "launch": ls, "golden": gl,
            "evidence": evidence}
     if git:
@@ -807,14 +928,16 @@ def report(a_exes, b_exes, launch=None, golden_a=None, golden_b=None, golden_out
 
 
 def summary_lines(rep):
-    yield f"work_equal: {rep['verdict']}  (code objects {rep['checks']['code_objects']}, launch {rep['checks']['launch_sequence']}, " \
-          f"golden {rep['checks']['golden']}; host code {rep['checks']['host_code']})"
+    arch = rep.get("arch")
+    yield f"work_equal: {rep['verdict']}  ({'arch ' + arch + ' only: ' if arch else ''}code objects {rep['checks']['code_objects']}, " \
+          f"launch {rep['checks']['launch_sequence']}, golden {rep['checks']['golden']}; host code {rep['checks']['host_code']})"
     for e in rep["exes"]:
         if "a" not in e:
             yield f"  {e['name']}: only on one side"; continue
         co, h = e["code_objects"], e["host"]
         yield (f"  {e['name']}: A {e['a']['sha256'][:16]} B {e['b']['sha256'][:16]}; code objects {co['result']} "
-               f"({co['n_a']}/{co['n_b']}: {', '.join(o['target'] + ('=' if o['same'] else '=~cuid' if o.get('cuid_only') else '!=') for o in co['objects'])}); "
+               f"({co['n_a']}/{co['n_b']}: {', '.join(o['target'] + ('=' if o['same'] else '=~cuid' if o.get('cuid_only') else '!=') for o in co['objects'])}"
+               + (f"; other targets not judged: A {len(co.get('ignored_a', []))}, B {len(co.get('ignored_b', []))}" if arch else "") + "); "
                f"host {h['result']} (.text {'same' if h['text_same'] else 'differs' if h['text_same'] is False else '?'}, "
                f"unexplained bytes {h['unexplained_bytes']}, stamp bytes {h['stamp_bytes']})")
         if h.get("strings_only_a") or h.get("strings_only_b"):
@@ -824,10 +947,12 @@ def summary_lines(rep):
                 yield f"      section {s['name']}: {s.get('differing_bytes', '?')} differing bytes outside code objects + {s.get('stamp_bytes', 0)} stamp bytes"
     for x in rep["launch"]:
         yield (f"  launch {x['a']} vs {x['b']}: {x['result']}, {x['n_same']}/{x['n_runs']} runs same, arguments compared in "
-               f"{x['args_compared']}; binding A {x['binding']['a']['state']} B {x['binding']['b']['state']}")
+               f"{x['args_compared']}; binding A {x['binding']['a']['state']} B {x['binding']['b']['state']}"
+               + (f"; {x.get('n_on_arch', 0)} same run(s) on {arch}, {len(x.get('other_arch_runs', []))} of another GPU left out" if arch else ""))
     g = rep["golden"]
     yield (f"  golden: {g['result']}, {sum(c['same'] for c in g['cases'])}/{len(g['cases'])} cases OK on both (only in B {len(g['only_b'])}), outputs compared "
-           f"{g['outputs']['compared']} ({len(g['outputs']['differing'])} differ); binding A {g['binding']['a']} B {g['binding']['b']}")
+           f"{g['outputs']['compared']} ({len(g['outputs']['differing'])} differ); binding A {g['binding']['a']} B {g['binding']['b']}"
+           + (f"; {len(g.get('other_arch_cases', []))} case(s) of another GPU left out" if arch else ""))
     if "git" in rep:
         yield f"  git {rep['git'].get('a')}..{rep['git'].get('b')}: {rep['git'].get('counts', rep['git'].get('error'))}"
     for r in rep["reasons"]:
@@ -838,6 +963,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd")
     c = sub.add_parser("compare")
+    # v0251-d1a (D1(a)): judge one GPU; the exit codes stay 0 EQUIVALENT / 1 NOT_EQUIVALENT / 2 INCOMPLETE / 3 usage
+    c.add_argument("--arch", choices=ARCHS, help="judge only this GPU's code objects, launch runs (--device) and golden cases")
     c.add_argument("--a-exe", action="append", default=[])
     c.add_argument("--b-exe", action="append", default=[])
     c.add_argument("--a-launch", action="append", default=[])
@@ -879,7 +1006,7 @@ def main(argv=None):
     pairs = list(zip(a.a_launch, a.b_launch))
     git = (a.repo, a.a_commit, a.b_commit) if a.repo and a.a_commit and a.b_commit else None
     rep = report(a.a_exe, a.b_exe, pairs[0] if pairs else None, a.a_golden, a.b_golden, (a.a_golden_out, a.b_golden_out),
-                 a.server, ign, a.db, a.allow_unbound_launch, git, pairs[1:], a.allow_cuid_length)
+                 a.server, ign, a.db, a.allow_unbound_launch, git, pairs[1:], a.allow_cuid_length, arch=a.arch)
     for line in summary_lines(rep):
         print(line)
     if a.o:
