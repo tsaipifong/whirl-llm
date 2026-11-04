@@ -48,6 +48,7 @@
 #include "device/backend.h"
 #include "device/handles.h"
 #include "evict_policy.h"
+#include "platform/proc.h"  // ProcState (pinned-note sweep, v0251-pathb)
 #include "whirl/thread_annotations.h"
 
 #include <array>
@@ -559,6 +560,49 @@ private:
 // Write %LOCALAPPDATA%\whirl\pinned\<pid>.txt = the pinned host bytes this
 // process allocated on purpose (the RAM tier). local_app_data: UTF-8, nullable.
 void declarePinned(const char* local_app_data, std::uint64_t bytes);
+
+// v0251-pathb (B26-7, PATH-256 P7; progress\pathlen256.DISCOVERY.md §2b-5): the notes above were never deleted (6,947
+// on one machine, 2026-11-03). The public name <pid>.txt stays (docs/guide/en/kv-and-caching.md, CHANGELOG 0.1.3); a
+// monitor reads the note of a RUNNING server, so a note is removed only when its writer cannot be running:
+//   live  = the pid's process runs (platform::proc::processState kRunning) AND it was created at or before the note's
+//           last write (a note is always written after its writer started; a reused pid belongs to a later process),
+//           or the state is kUnknown (access denied: never delete what may be a live note)
+//   stale = kGone, or kRunning with a creation time after the note's last write (pid reused)
+// Only names "<decimal pid>.txt" are considered; this process's own note is never swept.
+bool pinnedNoteLive(platform::proc::ProcState st, std::uint64_t created, std::uint64_t note_write);
+struct PinnedNoteOps {
+    // every entry of the notes folder: fn(file name, last write time (100 ns ticks since 1601))
+    std::function<void(const std::function<void(const std::wstring& name, std::uint64_t last_write)>&)> list;
+    std::function<platform::proc::ProcState(std::uint32_t pid, std::uint64_t* created)> state;
+    std::function<bool(const std::wstring& name)> remove;
+};
+struct PinnedSweep {
+    std::size_t seen = 0;        // "<pid>.txt" names looked at
+    std::size_t removed = 0;     // stale notes deleted
+    std::size_t live = 0;        // kept: the writer may be running
+    std::size_t other = 0;       // entries that are not "<pid>.txt" (left alone)
+    std::size_t failed = 0;      // stale, but the delete failed
+    bool capped = false;         // stopped at max_remove (the rest is swept by later starts)
+};
+// The sweep: deletes at most max_remove stale notes per call (start-up stays short even with thousands of old notes).
+PinnedSweep sweepPinnedNotes(const PinnedNoteOps& ops, std::uint32_t self_pid, std::size_t max_remove);
+inline constexpr std::size_t kPinnedSweepMax = 256;
+// %LOCALAPPDATA%\whirl\pinned with the real file system and processes; no folder = nothing to do. The server calls it
+// once at start. local_app_data: UTF-8, nullable.
+PinnedSweep sweepPinned(const char* local_app_data, std::size_t max_remove = kPinnedSweepMax);
+// Delete this process's own note (the server at a normal stop; idempotent).
+void retractPinned(const char* local_app_data);
+// retractPinned at scope exit (the server's start-up / serving scope: also on a fatal error). The destructor is defined
+// in kv_tier.cpp, not here (v0251-p7iso): header-only modules list this header (tests/iso/server.drafter_ctx,
+// server.engine_types) without linking the tier sources, and an inline body naming retractPinned is an unresolved
+// external in their decl-link (-femit-all-decls). No inline body in this header may call into kv_tier.cpp.
+struct PinnedNoteGuard {
+    const char* lad;
+    explicit PinnedNoteGuard(const char* l) : lad(l) {}
+    ~PinnedNoteGuard();
+    PinnedNoteGuard(const PinnedNoteGuard&) = delete;
+    PinnedNoteGuard& operator=(const PinnedNoteGuard&) = delete;
+};
 // FNV-1a over a string (fingerprints).
 std::uint64_t hashStr(std::uint64_t h, std::string_view s);
 // Identity of the running executable (size + last write time): an SSD entry

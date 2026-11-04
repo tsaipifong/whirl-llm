@@ -91,6 +91,16 @@ static void testPlatformProc() {
         CHECK(pproc::exePath() == std::wstring(buf));
         CHECK(pproc::currentId() == GetCurrentProcessId());
         CHECK(pproc::currentProcess() == GetCurrentProcess());
+        {
+            // v0251-pathb (B26-7): processState == GetProcessTimes' creation time of this process; no process -> kGone
+            // (the exited-child and pid-reuse cases: tests/server/tier_tests.cpp testPinnedNotes)
+            std::uint64_t created = 0;
+            CHECK(pproc::processState(pproc::currentId(), &created) == pproc::ProcState::kRunning);
+            FILETIME c{}, e{}, k{}, u{};
+            CHECK(GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u) != 0);
+            CHECK(created == ((static_cast<std::uint64_t>(c.dwHighDateTime) << 32) | c.dwLowDateTime));
+            CHECK(pproc::processState(4000000004u, &created) == pproc::ProcState::kGone);
+        }
         std::uint64_t ws = 0;
         CHECK(pproc::workingSetBytes(pproc::currentProcess(), &ws));
         CHECK(ws > 0);

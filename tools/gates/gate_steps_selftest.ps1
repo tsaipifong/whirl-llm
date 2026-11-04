@@ -48,6 +48,7 @@ try {
         Check "list 8060s $n GPU" (@($s8.out | Where-Object { $_ -match "^$n\s+GPU\s*$" }).Count -eq 1) "not listed as an available GPU step"
     }
     Check "list cpu_platform_check CPU (arch025-PL5)" (@($r97.out | Where-Object { $_ -match "^cpu_platform_check\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^cpu_platform_check\s+CPU\s*$" }).Count -eq 1) "missing"
+    Check "list cpu_pathlen CPU (v0251-pathb, PATH-256 P6)" (@($r97.out | Where-Object { $_ -match "^cpu_pathlen\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^cpu_pathlen\s+CPU\s*$" }).Count -eq 1) "missing"
     # rel025-c5bench: the measure-tools test exes under the names tools/impact/impact.py derives (exe minus whirl- / -tests)
     foreach ($n in "cpu_bench-out", "cpu_kt-bench", "cpu_stage-bench") {
         Check "list $n CPU on both cards (rel025-c5bench)" (@($r97.out | Where-Object { $_ -match "^$n\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^$n\s+CPU\s*$" }).Count -eq 1) "missing"
@@ -122,6 +123,10 @@ try {
         @{ step = "st_dense_balance"; name = "clean"; exit = 0; lines = @("selftest: ok", "leak check: ok (1 units)"); want = $true },
         @{ step = "st_dense_balance"; name = "planted: no leak check line (arch025-Q2 rule, int4 merge)"; exit = 0; lines = @("selftest: ok"); want = $false },
         @{ step = "st_dense_balance"; name = "planted: selftest failed"; exit = 1; lines = @("selftest: FAIL (logits differ)"); want = $false },
+        @{ step = "cpu_pathlen"; name = "clean"; exit = 0; lines = @("pathlen check test: 9/9 as expected", "pathlen check: ok (100 files, 10 folders; longest exe 108 bytes (limit 150), longest path 201 (fail at 240))"); want = $true },
+        @{ step = "cpu_pathlen"; name = "planted: an exe over 150 bytes"; exit = 1; lines = @("pathlen check test: 9/9 as expected", "FAIL exe 151 bytes > 150: C:\x\y.exe", "pathlen check: FAIL (1 path(s))"); want = $false },
+        @{ step = "cpu_pathlen"; name = "planted: the block / pass tests failed"; exit = 1; lines = @("pathlen check test: 8/9 as expected"); want = $false },
+        @{ step = "cpu_pathlen"; name = "planted: exit 0 but no ok line"; exit = 0; lines = @("pathlen check test: 9/9 as expected"); want = $false },
         @{ step = "cpu_platform_check"; name = "clean"; exit = 0; lines = @("platform check: ok (0 site(s) in 0 file(s), 0 pending entr(y/ies); 0 new, 0 grown, 0 stale, 0 blocked)"); want = $true },
         @{ step = "cpu_platform_check"; name = "planted: a raw OS call outside the whitelist"; exit = 1; lines = @("  BLOCKED platform header / OS call src/model/x.cpp: 1 site(s) in a blocked scope (any mode)", "platform check: FAIL (1 site(s) in 1 file(s), 0 pending entr(y/ies); 0 new, 0 grown, 0 stale, 1 blocked)"); want = $false },
         @{ step = "cpu_platform_check"; name = "planted: exit 0 but sites reported (report line)"; exit = 0; lines = @("platform check: report (3 site(s) in 1 file(s), 0 pending entr(y/ies); 0 new, 0 grown, 0 stale, 0 blocked)"); want = $false },

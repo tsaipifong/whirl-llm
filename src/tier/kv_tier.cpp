@@ -2486,6 +2486,109 @@ void declarePinned(const char* local_app_data, std::uint64_t bytes) {
     }
 }
 
+namespace {
+std::optional<std::filesystem::path> pinnedDir(const char* local_app_data) {
+    if (local_app_data == nullptr) return std::nullopt;
+    return std::filesystem::path(utf8ToWide(local_app_data)) / L"whirl" / L"pinned";
+}
+
+// "<decimal pid>.txt" (what declarePinned writes) -> pid; anything else -> nullopt
+std::optional<std::uint32_t> pinnedNotePid(const std::wstring& name) {
+    if (name.size() < 5 || name.size() > 14 || name.compare(name.size() - 4, 4, L".txt") != 0) return std::nullopt;
+    std::uint64_t v = 0;
+    for (std::size_t k = 0; k + 4 < name.size(); ++k) {
+        const wchar_t c = name[k];
+        if (c < L'0' || c > L'9' || (k == 0 && c == L'0')) return std::nullopt;
+        v = v * 10 + static_cast<std::uint64_t>(c - L'0');
+    }
+    if (v > 0xffffffffull) return std::nullopt;
+    return static_cast<std::uint32_t>(v);
+}
+}  // namespace
+
+bool pinnedNoteLive(platform::proc::ProcState st, std::uint64_t created, std::uint64_t note_write) {
+    using platform::proc::ProcState;
+    if (st == ProcState::kGone) return false;
+    if (st == ProcState::kUnknown) return true;
+    return created <= note_write;
+}
+
+PinnedSweep sweepPinnedNotes(const PinnedNoteOps& ops, std::uint32_t self_pid, std::size_t max_remove) {
+    PinnedSweep r;
+    struct Cand {
+        std::wstring name;
+        std::uint32_t pid;
+        std::uint64_t wt;
+    };
+    std::vector<Cand> cands;
+    ops.list([&](const std::wstring& name, std::uint64_t wt) {
+        const auto pid = pinnedNotePid(name);
+        if (!pid) {
+            ++r.other;
+            return;
+        }
+        cands.push_back({name, *pid, wt});
+    });
+    for (const Cand& c : cands) {
+        ++r.seen;
+        if (c.pid == self_pid) {
+            ++r.live;
+            continue;
+        }
+        std::uint64_t created = 0;
+        // v0251-p7fix: state() first, in its own statement. Function arguments are indeterminately sequenced and MSVC
+        // evaluates them right to left, so pinnedNoteLive(ops.state(pid, &created), created, ...) copied created == 0
+        // before state() wrote it and every reused pid looked live (tier_tests testPinnedNotes, 2026-11-04).
+        const platform::proc::ProcState st = ops.state(c.pid, &created);
+        if (pinnedNoteLive(st, created, c.wt)) {
+            ++r.live;
+            continue;
+        }
+        if (r.removed >= max_remove) {
+            r.capped = true;
+            break;
+        }
+        if (ops.remove(c.name)) ++r.removed;
+        else ++r.failed;
+    }
+    return r;
+}
+
+PinnedSweep sweepPinned(const char* local_app_data, std::size_t max_remove) {
+    try {
+        const auto dir = pinnedDir(local_app_data);
+        if (!dir) return {};
+        std::error_code ec;
+        if (!std::filesystem::is_directory(*dir, ec)) return {};
+        PinnedNoteOps ops;
+        ops.list = [&](const std::function<void(const std::wstring&, std::uint64_t)>& fn) {
+            std::error_code ie;
+            for (std::filesystem::directory_iterator it(*dir, ie), end; !ie && it != end; it.increment(ie)) {
+                if (!it->is_regular_file(ie)) continue;
+                pfs::Attributes a;
+                if (!pfs::attributes(it->path().c_str(), &a)) continue;  // unreadable: not touched
+                fn(it->path().filename().wstring(), a.last_write);
+            }
+        };
+        ops.state = [](std::uint32_t pid, std::uint64_t* created) { return platform::proc::processState(pid, created); };
+        ops.remove = [&](const std::wstring& name) { return pfs::remove((*dir / name).c_str()); };
+        return sweepPinnedNotes(ops, platform::proc::currentId(), max_remove);
+    } catch (...) {
+        return {};
+    }
+}
+
+void retractPinned(const char* local_app_data) {
+    try {
+        const auto dir = pinnedDir(local_app_data);
+        if (!dir) return;
+        pfs::remove((*dir / (std::to_wstring(platform::proc::currentId()) + L".txt")).c_str());
+    } catch (...) {
+    }
+}
+
+PinnedNoteGuard::~PinnedNoteGuard() { retractPinned(lad); }  // out of line: see kv_tier.h (v0251-p7iso)
+
 std::uint64_t hashStr(std::uint64_t h0, std::string_view s) {
     std::uint64_t h = h0;
     for (char c : s) {

@@ -43,6 +43,16 @@ inline constexpr int kCtrlClose = 2;  // CTRL_CLOSE_EVENT
 std::wstring exePath();
 
 std::uint32_t currentId();  // GetCurrentProcessId
+
+// v0251-pathb (B26-7, progress\v0251-pathb.PRIOR_ART.md): is process `pid` running, and when was it created? For the
+// pinned-memory notes (src/tier/kv_tier.cpp sweepPinned): a note is kept while its writer can still be running.
+//   OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid), WaitForSingleObject(h, 0), GetProcessTimes
+//   kGone     OpenProcess fails with ERROR_INVALID_PARAMETER (no process has this id), or the wait returns WAIT_OBJECT_0
+//             (it exited; another handle keeps its object, VFSForGit PR 1989)
+//   kRunning  the wait times out and GetProcessTimes answers: *created = its creation time (100 ns ticks since 1601)
+//   kUnknown  anything else (access denied, a protected process): the caller must treat it as running
+enum class ProcState { kGone, kRunning, kUnknown };
+ProcState processState(std::uint32_t pid, std::uint64_t* created);
 Handle currentProcess();    // GetCurrentProcess (the pseudo handle)
 // K32GetProcessMemoryInfo(h, &PROCESS_MEMORY_COUNTERS, sizeof): the working set in bytes; false when the call fails
 // (*bytes untouched).

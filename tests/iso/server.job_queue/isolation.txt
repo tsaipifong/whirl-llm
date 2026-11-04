@@ -64,6 +64,7 @@ hdr       src/platform/args.h
 hdr       src/platform/env.h
 hdr       src/platform/fs.h
 hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
 hdr       src/platform/time.h
 hdr       src/sampling/sampler.h
 hdr       src/server/engine_api.h
