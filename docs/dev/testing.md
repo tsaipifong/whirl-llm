@@ -308,8 +308,8 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
      `include/whirl/kernels_abi.h` (K8-5) to the full matrix.
    - **a change whose work equivalence cannot be shown.** With `--base-build DIR`, the code objects of both builds
      are compared (`work_equal.py`, CPU). If they differ although no kernel source changed, the full matrix runs.
-   - **Exception:** when every changed product file is a kernel for one architecture (the map lists one GPU), the
-     full matrix runs on that GPU only.
+   - **Exception:** a change whose product files are all kernels of one architecture is planned per architecture
+     (item 5): that GPU only, the other GPU carried by a code-object proof.
    <a id="core-sets"></a>**Core modules with GPU mutation evidence** (arch025 N11). A core module, a `modules.json`
    `full: true` module that is not a contract (`model.core`, `forward.state`, `model.types`, `device.profile`,
    `platform.args`), or a module owning a core path (`ops.*`) plans **its own GPU step set** instead of the full
@@ -364,11 +364,82 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
    - the verdict is `EQUIVALENT`, the code objects are identical or identical-except-cuid, and the launch
      sequence is identical;
    - its B `whirl.exe` (and `whirl-server.exe`) is the sha256 of `--build`;
-   - every launch run in it is for that GPU;
+   - it has at least one launch run of that GPU, and no run of another GPU. A run belongs to a GPU by
+     `--device X`, `--device=X` or `WHIRL_DEVICE=X` in its key, where X is a card name, an arch or a pci id (the
+     `work_equal.py` aliases: `r9700`, `gfx1201`, `pci:71:0`; `8060s`, `gfx1151`, `pci:196:0`). A run that names no GPU
+     is compared but never counts as proof (ADR-0003 addendum 1), so its step is not skipped;
    - the diff touches no kernel source and no header that a `.hip` file includes.
 
-   The skipped steps are the launch-covered steps (`<step>/<command>` keys), `golden_*` when golden is identical,
-   and `kt_full`. The plan names the proof file. Server steps the proof does not cover still run.
+   The skipped steps are the steps of that GPU's runs (`<step>/<command>` keys) and `kt_full`. `golden_*` is
+   skipped only when golden is identical, at least one case of that GPU's reference set (`<arch>:...`) is OK on both
+   sides, and no case belongs to another GPU's set. The plan names the proof file. Server steps the proof does not
+   cover still run. A `work_equal.py compare --arch <arch>` report (top-level `"arch"`) counts only for that
+   architecture's own GPU (v0251-d1b).
+5. **Per-architecture kernels** (v0251-d1b, 0.2.5.1 D1(b)). A change whose product files all compile into one
+   architecture's code object only, plus that architecture's registered kernel tests, runs **no GPU step on the other
+   GPU**; the other GPU is carried by a code-object proof instead.
+   - **Which files:** files under `kernels/gfx1151/` (`kernels/whirl_kernels.hip` includes the gfx1151 set only inside
+     `#if defined(__gfx1151__)`; `test_change_test.py` checks that shape on the tree). Each file must also pass the
+     impact map **of the planned version**. For `--worktree` that is the working tree. For `--range` / `--commit` it
+     counts only when the root's HEAD is the planned revision and the scanned folders are clean; otherwise the plan says
+     why and stays item 3. A `.hip` file must be in the map with arch gfx1151 only. A header must have includers in the
+     map. Every includer must be in `kernels/gfx1151/`, be `kernels/whirl_kernels.hip`, or be a test. A file the map
+     does not know, or an extension it does not scan, never qualifies. `kernels/gfx1151/attn_ws4_index.h` is included
+     by `src/ops/attention.cpp` (host code in `whirl.exe` for both GPUs), so it never qualifies. A file renamed into
+     `kernels/gfx1151/` from another place does not qualify either. A build file, a CMake source list, a build-wide
+     input, a host / contract file, a module without a gfx1151 part, or a change to the selection / proof tools or
+     their selection data (`test_change.py`, `work_equal.py`, `impact.py`, `impact_build.py`, `cxxscan.py`,
+     `launch_table.py`, `tools/gates/modules.json`: a diff that edits the modules' arch steps would choose its own
+     steps) keeps the plan of item 3.
+   - **`kernels/families.json`** (the kernel family manifest, read only by `kernel_iso_check.py`) may come along: a port
+     adds each new fragment there. It qualifies when the two versions differ only in paths under `kernels/gfx1151/`
+     (added to, removed from or moved between families); a changed family, `desc`, `deps` or `_doc`, or a path elsewhere,
+     keeps the plan of item 3.
+   - **modules.json `arch`:** each kernel family lists its gfx1151 part as
+     `"arch": {"gfx1151": {"paths", "tests", "steps"}}`. `paths` are globs under `kernels/gfx1151/` that are also
+     paths of the module, `tests` are the registered kernel tests (the shared harness `tests/kernels/kt*`,
+     `kernel_test_main.cpp` and `bench_kernels.cpp` sit under `kernels.common`), and `steps` are the GPU steps for that
+     part. `test_change_test.py` validates the entries (`arch_entry_errors`) and pins the tree: every
+     `kernels/gfx1151/*.hip` is registered, `attn_ws4_index.h` is not, and the new kernel files of the feat026
+     candidates are registered before they land.
+   - **The 8060S** runs the `arch.gfx1151.steps` of the touched modules and their callers, the map's steps and the
+     test-source / gate-script steps (the full 8060S matrix when a gfx1151 file is in no module).
+   - **The R9700** runs only the steps that the carry cannot cover. These are the steps of unregistered tests and of
+     gate scripts. `kt_full`, when registered kernel tests select it, is carried.
+   - **The carry** is the R9700 entry under `carry` in the plan. It is `required` until a proof is given:
+     `--base-build DIR` (test_change compares the code objects of both builds on the CPU), optionally with
+     `--proof r9700=FILE` (a `work_equal.py compare [--arch gfx1201]` report of that base build). It is `proven` only
+     when all of these hold:
+     - every gfx1201 code object of `--build`'s `whirl.exe` and `whirl-server.exe` equals the base build's (identical
+       or identical-except-cuid, read per object). Both exes must be in `--build`;
+     - the report's B exes are `--build`'s, and `--build` is the planned version's build. For `--range` / `--commit`
+       it is stamped (`--stamp-build`) at the planned revision (the range end / the commit), clean, its exes unchanged
+       since. For `--worktree`, which has no commit to stamp, it was configured from this tree (`CMakeCache.txt`
+       `CMAKE_HOME_DIRECTORY`), no product source of the tree (tracked or untracked) is newer than its exes, and the exes
+       are the outputs `.ninja_log` recorded. An unstamped build, a build of another branch or tree, or one older than
+       the last edit refuses the carry;
+     - its A exes are the base build's, and that build was stamped at the plan's base revision. Stamp it right after
+       building the base with `python tools/gates/test_change.py --stamp-build DIR`. The stamp
+       (`DIR/whirl_build_manifest.json`) records the commit and the exe sha256 values. It refuses a source tree with
+       uncommitted product files, or with a product source newer than the exes. An exe rebuilt after the stamp, a stamp
+       of another commit, or A equal to B (a self-compare) refuses the carry.
+     - How the stamp knows the exes are this folder's build: ninja (log v7) writes each output's line as start ms, end
+       ms, logged mtime, output, command hash, and the logged mtime is the command's START. An exe's file time must lie
+       between that start and start + its run time (end − start) + 2 s. A copied exe (the copy time) or an older one is
+       refused; a link that runs longer than 10 s is not. The commit is inferred from git and file times, not embedded
+       into the exe at build time (llama.cpp's `build-info.cpp` way). Limits: the stamp must be taken in the build
+       folder right after the build and before any checkout or edit (a checkout or edit makes sources newer than the
+       exes and the stamp is refused: safe, but the build must be redone); a tool that sets old file times (an archive
+       extract, `touch -d`), a source deleted after a `--worktree` build, a clock change, or a configure-time option
+       (CMake cache, environment) is not seen.
+
+     No launch or golden evidence is needed: the diff changed no host source. A report for another arch, an
+     `--arch gfx1201` verdict NOT_EQUIVALENT, a differing launch sequence or golden output, or a differing / one-sided /
+     missing gfx1201 object also **refuses** the carry, and the full matrix runs on both GPUs. `--run` refuses (exit 2)
+     while the carry is `required`. With a proven carry `--run` calls the 8060S first with all CPU steps, then the R9700
+     with its per-GPU CPU checks only, so a setup error there does not stop the 8060S steps.
+   - The plan prints `arch gfx1151 only (8060s): ...` and `carry r9700: REQUIRED|PROVEN|REFUSED ...`. A change that
+     touches `kernels/gfx1151/` but does not qualify prints why (`arch not one architecture's kernels only: ...`).
 
 `--run` calls `release_gate.ps1 -Steps <plan> -Tag change_<id>_<device> -LaunchLog ...` once per GPU, R9700 first,
 then 8060S. It refuses (exit 2) while any `whirl*` process runs, and `--force` overrides that. It writes

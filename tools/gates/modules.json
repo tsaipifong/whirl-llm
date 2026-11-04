@@ -3,9 +3,10 @@
   "Module -> release_gate.ps1 steps (arch024 PLAN (c) c-1). Read by `release_gate.ps1 -Module <name>` (step selection),",
   "tools/gates/modules_check.py (validation against a tree and the gate's step list) and tools/impact/impact.py",
   "(which modules a diff touches).",
-  "STATUS: DEV-TIME FAST FEEDBACK ONLY. Not for releases, rc merges or bug-fix releases until the owner signs",
-  "off O1 and O2 (arch024 PLAN, sign-off list). Until then a release / rc / bug-fix release runs the full",
-  "release_gate.ps1 on both GPUs under the current bug-fix rules (docs/dev/testing.md).",
+  "STATUS: DEV-TIME SELECTION. test_change.py and release_gate.ps1 -Module plan development runs from this table",
+  "(owner sign-off O1 / O2: decisions/ADR-0003, 2026-10-25). A release, an rc merge and a bug-fix release still",
+  "run release_gate.ps1 under the release checks (R1: formal gate summaries, no -Module / change_* summary; R2: a",
+  "carried speed cell needs its work_equal proof) (docs/dev/testing.md).",
   "Fields: id (PLAN module id); paths (globs, repo-relative, '/' separators; a diff file matching one belongs to",
   "the module); lands_on (the branch / step that adds the module's files: when no path matches a file in the",
   "tree, the module is 'declared, not on this branch' instead of an error); steps (release_gate step names; one",
@@ -16,9 +17,14 @@
   "callers: \"rdeps\" = also run the modules of every src/include file that includes the module's files (transitive;",
   "an includer in no module = the full gate), or a list of module names (review A4). release_gate prints, and",
   "impact.py adds as -Steps, the steps the impact map selects beyond this table (PLAN c-2).",
-  "Every step name must exist in release_gate.ps1 -List or be in pending, else release_gate exits 2."
+  "Every step name must exist in release_gate.ps1 -List or be in pending, else release_gate exits 2.",
+  "arch (v0251-d1b; read by tools/gates/test_change.py only): {\"gfx1151\": {paths, tests, steps}} = the module's files that",
+  "compile into that architecture's code object alone (globs under kernels/gfx1151/, a subset of paths; never a file that",
+  "host code includes, e.g. kernels/gfx1151/attn_ws4_index.h <- src/ops/attention.cpp), the kernel tests registered for",
+  "them (tests/ globs) and the GPU steps run on that architecture's GPU when a diff touches only such files (+ those",
+  "tests): the other GPU runs no step and is carried by a work_equal --arch proof (test_change.py arch_scope, carry_proof)."
  ],
- "status": "dev-only: not for releases until owner sign-off O1/O2 (arch024 PLAN)",
+ "status": "dev-only: development test selection (test_change.py, release_gate.ps1 -Module); owner sign-off O1/O2 in ADR-0003 (2026-10-25); releases follow the release checks R1 / R2",
  "safety": {
   "_doc": [
    "arch025-Q1 / Q3 impact selection of the C++ safety steps (arch025 PLAN (e)); read by tools/impact/impact.py, checked by",
@@ -1172,29 +1178,32 @@
   "kernels.common": {
      "id": "N5/N14",
      "desc": "kernel family common: smoke kernel, helpers, quant block decoders, packed scales, warp / block reductions (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
-     "paths": ["kernels/smoke.hip", "kernels/common.hip", "kernels/gfx1151/common.hip", "kernels/gfx1151/quant.hip", "kernels/shared/common_part.h", "kernels/shared/common_part_2.h", "kernels/shared/block_sum.h", "kernels/shared/common_vocab.h", "kernels/shared/common_warp.h", "kernels/iq_tables.h", "kernels/families.json", "kernels/shared/block_argmax.h"],
+     "paths": ["kernels/smoke.hip", "kernels/common.hip", "kernels/gfx1151/common.hip", "kernels/gfx1151/quant.hip", "kernels/shared/common_part.h", "kernels/shared/common_part_2.h", "kernels/shared/block_sum.h", "kernels/shared/common_vocab.h", "kernels/shared/common_warp.h", "kernels/iq_tables.h", "kernels/families.json", "kernels/shared/block_argmax.h", "kernels/gfx1151/lds_barrier.h"],
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_moe_precise": 2},
+     "arch": {"gfx1151": {"paths": ["kernels/gfx1151/common.hip", "kernels/gfx1151/quant.hip", "kernels/gfx1151/lds_barrier.h"], "tests": ["tests/kernels/kt*", "tests/kernels/kernel_test_main.cpp", "tests/kernels/bench_kernels.cpp", "tests/kernels/cpu_ref*", "tests/kernels/test_quant.cpp"], "steps": ["kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise"]}},
      "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
   },
   "kernels.gemv": {
      "id": "N5/N14",
      "desc": "kernel family gemv: decode matvec: f32 / f16 activations, int8 GEMV (grouped ABI), multi-row, WMMA mid-batch, gfx1151 units / Q6_K (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
-     "paths": ["kernels/gemv_f.hip", "kernels/gemv_q.hip", "kernels/gemv_mr.hip", "kernels/gemv_w.hip", "kernels/gemv_wp.hip", "kernels/gemv_wx.hip", "kernels/gfx1151/gemv_f.hip", "kernels/gfx1151/gemv_q.hip", "kernels/gfx1151/gemv_mr.hip", "kernels/gfx1151/gemv_wunit.hip", "kernels/gfx1151/gemv_q6.hip", "kernels/shared/gemv_f_gemv_entry.h", "kernels/shared/gemv_q_gemv_grouped_abi.h", "kernels/shared/gemv_q_part.h", "kernels/shared/gemv_q_part_2.h", "kernels/shared/gemv_q_qd.h", "kernels/shared/gemv_q_qd_iq3s.h", "kernels/shared/gemv_q_kq_tail.h", "kernels/shared/gemvw_red_store.h", "kernels/shared/gemvw11_setup.h", "kernels/shared/gemvw11_red_store.h", "kernels/shared/gemv_kscale.h", "kernels/shared/gemvw_rows.h", "kernels/shared/gemv_mr_unit4_dot.h", "kernels/shared/gemv_mr_kw.h", "kernels/shared/gemv_mr_q6.h", "kernels/shared/gemvw_unit4_x.h", "kernels/shared/gemvw_unit4_run.h", "kernels/shared/gemv_unit4_scales.h", "kernels/shared/gemv_q6_unit.h", "kernels/shared/wunit11_q5k_head.h", "kernels/shared/wunit11_iq4xs_head.h"],
+     "paths": ["kernels/gemv_f.hip", "kernels/gemv_q.hip", "kernels/gemv_mr.hip", "kernels/gemv_w.hip", "kernels/gemv_wp.hip", "kernels/gemv_wx.hip", "kernels/gfx1151/gemv_f.hip", "kernels/gfx1151/gemv_q.hip", "kernels/gfx1151/gemv_mr.hip", "kernels/gfx1151/gemv_wunit.hip", "kernels/gfx1151/gemv_q6.hip", "kernels/gfx1151/gemv_gk.hip", "kernels/shared/gemv_f_gemv_entry.h", "kernels/shared/gemv_q_gemv_grouped_abi.h", "kernels/shared/gemv_q_part.h", "kernels/shared/gemv_q_part_2.h", "kernels/shared/gemv_q_qd.h", "kernels/shared/gemv_q_qd_iq3s.h", "kernels/shared/gemv_q_kq_tail.h", "kernels/shared/gemvw_red_store.h", "kernels/shared/gemvw11_setup.h", "kernels/shared/gemvw11_red_store.h", "kernels/shared/gemv_kscale.h", "kernels/shared/gemvw_rows.h", "kernels/shared/gemv_mr_unit4_dot.h", "kernels/shared/gemv_mr_kw.h", "kernels/shared/gemv_mr_q6.h", "kernels/shared/gemvw_unit4_x.h", "kernels/shared/gemvw_unit4_run.h", "kernels/shared/gemv_unit4_scales.h", "kernels/shared/gemv_q6_unit.h", "kernels/shared/wunit11_q5k_head.h", "kernels/shared/wunit11_iq4xs_head.h"],
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_swift_balance", "st_swift_fast"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2},
+     "arch": {"gfx1151": {"paths": ["kernels/gfx1151/gemv_f.hip", "kernels/gfx1151/gemv_q.hip", "kernels/gfx1151/gemv_mr.hip", "kernels/gfx1151/gemv_wunit.hip", "kernels/gfx1151/gemv_q6.hip", "kernels/gfx1151/gemv_gk.hip"], "tests": ["tests/kernels/test_gemv.cpp", "tests/kernels/test_gemvk.cpp"], "steps": ["kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_swift_balance", "st_swift_fast"]}},
      "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
   },
   "kernels.gemm": {
      "id": "N5/N14",
      "desc": "kernel family gemm: prefill GEMM (WMMA f16), small-batch GEMM, MXFP4 x fp8 GEMM, gemv_h (precise f16-activation decode / verify matmul on the small-batch stages) (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
-     "paths": ["kernels/gemm_*.hip", "kernels/gemv_h.hip", "kernels/gfx1151/gemm_*.hip", "kernels/gfx1151/gemv_h.hip", "kernels/shared/gemm_prefill_dequant_f16_f32.h", "kernels/shared/gemm_prefill_f32_to_f16.h", "kernels/shared/gemm_prefill_gemm_c12_f32.h", "kernels/shared/gemm_prefill_gemm_c2_q8_0.h", "kernels/shared/gemm_prefill_gemm_entry.h", "kernels/shared/gemm_prefill_wmma_entry.h", "kernels/shared/gemmh_impl.h", "kernels/gemm_small_addr.h", "kernels/shared/gemm8_mainloop.h", "kernels/shared/gemm3_mainloop.h", "kernels/shared/gemm_store_ij.h", "kernels/shared/gemm_store_ij_f32.h", "kernels/shared/gemvh11_tile.h"],
+     "paths": ["kernels/gemm_*.hip", "kernels/gemv_h.hip", "kernels/gfx1151/gemm_*.hip", "kernels/gfx1151/gemv_h.hip", "kernels/gfx1151/gemv_hv8.hip", "kernels/gfx1151/gemv_hv9.hip", "kernels/gfx1151/mx_inject.h", "kernels/shared/gemm_prefill_dequant_f16_f32.h", "kernels/shared/gemm_prefill_f32_to_f16.h", "kernels/shared/gemm_prefill_gemm_c12_f32.h", "kernels/shared/gemm_prefill_gemm_c2_q8_0.h", "kernels/shared/gemm_prefill_gemm_entry.h", "kernels/shared/gemm_prefill_wmma_entry.h", "kernels/shared/gemmh_impl.h", "kernels/gemm_small_addr.h", "kernels/shared/gemm8_mainloop.h", "kernels/shared/gemm3_mainloop.h", "kernels/shared/gemm_store_ij.h", "kernels/shared/gemm_store_ij_f32.h", "kernels/shared/gemvh11_tile.h"],
      "lands_on": "arch025-kern (lane 3)",
      "callers": "rdeps",
      "steps": ["cpu_iso_kernels_gemm", "cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_swift_balance", "st_moe_precise"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_swift_balance": 2, "st_moe_precise": 2},
+     "arch": {"gfx1151": {"paths": ["kernels/gfx1151/gemm_*.hip", "kernels/gfx1151/gemv_h.hip", "kernels/gfx1151/gemv_hv8.hip", "kernels/gfx1151/gemv_hv9.hip", "kernels/gfx1151/mx_inject.h"], "tests": ["tests/kernels/test_gemm.cpp", "tests/kernels/test_gemvh.cpp"], "steps": ["kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_swift_balance", "st_moe_precise"]}},
      "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
   },
   "kernels.gdn": {
@@ -1204,6 +1213,7 @@
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_swift_balance", "seq_swift_precise"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_swift_balance": 2, "seq_swift_precise": 2},
+     "arch": {"gfx1151": {"paths": ["kernels/gfx1151/fused_decode.hip", "kernels/gfx1151/gdn*.hip"], "tests": ["tests/kernels/test_gdn.cpp"], "steps": ["kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_swift_balance", "seq_swift_precise"]}},
      "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
   },
   "kernels.norm": {
@@ -1213,6 +1223,7 @@
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_moe_precise": 2},
+     "arch": {"gfx1151": {"paths": ["kernels/gfx1151/misc_rows_norm.hip", "kernels/gfx1151/misc_probe_requant.hip", "kernels/gfx1151/prefill_fused.hip"], "tests": ["tests/kernels/test_misc.cpp"], "steps": ["kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise"]}},
      "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
   },
   "kernels.attn": {
@@ -1222,15 +1233,17 @@
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise", "srv_mt_precise"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_moe_precise": 2, "srv_mt_precise": 2},
+     "arch": {"gfx1151": {"paths": ["kernels/gfx1151/misc_kv_argmax.hip", "kernels/gfx1151/attn*.hip"], "tests": ["tests/kernels/test_attn*.cpp"], "steps": ["kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise", "srv_mt_precise"]}},
      "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
   },
   "kernels.moe": {
      "id": "N5/N14",
      "desc": "kernel family moe: mixture of experts: route, gather, expert GEMV / GEMM, MXFP4 experts, precise f32 experts (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
-     "paths": ["kernels/moe*.hip", "kernels/gfx1151/moe.hip", "kernels/shared/moe_moe_bm.h", "kernels/shared/moe_logits_f32.h", "kernels/shared/moe_moe_route.h", "kernels/shared/moe_gu_pair.h"],
+     "paths": ["kernels/moe*.hip", "kernels/gfx1151/moe.hip", "kernels/gfx1151/moe_down8.hip", "kernels/gfx1151/moe_prefill_mt.hip", "kernels/moep_map.h", "kernels/shared/moe_moe_bm.h", "kernels/shared/moe_logits_f32.h", "kernels/shared/moe_moe_route.h", "kernels/shared/moe_gu_pair.h"],
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_moe_precise", "st_moe_balance", "st_moe_fast"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2},
+     "arch": {"gfx1151": {"paths": ["kernels/gfx1151/moe.hip", "kernels/gfx1151/moe_down8.hip", "kernels/gfx1151/moe_prefill_mt.hip"], "tests": ["tests/kernels/test_moe*.cpp"], "steps": ["kt_full", "golden_swift", "golden_moe", "st_moe_precise", "st_moe_balance", "st_moe_fast"]}},
      "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
   },
   "kernels.sample": {
@@ -1240,6 +1253,7 @@
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "srv_mt_precise", "srv_balance", "seq_swift_precise"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_balance": 2, "seq_swift_precise": 2},
+     "arch": {"gfx1151": {"paths": ["kernels/gfx1151/draft_pick.hip", "kernels/gfx1151/sample_cand.hip"], "tests": ["tests/kernels/test_misc.cpp"], "steps": ["kt_full", "golden_swift", "golden_moe", "srv_mt_precise", "srv_balance", "seq_swift_precise"]}},
      "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
   },
   "kernels.dflash": {
@@ -1267,6 +1281,7 @@
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_moe_precise": 2},
+     "arch": {"gfx1151": {"paths": ["kernels/gfx1151/whirl_kernels_gfx1151.hip"], "tests": [], "steps": ["kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise"]}},
      "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU); the include order is the link order of the kernels, a change of order is a change of code object"]
   },
   "kernels.abi": {
