@@ -498,6 +498,11 @@ void testLoadRules() {
     NCHECK(fl({{"ATTN_SEG", "1000"}}).flags.attn_seg == 768 && fl({{"ATTN_SEG", "x"}}).flags.attn_seg == 0, "ATTN_SEG /256*256");
     NCHECK(fl({{"MOE_WIDE", ""}}).flags.moe_wide && !fl({{"MOE_MXW", "0"}}).flags.moe_mxw && !fl({{"MOE_RBF", "0"}}).flags.moe_rbf,
            "loader flags: envFlag (\"\" is on)");
+    // v0251-a11port (feat026-router, was loader.cpp envFlag("MOE_RFUSE", false); t = the R9700 card, where the default is
+    // off): the loader's envFlag rule, "0" = off, any other value (also "") = on; a plain value, no A/B switch note
+    NCHECK(!fl({}).flags.moe_rfuse && fl({{"MOE_RFUSE", "1"}}).flags.moe_rfuse && fl({{"MOE_RFUSE", ""}}).flags.moe_rfuse &&
+               !fl({{"MOE_RFUSE", "0"}}).flags.moe_rfuse && !fl({{"MOE_RFUSE", "1"}}, "precise").lossy_override,
+           "MOE_RFUSE: envFlag rule (moe_rfuse)");
     NCHECK(!fl({{"G8T", "0"}}).flags.g8t && fl({}).flags.g8t, "G8T");
     // feat026-moep (was loader.cpp envGet; t = the R9700 card, where the default is off): variant names -> index + 1,
     // unknown / "" / "0" / unset -> 0 (off), MOEP_COMB strtoul
@@ -681,6 +686,7 @@ void testFastOnlyOverrides() {
         // v0251-a7fix: WHIRL_MOEP_COMB 0-2 are bitwise, 3 / 4 are f16 intermediates (L); 5 (atomic scatter) is fast-only
         // through the plan's refusal (v0251-a7pol B26-41, testMoepCombMode), so the variable's class stays 'L'.
         {"MOEP_GU", 'B'},  {"MOEP_DN", 'B'},   {"MOEP_COMB", 'L'},
+        {"MOE_RFUSE", 'B'},  // v0251-a11port: fused router, bit-identical to moe_logits_f32 + moe_topk (kt moemx, golden)
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i)
@@ -835,6 +841,36 @@ static void testMoepCombMode() {
     }
 }
 
+// v0251-a11port (feat026-router): the fused MoE router is the Radeon 8060S default (Target::gfx1151) for MoE models in
+// every mode (bit-identical); off on the R9700 and on dense models; WHIRL_MOE_RFUSE=0 gives the 0.2.5 path everywhere,
+// "1" turns the flag on anywhere (the R9700 code object has no kernel: ops::chooseMoe keeps the two-kernel path). Not
+// labelled +overrides (no A/B switch: it is the default), FO-3 / FO-4 below. Fails before the port (no default).
+static void testRfuseDefault() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const bool on = std::string_view(c.name) == "8060s" && std::string_view(model) == "moe";
+                const nu::Plan p = pl(t, mode, {});
+                NCHECK(p.flags.moe_rfuse == on, "moe_rfuse default {} {} {}: {} (want {})", c.name, model, mode, p.flags.moe_rfuse, on);
+                const nu::Plan off = pl(t, mode, {{"MOE_RFUSE", "0"}});
+                NCHECK(!off.flags.moe_rfuse, "moe_rfuse {} {} {}: WHIRL_MOE_RFUSE=0 = the 0.2.5 path", c.name, model, mode);
+                const nu::Plan one = pl(t, mode, {{"MOE_RFUSE", "1"}});
+                NCHECK(one.flags.moe_rfuse, "moe_rfuse {} {} {}: WHIRL_MOE_RFUSE=1 on", c.name, model, mode);
+                // the flag changes nothing else in the plan: its bitsKey is the off plan's with moe_rfuse=1
+                nu::Plan a = off;
+                a.flags.moe_rfuse = true;
+                NCHECK(a.bitsKey() == one.bitsKey() && nu::logLine(off) == nu::logLine(one) && !one.lossy_override && one.overrides == off.overrides,
+                       "moe_rfuse {} {} {}: WHIRL_MOE_RFUSE changes only the moe_rfuse flag", c.name, model, mode);
+            }
+}
+
 void testNumericsPlan(int& pass, int& fail) {
     testPlanTable();
     testApplyFrontEqualsPlan();  // arch025-N2b (replaces testUnwiredCallerUnchanged: no caller passes Target::gdn_strix now)
@@ -844,6 +880,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testLoadRules();
     testMoepDefault();  // v0251-a7port (fails before the port: the plan has no gfx1151 default)
     testMoepCombMode();  // v0251-a7pol B26-41 (the refusal rows fail on cfce7ea)
+    testRfuseDefault();  // v0251-a11port (fails before the port: the plan has no gfx1151 default)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)

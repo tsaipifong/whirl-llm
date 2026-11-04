@@ -89,6 +89,7 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
     mp.sx_buf = moe_sx != 0;
     mp.tiles64_buf = moe_tiles64 != 0;
     mp.cnt_buf = moe_cnt != 0;
+    mp.rcnt_buf = moe_rcnt != 0;
     ops::MoeFlags mf;
     mf.prec_dec = nf().prec_dec;
     mf.small_max = small_max;
@@ -103,6 +104,7 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
     // v0251-a7pol (B26-41): the combine classes by the plan's mode (the plan already refuses COMB 3 / 4 in precise, 5
     // outside fast; this keeps chooseMoe from taking them on prec_dec alone)
     mf.moep_comb_ok = ops::moepCombFor(num_plan.mode == numerics::Mode::precise, num_plan.mode == numerics::Mode::fast);
+    mf.moe_rfuse = nf().moe_rfuse;
     const ops::MoePlan pl = ops::chooseMoe(mp, mf, k, k.silu_mul_x8h);
     const bool small = pl.small;
     // precise decode: f32-activation experts (moe_gu_f / moe_down_f) and the shared expert on
@@ -114,7 +116,13 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
     else
         rmsnorm(x, post_norm, h, E, n, E, E);
     // router logits (f32 activations for small batches, also in precise mode)
-    if (small) {
+    // v0251-a11port (feat026-router): the fused router (logits + top-k + shared gate in one launch, bit-identical to
+    // moe_logits_f32 + moe_topk; kernels/gfx1151/moe_router.hip) when ops::chooseMoe picked it
+    if (pl.router != nullptr) {
+        hip::launch(pl.router, pl.logits_grid, D(256), 0, stream, mo.router.ptr, h, moe_logits, I(R), I(E), I(n), gate,
+                    mo.sh_gate, moe_ids, moe_w, moe_sg, I(K), I(E), moe_rcnt);
+        mark(OpClass::matmul);
+    } else if (small) {
         // 16 tokens per launch (the kernel's tile); each token's logits are the same in any piece
         for (u32 t0 = 0; t0 < n; t0 += max_small_batch)
             hip::launch(k.moe_logits_f32, pl.logits_grid, D(256), 0, stream, mo.router.ptr, h + static_cast<u64>(t0) * E * 4,
@@ -123,8 +131,10 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
     } else {
         matmul(mo.router, h, moe_logits, n, false);
     }
-    hip::launch(k.moe_topk, D(n), D(256), 0, stream, moe_logits, I(R), h, mo.sh_gate, moe_ids, moe_w, moe_sg, I(R), I(K), I(E));
-    mark(OpClass::misc);
+    if (pl.router == nullptr) {
+        hip::launch(k.moe_topk, D(n), D(256), 0, stream, moe_logits, I(R), h, mo.sh_gate, moe_ids, moe_w, moe_sg, I(R), I(K), I(E));
+        mark(OpClass::misc);
+    }
     if (moe_dump) {
         const std::size_t old = moe_dump->size();
         moe_dump->resize(old + static_cast<std::size_t>(n) * K);

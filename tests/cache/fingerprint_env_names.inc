@@ -79,6 +79,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_MOEP_GU",    // src/common/numerics.cpp (feat026-moep, v0251-a7port)
     "WHIRL_MOEP_DN",    // src/common/numerics.cpp
     "WHIRL_MOEP_COMB",  // src/common/numerics.cpp
+    "WHIRL_MOE_RFUSE",  // src/common/numerics.cpp (feat026-router, v0251-a11port)
     "WHIRL_MOE_WIDE",  // src/common/numerics.cpp
     "WHIRL_MTP",  // src/cli/cmd_bench.cpp
     "WHIRL_MTP_ADAPT",  // src/cli/decode.cpp

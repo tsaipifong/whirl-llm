@@ -36,6 +36,7 @@ struct MoeProblem {
     bool refs = false;                    // all three expert tensors carry MXFP4 load-time row exponents
     bool sx_buf = false, tiles64_buf = false;  // the fp8 scale buffer / the 64-token tile list exist
     bool cnt_buf = false;                 // feat026-moep: the fused-combine counters (n * ceil(E / kMoepMinBm) ints) exist
+    bool rcnt_buf = false;                // v0251-a11port: the fused router's block counter (Scratch::moe_rcnt) exists
 };
 struct MoeFlags {
     bool prec_dec = false;
@@ -56,6 +57,9 @@ struct MoeFlags {
         f16,      // + 3 / 4: f16 expert outputs (balance item f16 intermediates)
         atomic,   // + 5: atomic scatter, f32 order varies run to run (fast only)
     } moep_comb_ok = MoepComb::bitwise;
+    // v0251-a11port (feat026-router, numerics::Flags::moe_rfuse: the gfx1151 MoE default, WHIRL_MOE_RFUSE=0 off): router
+    // logits + top-k + shared gate in one launch (bit-identical to moe_logits_f32 + moe_topk) when the kernel exists
+    bool moe_rfuse = false;
 };
 // v0251-a7pol: precise -> bitwise, balance -> f16, fast -> atomic (owner mode standard 2026-10-26)
 inline MoeFlags::MoepComb moepCombFor(bool precise, bool fast) {
@@ -91,6 +95,9 @@ struct MoePlan {
     Dim3 gu_grid{}, down_grid{};
     // router logits for small batches: moe_logits_f32 in pieces of max_small_batch rows
     Dim3 logits_grid{};
+    // v0251-a11port: the fused router (moe_router_fused_i16 / _i24, grid logits_grid) instead of moe_logits_f32 + moe_topk;
+    // null = the two-kernel path (flag off, n > max_small_batch, a prefill batch, a shape outside the kernel, no kernel)
+    Function router = nullptr;
     // prefill
     MoePrefillKind kind = MoePrefillKind::generic;
     std::uint32_t bn = 64;           // token tile of the route / tile lists

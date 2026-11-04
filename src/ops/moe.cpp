@@ -76,6 +76,12 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
     pl.small = n <= f.small_max || preciseRows(f.prec_dec, n, f.max_verify_rows);
     pl.small_q8 = pl.small && !f.prec_dec;
     pl.logits_grid = D((R + 7) / 8);
+    // v0251-a11port (feat026-router): one small piece (n <= max_small_batch) of a supported shape -> the fused router
+    // (the screened host condition, f06b245 forward/ffn.cpp); ceil(E / 128) picks the entry, else the two-kernel path
+    if (f.moe_rfuse && pl.small && n <= f.max_small_batch && R <= 256 && K <= 32 && E % 4 == 0 && p.rcnt_buf) {
+        const u32 it = (E + 127) / 128;
+        pl.router = it == 16 ? k.moe_router_fused_i16 : it == 24 ? k.moe_router_fused_i24 : nullptr;
+    }
     if (pl.small) {
         const bool same = p.gate_ty == p.up_ty;
         pl.gu_split = !same;

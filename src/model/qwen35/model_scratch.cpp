@@ -118,6 +118,7 @@ void Model::allocScratch(u32 fd_splits_) {
         m.moe_inv = m.alloc(B * Kx * 4);
         m.moe_tiles = m.alloc((B * Kx / 32 + cfg.n_expert + 1) * 16);
         m.moe_ntiles = m.allocZero(16);
+        m.moe_rcnt = m.moe_ntiles + 8;  // v0251-a11port: the fused router's counter (scratch.h: bytes 8..11, zeroed)
         m.moe_tiles64 = m.alloc((B * Kx / 64 + cfg.n_expert + 1) * 16);
         m.moe_ntiles64 = m.allocZero(16);
         m.moe_x16 = m.alloc(B * Kx * std::max(E, F) * 2);

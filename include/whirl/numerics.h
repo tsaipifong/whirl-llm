@@ -84,8 +84,9 @@ struct EnvValues {
     // src/model/tune.cpp:852-982 (loadOrTuneImpl)
     Raw fp8, fp8_mask, g8t, gdn_wmma, act_fuse, gemmh, gemmhq, attn_kx, attn_kg, attn_dqf, attn_seg, gdn_ba, gdn_in2, q4_relaxed,
         ffn_h16, gdn_strix, gdn_strix_min, kv, q8dec, relax, relax_k, relax_alpha, relax_eps, relax_delta, spec_sample;
-    // src/model/loader.cpp:550-553; feat026-moep: moep_gu / moep_dn / moep_comb (WHIRL_MOEP_GU / _DN / _COMB)
-    Raw moe_fp8, moe_mxw, moe_wide, moe_rbf, moep_gu, moep_dn, moep_comb;
+    // src/model/loader.cpp:550-553; feat026-moep: moep_gu / moep_dn / moep_comb (WHIRL_MOEP_GU / _DN / _COMB);
+    // v0251-a11port (feat026-router): moe_rfuse (WHIRL_MOE_RFUSE)
+    Raw moe_fp8, moe_mxw, moe_wide, moe_rbf, moep_gu, moep_dn, moep_comb, moe_rfuse;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -93,7 +94,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 32;
+    static constexpr std::size_t n_fields = 33;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -254,6 +255,7 @@ struct ItemState {
     X(U, moep_gu, 0, "")                                         \
     X(U, moep_dn, 0, "")                                         \
     X(U, moep_comb, 0, "")                                       \
+    X(B, moe_rfuse, false, "")                                   \
     X(B, gv_group, true, "gv_group")                             \
     X(U, gv_nmax, 0, "gv_nmax")                                  \
     X(B, gdn_v0, false, "")
