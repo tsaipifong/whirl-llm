@@ -13,6 +13,7 @@ int main(int argc, char** argv) {
                      {"precise_rule", testPreciseRule},
                      {"matmul_path", testMatmulPath},
                      {"gemv_tile", testGemvTile},
+                     {"gemv_k", testGemvK},  // v0251-a6port (feat026-ggemv), the order of whirl-ops-tests
                      {"gemv_wide", testGemvWide},
                      {"gemm", testOpsGemm}},
                     argc, argv);

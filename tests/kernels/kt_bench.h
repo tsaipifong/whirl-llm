@@ -201,10 +201,12 @@ struct BenchOpts {
     std::uint64_t rot_cap = 4ull << 30;  // --rot-cap-mb: device memory per rotated set
     int moe_layers = 2;                  // --moe-layers: real expert layers rotated (with 64 routing sets)
     bool no_anchor = false;              // --no-anchor
+    std::vector<int> ggemv_nt;           // --bench-nt: subset of kt::ggemvBenchNts() (kt_ggemv_widths.h); empty = all
+    std::vector<int> ggemv_v;            // --bench-v: gemvk variants 1..9 timed next to production (v0251-a6port); empty = all
     std::string state = "burst";         // declared power state (DESIGN (d))
     std::string tool_ver, code_hash, code_hash_b, gpu_arch, gpu_pci;
 };
-extern const char* const kBenchFamilies[6];
+extern const char* const kBenchFamilies[7];
 bool benchFamilyKnown(const std::string& f);
 struct Ctx;
 void runBench(Ctx& c, const BenchOpts& o);

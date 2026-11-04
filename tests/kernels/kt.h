@@ -208,6 +208,7 @@ HostMat randomMat(Ctx& c, QType t, int nrows, int ncols);
 // Test families (each in its own .cpp)
 void testQuant(Ctx& c);
 void testGemv(Ctx& c);
+void testGemvk(Ctx& c);   // "gemvk": gfx1151 K-balanced MXFP4 multi-token GEMV bitwise == 1-token (feat026-ggemv)
 void testGemm(Ctx& c);
 void testAttn(Ctx& c);
 void testAttnDq4(Ctx& c);  // "attndq4": attn_dq4 at 256 splits / contexts up to 256k / random draft windows

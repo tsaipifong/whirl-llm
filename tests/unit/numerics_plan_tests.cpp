@@ -335,6 +335,7 @@ void testFlagScope() {
         {"gemv_r", "needs GPU dump: tune rows (applyGemvEnv: WHIRL_GEMV_R)"},
         {"gemv_w[", "needs GPU dump: tune rows (applyGemvEnv: WHIRL_GEMV_W)"},
         {"gemv_w_head", "needs GPU dump: tune rows (applyGemvEnv: WHIRL_GEMV_WH)"},
+        {"gemv_k", "needs GPU dump: the gfx1151 gemvk table (defaultGemvK, applyGemvEnv / applyGemvKEnv: WHIRL_GEMV_K)"},
         {"mm_class", "per forward"},
         {"out_h16", "per forward"},
         {"small_max", "per forward"},
@@ -669,6 +670,19 @@ void testFastOnlyOverrides() {
         {"SPEC_SAMPLE", 'L'}, {"MOE_FP8", 'L'}, {"MOE_MXW", 'B'},   {"MOE_WIDE", 'B'},    {"MOE_RBF", 'B'},
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
+    // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
+    // safety by construction: the plan never reads it (not an EnvValues name, not a switch), so no value of it can
+    // enable a fast-only item; pinned here so a later move into the plan must be classified again.
+    {
+        const std::map<std::string, char> k_snapshot_class = {{"GEMV_K", 'B'}};
+        for (const auto& [n, cls] : k_snapshot_class) {
+            NCHECK(cls == 'B', "FO-4: WHIRL_{} class {} (gemvk is bitwise: B)", n, cls);
+            bool in_plan = false;
+            for (const auto& e : nu::EnvValues::names()) in_plan = in_plan || n == e.name;
+            for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i) in_plan = in_plan || n == nu::k_numerics_switches[i];
+            NCHECK(!in_plan, "FO-4: WHIRL_{} is read by the numerics plan (classify it in k_class, probe it in FO-3)", n);
+        }
+    }
     for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i)
         NCHECK(k_class.count(nu::k_numerics_switches[i]) == 0, "FO-4: switch WHIRL_{} is also an item override", nu::k_numerics_switches[i]);
 }

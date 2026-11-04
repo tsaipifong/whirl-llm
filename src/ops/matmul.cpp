@@ -101,6 +101,9 @@ GemvPlan chooseGemvTile(const MatShape* mats, std::size_t n_mats, std::uint32_t 
     return p;
 }
 
+// v0251-a6port test-first stub (the port: the K-wave rule of feat026-ggemv)
+std::uint8_t gemvkAuto(std::uint32_t, std::uint32_t) { return 0; }
+
 GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::MatmulKernels& k, bool head_gemvx) {
     const std::size_t t = ti(w0.ty);
     if (k.gemvx[t] != nullptr && (!w0.head || head_gemvx)) return GemvWide::gemvx;

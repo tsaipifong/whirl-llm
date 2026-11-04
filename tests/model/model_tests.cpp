@@ -3,6 +3,7 @@
 // draft allocation (cycle cost, slot acceptance, allocDrafts).
 // SPDX-License-Identifier: Apache-2.0
 
+#include "../kernels/kt_ggemv_widths.h"  // v0251-a6port: the ggemv bench width table
 #include "../test_env.h"
 #include "../test_check.h"
 #include "config/env_snapshot.h"
@@ -1537,6 +1538,109 @@ void testLoadEstimate() {
     }
 }
 
+// v0251-a6port: the 8060S gemvk default (device profile rows -> qwen35::defaultGemvK -> the load's TuneTable::gemv_k)
+// and the WHIRL_GEMV_K override (replaces the table; "off" / "0" = all 0 = the 0.2.5 path; "" = not set), the
+// server's applyGemvKEnv, and the route of the default row through the Model's own tables (fake kernels, no GPU).
+void testGemvkDefault() {
+    namespace kn = whirl::kernels;
+    namespace dv = whirl::device;
+    q::GemvR swift{};
+    swift[5] = swift[6] = 7;
+    check(dv::profile(whirl::hip::Arch::gfx1151).gemvk_dense == swift, "gemvk: 8060S dense profile row = v7 at 5 and 6 tokens only");
+    check(q::defaultGemvK(whirl::hip::Arch::gfx1151, false) == swift, "gemvk: defaultGemvK(gfx1151, dense) = the dense row");
+    check(q::defaultGemvK(whirl::hip::Arch::gfx1151, true) == q::GemvR{}, "gemvk: defaultGemvK(gfx1151, moe) = all 0 (Ornith not a default yet)");
+    check(q::defaultGemvK(whirl::hip::Arch::gfx1201, false) == q::GemvR{} && q::defaultGemvK(whirl::hip::Arch::gfx1201, true) == q::GemvR{},
+          "gemvk: defaultGemvK(gfx1201, *) = all 0 (R9700 never selects gemvk)");
+    q::Model m;
+    auto setDefault = [&] { m.tuneTable().gemv_k = swift; };
+    struct C {
+        const char* v;
+        q::GemvR want;
+    };
+    q::GemvR o58{};
+    o58[5] = 2;
+    o58[6] = 8;
+    q::GemvR a5{};
+    a5[5] = whirl::ops::kGemvkAuto;
+    const C cs[] = {{"off", {}}, {"0", {}}, {"5:2,6:8", o58}, {"5", a5}, {"", swift}, {"9:2,1:3", {}}, {"5:10", {}}};
+    for (const C& c : cs) {
+        setDefault();
+        q::parseGemvK(m, c.v);
+        check(m.tuneTable().gemv_k == c.want, std::string("gemvk: WHIRL_GEMV_K='") + c.v + "' on the dense default gives the expected table");
+    }
+    // the server's read (the load's snapshot)
+    using whirl::config::EnvSnapshot;
+    auto withSnap = [&](std::optional<std::string> v) {
+        setDefault();
+        m.env_snap = v ? std::make_shared<const EnvSnapshot>(EnvSnapshot::fromValues({{"GEMV_K", *v}})) : std::make_shared<const EnvSnapshot>();
+        return q::applyGemvKEnv(m);
+    };
+    {
+        const auto r = withSnap(std::string("off"));
+        check(r && *r == "off" && m.tuneTable().gemv_k == q::GemvR{}, "gemvk: applyGemvKEnv(WHIRL_GEMV_K=off) -> \"off\", all 0");
+    }
+    {
+        const auto r = withSnap(std::nullopt);
+        check(!r && m.tuneTable().gemv_k == swift, "gemvk: applyGemvKEnv without WHIRL_GEMV_K -> nullopt, default kept");
+    }
+    {
+        setDefault();
+        m.env_snap = std::make_shared<const EnvSnapshot>(EnvSnapshot::fromValues({{"GEMV_K", std::string("5:2,6:8")}}));
+        q::applyGemvEnv(m);
+        check(m.tuneTable().gemv_k == o58, "gemvk: applyGemvEnv (CLI) reads WHIRL_GEMV_K=5:2,6:8");
+        m.env_snap.reset();
+    }
+    // route of the dense default through the Model's tables (fake gemvk entries)
+    static int fake[kn::kGemvkMaxNt + 1][kn::kNGemvk][2];
+    for (int nt = 2; nt <= kn::kGemvkMaxNt; ++nt)
+        for (int v = 1; v < kn::kNGemvk; ++v) {
+            m.k.gemvk[v][nt - 2] = &fake[nt][v][0];
+            m.k.gemvk_g[v][nt - 2] = &fake[nt][v][1];
+        }
+    q::Mat w;
+    w.ty = gguf::GgmlType::mxfp4;
+    w.nrows = 6144;
+    w.ncols = 5120;
+    const whirl::ops::MatShape s3[3] = {m.matShape(w), m.matShape(w), m.matShape(w)};
+    setDefault();
+    const auto& tt = m.tuneTable();
+    const whirl::ops::GemvTune tn{&tt.gemv_r, &tt.gemv_w, &tt.gemv_w_head, 0, &tt.gemv_k};
+    bool route = true;
+    for (std::uint32_t n = 2; n <= 16; ++n) {
+        const whirl::ops::GemvPlan p = whirl::ops::chooseGemvTile(s3, 3, n, m.k, tn);
+        const bool on = n <= static_cast<std::uint32_t>(kn::kGemvkMaxNt) && p.f == &fake[n][7][1];
+        route = route && (on == (n == 5 || n == 6));
+    }
+    check(route, "gemvk: the dense default routes exactly 5 / 6 tokens to ggemvk_nt<n>v7 (Model tables)");
+}
+
+// v0251-a6bench (feat026-ggemv a1f3e35 / a4b700c, ported): the ggemv bench times every width WHIRL_GEMV_K can select
+// (kt_ggemv_widths.h == 2..kGemvkMaxNt), every 8060S MTP verify width of Swift / Ornith with a gemvk kernel is in it,
+// and --bench-nt accepts only subsets.
+void testGgemvBenchWidths() {
+    namespace kn = whirl::kernels;
+    const std::vector<int> bench = kt::ggemvBenchNts();
+    std::vector<int> runtime;
+    for (int n = 2; n <= kn::kGemvkMaxNt; ++n) runtime.push_back(n);
+    check(bench == runtime, "ggemv bench widths " + kt::joinNts(bench) + " == runtime gemvk widths " + kt::joinNts(runtime));
+    for (const bool moe : {false, true}) {
+        const q::MtpDefaults d = q::mtpDefaults(moe, whirl::hip::Arch::gfx1151);
+        std::string missing;
+        for (std::uint32_t nd = 1; nd <= d.drafts; ++nd) {
+            const int rows = static_cast<int>(nd) + 1;
+            if (rows <= kn::kGemvkMaxNt && std::find(bench.begin(), bench.end(), rows) == bench.end()) missing += " " + std::to_string(rows);
+        }
+        check(missing.empty(), std::string("ggemv bench: ") + (moe ? "Ornith" : "Swift") + " 8060S MTP verify widths timed (missing:" + missing + ")");
+    }
+    std::vector<int> sub;
+    std::string err;
+    check(kt::parseBenchNt("6,5", sub, err) && sub == std::vector<int>{5, 6}, "--bench-nt 6,5 -> 5,6 (table order) " + err);
+    check(!kt::parseBenchNt(std::to_string(kn::kGemvkMaxNt + 1), sub, err), "--bench-nt kGemvkMaxNt + 1 refused (" + err + ")");
+    check(!kt::parseBenchNt("1", sub, err) && !kt::parseBenchNt("5,5", sub, err) && !kt::parseBenchNt("", sub, err) &&
+              !kt::parseBenchNt("x", sub, err),
+          "--bench-nt 1 / 5,5 / empty / x refused");
+}
+
 // RC-R1 / PREFILL-R2: f32 / f16 matrices (no int8 GEMV) at n = 2..gvMax() rows take the multi-token
 // GEMV loop, bitwise == n = 1 per token: up to 16 rows, up to 32 inside a wide verify (small_max 32),
 // and only the n = 1 kernel is required (without gemv_<T>_4 / _8 the loop runs _1 per token).
@@ -2429,7 +2533,7 @@ void testEnvSnapshot() {
         check(run(sw, 0, "") == envtab::tuneOutput(0, model.string()), std::string("env snapshot: switch ") + sw + "='' = not set (numerics.cpp:292)");
         empty_names.push_back(sw);
     }
-    for (const char* g : {"GEMV_R", "GEMV_W", "GEMV_WH"}) {
+    for (const char* g : {"GEMV_R", "GEMV_W", "GEMV_WH", "GEMV_K"}) {  // GEMV_K: v0251-a6port
         const auto snap = std::make_shared<const EnvSnapshot>(EnvSnapshot::fromValues({{g, V("")}}));
         check(envtab::gemvOutput(snap) == envtab::gemvOutput(), std::string("env snapshot: ") + g + "='' applies nothing (config.cpp:283-293)");
         empty_names.push_back(g);
@@ -2757,6 +2861,7 @@ void testPlanVsLoadOrTune() {
         {"GEMV_R", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
         {"GEMV_W", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
         {"GEMV_WH", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
+        {"GEMV_K", "config.cpp applyGemvEnv / applyGemvKEnv: the gfx1151 gemvk table (v0251-a6port; testGemvkDefault)"},
         {"GPU_SHARE", "device.cpp: GPU lock"},
         {"GPU_WAIT", "device.cpp: GPU lock"},
         {"DEVICE", "device.cpp: GPU selection"},
@@ -4236,6 +4341,8 @@ int main(int argc, char** argv) {
     testPlanVsLoadOrTune();  // arch025-N2a
     testLoadFlagsWithoutTune();  // arch025-N2b-r2
     testFloatGemvDispatch();
+    testGemvkDefault();  // v0251-a6port
+    testGgemvBenchWidths();  // v0251-a6port (v0251-a6bench)
     testArchWhitelist();
     testLoadEstimate();
     testLoadValidation();

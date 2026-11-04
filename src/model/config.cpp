@@ -283,6 +283,11 @@ void parseGemvWHead(Model& m, std::string_view list) {
     });
 }
 
+// v0251-a6port test-first stubs (the port: the device profile row, the WHIRL_GEMV_K table)
+GemvR defaultGemvK(hip::Arch, bool) { return GemvR{}; }
+void parseGemvK(Model&, std::string_view) {}
+std::optional<std::string> applyGemvKEnv(Model&) { return std::nullopt; }
+
 void applyGemvEnv(Model& m) {
     const auto env = whirl::config::snapshotOf(m);  // the load's (arch025-N1)
     if (const auto& v = env->gemv_r) parseGemvR(m, *v);
