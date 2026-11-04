@@ -239,6 +239,8 @@ ops::GemmFlags Context::gemmFlags() const {
     // v0251-a3port: the gemmfq slot, WHIRL_FDQ8S when set (Model::load -> fdq >= 0), else the device default
     f.fdq = fdq >= 0 ? fdq : static_cast<int>(device::profile(arch).fdq_default);
     f.fdq_min = fdq_min;
+    // v0251-a3fix: the device's slot from GemmFlags::fdq_big_min rows; WHIRL_FDQ8S set -> that slot everywhere (-1)
+    f.fdq_big = fdq >= 0 ? -1 : static_cast<int>(device::profile(arch).fdq_big);
     f.gv_max = gvMax();
     return f;
 }

@@ -197,13 +197,15 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
         p.grid = Dim3{(n + 255) / 256, (w.nrows + 127) / 128, 1};
         return p;
     }
-    if (choice >= G && w.ty == GgmlType::mxfp4 && f.fdq > 0 && static_cast<std::size_t>(f.fdq) <= k.gemmfq.size() && !f.out_h16 &&
-        n >= f.fdq_min && w.ncols % 256 == 0 && w.row_bytes % 8 == 0 && k.gemmfq[static_cast<std::size_t>(f.fdq - 1)] != nullptr) {
+    // v0251-a3fix: from fdq_big_min rows the slot is fdq_big (-1 = fdq): gfx1151 c2 there, t2 below (GemmFlags)
+    const int fs = n >= f.fdq_big_min && f.fdq_big >= 0 ? f.fdq_big : f.fdq;
+    if (choice >= G && w.ty == GgmlType::mxfp4 && fs > 0 && static_cast<std::size_t>(fs) <= k.gemmfq.size() && !f.out_h16 &&
+        n >= f.fdq_min && w.ncols % 256 == 0 && w.row_bytes % 8 == 0 && k.gemmfq[static_cast<std::size_t>(fs - 1)] != nullptr) {
         // v0251-a3port (feat026-fdq): the MXFP4 dequant fused into the f16 GEMM, gfx1151 gemmfq (bitwise == dequant_f16 +
         // gemm_c<i>_f16 for every i: same f16 weights in LDS, same WMMA chain over k)
-        const kernels::GemmCfg fc = kernels::kGemmFqCfgs[static_cast<std::size_t>(f.fdq - 1)];
+        const kernels::GemmCfg fc = kernels::kGemmFqCfgs[static_cast<std::size_t>(fs - 1)];
         p.kind = GemmKind::gemmfq;
-        p.f = k.gemmfq[static_cast<std::size_t>(f.fdq - 1)];
+        p.f = k.gemmfq[static_cast<std::size_t>(fs - 1)];
         p.grid = Dim3{static_cast<unsigned>((n + fc.bn - 1) / fc.bn), static_cast<unsigned>((w.nrows + fc.bm - 1) / fc.bm), 1};
         p.block = D(fc.nth);
         return p;
