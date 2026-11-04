@@ -142,6 +142,9 @@ std::string execDump(const Model& m) {
     WD_B(head_gemvx);
     WD_B(prec_gemvh);
     add("prec_gs", std::to_string(m.prec_gs));
+    // v0251-a3port: the gemmfq switches (Model::load -> fdqEnv); fdq is -1 (the device default) when unset, so no u()
+    add("fdq", std::to_string(m.fdq));
+    WD_U(fdq_min);
     add("mtp", b(m.mtp.has_value()));
     WD_B(keep_hidden);
     WD_B(all_logits);

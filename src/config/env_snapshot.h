@@ -34,12 +34,14 @@ public:
     Value code_object, moe_mxw, moe_wide, moe_rbf, gemv_r, gemv_w, gemv_wh, gpu_share, gpu_wait, device, dflash_prof;
     // src/model/qwen35/forward/dispatch.cpp (arch025-F7, through forwardEnv below): gemvLaunch, gemmFlags
     Value head_gemvx, prec_gemvh, prec_gs;
+    // src/model/loader.cpp (v0251-a3port, through qwen35::fdqEnv at Model::load): the gemmfq slot / row threshold
+    Value fdq8s, fdq8s_min;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 54;
+    static constexpr std::size_t n_names = 56;
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

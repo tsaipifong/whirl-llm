@@ -37,11 +37,20 @@ struct Profile {
     bool h16_from_candidates;
     // small-batch WMMA GEMM selection: ties between row blocks go to the larger BM (GEMVH-2)
     bool gemms_tie_larger_bm;
+    // fused-dequant MXFP4 prefill GEMM (gemmfq, v0251-a3port): the default slot of ops::GemmFlags::fdq for an MXFP4
+    // dequant choice at >= WHIRL_FDQ8S_MIN rows (1 c2, 2 t2 = kernels::kGemmFqNames[slot - 1]; 0 = the old
+    // dequant_f16 + gemm_c<i>_f16); WHIRL_FDQ8S overrides it. Only the gfx1151 code object has the kernels, so a
+    // slot here is also never selected on a family whose object lacks them (bitwise either way)
+    std::uint8_t fdq_default;
+    // v0251-a3fix: the slot from ops::GemmFlags::fdq_big_min (2305) rows (same encoding; WHIRL_FDQ8S overrides it too)
+    std::uint8_t fdq_big;
     // q4 KV decode through attn_dq4: the smallest split count with the same key partition (FAST-8S-1)
     bool attn_dq4_dynamic_splits;
     // ---- tuning (src/model/tune.cpp)
     bool tune_fast;                 // each kernel timed once per shape, slow candidates rejected early
-    const char* tune_cache_suffix;  // tune cache file name suffix (table revision)
+    // tune cache file name suffix (table revision). A change to what the tuner times on this family (candidates, slots,
+    // thresholds: qwen35::tuneCandidateKey) needs a new revision: tests/model testTuneCacheKey pins each one
+    const char* tune_cache_suffix;
     const char* tune_time_hint;     // first-run message: how long the tune takes
     // f16-WMMA chunked DeltaNet prefill from strix-llama.cpp (GDN-8S; where gdn_wmma's kernels do not exist)
     bool gdn_strix;
@@ -64,6 +73,8 @@ inline constexpr Profile k_profile_gfx1201{
     .gemvh_grid_by_rows = false,
     .h16_from_candidates = false,
     .gemms_tie_larger_bm = false,
+    .fdq_default = 0,
+    .fdq_big = 0,
     .attn_dq4_dynamic_splits = false,
     .tune_fast = false,
     .tune_cache_suffix = "",
@@ -83,9 +94,11 @@ inline constexpr Profile k_profile_gfx1151{
     .gemvh_grid_by_rows = true,
     .h16_from_candidates = true,
     .gemms_tie_larger_bm = true,
+    .fdq_default = 2,  // t2 (v0251-a3port; v0251-judge1 sec 1 screening)
+    .fdq_big = 1,      // c2 from 2305 rows (v0251-a3fix; scratch/v0251_a3/gpu/8060s_20261104-0439/results.txt:106-124)
     .attn_dq4_dynamic_splits = true,
     .tune_fast = true,
-    .tune_cache_suffix = "-gfx1151r2",
+    .tune_cache_suffix = "-gfx1151r3",  // r3: gemmfq in the dequant family (v0251-a3key; tests/model testTuneCacheKey)
     .tune_time_hint = "8 minutes on the Radeon 8060S (less for MXFP4 models)",
     .gdn_strix = true,
     .numerics_8060s = true,

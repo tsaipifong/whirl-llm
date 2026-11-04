@@ -14,6 +14,8 @@
 //   attn  attn_wsplit1 + attn_combine (f16 KV, 24 / 4 heads, hd 256, one decode query at L = 2k / 32k / 128k)
 //   moe   moe_gu_mxfp4[w], moe_down_mxfp4[w] (Ornith MXFP4 experts, n = 1, K routed experts per launch)
 //   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state)
+//   fdq   in-object A/B: dequant_f16_mxfp4 + gemm_c<i>_f16 (the shipped MXFP4 dequant choice) vs gemmfq_<v>_mxfp4 (gfx1151),
+//         B bitwise == A on the full output first, then ABBA pairs; rows --fdq-n, slots --fdq-v (v0251-a3port)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
 // without a model the cells use synthetic MXFP4 blocks of the same shapes (cell names start with "synthetic.").
 
@@ -146,7 +148,75 @@ struct Cell {
     std::function<void(hip::Function, std::uint64_t)> call;
     std::function<std::vector<float>(hip::Function)> run;
     std::function<Result(const std::vector<float>&)> verify;
+    // in-object A/B (family fdq, v0251-a3port): B is ANOTHER call path of the same code object (not an --ab candidate).
+    // bitwise_b runs A and B once each on the full output and returns {values compared, mismatches}; B is timed against
+    // A (Bench::runAB, ABBA pairs) only when it gives A's bits.
+    std::string kernel_b;
+    std::function<void(std::uint64_t)> call_b;
+    std::function<std::pair<std::size_t, std::size_t>()> bitwise_b;
 };
+
+// family fdq: A = k.fa through k.call, B = k.call_b of the same object; rows A / B (variant=A / B) and the paired ratio
+// B / A (metric kern.<family>.<kernel_b>.ab_ratio, extra a_kernel, in_object)
+void runCellInObject(Env& e, Cell& k) {
+    Ctx& c = e.c;
+    if (e.have_b) std::printf("   %s: in-object A/B, --ab ignored for this cell\n", k.ci.cell.c_str());
+    const auto [nb, mb] = k.bitwise_b();
+    Result rb;
+    rb.kind = Kind::invariant;
+    rb.n = nb;
+    rb.mismatches = mb;
+    rb.pass = nb > 0 && mb == 0;
+    rb.name = "bench " + k.kernel_b + " " + k.ci.cell + ": bitwise == " + k.kernel + " (full output)";
+    c.rep.add(rb);
+    if (!rb.pass) {
+        std::printf("   %s %s: B is not bitwise == A (%zu of %zu values differ), no timing row\n", k.kernel_b.c_str(), k.ci.cell.c_str(), mb, nb);
+        return;
+    }
+    e.bench.beforeCell();
+    k.ci.started = wb::iso_now();
+    const BlockFn ba = hipBlock(c, [&k, f = k.fa](std::uint64_t r) { k.call(f, r); });
+    const BlockFn bb = hipBlock(c, [&k](std::uint64_t r) { k.call_b(r); });
+    const AbStats ab = e.bench.runAB(ba, bb);
+    if (e.bench.anchorSwitchedOff()) std::printf("   anchor: %s\n", e.bench.anchorError().c_str());
+    CellInfo ca = k.ci, cb = k.ci;
+    ca.variant = "A";
+    cb.kernel = k.kernel_b;
+    cb.variant = "B";
+    printCell(ca, ab.a, "A ");
+    printCell(cb, ab.b, "B ");
+    std::printf("         B/A %.4f (p10 %.4f p90 %.4f, %d pairs ABBA in one object, order AB %.4f BA %.4f, %s) B bitwise == A\n", ab.ratio.st.median,
+                ab.ratio.st.p10, ab.ratio.st.p90, ab.pairs, ab.order_ab, ab.order_ba, ab.ratio.stop_reason.c_str());
+    if (!ab.ratio.ok()) {
+        Result r;
+        r.name = "bench in-object A/B timing " + k.kernel_b + " " + k.ci.cell + ": " + ab.ratio.error;
+        r.pass = false;
+        c.rep.add(r);
+        return;
+    }
+    CellStats sa = ab.a, sb = ab.b;
+    for (CellStats* s : {&sa, &sb}) {
+        s->anchor_ref_us = ab.ratio.anchor_ref_us;
+        s->anchor_min_us = ab.ratio.anchor_min_us;
+        s->anchor_max_us = ab.ratio.anchor_max_us;
+        s->anchor_name = ab.ratio.anchor_name;
+        s->cooldowns = ab.ratio.cooldowns;
+        s->stop_reason = ab.ratio.stop_reason;
+    }
+    ca.settings += ";ab=abba_in_object";
+    cb.settings += ";ab=abba_in_object";
+    e.write(cellRow(ca, sa, e.o.tool_ver));
+    wb::Row rbw = cellRow(cb, sb, e.o.tool_ver);
+    rbw.extra.push_back({"b_bitwise", "true"});
+    e.write(rbw);
+    CellInfo cr = k.ci;
+    cr.kernel = k.kernel_b;
+    wb::Row rr = abRow(cr, ab, e.o.tool_ver, e.o.code_hash);
+    rr.extra.push_back({"b_bitwise", "true"});
+    rr.extra.push_back({"a_kernel", wb::json_string(k.kernel)});
+    rr.extra.push_back({"in_object", "true"});
+    e.write(rr);
+}
 
 void runCell(Env& e, Cell& k) {
     Ctx& c = e.c;
@@ -157,6 +227,10 @@ void runCell(Env& e, Cell& k) {
     c.rep.add(ra);
     if (!ok_a) {
         std::printf("   %s %s: output check FAILED, no timing row\n", k.kernel.c_str(), k.ci.cell.c_str());
+        return;
+    }
+    if (k.call_b) {
+        runCellInObject(e, k);
         return;
     }
     hip::Function fb = e.have_b ? e.xmod.getFunctionOpt(k.kernel.c_str()) : nullptr;
@@ -932,9 +1006,149 @@ void benchGdn(Env& e) {
     runCell(e, k);
 }
 
+// ---------------------------------------------------------------- fdq (v0251-a3port): in-object pair vs fused A/B
+// A = the shipped path of an MXFP4 dequant choice on the 8060S: dequant_f16_mxfp4 into an f16 scratch, then
+// gemm_c<i>_f16 on it (i = the tuned config of the shape on this machine: Swift c2, Ornith 512 x 2048 c1;
+// %LOCALAPPDATA%\whirl\tune4-*-gfx1151r2.txt bucket 1); B = gemmfq_<v>_mxfp4 on the raw weights. B must be bitwise == A
+// on the full output, then ABBA pairs in one process (Bench::runAB). Rows: --fdq-n (default 1024 1280 2048 4096: the
+// threshold, a tail forward, the Swift forward, the MoE forward / WHIRL_PREFILL_CHUNK=4096), slots --fdq-v (default all
+// in the object). Weights: Swift blk.0 ffn_gate / ffn_down (--mx), Ornith blk.0 ffn_gate_shexp (--moemx, MXFP4 512 x
+// 2048); without models synthetic MXFP4 at the Swift shapes.
+void benchFdq(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "fdq";
+    if (c.mod.arch() != hip::Arch::gfx1151) {
+        c.rep.skip("fdq", "bench fdq", "gemmfq exists only in the gfx1151 code object");
+        return;
+    }
+    const int ti = static_cast<int>(QType::mxfp4);
+    const hip::Function dq = c.k.dequant_f16[ti];
+    std::vector<int> slots;
+    for (std::size_t fi = 0; fi < wk::kGemmFqCfgs.size(); ++fi) {
+        const std::string v = wk::kGemmFqNames[fi];
+        if (!e.o.fdq_v.empty() && std::find(e.o.fdq_v.begin(), e.o.fdq_v.end(), v) == e.o.fdq_v.end()) continue;
+        if (!c.fnOpt("gemmfq_" + v + "_mxfp4")) {
+            Result r;
+            r.name = "bench fdq: gemmfq_" + v + "_mxfp4 not in this code object";
+            r.pass = false;  // a missing B is a failure, never a silent skip (the family exists to time it)
+            c.rep.add(r);
+            std::printf("   fdq: gemmfq_%s_mxfp4 not in this code object (FAIL)\n", v.c_str());
+            continue;
+        }
+        slots.push_back(static_cast<int>(fi));
+    }
+    if (!dq || slots.empty()) {
+        if (!dq) c.rep.skip("fdq", "bench fdq", "no dequant_f16_mxfp4 in this code object");
+        return;
+    }
+    const std::vector<int> ns = !e.o.fdq_n.empty() ? e.o.fdq_n : std::vector<int>{1024, 1280, 2048, 4096};
+    struct FqW {
+        std::string label, tensor;
+        HostMat m;
+        int a_cfg;  // gemm_c<i>_f16 of the shipped pair
+    };
+    std::vector<FqW> ws;
+    {
+        const Weights w = denseWeights(c, {"blk.0.ffn_gate.weight", "blk.0.ffn_down.weight"});
+        for (const auto& [tn, m] : w.mats)
+            if (m.type == QType::mxfp4) ws.push_back({w.label, tn, m, 2});
+        if (const whirl::gguf::File* f = c.open(c.models.moemx); f && f->tensor("blk.0.ffn_gate_shexp.weight")) {
+            HostMat m = loadMat(*f, "blk.0.ffn_gate_shexp.weight");
+            if (m.type == QType::mxfp4) ws.push_back({"ornith", "blk.0.ffn_gate_shexp.weight", m, 1});
+        }
+    }
+    for (const FqW& fw : ws) {
+        const HostMat& m = fw.m;
+        const int ncols = m.ncols, nrows = m.nrows;
+        if (ncols % 256 != 0 || m.row_bytes % 8 != 0) continue;
+        const hip::Function ga = c.k.gemmc[fw.a_cfg][static_cast<int>(QType::f16)];
+        if (!ga) {
+            c.rep.skip("fdq", "bench fdq " + fw.label, "no gemm_c" + std::to_string(fw.a_cfg) + "_f16");
+            continue;
+        }
+        const DevCopies wc = upload(e, m.data);
+        const std::uint64_t rb = m.row_bytes;
+        auto w16 = std::make_shared<Buf>(static_cast<std::size_t>(nrows) * ncols * 2);
+        const std::uint64_t groups = static_cast<std::uint64_t>(ncols / 8) * nrows;
+        const auto& ac = wk::kGemmCfgs[static_cast<std::size_t>(fw.a_cfg)];
+        const std::string a_name = "dequant_f16_mxfp4+gemm_c" + std::to_string(fw.a_cfg) + "_f16";
+        const int cr = std::min(nrows, 64), ct = 8;
+        for (const int n : ns) {
+            if (n < 1) continue;
+            const std::vector<float> x = c.randn(static_cast<std::size_t>(n) * ncols);
+            std::vector<std::uint16_t> xh(x.size());
+            for (std::size_t i = 0; i < x.size(); ++i) xh[i] = f2h(x[i]);
+            Buf x16(xh), y(static_cast<std::size_t>(n) * nrows * 4);
+            for (const int fi : slots) {
+                const auto& g = wk::kGemmFqCfgs[static_cast<std::size_t>(fi)];
+                const hip::Function fb = c.fnOpt(std::string("gemmfq_") + wk::kGemmFqNames[static_cast<std::size_t>(fi)] + "_mxfp4");
+                Cell k;
+                // the cell names the B slot too: the A row of each slot's cell is its own pair measurement
+                k.ci = e.info("fdq", a_name, fw.label + "." + shortName(fw.tensor) + ".n" + std::to_string(n) + "." + wk::kGemmFqNames[static_cast<std::size_t>(fi)],
+                              shapeStr(nrows, ncols));
+                k.ci.settings = e.settings(static_cast<std::uint64_t>(wc.n()) * m.data.size(), wc.n());
+                k.ci.flops = 2.0 * n * nrows * ncols;
+                k.kernel = a_name;
+                k.kernel_b = std::string("gemmfq_") + wk::kGemmFqNames[static_cast<std::size_t>(fi)] + "_mxfp4";
+                k.fa = ga;
+                k.call = [&c, &wc, &x16, &y, w16, dq, ac, groups, rb, ncols, nrows, n](hip::Function f, std::uint64_t r) {
+                    hip::launch(dq, {static_cast<unsigned>(std::min<std::uint64_t>((groups + 255) / 256, 65535)), 1, 1}, {256, 1, 1}, 0, c.s, wc.at(r),
+                                rb, w16->p(), ncols, nrows);
+                    hip::launch(f, {cdiv(n, ac.bn), cdiv(nrows, ac.bm), 1}, {static_cast<unsigned>(ac.nth), 1, 1}, 0, c.s, w16->p(),
+                                static_cast<std::uint64_t>(ncols) * 2, x16.p(), y.p(), ncols, nrows, n, 0);
+                };
+                k.call_b = [&c, &wc, &x16, &y, fb, g, rb, ncols, nrows, n](std::uint64_t r) {
+                    hip::launch(fb, {cdiv(n, g.bn), cdiv(nrows, g.bm), 1}, {static_cast<unsigned>(g.nth), 1, 1}, 0, c.s, wc.at(r), rb, x16.p(), y.p(),
+                                ncols, nrows, n, 0);
+                };
+                k.run = [&c, &k, &y, n, nrows, cr, ct](hip::Function f) {
+                    y.fill(0xff);
+                    k.call(f, 0);
+                    c.sync();
+                    const auto all = y.down<float>(static_cast<std::size_t>(n) * nrows);
+                    std::vector<float> got;
+                    for (int t = 0; t < ct && t < n; ++t)
+                        got.insert(got.end(), all.begin() + static_cast<std::ptrdiff_t>(t) * nrows,
+                                   all.begin() + static_cast<std::ptrdiff_t>(t) * nrows + cr);
+                    return got;
+                };
+                k.verify = [&m, &xh, cr, ct, ncols, n](const std::vector<float>& got) {
+                    const int tt = std::min(ct, n);
+                    std::vector<float> wf(static_cast<std::size_t>(cr) * ncols);
+                    std::vector<std::uint16_t> wh(static_cast<std::size_t>(ncols));
+                    for (int r = 0; r < cr; ++r) {
+                        ref::dequantRowF16(m.type, m.data.data() + static_cast<std::size_t>(r) * m.row_bytes, ncols, wh.data());
+                        for (int q = 0; q < ncols; ++q) wf[static_cast<std::size_t>(r) * ncols + q] = h2f(wh[static_cast<std::size_t>(q)]);
+                    }
+                    std::vector<float> xf(static_cast<std::size_t>(tt) * ncols);
+                    for (std::size_t i = 0; i < xf.size(); ++i) xf[i] = h2f(xh[i]);
+                    std::vector<double> ry, rs;
+                    ref::gemvF64(wf, cr, ncols, xf.data(), tt, ncols, ry, rs);
+                    return cmpTol("vs CPU (" + std::to_string(cr) + " rows x " + std::to_string(tt) + " tokens)", got, ry, rs, 1e-4, 1e-6);
+                };
+                k.bitwise_b = [&c, &k, &y, n, nrows]() -> std::pair<std::size_t, std::size_t> {
+                    const std::size_t cnt = static_cast<std::size_t>(n) * nrows;
+                    y.fill(0xff);
+                    k.call(k.fa, 0);
+                    c.sync();
+                    const std::vector<float> ya = y.down<float>(cnt);
+                    y.fill(0x7f);  // a different fill: an output B never writes cannot match A by accident
+                    k.call_b(0);
+                    c.sync();
+                    const std::vector<float> yb = y.down<float>(cnt);
+                    std::size_t bad = 0;
+                    for (std::size_t i = 0; i < cnt; ++i) bad += std::memcmp(&ya[i], &yb[i], 4) != 0;
+                    return {cnt, bad};
+                };
+                runCell(e, k);
+            }
+        }
+    }
+}
+
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -984,7 +1198,8 @@ void runBench(Ctx& c, const BenchOpts& o) {
         const char* name;
         void (*fn)(Env&);
     };
-    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn}};
+    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
+                      {"fdq", benchFdq}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

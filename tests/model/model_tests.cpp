@@ -18,6 +18,7 @@
 #include "model/qwen35/weight_loader.h"
 #include "model/arch_registry.h"  // arch025-M5
 #include "model/qwen35/arch_names.h"  // arch025-lane2 leg 5
+#include "platform/paths.h"  // v0251-a3key testTuneCacheKey: the tune cache read paths
 #include "whirl/common.h"  // widen / narrow (bug-envpaths child test)
 #include "whirl/gpu_select.h"  // arch025-surv testLockGpuAbandoned
 #include "model/device_lock.h"  // arch025-surv testLockGpuAbandoned
@@ -1941,6 +1942,15 @@ void testBaselineDumps() {
         BCHECK(d.find("D exec: prec_gemvh=0\n") != std::string::npos);
         BCHECK(d.find("D exec: prec_gs=2\n") != std::string::npos);
     }
+    // v0251-a3port: the gemmfq switches are in the dump (defaults: -1 = the device default, 1025)
+    for (const char* k : {"D exec: fdq=-1\n", "D exec: fdq_min=1025\n"}) BCHECK(a.find(k) != std::string::npos);
+    {
+        q::Model m3;
+        m3.fdq = 0;
+        m3.fdq_min = 2048;
+        const std::string d = q::execDump(m3);
+        BCHECK(d.find("D exec: fdq=0\n") != std::string::npos && d.find("D exec: fdq_min=2048\n") != std::string::npos);
+    }
     m.fixFormat(whirl::KvFormat::q8h);  // one property changes one line (q8 -> q8h: the rotation)
     const std::string b = q::execDump(m);
     BCHECK(b != a);
@@ -2444,7 +2454,8 @@ void testEnvSnapshot() {
     // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
     const std::vector<std::string> covered = envtab::namesCovered();
     const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
-                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};  // the last three: Model::load -> forwardEnv (testForwardEnv)
+                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS",  // these three: Model::load -> forwardEnv (testForwardEnv)
+                                     "FDQ8S", "FDQ8S_MIN"};  // v0251-a3port: Model::load -> fdqEnv (testFdqEnv)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -2499,6 +2510,246 @@ bool oldHeadGemvx(const char* v) {  // envFlag("HEAD_GEMVX", false)
 bool oldPrecGemvh(const char* v) { return v == nullptr || *v != '0'; }
 int oldPrecGs(const char* v) { return v != nullptr && *v != 0 ? std::atoi(v) : -1; }
 }  // namespace f7
+
+// v0251-a3port: WHIRL_FDQ8S / WHIRL_FDQ8S_MIN (qwen35::fdqEnv at Model::load -> Context::fdq / fdq_min) and their use in
+// Context::gemmFlags. Literal expectations (include/whirl/model.h FdqEnv): FDQ8S unset / "" -> -1 (the device default),
+// "c2" / "1" -> slot 1, "t2" / "2" -> slot 2, anything else -> 0 (the old dequant + f16 GEMM; the screening-only probe
+// names of feat026-fdq c2l / t2l / c2f included); FDQ8S_MIN unset / "" -> 1025, else strtoul.
+void testFdqEnv() {
+    using whirl::config::EnvSnapshot;
+    using V = EnvSnapshot::Value;
+    struct S {
+        const char* v;
+        int fdq;
+    };
+    const S slots[] = {{nullptr, -1}, {"", -1}, {"c2", 1}, {"t2", 2}, {"1", 1}, {"2", 2}, {"0", 0}, {"off", 0}, {"3", 0}, {"5", 0},
+                       {"-1", 0}, {"c2l", 0}, {"t2l", 0}, {"c2f", 0}, {"T2", 0}, {"t2 ", 0}, {"abc", 0}, {"2x", 2}, {"2048", 0}};
+    struct M {
+        const char* v;
+        std::uint32_t min;
+    };
+    const M mins[] = {{nullptr, 1025u}, {"", 1025u}, {"2048", 2048u}, {"1025", 1025u}, {"512", 512u}, {"0", 0u}, {"abc", 0u}, {"4096x", 4096u}};
+    std::size_t n = 0;
+    for (const S& s : slots)
+        for (const M& mm : mins) {
+            std::vector<std::pair<std::string, V>> in;
+            if (s.v) in.push_back({"FDQ8S", V(s.v)});
+            if (mm.v) in.push_back({"FDQ8S_MIN", V(mm.v)});
+            const q::FdqEnv fe = q::fdqEnv(EnvSnapshot::fromValues(in));
+            check(fe.fdq == s.fdq && fe.fdq_min == mm.min,
+                  std::format("fdq env: FDQ8S={} FDQ8S_MIN={} -> slot {} min {} (got {} {})", s.v ? s.v : "(unset)", mm.v ? mm.v : "(unset)", s.fdq,
+                              mm.min, fe.fdq, fe.fdq_min));
+            ++n;
+        }
+    check(n == std::size(slots) * std::size(mins), "fdq env: table size");
+    // through the process environment ("" removes the variable): capture -> fdqEnv
+    _putenv_s("WHIRL_FDQ8S", "c2");
+    _putenv_s("WHIRL_FDQ8S_MIN", "2048");
+    {
+        const q::FdqEnv fe = q::fdqEnv(EnvSnapshot::capture());
+        check(fe.fdq == 1 && fe.fdq_min == 2048, "fdq env: process env WHIRL_FDQ8S=c2 WHIRL_FDQ8S_MIN=2048 -> slot 1 min 2048");
+    }
+    _putenv_s("WHIRL_FDQ8S", "");
+    _putenv_s("WHIRL_FDQ8S_MIN", "");
+    {
+        const q::FdqEnv fe = q::fdqEnv(EnvSnapshot::capture());
+        check(fe.fdq == -1 && fe.fdq_min == 1025, "fdq env: process env unset -> the device default, 1025");
+    }
+    // a Model's defaults = not set; Context::gemmFlags passes an explicit slot through and resolves -1 to the device
+    // default (device::Profile::fdq_default: gfx1201 0 here; gfx1151 2 is pinned by tests/device testProfiles; the
+    // gfx1151 row is not called here because gemmFlags then asks the HIP device for the gemvh cap)
+    {
+        q::Model m;
+        check(m.fdq == -1 && m.fdq_min == 1025, "fdq: a Model's defaults = not set (-1, 1025)");
+        check(m.arch == whirl::hip::Arch::gfx1201, "fdq: a fresh Model is the gfx1201 row");
+        check(m.gemmFlags().fdq == 0 && m.gemmFlags().fdq_min == 1025, "fdq: gfx1201 default = off (slot 0), threshold 1025");
+        m.fdq = 2;
+        check(m.gemmFlags().fdq == 2, "fdq: WHIRL_FDQ8S=t2 reaches GemmFlags (gfx1201 has no gemmfq kernel: ops keeps the old plan)");
+        m.fdq = 1;
+        m.fdq_min = 2048;
+        check(m.gemmFlags().fdq == 1 && m.gemmFlags().fdq_min == 2048, "fdq: WHIRL_FDQ8S=c2 WHIRL_FDQ8S_MIN=2048 reach GemmFlags");
+        m.fdq = 0;
+        check(m.gemmFlags().fdq == 0, "fdq: WHIRL_FDQ8S=0 -> off");
+        check(m.gemmFlags().fdq_big == -1, "fdq: WHIRL_FDQ8S set -> one slot for every row count (fdq_big -1)");
+        m.fdq = -1;
+        // v0251-a3fix: unset -> the device's slot from 2305 rows (device::Profile::fdq_big: gfx1201 0; gfx1151 1 = c2
+        // is pinned by tests/device testProfiles), so the bucket-1 tune (4096 rows) times the kernel that wins there
+        check(m.gemmFlags().fdq_big == 0 && m.gemmFlags().fdq_big_min == 2305, "fdq: gfx1201 default from 2305 rows = off (fdq_big 0)");
+    }
+    // v0251-a3key (REVIEW-v0251-a3 C1): the gfx1151 row, so a miswired Context::gemmFlags (fdq_big from fdq_default, the
+    // two swapped) fails on the CPU; before this only the gfx1201 row (0 == 0) and the Profile values were pinned.
+    // kernels::gemvhCap() (include/whirl/kernels_abi.h) asks the HIP device only when WHIRL_GEMVH_WAVES is not > 0; it
+    // is a function-local static, so the override is set before this process's first gfx1151 gemmFlags call (the
+    // calls above are gfx1201, which does not reach gemvhCap).
+    {
+        char* gw0 = nullptr;
+        std::size_t gwn = 0;
+        (void)_dupenv_s(&gw0, &gwn, "WHIRL_GEMVH_WAVES");
+        const std::string gw_saved = gw0 ? gw0 : "";
+        const bool gw_had = gw0 != nullptr;
+        std::free(gw0);
+        _putenv_s("WHIRL_GEMVH_WAVES", "640");
+        q::Model m;
+        m.arch = whirl::hip::Arch::gfx1151;
+        const whirl::device::Profile& p = whirl::device::profile(m.arch);
+        const whirl::ops::GemmFlags f = m.gemmFlags();
+        check(f.fdq == 2 && f.fdq == static_cast<int>(p.fdq_default), "fdq: gfx1151 default slot = Profile::fdq_default = 2 (t2)");
+        check(f.fdq_big == 1 && f.fdq_big == static_cast<int>(p.fdq_big), "fdq: gfx1151 slot from 2305 rows = Profile::fdq_big = 1 (c2)");
+        check(f.fdq_min == 1025 && f.fdq_big_min == 2305, "fdq: gfx1151 thresholds 1025 (fdq_min) / 2305 (fdq_big_min)");
+        m.fdq = 2;
+        check(m.gemmFlags().fdq == 2 && m.gemmFlags().fdq_big == -1, "fdq: gfx1151 WHIRL_FDQ8S=t2 -> t2 at every row count (fdq_big -1)");
+        m.fdq = 0;
+        check(m.gemmFlags().fdq == 0 && m.gemmFlags().fdq_big == -1, "fdq: gfx1151 WHIRL_FDQ8S=0 -> off at every row count");
+        m.fdq = 1;
+        m.fdq_min = 2048;
+        check(m.gemmFlags().fdq == 1 && m.gemmFlags().fdq_min == 2048 && m.gemmFlags().fdq_big == -1,
+              "fdq: gfx1151 WHIRL_FDQ8S=c2 WHIRL_FDQ8S_MIN=2048 reach GemmFlags");
+        _putenv_s("WHIRL_GEMVH_WAVES", gw_had ? gw_saved.c_str() : "");
+    }
+}
+
+// v0251-a3key (REVIEW-v0251-a3 A1): the tune cache file's key (include/whirl/model.h tuneCandidateKey /
+// tuneSelectionSuffix / tuneCacheStem; src/model/tune.cpp loadOrTune).
+// (1) the candidate set of each family is pinned to its table revision (device::Profile::tune_cache_suffix) in an
+//     APPEND-ONLY table: a change to what the tuner times without a new revision fails here. To change the candidate
+//     set: give the family a new tune_cache_suffix and append a row with the printed key; never edit or remove a row
+//     (the gfx1201 row keeps the plain file name of v0.2.x, so a gfx1201 change needs its first suffix).
+// (2) WHIRL_FDQ8S / _MIN set at the load -> a separately keyed table (a tune with an override times that setting).
+// (3) the old revision's file is never read, also not as the research prototype's tune3- / tune- fallback (old tables
+//     are user files: never deleted, only no longer read).
+// (4) loadOrTune reads the keyed file (host-only Model, empty tables: readTune accepts "" for a Model without layers).
+void testTuneCacheKey() {
+    namespace fs = std::filesystem;
+    namespace d = whirl::device;
+    using hip::Arch;
+    const std::string common =
+        "tunekey1 choices=56 buckets=512,4096,128,32,48,64,96,192,256,384,1024,"
+        " gemm=128/256/512,128/256/256,256/128/256,64/128/256,64/128/256,64/128/256,64/128/256,64/128/256,64/128/256,"
+        "128/256/512,128/256/512,256/128/512,256/128/512,128/128/512,128/128/512,128/128/512,128/128/512,128/128/512,"
+        "128/128/512,64/256/512,64/256/512,64/256/512,256/256/512,128/512/512,"
+        " gemms=64/32/128,128/32/256,128/48/256,128/64/256,128/16/256,64/64/256,64/96/256,64/128/256,"
+        " gemmh_min=512";
+    struct Rev {
+        Arch arch;
+        const char* suffix;
+        std::string key;
+    };
+    const Rev hist[] = {
+        {Arch::gfx1201, "", common + " fast=0 tie_bm=0 h16_cand=0 fdq=0/0"},
+        // r2 (8s-c3, 51b20ad: gemms became candidates); key as at int0251 2421013, before A3 (no gemmfq slot)
+        {Arch::gfx1151, "-gfx1151r2", common + " fast=1 reject=1.50@512 tie_bm=1 h16_cand=1 fdq=0/0"},
+        // r3 (v0251-a3key): gemmfq in the dequant family, t2 up to 2304 rows (cee3dfe), c2 from 2305 (3e342e0)
+        {Arch::gfx1151, "-gfx1151r3",
+         common + " fast=1 reject=1.50@512 tie_bm=1 h16_cand=1 fdq=2/1 fdq_min=1025 fdq_big_min=2305 gemmfq=256/128/256,128/256/256, fq_names=c2,t2,"},
+    };
+    bool unique = true;
+    for (std::size_t i = 0; i < std::size(hist); ++i)
+        for (std::size_t j = i + 1; j < std::size(hist); ++j)
+            if (hist[i].arch == hist[j].arch && std::string_view(hist[i].suffix) == hist[j].suffix) unique = false;
+    check(unique, "tune key: one row per (family, table revision)");
+    for (const Arch a : {Arch::gfx1201, Arch::gfx1151}) {
+        const d::Profile& p = d::profile(a);
+        const char* an = a == Arch::gfx1201 ? "gfx1201" : "gfx1151";
+        const std::string live = q::tuneCandidateKey(p);
+        std::printf("tune key %s (suffix '%s'): %s\n", an, p.tune_cache_suffix, live.c_str());
+        const Rev* row = nullptr;
+        for (const Rev& r : hist)
+            if (r.arch == a && std::string_view(r.suffix) == p.tune_cache_suffix) row = &r;
+        check(row != nullptr && row->key == live,
+              std::format("tune key {}: the candidate set of table revision '{}' is unchanged (else give device::Profile::tune_cache_suffix "
+                          "a new revision and append a row with the printed key){}",
+                          an, p.tune_cache_suffix, row == nullptr ? " - no row for this suffix" : ""));
+    }
+
+    // (2) the selection part of the key
+    struct Sel {
+        int fdq;
+        std::uint32_t min;
+        bool has_fq;
+        const char* want;
+    };
+    const Sel sels[] = {
+        {-1, 1025, true, ""},             // unset: the shared table
+        {-1, 1025, false, ""},            //
+        {2, 1025, false, ""},             // no gemmfq kernel (gfx1201 object): the override changes nothing
+        {0, 2048, false, ""},             //
+        {0, 1025, true, "-fdq0"},         // WHIRL_FDQ8S=0 (the old dequant + f16 GEMM)
+        {0, 2048, true, "-fdq0"},         // off: the threshold does not matter
+        {2, 1025, true, "-fdq2-1025"},    // t2 (or "2")
+        {1, 1025, true, "-fdq1-1025"},    // c2
+        {2, 2048, true, "-fdq2-2048"},    //
+        {-1, 2048, true, "-fdqd-2048"},   // only WHIRL_FDQ8S_MIN: the device's slots from 2048 rows
+        {-1, 0, true, "-fdqd-0"},         //
+    };
+    for (const Sel& s : sels) {
+        const std::string got = q::tuneSelectionSuffix(s.fdq, s.min, s.has_fq);
+        check(got == s.want, std::format("tune key: selection fdq {} min {} gemmfq {} -> '{}' (got '{}')", s.fdq, s.min, s.has_fq, s.want, got));
+    }
+
+    // (3) the file stems and the read paths
+    const std::string lad = "C:\\Users\\u\\AppData\\Local";
+    {
+        q::Model m;
+        check(q::tuneCacheStem(m, "m.gguf", 123) == "m.gguf-123.txt", "tune key: gfx1201 stem = the plain v0.2.x name");
+        m.fdq = 2;
+        check(q::tuneCacheStem(m, "m.gguf", 123) == "m.gguf-123.txt", "tune key: gfx1201 stem with WHIRL_FDQ8S=t2 (no gemmfq kernel) unchanged");
+        m.fdq = -1;
+        m.arch = Arch::gfx1151;
+        const std::string st = q::tuneCacheStem(m, "m.gguf", 123);
+        check(st == "m.gguf-123-gfx1151r3.txt", "tune key: gfx1151 stem = table revision 3 (got " + st + ")");
+        std::vector<std::string> all = {whirl::platform::paths::tuneCachePath(lad, st)};
+        for (const std::string& x : whirl::platform::paths::tuneReadPaths4(lad, st)) all.push_back(x);
+        for (const std::string& x : whirl::platform::paths::tuneReadPathsOld(lad, st)) all.push_back(x);
+        bool old_rev = false;
+        for (const std::string& x : all) old_rev = old_rev || x.find("gfx1151r2") != std::string::npos || x.find("gfx1151.txt") != std::string::npos;
+        check(all.size() == 7 && !old_rev, "tune key: no write / read / fallback path names an older gfx1151 revision (r1, r2)");
+        static int fake_kernel = 0;
+        m.k.gemmfq[1] = &fake_kernel;
+        m.fdq = 2;
+        const std::string sk = q::tuneCacheStem(m, "m.gguf", 123);
+        check(sk == "m.gguf-123-gfx1151r3-fdq2-1025.txt", "tune key: gfx1151 stem with WHIRL_FDQ8S=t2 = its own table (got " + sk + ")");
+        m.k.gemmfq[1] = nullptr;
+    }
+
+    // (4) loadOrTune reads the keyed file: the r2 table and the shared r3 table are both present
+    const fs::path dir = whirl::test::testTmpBase() / L"a3key";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / L"whirl", ec);
+    const fs::path model = dir / L"m.gguf";
+    {
+        std::ofstream(model, std::ios::binary) << "not a gguf: only its name and size go into the tune cache file name";
+    }
+    const std::string fsz = std::to_string(fs::file_size(model));
+    for (const char* sfx : {"-gfx1151r2", "-gfx1151r3", "-gfx1151r3-fdq2-1025"})
+        std::ofstream(dir / L"whirl" / ("tune4-m.gguf-" + fsz + sfx + ".txt"), std::ios::binary) << "";
+    char* old = nullptr;
+    std::size_t old_len = 0;
+    _dupenv_s(&old, &old_len, "LOCALAPPDATA");
+    const std::string old_lad = old != nullptr ? old : "";
+    std::free(old);
+    _putenv_s("LOCALAPPDATA", dir.string().c_str());
+    static int fake_kernel2 = 0;
+    for (const int fdq : {-1, 2}) {
+        auto mp = envtab::makeModel(1);  // dense MXFP4, balance (the env table's model)
+        q::Model& m = *mp;
+        m.arch = Arch::gfx1151;
+        m.fdq = fdq;
+        if (fdq >= 0) m.k.gemmfq[1] = &fake_kernel2;
+        std::string log, err;
+        try {
+            q::loadOrTune(m, model.string(), log);
+        } catch (const std::exception& e) {
+            err = e.what();
+        }
+        m.k.gemmfq[1] = nullptr;
+        const std::string want = "tune4-m.gguf-" + fsz + (fdq < 0 ? "-gfx1151r3" : "-gfx1151r3-fdq2-1025") + ".txt)";
+        check(err.empty() && log.find(want) != std::string::npos,
+              std::format("tune key: loadOrTune gfx1151 fdq {} reads {} (error '{}')", fdq, want, err));
+    }
+    _putenv_s("LOCALAPPDATA", old_lad.c_str());
+    fs::remove_all(dir, ec);
+}
 
 void testForwardEnv() {
     namespace fs = std::filesystem;
@@ -2768,6 +3019,8 @@ void testPlanVsLoadOrTune() {
         {"HEAD_GEMVX", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
         {"PREC_GEMVH", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
         {"PREC_GS", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
+        {"FDQ8S", "loader.cpp Model::load -> fdqEnv: bit-neutral gemmfq slot (v0251-a3port)"},
+        {"FDQ8S_MIN", "loader.cpp Model::load -> fdqEnv: gemmfq row threshold (v0251-a3port)"},
     };
     for (const auto& e : EnvSnapshot::names()) {
         nu::EnvValues v;
@@ -4494,6 +4747,8 @@ int main(int argc, char** argv) {
     testEnvTable();
     testEnvSnapshot();
     testForwardEnv();
+    testFdqEnv();  // v0251-a3port
+    testTuneCacheKey();  // v0251-a3key
     testPlanVsLoadOrTune();  // arch025-N2a
     testLoadFlagsWithoutTune();  // arch025-N2b-r2
     testFloatGemvDispatch();

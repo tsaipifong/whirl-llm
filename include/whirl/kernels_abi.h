@@ -495,6 +495,13 @@ inline constexpr std::array<GemmCfg, 5> kGemm8Cfgs = {{
 inline constexpr std::array<GemmCfg, 5> kGemm8tCfgs = {{
     {128, 256, 256}, {128, 128, 256}, {128, 64, 256}, {128, 32, 256}, {128, 48, 256},
 }};
+// gemmfq_<v>_mxfp4 (gfx1151 only, kernels/gfx1151/gemm_fq.hip; feat026-fdq, v0251-a3port): MXFP4 fused-dequant prefill
+// GEMM, bitwise == dequant_f16_mxfp4 + gemm_c<i>_f16; TOK_X grid (x = token blocks). Slot s (1-based in
+// ops::GemmFlags::fdq / WHIRL_FDQ8S, 0 = the old path) = kGemmFqNames[s - 1]: 1 c2 (256 x 128), 2 t2 (128 x 256).
+inline constexpr std::array<GemmCfg, 2> kGemmFqCfgs = {{
+    {256, 128, 256}, {128, 256, 256},
+}};
+inline constexpr std::array<const char*, 2> kGemmFqNames = {"c2", "t2"};
 // gemvw_nt<N>v<V>_<T>: rows per block per variant (v0 = not a gemvw kernel).
 inline constexpr int kNGemvw = 9;
 inline constexpr std::array<int, kNGemvw> kGemvwRows = {0, 16, 32, 16, 32, 16, 16, 32, 32};
@@ -562,6 +569,7 @@ struct MatmulKernels {
     std::array<F, kGemm8Cfgs.size()> gemm8{}, gemm8h{};
     std::array<F, kGemm8tCfgs.size()> gemm8t{}, gemm8th{};
     std::array<F, kGemmCfgs.size()> gemmch{};
+    std::array<F, kGemmFqCfgs.size()> gemmfq{};  // gemmfq_<kGemmFqNames[i]>_mxfp4 (gfx1151 code object; null elsewhere)
     F gemmh_f16{}, gemmhh_f16{};
     // activation converters of the GEMV / GEMM inputs
     F f32_to_f16{}, quantize_q8{}, qact_fp8{}, qact_fp8t{};

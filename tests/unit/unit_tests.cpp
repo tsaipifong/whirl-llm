@@ -68,6 +68,7 @@ const OrderRow kOrder[] = {
     {"contract", "testNumericsPlan"},
     {"contract", "testKvChoice"},
     {"contract", "testKvEstimateCaps"},
+    {"kernels.gemm", "testMxInject"},  // v0251-a3port (feat026-fdq: between testKvEstimateCaps and testKernelFetchBounds)
     {"kernels.gemm", "testKernelFetchBounds"},
     {"model.core", "testValueScope"},
     {"hip.runtime", "testLaunchDigest"},

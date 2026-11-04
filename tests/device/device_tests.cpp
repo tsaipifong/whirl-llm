@@ -177,11 +177,18 @@ void testProfiles() {
     // Radeon 8060S (gfx1151): UMA iGPU
     CHECK(b.uma_no_vram_fit_check && b.gemvh_grid_by_rows && b.h16_from_candidates && b.gemms_tie_larger_bm);
     CHECK(b.attn_dq4_dynamic_splits && b.tune_fast && b.gdn_strix && b.numerics_8060s && b.mtp_costly_verify_rows);
-    CHECK(std::string_view(b.tune_cache_suffix) == "-gfx1151r2");
+    // v0251-a3key: table revision 3 (gemmfq joined the dequant family; tests/model testTuneCacheKey pins the candidate set)
+    CHECK(std::string_view(b.tune_cache_suffix) == "-gfx1151r3");
     CHECK(std::string_view(b.tune_time_hint) == "8 minutes on the Radeon 8060S (less for MXFP4 models)");
     CHECK(b.prefill_exec_moe == 4096 && b.prefill_fill_batch && b.vision_attn_threads == 256);
     const std::array<std::uint8_t, 17> rb = {1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
     CHECK(b.gemv_r == rb);
+    // v0251-a3port: the fused-dequant MXFP4 prefill GEMM is the 8060S default (slot 2 = t2), off on the R9700
+    CHECK(b.fdq_default == 2);
+    CHECK(a.fdq_default == 0);
+    // v0251-a3fix: from 2305 rows the 8060S slot is c2 (t2 1.33-1.35x the old pair at 4096 rows), off on the R9700
+    CHECK(b.fdq_big == 1);
+    CHECK(a.fdq_big == 0);
     // constexpr: the field reads fold like the arch comparisons they replaced
     static_assert(d::profile(Arch::gfx1151).prefill_exec_moe == 4096 && !d::profile(Arch::gfx1201).tune_fast);
     // REVIEW-ARCH3 P3-3: a value with no row throws instead of getting the gfx1201 row (a new enumerator without a

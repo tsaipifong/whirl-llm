@@ -269,6 +269,33 @@ void parseGemvW(Model& m, std::string_view list);
 void parseGemvWHead(Model& m, std::string_view list);
 void applyGemvEnv(Model& m);
 
+// v0251-a3port (feat026-fdq): the fused-dequant MXFP4 prefill GEMM switches of a load's snapshot (Model::load ->
+// Context::fdq / fdq_min). WHIRL_FDQ8S: unset or "" -> -1 (the device default, device::Profile::fdq_default);
+// "c2" / "1" -> 1, "t2" / "2" -> 2 (kernels::kGemmFqNames); any other value ("0", "off", the source branch's
+// screening-only probes c2l / t2l / c2f, a typo) -> 0 = the old dequant + f16 GEMM (the source's rule: unknown =
+// off). WHIRL_FDQ8S_MIN: unset or "" -> 1025 (the tune bucket boundary, n > tune_small_max = 1024), else strtoul.
+struct FdqEnv {
+    int fdq = -1;
+    std::uint32_t fdq_min = 1025;
+};
+FdqEnv fdqEnv(const whirl::config::EnvSnapshot& env);
+
+// v0251-a3key (REVIEW-v0251-a3 A1): the key of the tune cache file (src/model/tune.cpp).
+// tuneCandidateKey: a text fingerprint of what the prefill GEMM tuner times on a code-object family - the candidate
+// tables (kernels::kGemmCfgs / kGemmsCfgs / kGemmFqCfgs + names), n_choices, the tune buckets, gemmh_min, the fast-tune
+// parameters and the profile's selection fields (tune_fast, gemms_tie_larger_bm, h16_from_candidates, fdq_default /
+// fdq_big with their row thresholds). tests/model testTuneCacheKey pins it per device::Profile::tune_cache_suffix in an
+// append-only table: a changed candidate set without a new table revision fails on the CPU (A3 added gemmfq to the
+// dequant family without the r2 -> r3 bump, so 0.2.5 tables were reused).
+// tuneSelectionSuffix: the part of the key for the selection overrides of the load (WHIRL_FDQ8S / _MIN, parsed: Model::
+// fdq / fdq_min): "" at the defaults (FdqEnv{}) or when the code object has no gemmfq kernel (nothing changes), else
+// "-fdq0" (off) or "-fdq<slot>-<min>" ("d" = the device's slot): a tune run with an override set times that setting,
+// so it gets its own table and never writes the shared one (Triton's cache-invalidating env vars in the key).
+// tuneCacheStem: <file name>-<file size><tune_cache_suffix><tuneSelectionSuffix>.txt (loadOrTune's file stem).
+std::string tuneCandidateKey(const device::Profile& p);
+std::string tuneSelectionSuffix(int fdq, std::uint32_t fdq_min, bool has_gemmfq);
+std::string tuneCacheStem(const Model& m, const std::string& file_name, std::uintmax_t file_size);
+
 // ---------------------------------------------------------------------------
 // device selection: qwen35::pickDevice / restrictDevice are declared in whirl/device_pick.h (included above;
 // arch025-lane1 leg 3: config.device needs them without this header)

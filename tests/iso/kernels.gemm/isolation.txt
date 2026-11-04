@@ -10,6 +10,7 @@ mutsym    now
 mutsym    hip
 # headers (include closure of the files above)
 hdr       kernels/gemm_small_addr.h
+hdr       kernels/gfx1151/mx_inject.h
 # test program
 testsrc   tests/unit/kernels_gemm_tests.cpp
 testhdr   tests/test_check.h

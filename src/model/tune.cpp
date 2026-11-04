@@ -189,6 +189,47 @@ void Model::autotuneGemm(std::size_t bucket, u32 reps, std::string* log) {
 
 // Model::writeTune / readTune: src/model/qwen35/tune_table.cpp (arch025-M3)
 
+// v0251-a3key: the tune cache key (include/whirl/model.h). The fingerprint reads the tables and fields the tuner and
+// Model::matmul use, not copies of them; the threshold / slot part appears only on a family with a gemmfq slot, so a
+// threshold change does not force a new table revision where the slot is 0 (gfx1201).
+std::string tuneCandidateKey(const device::Profile& p) {
+    std::string s = fmt("tunekey1 choices=%u buckets=", n_choices);
+    for (const u32 b : tune_sizes) s += fmt("%u,", b);
+    const auto cfgs = [&s](const char* name, const auto& table) {
+        s += fmt(" %s=", name);
+        for (const auto& c : table) s += fmt("%d/%d/%d,", c.bm, c.bn, c.nth);
+    };
+    cfgs("gemm", kernels::kGemmCfgs);
+    cfgs("gemms", kernels::kGemmsCfgs);
+    s += fmt(" gemmh_min=%u fast=%d", ops::gemmh_min, p.tune_fast ? 1 : 0);
+    if (p.tune_fast) s += fmt(" reject=%.2f@%u", kTuneRejectFactor, kTuneRejectMinN);
+    s += fmt(" tie_bm=%d h16_cand=%d fdq=%u/%u", p.gemms_tie_larger_bm ? 1 : 0, p.h16_from_candidates ? 1 : 0,
+             static_cast<unsigned>(p.fdq_default), static_cast<unsigned>(p.fdq_big));
+    if (p.fdq_default != 0 || p.fdq_big != 0) {
+        s += fmt(" fdq_min=%u fdq_big_min=%u", FdqEnv{}.fdq_min, ops::GemmFlags{}.fdq_big_min);
+        cfgs("gemmfq", kernels::kGemmFqCfgs);
+        s += " fq_names=";
+        for (const char* nm : kernels::kGemmFqNames) s += fmt("%s,", nm);
+    }
+    return s;
+}
+
+// The parsed values (Model::fdq / fdq_min), so "t2" and "2" share a table and no raw environment text reaches the file
+// name. Without a gemmfq kernel in the code object the switches change nothing (ops::chooseGemmF16 keeps the old plan).
+std::string tuneSelectionSuffix(int fdq, std::uint32_t fdq_min, bool has_gemmfq) {
+    const FdqEnv def;
+    if (!has_gemmfq || (fdq == def.fdq && fdq_min == def.fdq_min)) return std::string();
+    if (fdq == 0) return "-fdq0";
+    return (fdq < 0 ? std::string("-fdqd-") : fmt("-fdq%d-", fdq)) + std::to_string(fdq_min);
+}
+
+std::string tuneCacheStem(const Model& m, const std::string& file_name, std::uintmax_t file_size) {
+    bool has_fq = false;
+    for (const auto fn : m.k.gemmfq) has_fq = has_fq || fn != nullptr;
+    return file_name + "-" + std::to_string(file_size) + device::profile(m.arch).tune_cache_suffix +
+           tuneSelectionSuffix(m.fdq, m.fdq_min, has_fq) + ".txt";
+}
+
 // Per quant type: int8-activation GEMV vs f32 GEMV on one real matrix.
 bool Model::checkGemvq(std::string& log) {
     struct PrecOff {
@@ -805,6 +846,15 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     afterLoadTune(m);
 }
 
+// v0251-int (merge of v0251-path PATH-256 P2 and v0251-a3key): resolve() with the a3key selection key
+// (tuneSelectionSuffix, "" at the defaults); defined below with resolve, which is resolveKeyed(.., "", ..)
+namespace tune_cache {
+namespace {
+Plan resolveKeyed(const std::string& base, const std::string& model_path, std::uint64_t size, const std::string& suffix,
+                  const std::string& selection, std::size_t n_tune, const Accept& accept, const Io& io);
+}  // namespace
+}  // namespace tune_cache
+
 namespace {
 void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     namespace nu = whirl::numerics;
@@ -874,13 +924,20 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         const auto fsz = std::filesystem::file_size(widen(model_path), ec);
         if (!ec) {
             // the R9700 (gfx1201) keeps the plain file name; other code objects get their own.
-            // gfx1151 table revision 2: the small-batch WMMA GEMMs (gemms) became candidates,
-            // so tables written before them are tuned again.
+            // gfx1151 table revision 2: the small-batch WMMA GEMMs (gemms) became candidates; revision 3
+            // (v0251-a3key): the fused-dequant gemmfq joined the dequant family. Tables written before are
+            // tuned again (and kept: user files); tests/model testTuneCacheKey fails when the candidate set
+            // changes without a new revision. WHIRL_FDQ8S / _MIN set: a table of its own (tuneSelectionSuffix):
+            // in the v0.2.5 stems read for the import (= tuneCacheStem of the name on disk) and in the tune5 key
+            // (tune_cache::resolveKeyed: hashed into h16, so the tune5 name keeps path_budget::kTune5NameMax).
             const std::string sfx = device::profile(m.arch).tune_cache_suffix;
+            bool has_fq = false;
+            for (const auto fn : m.k.gemmfq) has_fq = has_fq || fn != nullptr;
+            const std::string sel = tuneSelectionSuffix(m.fdq, m.fdq_min, has_fq);
             std::filesystem::create_directories(widen(platform::paths::whirlDir(base)), ec);
-            const tune_cache::Plan plan = tune_cache::resolve(
-                base, model_path, fsz, sfx, n_tune, [&m](const std::string& text, std::size_t nb) { return m.readTune(text, nb); },
-                tune_cache::realIo());
+            const tune_cache::Plan plan = tune_cache::resolveKeyed(
+                base, model_path, fsz, sfx, sel, n_tune,
+                [&m](const std::string& text, std::size_t nb) { return m.readTune(text, nb); }, tune_cache::realIo());
             for (const std::string& note : plan.notes) log += "  " + note + "\n";
             if (plan.found == tune_cache::Found::full) {
                 log += "  prefill GEMM tune: cached (" + plan.read_path + ")\n";
@@ -972,6 +1029,30 @@ Io realIo() {
 
 Plan resolve(const std::string& base, const std::string& model_path, std::uint64_t size, const std::string& suffix,
              std::size_t n_tune, const Accept& accept, const Io& io) {
+    return resolveKeyed(base, model_path, size, suffix, std::string(), n_tune, accept, io);
+}
+
+namespace {
+// v0251-int: the tune5 name of a load with a selection override (tuneSelectionSuffix != ""): tune5Name's text with h16 =
+// fnv1a64(name, NUL, size, NUL, selection), so the name keeps its length (kTune5NameMax: "-gfx1151r3" already fills
+// kTuneSuffixMax, "-fdq2-1025" does not fit as a visible suffix). selection "" = tune5Name unchanged (v0251-path).
+std::string tune5KeyedName(const std::string& name, std::uint64_t size, const std::string& suffix, const std::string& selection) {
+    namespace pp = platform::paths;
+    std::string n5 = pp::tune5Name(name, size, suffix);
+    if (selection.empty()) return n5;
+    std::string key = name;
+    key.push_back('\0');
+    key += std::to_string(size);
+    key.push_back('\0');
+    key += selection;
+    char h16[17];
+    std::snprintf(h16, sizeof h16, "%016llx", static_cast<unsigned long long>(pp::fnv1a64(key)));
+    n5.replace(n5.size() - 4 - suffix.size() - 16, 16, h16);
+    return n5;
+}
+
+Plan resolveKeyed(const std::string& base, const std::string& model_path, std::uint64_t size, const std::string& suffix,
+                  const std::string& selection, std::size_t n_tune, const Accept& accept, const Io& io) {
     namespace pp = platform::paths;
     namespace pb = platform::path_budget;
     Plan p;
@@ -979,7 +1060,7 @@ Plan resolve(const std::string& base, const std::string& model_path, std::uint64
     const std::optional<std::string> disk = io.disk_name(model_path);
     p.name = disk ? *disk : typedName(model_path);
     p.size = size;
-    const std::string n5 = pp::tune5Name(p.name, size, suffix);
+    const std::string n5 = tune5KeyedName(p.name, size, suffix, selection);
     p.write_path = pp::tune5Path(base, n5);
     if (const std::optional<std::string> text = io.read(p.write_path); text && accept(*text, n_tune)) {
         p.found = Found::full;
@@ -997,8 +1078,9 @@ Plan resolve(const std::string& base, const std::string& model_path, std::uint64
             pos = e + 1;
         }
     }
-    // the v0.2.5 names (built with the same name) in the v0.2.5 order; one longer than kPathMax is skipped (2c #7)
-    const std::string stem = p.name + "-" + std::to_string(size) + suffix + ".txt";
+    // the v0.2.5 names (built with the same name) in the v0.2.5 order; one longer than kPathMax is skipped (2c #7).
+    // With a selection: the stem tuneCacheStem gives (v0251-a3key: the research prototype's tables, same format)
+    const std::string stem = p.name + "-" + std::to_string(size) + suffix + selection + ".txt";
     const auto fits = [](const std::string& path) { return pb::utf16Units(path) <= pb::kPathMax; };
     const auto record = [&](const std::string& old) {
         std::string line = n5 + "\t";
@@ -1031,6 +1113,7 @@ Plan resolve(const std::string& base, const std::string& model_path, std::uint64
     }
     return p;
 }
+}  // namespace
 
 std::string fileText(const std::string& name, std::uint64_t size, const std::string& table) {
     return "# model " + name + " " + std::to_string(size) + "\n" + table;

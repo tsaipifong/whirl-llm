@@ -51,8 +51,10 @@ int usage() {
         "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,misc,dflash,gemvh,ws4,ws4g,vision] [--quick] [-v]\n"
         "                         [--q4 GGUF] [--mx GGUF] [--moe GGUF] [--moemx GGUF]\n"
         "  --require-all  a kernel missing from the code object fails unless the arch lacks it by design\n"
-        "  --bench gemv,gemvh,gemm,attn,moe,gdn [--jsonl FILE] [--ab HSACO] [--burst-idle S] [--bench-max-s S]\n"
+        "  --bench gemv,gemvh,gemm,attn,moe,gdn,fdq [--jsonl FILE] [--ab HSACO] [--burst-idle S] [--bench-max-s S]\n"
         "          [--rot-mb N] [--rot-cap-mb N] [--moe-layers N] [--no-anchor]: kernel timing (kt::Bench) instead of tests\n"
+        "          fdq: in-object A/B (ABBA) of the shipped dequant_f16_mxfp4 + gemm_c<i>_f16 pair vs gemmfq_<v>_mxfp4\n"
+        "          [--fdq-n ROWS,...] (default 1024,1280,2048,4096) [--fdq-v c2,t2] (gfx1151 code object)\n"
         "  --device  index, gfx arch, name substring, r9700 or 8060s (default: WHIRL_DEVICE, else the\n"
         "            first R9700, else the first GPU this build has kernels for)\n"
         "  models default to WHIRL_TEST_Q4 (else WHIRL_TEST_GGUF) / WHIRL_TEST_MX / WHIRL_TEST_MOE /\n"
@@ -96,7 +98,7 @@ int main(int argc, char** argv) {
                 std::string f;
                 while (std::getline(ss, f, ',')) {
                     if (!kt::benchFamilyKnown(f)) {
-                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe gdn)\n", f.c_str());
+                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe gdn fdq)\n", f.c_str());
                         return usage();
                     }
                     bo.families.insert(f);
@@ -109,7 +111,14 @@ int main(int argc, char** argv) {
             else if (a == "--rot-cap-mb") bo.rot_cap = std::stoull(next()) << 20;
             else if (a == "--moe-layers") bo.moe_layers = std::stoi(next());
             else if (a == "--no-anchor") bo.no_anchor = true;
-            else return usage();
+            else if (a == "--fdq-n" || a == "--fdq-v") {
+                std::stringstream ss(next());
+                std::string f;
+                while (std::getline(ss, f, ',')) {
+                    if (a == "--fdq-v") bo.fdq_v.push_back(f);
+                    else bo.fdq_n.push_back(std::stoi(f));
+                }
+            } else return usage();
         } catch (const std::exception& e) {
             std::printf("%s\n", e.what());
             return usage();
