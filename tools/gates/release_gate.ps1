@@ -237,8 +237,11 @@ AddStep "cpu_vis_order" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$
 # whirl.exe: preflight_order_test.py (the GPU-runtime preflight runs before every GPU command, also serve / vis-encode:
 # a copy of whirl.exe next to a fake amdhip64_7.dll must exit 3; kills mutant c2-raw-early) and dump_only_test.py
 # (bug-cli-dumponly: commands that do not load + tune refuse --dump-only). CPU only, nothing is loaded (missing models).
-AddStep "cpu_cli_tests" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tests\cli\preflight_order_test.py")' --bin '$Build'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tests\cli\dump_only_test.py")' --bin '$Build'; exit `$LASTEXITCODE") `
-    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^preflight order test: [1-9]\d* passed, 0 failed") -and ($o -match "(?m)^dump-only cli test: [1-9]\d* passed, 0 failed") }
+# PATH-256 (v0.2.5.1 PLAN V1-22): install_dir_test.py - whirl.exe / whirl-server.exe / whirl-vis.exe refuse an install
+# folder over 150 UTF-8 bytes first (exit 2, before the probe branch and the GPU-runtime preflight; the same fake
+# amdhip64_7.dll keeps the real runtime away, and every exe path stays <= 150 characters).
+AddStep "cpu_cli_tests" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tests\cli\preflight_order_test.py")' --bin '$Build'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tests\cli\dump_only_test.py")' --bin '$Build'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tests\cli\install_dir_test.py")' --bin '$Build'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^preflight order test: [1-9]\d* passed, 0 failed") -and ($o -match "(?m)^dump-only cli test: [1-9]\d* passed, 0 failed") -and ($o -match "(?m)^install dir test: [1-9]\d* passed, 0 failed") }
 AddStep "cpu_server_only_typo" $false @($exe["whirl-server-tests"], "--gguf", $SW, "--only", "no_such_test") { param($o, $c) $c -eq 2 }
 AddStep "cpu_server_watchdog" $false @($py, "-I", (Join-Path $repo "tools\gates\server_watchdog_test.py"), "--exe", $exe["whirl-server-tests"], "--gguf", $SW) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^server watchdog test: ([1-9]\d*)/\1 ok") }
 AddStep "cpu_golden_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "all cases as expected") }
