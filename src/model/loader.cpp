@@ -234,6 +234,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.state_tables.emplace_back(cfg.n_layer, 0);
     m.ssm_state = std::span<DevPtr>(m.state_tables.back());
     m.gemv_r = device::profile(m.arch).gemv_r;
+    m.tuneTable().gemv_k = defaultGemvK(m.arch, cfg.moe);  // v0251-a6port: the 8060S gemvk row (WHIRL_GEMV_K replaces it)
 
     const std::size_t staging_len = 64u << 20;
     const device::PinnedBuf staging_buf = device::PinnedBuf::alloc(device::hipBackend(), staging_len);

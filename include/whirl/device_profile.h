@@ -88,7 +88,7 @@ inline constexpr Profile k_profile_gfx1151{
     // v0251-a6port: Swift (dense) verify widths 5 / 6 on gemvk v7 (KW 8, PF 2): the A6 kernel bench pick (sum of the
     // 8 Swift shapes 0.900 / 0.897 of gemvq_nt*r2, scratch/feat026_ggemv/results_8060s_b2a.txt) and its e2e (balance
     // decode 2k +7.91 %, 128k +5.43 %, results_8060s_h2.txt). MoE (Ornith) stays on gemvq until its own e2e passes.
-    .gemvk_dense = {},  // v0251-a6port test-first: the row is the port
+    .gemvk_dense = {0, 0, 0, 0, 0, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
     .gemvk_moe = {},
     .gemvh_grid_by_rows = true,
     .h16_from_candidates = true,

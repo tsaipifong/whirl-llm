@@ -20,6 +20,7 @@
 #include "gemv_mr.hip"             // multi-row multi-token GEMV
 #include "gemv_wunit.hip"          // Q4_K / Q5_K / IQ4_XS / MXFP4 GEMV units
 #include "gemv_q6.hip"             // Q6_K GEMV family
+#include "gemv_gk.hip"             // K-balanced MXFP4 multi-token GEMV (feat026-ggemv, WHIRL_GEMV_K)
 #include "fused_decode.hip"        // decode fusions (norm+quant, fused DeltaNet)
 #include "misc_rows_norm.hip"      // norms, rope, elementwise
 #include "attn.hip"                // paged KV + decode / split / prefill attention
