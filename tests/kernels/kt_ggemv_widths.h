@@ -17,7 +17,9 @@
 namespace kt {
 
 inline std::vector<int> ggemvBenchNts() {
-    return {2, 4};  // RED (test-first state): the A6 first round's literal list
+    std::vector<int> v;
+    for (int nt = 2; nt <= whirl::kernels::kGemvkMaxNt; ++nt) v.push_back(nt);
+    return v;
 }
 
 // "--bench-nt 5,6": the listed widths, in table order, each of which must be in ggemvBenchNts(). Returns false (and

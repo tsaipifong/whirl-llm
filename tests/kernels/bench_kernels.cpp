@@ -14,7 +14,8 @@
 //   attn  attn_wsplit1 + attn_combine (f16 KV, 24 / 4 heads, hd 256, one decode query at L = 2k / 32k / 128k)
 //   moe   moe_gu_mxfp4[w], moe_down_mxfp4[w] (Ornith MXFP4 experts, n = 1, K routed experts per launch)
 //   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state)
-//   ggemv gemvq_nt<N>r2_mxfp4 vs gemvk_nt<N>v1..9_mxfp4 (gfx1151 verify GEMV, N = 2 / 4; feat026-ggemv)
+//   ggemv gemvq_nt<N>r2_mxfp4 vs gemvk_nt<N>v1..9_mxfp4 (gfx1151 verify GEMV, N = every gemvk width 2..8 of
+//         kt::ggemvBenchNts(), --bench-nt a subset; feat026-ggemv, v0251-a6bench)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
 // without a model the cells use synthetic MXFP4 blocks of the same shapes (cell names start with "synthetic.").
 
@@ -28,6 +29,7 @@
 
 #include "cpu_ref.h"
 #include "kt_bench.h"
+#include "kt_ggemv_widths.h"
 
 namespace kt {
 
@@ -391,9 +393,10 @@ void benchGemv(Env& e) {
 
 // ---------------------------------------------------------------- ggemv (feat026-ggemv)
 // The balance verify GEMV on the 8060S: the production gemvq_nt<N>r2_mxfp4 (16 rows per block, 8 K-waves) and the
-// gfx1151 gemvk variants v1..v9 (gemv_gk.hip), N = 2 (Ornith 1 draft) and 4 (Swift 3 drafts), on the Swift and Ornith
-// dense MXFP4 shapes. Output check: the production kernel vs the CPU (tolerance), each gemvk variant BITWISE vs the
-// production kernel's output (the checkGemvBitwise contract). bytes = weight bytes + N x ncols int8 activations.
+// gfx1151 gemvk variants v1..v9 (gemv_gk.hip), N = every width WHIRL_GEMV_K can select (kt::ggemvBenchNts() = 2..
+// kernels::kGemvkMaxNt; v0251-a6bench: the A6 first round timed 2 / 4 only, Swift's MTP verify runs 2..9 rows with the
+// 8060S auto drafts 1..8 and Ornith's n-gram verifies 4..16), on the Swift and Ornith dense MXFP4 shapes. Output
+// check: the production kernel vs the CPU (tolerance), each gemvk variant BITWISE vs the production kernel's output (the checkGemvBitwise contract). bytes = weight bytes + N x ncols int8 activations.
 // Plain (one-matrix) entries; the grouped twins run the same code per block.
 void benchGGemv(Env& e) {
     Ctx& c = e.c;
@@ -402,6 +405,8 @@ void benchGGemv(Env& e) {
         c.rep.skip("ggemv", "bench gemvk", "kernel not in this code object (gfx1151 only)");
         return;
     }
+    const std::vector<int> nts = e.o.ggemv_nt.empty() ? ggemvBenchNts() : e.o.ggemv_nt;
+    std::printf("  [info] ggemv bench widths: %s (table %s)\n", joinNts(nts).c_str(), joinNts(ggemvBenchNts()).c_str());
     std::vector<Weights> ws;
     ws.push_back(denseWeights(c, {"blk.0.attn_qkv.weight", "blk.0.attn_gate.weight", "blk.0.ssm_out.weight", "blk.0.ffn_gate.weight",
                                   "blk.0.ffn_down.weight", "blk.3.attn_q.weight", "blk.3.attn_k.weight", "blk.3.attn_output.weight"}));
@@ -431,7 +436,7 @@ void benchGGemv(Env& e) {
             const int ncols = m.ncols, nrows = m.nrows;
             const DevCopies wc = upload(e, m.data);
             const std::uint64_t rb = m.row_bytes;
-            for (const int nt : {2, 4}) {
+            for (const int nt : nts) {
                 const std::vector<float> x = c.randn(static_cast<std::size_t>(nt) * ncols);
                 Buf dx(x), xq(static_cast<std::size_t>(nt) * ncols), xd(static_cast<std::size_t>(nt) * ncols / 32 * 4),
                     y(static_cast<std::size_t>(nt) * nrows * 4);
@@ -449,6 +454,10 @@ void benchGGemv(Env& e) {
                 };
                 std::vector<K> ks;
                 ks.push_back({"gemvq_nt" + std::to_string(nt) + "r2_mxfp4", c.k.gemvqMr(QType::mxfp4, nt, 2, false), 16});
+                if (ks[0].f == nullptr) {  // no production baseline: never let a gemvk variant become the reference
+                    c.rep.skip("ggemv", "bench " + ks[0].name, "production kernel not in this code object (no baseline for nt" + std::to_string(nt) + ")");
+                    continue;
+                }
                 for (int v = 1; v < wk::kNGemvk; ++v) ks.push_back({wk::gemvkName(nt, v, false), c.k.gemvK(nt, v, false), wk::gemvkRows(v)});
                 for (const K& kk : ks) {
                     if (kk.f == nullptr) continue;

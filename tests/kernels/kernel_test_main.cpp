@@ -26,6 +26,7 @@
 
 #include "cpu_ref.h"
 #include "kt_bench.h"
+#include "kt_ggemv_widths.h"
 #include "whirl/common.h"
 
 #ifndef WHIRL_KT_VERSION
@@ -47,6 +48,7 @@ int usage() {
         "  --require-all  a kernel missing from the code object fails unless the arch lacks it by design\n"
         "  --bench gemv,gemvh,gemm,attn,moe,gdn [--jsonl FILE] [--ab HSACO] [--burst-idle S] [--bench-max-s S]\n"
         "          [--rot-mb N] [--rot-cap-mb N] [--moe-layers N] [--no-anchor]: kernel timing (kt::Bench) instead of tests\n"
+        "          [--bench-nt 5,6]: ggemv widths, a subset of the gemvk table (--list-bench-nt prints it and exits 0)\n"
         "  --device  index, gfx arch, name substring, r9700 or 8060s (default: WHIRL_DEVICE, else the\n"
         "            first R9700, else the first GPU this build has kernels for)\n"
         "  models default to WHIRL_TEST_Q4 (else WHIRL_TEST_GGUF) / WHIRL_TEST_MX / WHIRL_TEST_MOE /\n"
@@ -101,7 +103,16 @@ int main(int argc, char** argv) {
             else if (a == "--rot-cap-mb") bo.rot_cap = std::stoull(next()) << 20;
             else if (a == "--moe-layers") bo.moe_layers = std::stoi(next());
             else if (a == "--no-anchor") bo.no_anchor = true;
-            else return usage();
+            else if (a == "--bench-nt") {
+                std::string err;
+                if (!kt::parseBenchNt(next(), bo.ggemv_nt, err)) {
+                    std::printf("whirl-kernel-test: %s\n", err.c_str());
+                    return usage();
+                }
+            } else if (a == "--list-bench-nt") {  // before any device call: the runners size their estimate from it
+                std::printf("ggemv bench widths: %s\n", kt::joinNts(kt::ggemvBenchNts()).c_str());
+                return 0;
+            } else return usage();
         } catch (const std::exception& e) {
             std::printf("%s\n", e.what());
             return usage();
@@ -120,6 +131,10 @@ int main(int argc, char** argv) {
     const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "misc", "attnbench",
                                "gemvh", "gemvhbench", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk"};  // = fams below
     const bool bench = !bo.families.empty();
+    if (!bo.ggemv_nt.empty() && bo.families.count("ggemv") == 0) {
+        std::printf("whirl-kernel-test: --bench-nt needs --bench ggemv\n");
+        return usage();
+    }
     if (!bench && (!bo.jsonl.empty() || !bo.ab_hsaco.empty())) {
         std::printf("whirl-kernel-test: --jsonl / --ab need --bench\n");
         return usage();
