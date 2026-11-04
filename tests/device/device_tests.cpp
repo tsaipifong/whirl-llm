@@ -177,7 +177,8 @@ void testProfiles() {
     // Radeon 8060S (gfx1151): UMA iGPU
     CHECK(b.uma_no_vram_fit_check && b.gemvh_grid_by_rows && b.h16_from_candidates && b.gemms_tie_larger_bm);
     CHECK(b.attn_dq4_dynamic_splits && b.tune_fast && b.gdn_strix && b.numerics_8060s && b.mtp_costly_verify_rows);
-    CHECK(std::string_view(b.tune_cache_suffix) == "-gfx1151r2");
+    // v0251-a3key: table revision 3 (gemmfq joined the dequant family; tests/model testTuneCacheKey pins the candidate set)
+    CHECK(std::string_view(b.tune_cache_suffix) == "-gfx1151r3");
     CHECK(std::string_view(b.tune_time_hint) == "8 minutes on the Radeon 8060S (less for MXFP4 models)");
     CHECK(b.prefill_exec_moe == 4096 && b.prefill_fill_batch && b.vision_attn_threads == 256);
     const std::array<std::uint8_t, 17> rb = {1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};

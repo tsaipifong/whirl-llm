@@ -186,6 +186,38 @@ void Model::autotuneGemm(std::size_t bucket, u32 reps, std::string* log) {
 
 // Model::writeTune / readTune: src/model/qwen35/tune_table.cpp (arch025-M3)
 
+// v0251-a3key: the tune cache key (include/whirl/model.h). The fingerprint reads the tables and fields the tuner and
+// Model::matmul use, not copies of them; the threshold / slot part appears only on a family with a gemmfq slot, so a
+// threshold change does not force a new table revision where the slot is 0 (gfx1201).
+std::string tuneCandidateKey(const device::Profile& p) {
+    std::string s = fmt("tunekey1 choices=%u buckets=", n_choices);
+    for (const u32 b : tune_sizes) s += fmt("%u,", b);
+    const auto cfgs = [&s](const char* name, const auto& table) {
+        s += fmt(" %s=", name);
+        for (const auto& c : table) s += fmt("%d/%d/%d,", c.bm, c.bn, c.nth);
+    };
+    cfgs("gemm", kernels::kGemmCfgs);
+    cfgs("gemms", kernels::kGemmsCfgs);
+    s += fmt(" gemmh_min=%u fast=%d", ops::gemmh_min, p.tune_fast ? 1 : 0);
+    if (p.tune_fast) s += fmt(" reject=%.2f@%u", kTuneRejectFactor, kTuneRejectMinN);
+    s += fmt(" tie_bm=%d h16_cand=%d fdq=%u/%u", p.gemms_tie_larger_bm ? 1 : 0, p.h16_from_candidates ? 1 : 0,
+             static_cast<unsigned>(p.fdq_default), static_cast<unsigned>(p.fdq_big));
+    if (p.fdq_default != 0 || p.fdq_big != 0) {
+        s += fmt(" fdq_min=%u fdq_big_min=%u", FdqEnv{}.fdq_min, ops::GemmFlags{}.fdq_big_min);
+        cfgs("gemmfq", kernels::kGemmFqCfgs);
+        s += " fq_names=";
+        for (const char* nm : kernels::kGemmFqNames) s += fmt("%s,", nm);
+    }
+    return s;
+}
+
+// (test-first interface: no selection suffix yet)
+std::string tuneSelectionSuffix(int, std::uint32_t, bool) { return std::string(); }
+
+std::string tuneCacheStem(const Model& m, const std::string& file_name, std::uintmax_t file_size) {
+    return file_name + "-" + std::to_string(file_size) + device::profile(m.arch).tune_cache_suffix + ".txt";
+}
+
 // Per quant type: int8-activation GEMV vs f32 GEMV on one real matrix.
 bool Model::checkGemvq(std::string& log) {
     struct PrecOff {
