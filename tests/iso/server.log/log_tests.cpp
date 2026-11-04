@@ -94,9 +94,27 @@ void testFile() {
     fs::remove_all(dir.parent_path(), ec);
 }
 
+// PATH-256 (pathlen256.DISCOVERY.md v3.1 2c #5): --log-file is never refused for its length; when it cannot be opened the
+// message adds the path's length in UTF-16 units (a folder of that name: the open fails). Written before the fix.
+void testOpenFailLength() {
+    namespace fs = std::filesystem;
+    const fs::path d = fs::temp_directory_path() / "whirl_iso_server_log_len" / "a-folder.log";
+    std::error_code ec;
+    fs::create_directories(d, ec);
+    const std::string p = d.string();  // ASCII temp folder on this machine: characters = UTF-16 units
+    std::string what;
+    try {
+        s::Log::open(p);
+    } catch (const std::runtime_error& e) {
+        what = e.what();
+    }
+    ISO_CHECK(what.rfind("cannot open log file " + p + " (the path is " + std::to_string(p.size()) + " characters long in UTF-16 / ", 0) == 0);
+    fs::remove_all(d.parent_path(), ec);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    return iso::run("server.log", {{"format", testFormat}, {"long_message_cut", testLongMessageCut}, {"file", testFile}},
+    return iso::run("server.log", {{"format", testFormat}, {"long_message_cut", testLongMessageCut}, {"file", testFile}, {"open_fail_length", testOpenFailLength}},
                     argc, argv);
 }

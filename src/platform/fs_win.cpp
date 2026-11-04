@@ -300,6 +300,9 @@ bool copyNoReplace(const wchar_t* from, const wchar_t* to) {
     return CopyFileExW(longPathForm(from).c_str(), longPathForm(to).c_str(), nullptr, nullptr, nullptr, COPY_FILE_FAIL_IF_EXISTS) != 0;
 }
 
+// PATH-256 test-first stub (v0251-patha commit 3): no note yet
+std::string pathLengthNote(const std::string&) { return std::string(); }
+
 bool utf8ToWideStrict(std::string_view s, std::wstring* out) {
     if (s.empty()) {
         out->clear();

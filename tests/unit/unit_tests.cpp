@@ -116,6 +116,7 @@ const OrderRow kOrder[] = {
     {"mem.governor", "testMemGovernorGrowOvershoot"},
     {"gpu_select", "testGpuSelect"},
     {"platform.fs", "testFsMappedOpen"},
+    {"platform.fs", "testPathLengthNote"},  // PATH-256 2c #5
 #if WHIRL_WITH_HIP && defined(_WIN32)
     {"gpu_select", "testProbeChild"},
 #endif

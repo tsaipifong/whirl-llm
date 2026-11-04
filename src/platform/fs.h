@@ -120,6 +120,13 @@ std::FILE* openStdio(const wchar_t* path, const wchar_t* mode);
 // nullptr, COPY_FILE_FAIL_IF_EXISTS): false (and `to` untouched) when `to` exists or the copy fails.
 bool copyNoReplace(const wchar_t* from, const wchar_t* to);
 
+// PATH-256 (pathlen256.DISCOVERY.md v3.1 2c #5 / #6): what an open / write failure adds to its message, so the user sees
+// the path's length in the unit Windows counts (no file a user gives is refused for its length):
+//   " (the path is N characters long in UTF-16[; Windows without long path support allows at most 259] / 路徑長 N 字元（UTF-16）[，Windows 未開長路徑支援時上限 259 字元])"
+// N = the full path (GetFullPathNameW; the typed text when that fails) without a \\?\ / \\?\UNC\ prefix, in UTF-16
+// units; the 259 clause from N = 260 (MAX_PATH with its NUL). path is UTF-8.
+std::string pathLengthNote(const std::string& path);
+
 // UTF-8 -> UTF-16 with MB_ERR_INVALID_CHARS (MultiByteToWideChar); false on invalid UTF-8 (out untouched). "" -> "".
 bool utf8ToWideStrict(std::string_view s, std::wstring* out);
 
