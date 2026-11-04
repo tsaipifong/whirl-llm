@@ -7,7 +7,7 @@
 // Exit: 0 pass, 1 a failing check (or, with --require-all, a kernel missing that the arch requires),
 // 2 usage error: unknown --only family, a given model path that does not exist, 0 checks run, or
 // --require-all on an arch without a required-kernel list (FIX-TEST-A, FR-TEST P3-3 / P3-4).
-// families: quant gemv gemm attn attndq4 gdn moe moemx moef misc gemvh dflash ws4 ws4g vision
+// families: the rows of tests/kernels/kt_families.h (the only list; --only validation and the run table both expand it)
 //
 // Timing (measure-tools P2, tests/kernels/kt_bench.h + bench_kernels.cpp): --bench FAMILY[,FAMILY] runs the timing cells
 // of gemv gemvh gemm attn moe router gdn instead of the test families (each cell checks its output vs the CPU first);
@@ -26,6 +26,7 @@
 
 #include "cpu_ref.h"
 #include "kt_bench.h"
+#include "kt_families.h"
 #include "whirl/common.h"
 
 #ifndef WHIRL_KT_VERSION
@@ -41,8 +42,10 @@ std::string envOr(const char* name) {
 }
 
 int usage() {
+    std::string fl;  // v0251-harness: the family list comes from kt_families.h
+    for (const kt::FamilyName& f : kt::kFamilyNames) fl += std::string(fl.empty() ? "" : ",") + f.name;
+    std::printf("usage: whirl-kernel-test [--device SPEC] [--only FAM[,FAM]] [--quick] [-v]\n  families: %s\n", fl.c_str());
     std::printf(
-        "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,router,misc,dflash,gemvh,ws4,ws4g,vision] [--quick] [-v]\n"
         "                         [--q4 GGUF] [--mx GGUF] [--moe GGUF] [--moemx GGUF]\n"
         "  --require-all  a kernel missing from the code object fails unless the arch lacks it by design\n"
         "  --bench gemv,gemvh,gemm,attn,moe,gdn [--jsonl FILE] [--ab HSACO] [--burst-idle S] [--bench-max-s S]\n"
@@ -117,8 +120,6 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "misc", "attnbench",
-                               "gemvh", "gemvhbench", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision"};  // = fams below
     const bool bench = !bo.families.empty();
     if (!bench && (!bo.jsonl.empty() || !bo.ab_hsaco.empty())) {
         std::printf("whirl-kernel-test: --jsonl / --ab need --bench\n");
@@ -133,9 +134,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     for (const std::string& f : only) {
-        bool known = false;
-        for (const char* n : fam_names) known = known || f == n;
-        if (!known) {
+        if (!kt::familyKnown(f)) {  // v0251-harness: the same table the run loop expands (kt_families.h)
             std::printf("whirl-kernel-test: --only: no family named \"%s\"\n", f.c_str());
             return usage();
         }
@@ -225,13 +224,11 @@ int main(int argc, char** argv) {
         const char* name;
         void (*run)(kt::Ctx&);
     };
-    const Fam fams[] = {{"quant", kt::testQuant}, {"gemv", kt::testGemv}, {"gemm", kt::testGemm},
-                        {"attn", kt::testAttn},   {"attndq4", kt::testAttnDq4},   {"gdn", kt::testGdn},   {"moe", kt::testMoe},
-                        {"moemx", kt::testMoeMx}, {"moef", kt::testMoeF}, {"router", kt::testMoeRouter}, {"misc", kt::testMisc},   {"attnbench", kt::benchAttn},
-                        {"gemvh", kt::testGemvh}, {"gemvhbench", kt::benchGemvh}, {"dflash", kt::testDflash},
-                        {"ws4", kt::testAttnWs4}, {"ws4bench", kt::benchAttnWs4},
-                        {"ws4g", kt::testAttnWs4g}, {"ws4gbench", kt::benchAttnWs4g},
-                        {"vision", kt::testVision}};
+    const Fam fams[] = {
+#define WHIRL_KT_RUN_ROW(n, f, req) {n, f},
+        WHIRL_KT_FAMILIES(WHIRL_KT_RUN_ROW)
+#undef WHIRL_KT_RUN_ROW
+    };
     if (bench) {
         const auto t0 = std::chrono::steady_clock::now();
         try {
@@ -248,7 +245,7 @@ int main(int argc, char** argv) {
     for (const Fam& f : fams) {
         if (bench) break;
         if (!only.empty() && !only.count(f.name)) continue;
-        if (only.empty() && (std::string(f.name) == "attnbench" || std::string(f.name) == "gemvhbench" || std::string(f.name) == "ws4bench" || std::string(f.name) == "ws4gbench")) continue;  // timing only, on request
+        if (only.empty() && kt::familyOnRequest(f.name)) continue;  // timing only, on request (kt_families.h)
         const auto t0 = std::chrono::steady_clock::now();
         std::printf("== %s\n", f.name);
         std::fflush(stdout);
