@@ -31,6 +31,32 @@ __device__ __forceinline__ void ws4_lds_barrier() {
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup", "local");
 }
+// feat026-attndec8s: on gfx11 the compiler puts s_waitcnt vmcnt(0) before EVERY s_barrier (no
+// FeatureBackOffBarrier for GFX11, LLVM 4b89e8adda), fences or not, so ws4_lds_barrier drains the
+// register prefetch. B = 1: the barrier as inline asm (opaque to the waitcnt pass, as hipfire
+// AT_BARRIER): this wave's LDS reads / writes done (lgkmcnt(0)), then s_barrier; global loads stay
+// in flight. Only LDS is exchanged between the waves here. Same instructions on the data, so the
+// same bits; B = 0 is the shipped barrier.
+// Why the compiler cannot break it: asm volatile has unmodeled side effects (a scheduling barrier at
+// the MI level; the "memory" clobber orders it at the IR level), and clang marks inline asm in HIP
+// device code convergent, so it is never duplicated into divergent paths (every caller's condition is
+// block-uniform: c, nch, cidx, kAlias). VGPR dependencies on the in-flight loads still get their
+// vmcnt from SIInsertWaitcnts (the asm does not touch those registers).
+// Risk accepted (review C2): without FeatureBackOffBarrier (GFX11) a wave waiting in s_barrier with
+// VMEM still outstanding cannot be backed out of the barrier on an exception (trap / debugger / bad
+// address), so a corrupt KV pointer may hang the GPU (TDR) instead of a clean page fault. All loads
+// here are clamped to [b0, b1 - 1]; only a bad KV pool pointer can trigger it. hipfire ships the same
+// barrier (AT_BARRIER).
+// Upstream LLVM d83cba (2025-08, "Reenable BackOffBarrier on GFX11/12") waits only for vm_vsrc before a
+// barrier; the ROCm 7.2 compiler used here still drains (progress\v0251-q8mport.PRIOR_ART.md): re-measure
+// ws4_tu after a compiler change.
+template <int B>
+__device__ __forceinline__ void ws4_bar() {
+    if constexpr (B == 0)
+        ws4_lds_barrier();
+    else
+        asm volatile("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory");
+}
 
 // scales as f16 vectors (constant lane indices after unrolling; a _Float16 array was promoted
 // to LDS by the compiler)
@@ -58,9 +84,9 @@ template <> struct Ws4Raw<2> {  // int4: K 4 x 16 nibbles + scale, V 8 keys x 8 
 // the caller skips loads past the last chunk; the loads under a branch make the compiler copy
 // their results at the join, i.e. wait right away (the prefetch then only covers the staging).
 // f16 / int8 use BF (+13% for int8); int4 does not (BF needs 4 more VGPRs than 256 there).
+// dl: kv_delta(kv, tb, k0), looked up by the caller (32-key chunks never straddle a page)
 template <int F, bool BF>
-__device__ __forceinline__ void ws4_load(Ws4Raw<F> &r, const KvArgs &kv, int tb, int k0, int b1, int g, int n_kv, int tv) {
-    const int dl = kv_delta(kv, tb, k0);  // 32-key chunks never straddle a page
+__device__ __forceinline__ void ws4_load_dl(Ws4Raw<F> &r, const KvArgs &kv, int dl, int k0, int b1, int g, int n_kv, int tv) {
 #pragma unroll
     for (int p = 0; p < ws4::k_pieces(F); ++p) {
         const int key = min(k0 + ws4::k_key(F, tv, p), b1 - 1);  // clamp (attn_wsplit_impl krow)
@@ -101,6 +127,10 @@ __device__ __forceinline__ void ws4_load(Ws4Raw<F> &r, const KvArgs &kv, int tb,
             r.vs[i] = kv.vs[e >> 5];
         }
     }
+}
+template <int F, bool BF>
+__device__ __forceinline__ void ws4_load(Ws4Raw<F> &r, const KvArgs &kv, int tb, int k0, int b1, int g, int n_kv, int tv) {
+    ws4_load_dl<F, BF>(r, kv, kv_delta(kv, tb, k0), k0, b1, g, n_kv, tv);
 }
 
 // dequantize / move the raw chunk k0 into Ks [32][kQs] and Vt (attn_wsplit_impl key permutation)
@@ -154,7 +184,19 @@ __device__ __forceinline__ void ws4_stage(const Ws4Raw<F> &r, _Float16 (*Ks)[ws4
 #ifndef WS4_DBG  // kernel development: 1 = no QK / softmax / P.V, 2 = no global loads after the prologue
 #define WS4_DBG 0
 #endif
-template <int F, int PD, bool BF>
+// TU (schedule bits, 0 = the v0.2.5 code): 1 inline-asm barriers (ws4_bar<1>), 2 page-table
+// lookahead (the kv_delta of the chunk loaded next is read one load earlier, after the current
+// chunk's K / V loads, so its wait is not a serial round trip right before them). Same addresses,
+// same data, same arithmetic: bitwise the shipped partials.
+// The lookahead is applied to the int8 / int4 entries only: with f16 K / V (64 raw VGPRs) it spilled 3 VGPRs
+// (attn_ws4 245 -> 256 VGPR, 16 B scratch; scratch\f26attndec8s\regs.tsv, first m31 build).
+// ws4_tu(F): the shipped choice per KV element format (v0.2.5.1, q8m = feat026-attndec8s-r1 de53f99 tune id 47):
+// int8 (F == 1, balance) 3 = both; f16 (precise) and int4 (fast) 0 = the v0.2.5 code. 8060S screening
+// (progress\v0251-judge3.md, v0251-judge7.md): the asm barrier made the DRAM-bound f16 attn_ws4 3-5 % and attn_ws4_q4
+// 17 % slower at 32k / 128k, while the int8 kernels got faster (ws4g2_q8 128k B/A 0.81, ws4_q8 0.96).
+// Compile-time, per format, like llama.cpp fattn-vec.cuh:86-99 (progress\v0251-q8mport.PRIOR_ART.md).
+__host__ __device__ constexpr int ws4_tu(int F) { return F == 1 ? 3 : 0; }
+template <int F, int PD, bool BF, int TU = 0>
 __device__ __forceinline__ void attn_ws4_impl(const float *q, const KvArgs &kv, float *part_ml, float *part_acc, int n_head, int n_kv,
                                               int q_stride, const int *pos, float scale, const int *skip, const AwGroups &groups) {
 #pragma clang fp contract(off)
@@ -196,6 +238,9 @@ __device__ __forceinline__ void attn_ws4_impl(const float *q, const KvArgs &kv, 
 #pragma unroll
     for (int j = 1; j <= PD; ++j)
         if (BF || j < nch) ws4_load<F, BF>(raw[j % PD], kv, tb, b0 + min(j, nch - 1) * AW_K, b1, g, n_kv, tv);
+    // TU & 2: page-table entry of the first in-loop load (chunk min(1 + PD, nch - 1))
+    int dl_next = 0;
+    if constexpr ((TU & 2) != 0) dl_next = kv_delta(kv, tb, b0 + min(1 + PD, nch - 1) * AW_K);
     float8 o[4];
 #pragma unroll
     for (int j = 0; j < 4; ++j) o[j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
@@ -206,7 +251,7 @@ __device__ __forceinline__ void attn_ws4_impl(const float *q, const KvArgs &kv, 
             const int c = i0 + s;
             if (c < nch) {
                 const int k0 = b0 + c * AW_K;
-                ws4_lds_barrier();  // LB0: Ks / Vt (and Qs) of chunk c written
+                ws4_bar<TU & 1>();  // LB0: Ks / Vt (and Qs) of chunk c written
 #if WS4_DBG != 1
                 if (wid < 2) {
                     const int kt = wid;
@@ -215,7 +260,7 @@ __device__ __forceinline__ void attn_ws4_impl(const float *q, const KvArgs &kv, 
                     *(float4 *)&Sc[ws4::sc_addr(kt, lane, 0)] = (float4){sc[0], sc[1], sc[2], sc[3]};
                     *(float4 *)&Sc[ws4::sc_addr(kt, lane, 4)] = (float4){sc[4], sc[5], sc[6], sc[7]};
                 }
-                ws4_lds_barrier();  // LB1: Sc written, Ks free
+                ws4_bar<TU & 1>();  // LB1: Sc written, Ks free
                 float8 sc[AW_K / 16];
 #pragma unroll
                 for (int kt = 0; kt < AW_K / 16; ++kt) {
@@ -229,12 +274,19 @@ __device__ __forceinline__ void attn_ws4_impl(const float *q, const KvArgs &kv, 
                          [&](int j, int kt) { return ld_frag16(&Vt[ws4::vt_addr((4 * wid + j) * 16 + lane % 16, kt * 16)]); });
 #endif
                 if (c + 1 < nch) {
-                    ws4_lds_barrier();  // LB2: Vt, Ps read
+                    ws4_bar<TU & 1>();  // LB2: Vt, Ps read
                     ws4_stage<F>(raw[(s + 1) % PD], Ks, Vt, k0 + AW_K, b1, tv);
                     // BF: unconditional (see ws4_load); past the last chunk it reloads the last
                     // one (L2), never used
-                    if (WS4_DBG != 2 && (BF || c + 1 + PD < nch))
-                        ws4_load<F, BF>(raw[(s + 1) % PD], kv, tb, min(k0 + (1 + PD) * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, tv);
+                    if constexpr ((TU & 2) == 0) {
+                        if (WS4_DBG != 2 && (BF || c + 1 + PD < nch))
+                            ws4_load<F, BF>(raw[(s + 1) % PD], kv, tb, min(k0 + (1 + PD) * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, tv);
+                    } else {
+                        if (WS4_DBG != 2 && (BF || c + 1 + PD < nch))
+                            ws4_load_dl<F, BF>(raw[(s + 1) % PD], kv, dl_next, min(k0 + (1 + PD) * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, tv);
+                        // the entry of the following load (clamped as that load), issued after this one
+                        dl_next = kv_delta(kv, tb, min(k0 + (2 + PD) * AW_K, b0 + (nch - 1) * AW_K));
+                    }
                 }
             }
         }
@@ -255,7 +307,7 @@ __device__ __forceinline__ void attn_ws4_impl(const float *q, const KvArgs &kv, 
     extern "C" __global__ void __launch_bounds__(128)                                                                                 \
         name(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv, int q_stride, const int *pos, float scale, \
              const int *skip, AwGroups groups) {                                                                                      \
-        attn_ws4_impl<F, PD, BF>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);                            \
+        attn_ws4_impl<F, PD, BF, ws4_tu(F)>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);                            \
     }
 WS4_ENTRY(attn_ws4, 0, 1, true)
 WS4_ENTRY(attn_ws4_q8, 1, 1, true)
@@ -311,9 +363,11 @@ template <> struct Ws4gRaw<1> {
 
 // branch-free: the role only selects base pointers and offsets; keys >= b1 read row b1 - 1
 // (K: the attn_wsplit_impl clamp; V: zeroed when staged)
-template <int F>
-__device__ __forceinline__ void ws4g_load(Ws4gRaw<F> &r, const KvArgs &kv, int tb, int k0, int b1, int g, int n_kv, bool isv, int tq) {
-    const int dl = kv_delta(kv, tb, k0);
+// LA (feat026-attndec8s page-table lookahead): dl_la = kv_delta(kv, tb, k0), looked up by the caller. LA = false is the
+// shipped body token for token (a wrapper function changed the q8 entries' register allocation)
+template <int F, bool LA = false>
+__device__ __forceinline__ void ws4g_load(Ws4gRaw<F> &r, const KvArgs &kv, int tb, int k0, int b1, int g, int n_kv, bool isv, int tq, int dl_la = 0) {
+    const int dl = LA ? dl_la : kv_delta(kv, tb, k0);
     const int kb = ws4::v_kb(tq);
     const int d = isv ? ws4::v_d8(tq) : ws4::k_d0(0, tq);
     // pointer arithmetic, not a select of the two pointers (a select became a private array
@@ -373,7 +427,10 @@ __device__ __forceinline__ void ws4g_stage(const Ws4gRaw<F> &r, _Float16 (*Ks)[w
     }
 }
 
-template <int F, int CG>
+// TU: the attn_ws4_impl schedule bits (1 inline-asm barriers, 2 page-table lookahead; 0 = the v0.2.5 code);
+// the entries pass ws4_tu(F) (int8 3, f16 0)
+// (lookahead: int8 entries only; f16 CG 3 spilled 5 -> 14 VGPRs with it)
+template <int F, int CG, int TU = 0>
 __device__ __forceinline__ void attn_ws4g_impl(const float *q, const KvArgs &kv, float *part_ml, float *part_acc, int n_head, int n_kv,
                                                int q_stride, const int *pos, float scale, const int *skip, const AwGroups &groups) {
 #pragma clang fp contract(off)
@@ -458,7 +515,14 @@ __device__ __forceinline__ void attn_ws4g_impl(const float *q, const KvArgs &kv,
         const int k0 = b0 + cidx * AW_K;
         const int kend = min(k0 + AW_K, b1) - 1;  // last key of the chunk
         const bool tail = pmin < kend;            // some row has keys of this chunk past its position
-        ws4_lds_barrier();                        // LB0: Ks / Vt (and Qs) of the chunk written
+        ws4_bar<TU & 1>();                        // LB0: Ks / Vt (and Qs) of the chunk written
+        // TU & 2 (r1 schedule): the page-table entry of the load issued after LB2 of THIS chunk, read here
+        // (unconditional, clamped as that load), a whole chunk of compute earlier. It is younger than the
+        // in-flight prefetch, which ws4g_stage consumes first at LB2 anyway, so no young load is drained
+        // for it. (The first version read the entry of the load after next AFTER the 16 prefetch loads;
+        // the loop end then got a vmcnt(12) draining 5 of them.)
+        int dl_la = 0;
+        if constexpr ((TU & 2) != 0) dl_la = kv_delta(kv, tb, min(k0 + 2 * AW_K, b0 + (nch - 1) * AW_K));
         // QK + softmax of tile c in wave c (its m, l live there): the two kt chains of aw_qk_chain
         // interleaved (one Q fragment load per st for both; each chain's order unchanged)
         half8 ptw[AW_K / 16];
@@ -482,13 +546,13 @@ __device__ __forceinline__ void attn_ws4g_impl(const float *q, const KvArgs &kv,
                 lw = l2;
             }
         }
-        if constexpr (kAlias) ws4_lds_barrier();  // every wave's Ks reads done (Ps / As overwrite Ks)
+        if constexpr (kAlias) ws4_bar<TU & 1>();  // every wave's Ks reads done (Ps / As overwrite Ks)
         if (wid < CG) {
 #pragma unroll
             for (int kt = 0; kt < AW_K / 16; ++kt) *(half8 *)&Ps[(wid * 2 + kt) * 32 * 8 + lane * 8] = ptw[kt];
             if (lane < 16) As[wid * 16 + lane] = alphaw;  // same in both half-waves (m, mx reduced over lane ^ 16)
         }
-        ws4_lds_barrier();  // LBP: p, alpha written
+        ws4_bar<TU & 1>();  // LBP: p, alpha written
         if (WS4G_NOTAIL || !tail) {
             // P.V: each V^T fragment loaded once for every tile; per column (and 16-dim tile) the
             // operations of aw_pv in its order: o * alpha, then WMMA kt 0, then kt 1
@@ -558,11 +622,15 @@ __device__ __forceinline__ void attn_ws4g_impl(const float *q, const KvArgs &kv,
         }
         }
         if (cidx + 1 < nch) {
-            ws4_lds_barrier();  // LB2: Vt, Ps read
+            ws4_bar<TU & 1>();  // LB2: Vt, Ps read
             ws4g_stage<F>(raw, Ks, Vt, k0 + AW_K, b1, isv, tq);
             // unconditional (a load under a branch is waited for at the join); past the last
             // chunk it reloads the last one (L2), never used
-            ws4g_load<F>(raw, kv, tb, min(k0 + 2 * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, isv, tq);
+            if constexpr ((TU & 2) == 0) {
+                ws4g_load<F>(raw, kv, tb, min(k0 + 2 * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, isv, tq);
+            } else {
+                ws4g_load<F, true>(raw, kv, tb, min(k0 + 2 * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, isv, tq, dl_la);
+            }
         }
     }
 #pragma unroll
@@ -585,7 +653,7 @@ __device__ __forceinline__ void attn_ws4g_impl(const float *q, const KvArgs &kv,
     extern "C" __global__ void __launch_bounds__(256)                                                                                 \
         name(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv, int q_stride, const int *pos, float scale, \
              const int *skip, AwGroups groups) {                                                                                      \
-        attn_ws4g_impl<F, CG>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);                               \
+        attn_ws4g_impl<F, CG, ws4_tu(F)>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);                               \
     }
 WS4G_ENTRY(attn_ws4g1, 0, 1)
 WS4G_ENTRY(attn_ws4g2, 0, 2)
