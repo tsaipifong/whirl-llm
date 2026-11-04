@@ -61,7 +61,26 @@ std::wstring exePath() {
 
 std::uint32_t currentId() { return GetCurrentProcessId(); }
 
-ProcState processState(std::uint32_t, std::uint64_t*) { return ProcState::kUnknown; }
+ProcState processState(std::uint32_t pid, std::uint64_t* created) {
+    // v0251-pathb (B26-7): see proc.h. Liveness by a zero wait (Chromium base/process/kill_win.cc), not by the exit code
+    // (STILL_ACTIVE 259 can be a real exit code) and not by OpenProcess alone (it succeeds for an exited process whose
+    // object another handle keeps).
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+    if (h == nullptr) return GetLastError() == ERROR_INVALID_PARAMETER ? ProcState::kGone : ProcState::kUnknown;
+    ProcState st = ProcState::kUnknown;
+    const DWORD w = WaitForSingleObject(h, 0);
+    if (w == WAIT_OBJECT_0) {
+        st = ProcState::kGone;
+    } else if (w == WAIT_TIMEOUT) {
+        FILETIME c{}, e{}, k{}, u{};
+        if (GetProcessTimes(h, &c, &e, &k, &u)) {
+            if (created != nullptr) *created = (static_cast<std::uint64_t>(c.dwHighDateTime) << 32) | c.dwLowDateTime;
+            st = ProcState::kRunning;
+        }
+    }
+    CloseHandle(h);
+    return st;
+}
 
 Handle currentProcess() { return GetCurrentProcess(); }
 

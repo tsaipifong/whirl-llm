@@ -1745,6 +1745,8 @@ int ServerRun::runServer() {
     http.stop();
     logI("server stopped");
     g_engine.store(nullptr);
+    // v0251-pathb (B26-7): before the event (after a close / logoff event the OS may end the process right after it)
+    tier::retractPinned(lad);
     if (g_stopped != nullptr) platform::proc::setEvent(g_stopped);
     return 0;
 }
@@ -1859,6 +1861,11 @@ int serveMain(int argc, char** argv, const char* program) {
 
     try {
         logI("WHIRL serve starting, log file {}", log_path);
+        // v0251-pathb (B26-7): notes of servers that ended are swept (bounded per start), ours is deleted at the end
+        if (const tier::PinnedSweep ps = tier::sweepPinned(lad); ps.removed > 0 || ps.failed > 0)
+            logI("pinned-memory notes: removed {} of ended processes ({} kept, {} not removable{})", ps.removed, ps.live,
+                 ps.failed, ps.capped ? "; the rest at the next start" : "");
+        const tier::PinnedNoteGuard pinned_note(lad);
         LoadedModel lm;
         buildModel(opt, nreq, lad, lm);
         // the rest of the startup and the serving loop (arch025-C1b), in the old order
