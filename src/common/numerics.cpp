@@ -325,6 +325,9 @@ std::uint32_t srvU32(const Raw& v, std::uint32_t def) {
     return def;
 }
 
+// v0251-a7pol: the plan's MoE prefill combine without WHIRL_MOEP_COMB (the gfx1151 MXFP4-expert default, else 0)
+std::uint32_t moepCombDefault(const Target& t) { return t.gfx1151 && t.moe_mxfp4 ? kernels::kMoepDefault.comb : 0u; }
+
 // loader.cpp:548-553 and :743, then tune.cpp:850-914 (before the numerics block)
 void loadFlags(const Request& r, const Target& t, Flags& F) {
     const EnvValues& e = r.env;
@@ -336,7 +339,7 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     if (t.gfx1151 && t.moe_mxfp4) {
         F.moep_gu = static_cast<std::uint32_t>(kernels::kMoepDefault.gu) + 1;
         F.moep_dn = static_cast<std::uint32_t>(kernels::kMoepDefault.dn) + 1;
-        F.moep_comb = kernels::kMoepDefault.comb;
+        F.moep_comb = moepCombDefault(t);
     }
     // feat026-moep (was loader.cpp, envGet): WHIRL_MOEP_GU / _DN name a variant (index + 1); any other value ("0", "",
     // an unknown name) is off; WHIRL_MOEP_COMB by std::strtoul (unparsable = 0 = moe_combine)
@@ -422,6 +425,25 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     F.prec_dec = !p.q8dec_default;
     if (e.q8dec && !e.q8dec->empty()) F.prec_dec = *e.q8dec == "0";
     if (items) setQ8dec(p, !F.prec_dec, e.q8dec ? *e.q8dec : std::string());
+    // v0251-a7pol (B26-41): the MoE prefill combine by the MODE (owner mode standard 2026-10-26), not by prec_dec (which
+    // WHIRL_Q8DEC=1 clears in precise): WHIRL_MOEP_COMB=5 (atomic scatter, f32 order varies run to run) is fast-only;
+    // 3 / 4 (f16 expert outputs, the balance item f16 intermediates) never in precise. Refused as bug-fastonly does: the
+    // mode's own combine stays (moepCombDefault) and Plan::ignored says so; ops::chooseMoe checks the mode again.
+    if (const Raw& v = e.moep_comb; v && F.moep_comb >= 3 && F.moep_comb <= 5) {
+        const char* why = nullptr;
+        std::string tail;
+        if (F.moep_comb == 5 && p.mode != Mode::fast) {
+            why = "the atomic-scatter MoE combine (f32 order varies run to run) is fast-only";
+            tail = std::format(" ({} never takes it)", modeName(p.mode));
+        } else if (F.moep_comb != 5 && p.mode == Mode::precise) {
+            why = "f16 MoE expert outputs are a balance item";
+            tail = " (precise never takes them)";
+        }
+        if (why != nullptr) {
+            F.moep_comb = moepCombDefault(t);
+            if (items) p.ignored.push_back(std::format("WHIRL_MOEP_COMB={} ignored: {}{}", *v, why, tail));
+        }
+    }
     // tune.cpp:968-979
     // bug-fastonly (audit F-A): relaxed acceptance is fast-only; precise / balance ignore WHIRL_RELAX (and its parameters)
     if (items)

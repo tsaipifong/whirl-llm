@@ -52,11 +52,22 @@ bool moepOk(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k
     return p.gate_ty == GgmlType::mxfp4 && p.up_ty == GgmlType::mxfp4 && p.down_ty == GgmlType::mxfp4 && p.gate_rb == p.up_rb && p.tiles64_buf &&
            kernels::kMoepGu[f.moep_gu].bn >= 64 && kernels::kMoepDn[f.moep_dn].bn >= 32;
 }
+// v0251-a7pol (B26-43): the moep flags only from kMoepMinTokensPerExpert tokens per expert (moepWide, moe.h); below it
+// the shipped 0.2.5 plan (no moep GEMMs, moe_combine). The one place the threshold applies.
+MoeFlags moepFloor(const MoeProblem& p, const MoeFlags& f) {
+    MoeFlags g = f;
+    if (!moepWide(p.n, p.K, p.R)) {
+        g.moep_gu = g.moep_dn = -1;
+        g.moep_comb = 0;
+    }
+    return g;
+}
 }  // namespace
 
 u32 moeTile(u32 n, u32 K, u32 R) { return n * K < 48 * R ? 32 : moe_bn; }
 
-MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, Function silu_mul_x8h) {
+MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeKernels& k, Function silu_mul_x8h) {
+    const MoeFlags f = moepFloor(p, f_in);
     const u32 n = p.n, E = p.E, K = p.K, F = p.F, R = p.R;
     MoePlan pl;
     // precise mode: every verify / decode batch (up to max_verify_rows rows) takes the decode experts, so a
@@ -104,7 +115,10 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKern
         pl.gu_bn = static_cast<u32>(vg.bn);
         pl.max_tiles64 = (pairs + pl.gu_bn - 1) / pl.gu_bn + R;
         const int dv = f.moep_dn;
-        const bool lossy_ok = !f.prec_dec;  // not bit-identical: never in precise (owner precision policy)
+        // not bit-identical: never in precise (owner precision policy). v0251-a7pol (B26-41): by the mode's class
+        // (moep_comb_ok) as well as prec_dec (WHIRL_Q8DEC=1 clears prec_dec in precise): 3 / 4 balance + fast, 5 fast only
+        const bool lossy_ok = !f.prec_dec && f.moep_comb_ok != MoeFlags::MoepComb::bitwise;
+        const bool atomic_ok = !f.prec_dec && f.moep_comb_ok == MoeFlags::MoepComb::atomic;
         const bool cnt_ok = p.cnt_buf && static_cast<u32>(vd.bm) >= kernels::kMoepMinBm;
         pl.fgu = k.moep_gu[f.moep_gu];
         pl.fdn = k.moep_dn[dv];
@@ -117,7 +131,7 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKern
         } else if (lossy_ok && f.moep_comb == 4 && k.moep_dhc[dv] != nullptr && cnt_ok) {
             pl.ydh = pl.comb_fused = true;
             pl.fdn = k.moep_dhc[dv];
-        } else if (lossy_ok && f.moep_comb == 5 && k.moep_da[dv] != nullptr && k.moe_combine4 != nullptr && E % 4 == 0) {
+        } else if (atomic_ok && f.moep_comb == 5 && k.moep_da[dv] != nullptr && k.moe_combine4 != nullptr && E % 4 == 0) {
             pl.comb_atomic = true;
             pl.fdn = k.moep_da[dv];
         }
