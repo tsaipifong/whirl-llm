@@ -26,6 +26,7 @@ const whirl::test::Suite& unitSuite_mem_fit();
 const whirl::test::Suite& unitSuite_server_kv_fit();  // arch025-iso4: split off mem_fit_tests.cpp
 const whirl::test::Suite& unitSuite_contract();
 const whirl::test::Suite& unitSuite_kernels_gemm();
+const whirl::test::Suite& unitSuite_kernels_moe();  // v0251-a7port (feat026-moep schedule replay)
 const whirl::test::Suite& unitSuite_model_core();
 const whirl::test::Suite& unitSuite_hip_runtime();
 const whirl::test::Suite& unitSuite_platform_paths();
@@ -69,6 +70,7 @@ const OrderRow kOrder[] = {
     {"contract", "testKvChoice"},
     {"contract", "testKvEstimateCaps"},
     {"kernels.gemm", "testKernelFetchBounds"},
+    {"kernels.moe", "testMoepSchedule"},  // v0251-a7port
     {"model.core", "testValueScope"},
     {"hip.runtime", "testLaunchDigest"},
     {"hip.runtime", "testLaunchDigestLayout"},
@@ -131,6 +133,7 @@ int main(int argc, char** argv) {
         &unitSuite_server_kv_fit(),
         &unitSuite_contract(),
         &unitSuite_kernels_gemm(),
+        &unitSuite_kernels_moe(),
         &unitSuite_model_core(),
         &unitSuite_hip_runtime(),
         &unitSuite_platform_paths(),

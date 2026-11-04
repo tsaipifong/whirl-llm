@@ -13,6 +13,7 @@
 // cache::fingerprintEnvKept); the EnvSnapshot name cross-check is in tests/model.
 
 #include "whirl/device_profile.h"
+#include "whirl/kernels_abi.h"  // v0251-a7port: kMoepDefault / kMoepGu / kMoepDn (testMoepDefault)
 #include "whirl/numerics.h"
 
 #include <cstdio>
@@ -497,6 +498,15 @@ void testLoadRules() {
     NCHECK(fl({{"MOE_WIDE", ""}}).flags.moe_wide && !fl({{"MOE_MXW", "0"}}).flags.moe_mxw && !fl({{"MOE_RBF", "0"}}).flags.moe_rbf,
            "loader flags: envFlag (\"\" is on)");
     NCHECK(!fl({{"G8T", "0"}}).flags.g8t && fl({}).flags.g8t, "G8T");
+    // feat026-moep (was loader.cpp envGet; t = the R9700 card, where the default is off): variant names -> index + 1,
+    // unknown / "" / "0" / unset -> 0 (off), MOEP_COMB strtoul
+    NCHECK(fl({}).flags.moep_gu == 0 && fl({}).flags.moep_dn == 0 && fl({}).flags.moep_comb == 0 &&
+               fl({{"MOEP_GU", "g64n64k64"}}).flags.moep_gu == 1 && fl({{"MOEP_GU", "g128n128k32"}}).flags.moep_gu == 6 &&
+               fl({{"MOEP_GU", "nope"}}).flags.moep_gu == 0 && fl({{"MOEP_GU", ""}}).flags.moep_gu == 0 &&
+               fl({{"MOEP_DN", "m128w4n32k64"}}).flags.moep_dn == 1 && fl({{"MOEP_DN", "m128w4n256k32"}}).flags.moep_dn == 6 &&
+               fl({{"MOEP_COMB", "2"}}).flags.moep_comb == 2 && fl({{"MOEP_COMB", "x"}}).flags.moep_comb == 0 &&
+               fl({{"MOEP_COMB", "5z"}}).flags.moep_comb == 5,
+           "MOEP_GU / _DN / _COMB: the loader's parse rules");
     NCHECK(!fl({}, "precise").flags.g8t, "g8t needs fp8_prefill");
     // Q8DEC: "" keeps the mode's choice; "1" in precise = int8 decode (lossy override)
     NCHECK(!fl({{"Q8DEC", ""}}).flags.prec_dec && fl({{"Q8DEC", "0"}}).flags.prec_dec, "Q8DEC");
@@ -667,6 +677,9 @@ void testFastOnlyOverrides() {
         {"GDN_IN2", 'B'},  {"Q4_RELAXED", 'L'}, {"FFN_H16", 'L'},   {"GDN_STRIX", 'L'},   {"GDN_STRIX_MIN", 'L'}, {"KV", 'F'},
         {"Q8DEC", 'L'},    {"RELAX", 'F'},      {"RELAX_K", 'P'},   {"RELAX_ALPHA", 'P'}, {"RELAX_EPS", 'P'},   {"RELAX_DELTA", 'P'},
         {"SPEC_SAMPLE", 'L'}, {"MOE_FP8", 'L'}, {"MOE_MXW", 'B'},   {"MOE_WIDE", 'B'},    {"MOE_RBF", 'B'},
+        // v0251-a7fix: WHIRL_MOEP_COMB 0-2 are bitwise, 3 / 4 are f16 intermediates (L); 5 (atomic scatter) must be
+        // fast-only via the fast-only path (B26-41; until then it is reachable in balance). 'L' stays right after B26-41.
+        {"MOEP_GU", 'B'},  {"MOEP_DN", 'B'},   {"MOEP_COMB", 'L'},
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i)
@@ -723,6 +736,50 @@ void testFastOnlyRefusal() {
 
 }  // namespace
 
+// v0251-a7port: the Radeon 8060S MoE prefill default (kernels::kMoepDefault = g64n64k64 + m128w4n128k64 + moe_combine4,
+// plan flags = variant index + 1) on the gfx1151 card with MXFP4 routed experts, in every mode; off on the R9700, on a
+// dense model and on non-MXFP4 experts; WHIRL_MOEP_GU / _DN / _COMB override it ("0" / "" = off)
+static void testMoepDefault() {
+    namespace kn = whirl::kernels;
+    NCHECK(std::string(kn::kMoepGu[kn::kMoepDefault.gu].name) == "g64n64k64" && std::string(kn::kMoepDn[kn::kMoepDefault.dn].name) == "m128w4n128k64" &&
+               kn::kMoepDefault.comb == 1u,
+           "kMoepDefault = the screened combination (v0251-judge6 / PLAN V1-11)");
+    auto fl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t).flags;
+    };
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const nu::Flags f = fl(t, mode, {});
+                const bool on = std::string_view(c.name) == "8060s" && std::string_view(model) == "moe";
+                NCHECK(on ? f.moep_gu == 1 && f.moep_dn == 3 && f.moep_comb == 1 : f.moep_gu == 0 && f.moep_dn == 0 && f.moep_comb == 0,
+                       "moep default {} {} {}: gu {} dn {} comb {}", c.name, model, mode, f.moep_gu, f.moep_dn, f.moep_comb);
+            }
+    const nu::Target t8 = target(card("8060s"), "moe", false);
+    for (const char* mode : {"precise", "balance", "fast"}) {
+        const nu::Flags g0 = fl(t8, mode, {{"MOEP_GU", "0"}}), d0 = fl(t8, mode, {{"MOEP_DN", ""}}), c0 = fl(t8, mode, {{"MOEP_COMB", "0"}});
+        NCHECK(g0.moep_gu == 0 && g0.moep_dn == 3 && g0.moep_comb == 1, "8060s moe {}: WHIRL_MOEP_GU=0 turns the gate + up variant off", mode);
+        NCHECK(d0.moep_gu == 1 && d0.moep_dn == 0 && d0.moep_comb == 1, "8060s moe {}: WHIRL_MOEP_DN= (empty) turns the down variant off", mode);
+        NCHECK(c0.moep_gu == 1 && c0.moep_dn == 3 && c0.moep_comb == 0, "8060s moe {}: WHIRL_MOEP_COMB=0 = moe_combine", mode);
+        const nu::Flags all0 = fl(t8, mode, {{"MOEP_GU", "0"}, {"MOEP_DN", "0"}, {"MOEP_COMB", "0"}});
+        NCHECK(all0.moep_gu == 0 && all0.moep_dn == 0 && all0.moep_comb == 0, "8060s moe {}: WHIRL_MOEP_*=0 = the shipped 0.2.5 path", mode);
+        const nu::Flags other = fl(t8, mode, {{"MOEP_GU", "g64n128k64"}, {"MOEP_DN", "m128w4n32k64"}, {"MOEP_COMB", "2"}});
+        NCHECK(other.moep_gu == 2 && other.moep_dn == 1 && other.moep_comb == 2, "8060s moe {}: another variant by name", mode);
+        NCHECK(fl(t8, mode, {{"MOEP_GU", "bogus"}}).moep_gu == 0, "8060s moe {}: an unknown name is off", mode);
+    }
+    // the env still works where the default is off (the R9700 table has no moep kernels: ops::chooseMoe keeps its plan)
+    NCHECK(fl(target(card("r9700"), "moe", false), "balance", {{"MOEP_GU", "g64n64k64"}}).moep_gu == 1, "r9700: MOEP_GU by name");
+    // gfx1151 with non-MXFP4 routed experts: off
+    nu::Target tq = t8;
+    tq.moe_mxfp4 = false;
+    NCHECK(fl(tq, "balance", {}).moep_gu == 0 && fl(tq, "balance", {}).moep_dn == 0 && fl(tq, "balance", {}).moep_comb == 0,
+           "8060s, non-MXFP4 experts: off");
+}
+
 void testNumericsPlan(int& pass, int& fail) {
     testPlanTable();
     testApplyFrontEqualsPlan();  // arch025-N2b (replaces testUnwiredCallerUnchanged: no caller passes Target::gdn_strix now)
@@ -730,6 +787,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testFlagScope();
     testFrontEnds();
     testLoadRules();
+    testMoepDefault();  // v0251-a7port (fails before the port: the plan has no gfx1151 default)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)
