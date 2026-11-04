@@ -49,7 +49,30 @@ struct MoeFlags {
     // combine; fast candidate: 5 = atomic scatter into x (f32 order varies run to run)
     int moep_gu = -1, moep_dn = -1;
     std::uint32_t moep_comb = 0;
+    // v0251-a7pol (B26-41): the combine classes the numerics MODE allows (moepCombFor; qwen35::Context::moeBlock sets it
+    // from the plan's mode). Not prec_dec: WHIRL_Q8DEC=1 clears prec_dec in precise. Default: bitwise only.
+    enum class MoepComb : std::uint8_t {
+        bitwise,  // COMB 0-2 (precise)
+        f16,      // + 3 / 4: f16 expert outputs (balance item f16 intermediates)
+        atomic,   // + 5: atomic scatter, f32 order varies run to run (fast only)
+    } moep_comb_ok = MoepComb::bitwise;
 };
+// v0251-a7pol: precise -> bitwise, balance -> f16, fast -> atomic (owner mode standard 2026-10-26)
+inline MoeFlags::MoepComb moepCombFor(bool precise, bool fast) {
+    return precise ? MoeFlags::MoepComb::bitwise : fast ? MoeFlags::MoepComb::atomic : MoeFlags::MoepComb::f16;
+}
+// v0251-a7pol (B26-43): the moep expert GEMMs only when the experts average at least this many tokens of the forward
+// (n * K >= kMoepMinTokensPerExpert * R; Ornith-1.5-35B-A3B, 8 of 256 experts: n >= 1024 rows). Below it chooseMoe gives
+// the shipped 0.2.5 plan (fused_gu + moe_combine; bitwise equal to moep, so only speed changes): the gate + up tile is
+// 64 tokens of 16-token fragments that share each decoded weight fragment, and with <= 16 tokens per expert most
+// experts fill one fragment (no sharing) of a 64 / 128-token tile. 8060S A7 verify 2026-11-04 (6 ABBA rounds, Ornith
+// prefill, moep vs 0.2.5): 4 tokens / expert (pp128) -3.4 % balance / -2.0 % precise, 16 (pp512) -1.0 / -0.5 %,
+// 32 (pp1024) +1.5 / +1.3 %, 64 (pp2048) +2.4 / +2.7 %. The same rule form as moeTile and llama.cpp's RDNA MoE tile
+// choice (mmq.cu ncols_opt = tokens per expert).
+inline constexpr std::uint32_t kMoepMinTokensPerExpert = 32;
+inline constexpr bool moepWide(std::uint32_t n, std::uint32_t K, std::uint32_t R) {
+    return static_cast<std::uint64_t>(n) * K >= static_cast<std::uint64_t>(kMoepMinTokensPerExpert) * R;
+}
 // v0251-a7port: the plan's moep flags (numerics::Flags moep_gu / moep_dn = variant index + 1, 0 = off; moep_comb) ->
 // MoeFlags (index, -1 = off); qwen35::Context::moeBlock's assembly, pinned on the CPU (tests/ops/ops_moe_cases.inc)
 inline void setMoep(MoeFlags& f, std::uint32_t plan_gu, std::uint32_t plan_dn, std::uint32_t plan_comb) {
@@ -87,7 +110,8 @@ struct MoePlan {
                                      // moe_combine4 with K = 0; no combine launch after
     Dim3 comb_grid{};
 };
-// silu_mul_x8h: the fp8 path's activation kernel (MiscKernels; null: no fp8 path)
+// silu_mul_x8h: the fp8 path's activation kernel (MiscKernels; null: no fp8 path). v0251-a7pol: the moep flags apply only
+// when moepWide(n, K, R) (else as moep_gu = moep_dn = -1, moep_comb = 0); COMB 3 / 4 need moep_comb_ok >= f16, COMB 5 atomic
 MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, Function silu_mul_x8h);
 // token tile: 32 when experts average under ~48 tokens (short prompts), else 64
 std::uint32_t moeTile(std::uint32_t n, std::uint32_t K, std::uint32_t R);

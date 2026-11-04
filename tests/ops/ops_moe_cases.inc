@@ -152,6 +152,7 @@ void testOpsMoe() {
         km.moep_dhc[2] = tag("gemm_moepdhc_m128w4n128k64_mxfp4");
         km.moep_da[2] = tag("gemm_moepda_m128w4n128k64_mxfp4");
         km.moe_combine4h = tag("moe_combine4h");
+        fm.moep_comb_ok = ops::MoeFlags::MoepComb::atomic;  // v0251-a7pol: fast's class (the combines below need it)
         fm.moep_comb = 3;
         pl = ops::chooseMoe(pm, fm, km, km.silu_mul_x8h);
         CHECK(pl.ydh && pl.comb4 && !pl.comb_fused && pl.bits == ops::MoeBits::moe_lossy_gemm && nameOf(pl.fdn) == "gemm_moepdh_m128w4n128k64_mxfp4");
@@ -172,6 +173,47 @@ void testOpsMoe() {
         }
         fp.moep_comb = 2;  // the bit-identical fused combine is allowed in precise
         CHECK(ops::chooseMoe(pm, fp, km, km.silu_mul_x8h).comb_fused);
+        // v0251-a7pol (B26-41): the combine class by the MODE (MoeFlags::moep_comb_ok), not prec_dec
+        {
+            CHECK(ops::moepCombFor(true, false) == ops::MoeFlags::MoepComb::bitwise && ops::moepCombFor(false, false) == ops::MoeFlags::MoepComb::f16 &&
+                  ops::moepCombFor(false, true) == ops::MoeFlags::MoepComb::atomic);
+            CHECK(ops::MoeFlags{}.moep_comb_ok == ops::MoeFlags::MoepComb::bitwise);
+            ops::MoeFlags fb = bal;  // balance: COMB 5 (atomic scatter) refused -> the plain moep down + moe_combine (bitwise)
+            fb.moep_gu = 1;
+            fb.moep_dn = 2;
+            fb.moep_comb_ok = ops::moepCombFor(false, false);
+            fb.moep_comb = 5;
+            pl = ops::chooseMoe(pm, fb, km, km.silu_mul_x8h);
+            CHECK(pl.kind == ops::MoePrefillKind::moep && !pl.comb_atomic && !pl.ydh && !pl.comb_fused && !pl.comb4 &&
+                  pl.bits == ops::MoeBits::moe_f16_gemm && nameOf(pl.fdn) == "gemm_moepdn_m128w4n128k64_mxfp4");
+            for (const unsigned cm : {3u, 4u}) {  // balance keeps COMB 3 / 4 (f16 intermediates)
+                fb.moep_comb = cm;
+                pl = ops::chooseMoe(pm, fb, km, km.silu_mul_x8h);
+                CHECK(pl.ydh && !pl.comb_atomic && pl.bits == ops::MoeBits::moe_lossy_gemm);
+            }
+            // precise with prec_dec cleared (WHIRL_Q8DEC=1): still bitwise only
+            ops::MoeFlags fq = bal;
+            fq.moep_gu = 1;
+            fq.moep_dn = 2;
+            fq.moep_comb_ok = ops::moepCombFor(true, false);
+            for (const unsigned cm : {3u, 4u, 5u}) {
+                fq.moep_comb = cm;
+                pl = ops::chooseMoe(pm, fq, km, km.silu_mul_x8h);
+                CHECK(pl.kind == ops::MoePrefillKind::moep && pl.bits == ops::MoeBits::moe_f16_gemm && !pl.ydh && !pl.comb_atomic &&
+                      nameOf(pl.fdn) == "gemm_moepdn_m128w4n128k64_mxfp4");
+            }
+            // fast: COMB 5 applies
+            ops::MoeFlags ff = fb;
+            ff.moep_comb_ok = ops::moepCombFor(false, true);
+            ff.moep_comb = 5;
+            pl = ops::chooseMoe(pm, ff, km, km.silu_mul_x8h);
+            CHECK(pl.comb_atomic && pl.bits == ops::MoeBits::moe_lossy_gemm && nameOf(pl.fdn) == "gemm_moepda_m128w4n128k64_mxfp4");
+            // fast below the token floor (B26-43): no moep, so no atomic combine either
+            ops::MoeProblem ps = pm;
+            ps.n = 128;
+            pl = ops::chooseMoe(ps, ff, km, km.silu_mul_x8h);
+            CHECK(pl.kind == ops::MoePrefillKind::fused_gu && !pl.comb_atomic && !pl.ydh && !pl.comb4);
+        }
         // no counter buffer: the fused combine falls back to the plain down twin + moe_combine
         fm.moep_comb = 2;
         pm.cnt_buf = false;
@@ -210,7 +252,8 @@ void testOpsMoe() {
         for (const bool precise : {false, true}) {
             ops::MoeFlags f = precise ? pre : bal;
             ops::setMoep(f, 1, 3, 1);
-            for (const unsigned n : {512u, 2048u, 4096u, 32768u}) {
+            // v0251-a7pol (B26-43): from 32 tokens per expert (Ornith 8 of 256: n >= 1024) exactly the cfce7ea default plan
+            for (const unsigned n : {1024u, 1280u, 2048u, 4096u, 8192u, 32768u}) {
                 pm.n = n;
                 pl = ops::chooseMoe(pm, f, km, km.silu_mul_x8h);
                 CHECK(pl.kind == ops::MoePrefillKind::moep && pl.bits == ops::MoeBits::moe_f16_gemm && pl.bn == 128 && pl.gu_bn == 64);
@@ -218,6 +261,26 @@ void testOpsMoe() {
                 CHECK(pl.comb4 && !pl.comb_fused && !pl.ydh && !pl.comb_atomic && pl.comb_grid.x == 2 && pl.comb_grid.y == n);
                 CHECK(pl.max_tiles == (n * 8 + 127) / 128 + 256 && pl.max_tiles64 == (n * 8 + 63) / 64 + 256 && pl.gu_pgrid.x == pl.max_tiles64 * 8 &&
                       pl.dn_pgrid.x == pl.max_tiles * 16);
+            }
+            // v0251-a7pol (B26-43): below the floor the shipped 0.2.5 plan, field for field as the plan's 0 / 0 / 0 at that n
+            CHECK(ops::kMoepMinTokensPerExpert == 32u && !ops::moepWide(1023, 8, 256) && ops::moepWide(1024, 8, 256) &&
+                  !ops::moepWide(511, 8, 128) && ops::moepWide(512, 8, 128) && ops::moepWide(0xffffffffu, 8, 256));
+            for (const unsigned n : {33u, 128u, 512u, 1000u, 1023u}) {  // > max_verify_rows: prefill in precise too
+                pm.n = n;
+                ops::MoeFlags off = precise ? pre : bal;
+                ops::setMoep(off, 0, 0, 0);
+                const ops::MoePlan a = ops::chooseMoe(pm, f, km, km.silu_mul_x8h), b = ops::chooseMoe(pm, off, km, km.silu_mul_x8h);
+                CHECK(!a.small && a.kind == ops::MoePrefillKind::fused_gu && !a.comb4 && !a.comb_fused && !a.ydh && !a.comb_atomic);
+                CHECK(a.kind == b.kind && a.bits == b.bits && a.bn == b.bn && a.max_tiles == b.max_tiles && a.max_tiles64 == b.max_tiles64 &&
+                      a.fgu == b.fgu && a.fdn == b.fdn && a.gu_bn == b.gu_bn && a.comb4 == b.comb4 && a.comb_grid.x == b.comb_grid.x &&
+                      a.comb_grid.y == b.comb_grid.y && a.gu_pgrid.x == b.gu_pgrid.x && a.dn_pgrid.x == b.dn_pgrid.x);
+                CHECK(nameOf(a.fgu) == "gemm_moegu_mxfp4" && nameOf(a.fdn) == "gemm_moe32r_mxfp4");
+                // an explicit WHIRL_MOEP_* combination (or COMB alone, e.g. GU=0 + COMB=1) is floored the same way
+                ops::MoeFlags x = precise ? pre : bal;
+                ops::setMoep(x, 2, 2, 2);
+                CHECK(ops::chooseMoe(pm, x, km, km.silu_mul_x8h).kind == ops::MoePrefillKind::fused_gu);
+                ops::setMoep(x, 0, 3, 1);
+                CHECK(!ops::chooseMoe(pm, x, km, km.silu_mul_x8h).comb4);
             }
             // decode / verify batches never take it (the decode experts; no combine launch on that path)
             pm.n = 1;

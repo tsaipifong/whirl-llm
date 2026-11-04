@@ -17,6 +17,7 @@
 #include "whirl/numerics.h"
 
 #include <cstdio>
+#include <cstdlib>  // v0251-a7pol: std::strtoul (testMoepCombMode)
 #include <format>
 #include <map>
 #include <set>
@@ -505,7 +506,7 @@ void testLoadRules() {
                fl({{"MOEP_GU", "nope"}}).flags.moep_gu == 0 && fl({{"MOEP_GU", ""}}).flags.moep_gu == 0 &&
                fl({{"MOEP_DN", "m128w4n32k64"}}).flags.moep_dn == 1 && fl({{"MOEP_DN", "m128w4n256k32"}}).flags.moep_dn == 6 &&
                fl({{"MOEP_COMB", "2"}}).flags.moep_comb == 2 && fl({{"MOEP_COMB", "x"}}).flags.moep_comb == 0 &&
-               fl({{"MOEP_COMB", "5z"}}).flags.moep_comb == 5,
+               fl({{"MOEP_COMB", "5z"}}, "fast").flags.moep_comb == 5,  // v0251-a7pol: 5 is fast-only (testMoepCombMode)
            "MOEP_GU / _DN / _COMB: the loader's parse rules");
     NCHECK(!fl({}, "precise").flags.g8t, "g8t needs fp8_prefill");
     // Q8DEC: "" keeps the mode's choice; "1" in precise = int8 decode (lossy override)
@@ -677,8 +678,8 @@ void testFastOnlyOverrides() {
         {"GDN_IN2", 'B'},  {"Q4_RELAXED", 'L'}, {"FFN_H16", 'L'},   {"GDN_STRIX", 'L'},   {"GDN_STRIX_MIN", 'L'}, {"KV", 'F'},
         {"Q8DEC", 'L'},    {"RELAX", 'F'},      {"RELAX_K", 'P'},   {"RELAX_ALPHA", 'P'}, {"RELAX_EPS", 'P'},   {"RELAX_DELTA", 'P'},
         {"SPEC_SAMPLE", 'L'}, {"MOE_FP8", 'L'}, {"MOE_MXW", 'B'},   {"MOE_WIDE", 'B'},    {"MOE_RBF", 'B'},
-        // v0251-a7fix: WHIRL_MOEP_COMB 0-2 are bitwise, 3 / 4 are f16 intermediates (L); 5 (atomic scatter) must be
-        // fast-only via the fast-only path (B26-41; until then it is reachable in balance). 'L' stays right after B26-41.
+        // v0251-a7fix: WHIRL_MOEP_COMB 0-2 are bitwise, 3 / 4 are f16 intermediates (L); 5 (atomic scatter) is fast-only
+        // through the plan's refusal (v0251-a7pol B26-41, testMoepCombMode), so the variable's class stays 'L'.
         {"MOEP_GU", 'B'},  {"MOEP_DN", 'B'},   {"MOEP_COMB", 'L'},
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
@@ -780,6 +781,60 @@ static void testMoepDefault() {
            "8060s, non-MXFP4 experts: off");
 }
 
+// v0251-a7pol (B26-41): WHIRL_MOEP_COMB by the MODE (owner mode standard 2026-10-26), in the bug-fastonly refusal form:
+// 5 (atomic scatter, f32 order varies run to run) is fast-only; 3 / 4 (f16 expert outputs = balance item f16
+// intermediates) never in precise, also with WHIRL_Q8DEC=1 (which clears prec_dec in precise). A refused value leaves
+// the mode's own combine (the 8060S default 1 or 0), bitsKey / overrides / logLine as without it, and one Plan::ignored
+// note. Expected to FAIL on cfce7ea: every refusal row (the flag took the value; no note).
+static void testMoepCombMode() {
+    auto planOf = [](const char* mode, const nu::Target& t, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    const std::string atomic = "the atomic-scatter MoE combine (f32 order varies run to run) is fast-only";
+    const std::string f16 = "f16 MoE expert outputs are a balance item";
+    for (const CardFake& c : k_cards)
+        for (const char* model : {"swift", "moe"}) {
+            const nu::Target t = target(c, model, false);
+            for (const char* q8 : {"", "1"}) {  // "": the mode's decode activations; "1": WHIRL_Q8DEC=1 (prec_dec off in precise)
+                std::vector<std::pair<const char*, const char*>> extra;
+                if (*q8) extra.emplace_back("Q8DEC", q8);
+                for (const char* mode : {"precise", "balance", "fast"}) {
+                    const std::string cell = std::format("B26-41 {} {} {} q8dec='{}'", c.name, model, mode, q8);
+                    const nu::Plan base = planOf(mode, t, extra);
+                    for (const char* v : {"0", "1", "2", "3", "4", "5", "5z"}) {
+                        auto vals = extra;
+                        vals.emplace_back("MOEP_COMB", v);
+                        const nu::Plan p = planOf(mode, t, vals);
+                        const unsigned want = static_cast<unsigned>(std::strtoul(v, nullptr, 10));
+                        const bool precise = std::string_view(mode) == "precise", fast = std::string_view(mode) == "fast";
+                        const bool refuse = (want == 5 && !fast) || ((want == 3 || want == 4) && precise);
+                        if (refuse) {
+                            const std::string why = want == 5 ? atomic + std::format(" ({} never takes it)", mode) : f16 + " (precise never takes them)";
+                            NCHECK(p.flags.moep_comb == base.flags.moep_comb, "{}: WHIRL_MOEP_COMB={} must keep the mode's combine {} (got {})", cell, v,
+                                   base.flags.moep_comb, p.flags.moep_comb);
+                            NCHECK(p.bitsKey() == base.bitsKey() && p.overrides == base.overrides && nu::logLine(p) == nu::logLine(base),
+                                   "{}: WHIRL_MOEP_COMB={} changed the plan", cell, v);
+                            NCHECK(p.ignored == std::vector<std::string>{std::format("WHIRL_MOEP_COMB={} ignored: {}", v, why)}, "{}: WHIRL_MOEP_COMB={} note ({})",
+                                   cell, v, p.ignored.empty() ? std::string("none") : p.ignored.front());
+                        } else {
+                            NCHECK(p.flags.moep_comb == want && p.ignored.empty(), "{}: WHIRL_MOEP_COMB={} must apply (comb {}, {} notes)", cell, v,
+                                   p.flags.moep_comb, p.ignored.size());
+                        }
+                    }
+                }
+            }
+        }
+    // the default plan is untouched: 8060S MoE MXFP4 = 1 / 3 / 1 in every mode (testMoepDefault), no notes without the variable
+    const nu::Target t8 = target(card("8060s"), "moe", false);
+    for (const char* mode : {"precise", "balance", "fast"}) {
+        const nu::Plan d = planOf(mode, t8, {});
+        NCHECK(d.flags.moep_gu == 1 && d.flags.moep_dn == 3 && d.flags.moep_comb == 1 && d.ignored.empty(), "B26-41 8060s moe {}: default plan changed", mode);
+    }
+}
+
 void testNumericsPlan(int& pass, int& fail) {
     testPlanTable();
     testApplyFrontEqualsPlan();  // arch025-N2b (replaces testUnwiredCallerUnchanged: no caller passes Target::gdn_strix now)
@@ -788,6 +843,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testFrontEnds();
     testLoadRules();
     testMoepDefault();  // v0251-a7port (fails before the port: the plan has no gfx1151 default)
+    testMoepCombMode();  // v0251-a7pol B26-41 (the refusal rows fail on cfce7ea)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)
