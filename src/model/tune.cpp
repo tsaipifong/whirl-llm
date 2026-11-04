@@ -846,14 +846,9 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     afterLoadTune(m);
 }
 
-// v0251-int (merge of v0251-path PATH-256 P2 and v0251-a3key): resolve() with the a3key selection key
-// (tuneSelectionSuffix, "" at the defaults); defined below with resolve, which is resolveKeyed(.., "", ..)
-namespace tune_cache {
-namespace {
-Plan resolveKeyed(const std::string& base, const std::string& model_path, std::uint64_t size, const std::string& suffix,
-                  const std::string& selection, std::size_t n_tune, const Accept& accept, const Io& io);
-}  // namespace
-}  // namespace tune_cache
+// v0251-int (merge of v0251-path PATH-256 P2 and v0251-a3key): tune_cache::resolveKeyed (model/tune_cache.h, v0251-tunetest:
+// declared there for the tests) is resolve() with the a3key selection key (tuneSelectionSuffix, "" at the defaults);
+// defined below with resolve, which is resolveKeyed(.., "", ..)
 
 namespace {
 void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
@@ -1038,7 +1033,6 @@ Plan resolve(const std::string& base, const std::string& model_path, std::uint64
     return resolveKeyed(base, model_path, size, suffix, std::string(), n_tune, accept, io);
 }
 
-namespace {
 // v0251-int: the tune5 name of a load with a selection override (tuneSelectionSuffix != ""): tune5Name's text with h16 =
 // fnv1a64(name, NUL, size, NUL, selection), so the name keeps its length (kTune5NameMax: "-gfx1151r3" already fills
 // kTuneSuffixMax, "-fdq2-1025" does not fit as a visible suffix). selection "" = tune5Name unchanged (v0251-path).
@@ -1119,7 +1113,6 @@ Plan resolveKeyed(const std::string& base, const std::string& model_path, std::u
     }
     return p;
 }
-}  // namespace
 
 std::string fileText(const std::string& name, std::uint64_t size, const std::string& table) {
     return "# model " + name + " " + std::to_string(size) + "\n" + table;

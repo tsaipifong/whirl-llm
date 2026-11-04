@@ -2608,6 +2608,37 @@ void testFdqEnv() {
     }
 }
 
+// v0251-tunetest: a tune_cache::Io over a map of files, no disk. opened = every path read, in order; copied = the targets
+// of copy_no_replace; appended = "<path>|<line>"
+struct TkFake {
+    std::map<std::string, std::string> files;
+    std::vector<std::string> opened, copied, appended;
+    q::tune_cache::Io io() {
+        q::tune_cache::Io i;
+        i.read = [this](const std::string& p) -> std::optional<std::string> {
+            opened.push_back(p);
+            const auto it = files.find(p);
+            if (it == files.end()) return std::nullopt;
+            return it->second;
+        };
+        i.disk_name = [](const std::string&) { return std::optional<std::string>(); };  // the typed name
+        i.copy_no_replace = [this](const std::string& from, const std::string& to) {
+            const auto it = files.find(from);
+            if (it == files.end() || files.count(to) != 0) return false;
+            files[to] = it->second;
+            copied.push_back(to);
+            return true;
+        };
+        i.append = [this](const std::string& p, const std::string& line) {
+            files[p] += line;
+            appended.push_back(p + "|" + line);
+            return true;
+        };
+        i.stamp = [](const std::string&) { return std::optional<q::tune_cache::Stamp>(); };
+        return i;
+    }
+};
+
 // v0251-a3key (REVIEW-v0251-a3 A1): the tune cache file's key (include/whirl/model.h tuneCandidateKey /
 // tuneSelectionSuffix / tuneCacheStem; src/model/tune.cpp loadOrTune).
 // (1) the candidate set of each family is pinned to its table revision (device::Profile::tune_cache_suffix) in an
@@ -2686,29 +2717,34 @@ void testTuneCacheKey() {
         check(got == s.want, std::format("tune key: selection fdq {} min {} gemmfq {} -> '{}' (got '{}')", s.fdq, s.min, s.has_fq, s.want, got));
     }
 
-    // (3) the file stems and the read paths
+    // (3) the file stems and the read paths of the LIVE resolver: tune_cache::resolveKeyed, the call loadOrTune makes with
+    // the profile's suffix and tuneSelectionSuffix (v0251-tunetest: was tuneCacheStem, which the product no longer calls).
+    // A fake Io records every path the resolver reads; tests testTuneCacheSelection has the full key matrix.
     const std::string lad = "C:\\Users\\u\\AppData\\Local";
     {
-        q::Model m;
-        check(q::tuneCacheStem(m, "m.gguf", 123) == "m.gguf-123.txt", "tune key: gfx1201 stem = the plain v0.2.x name");
-        m.fdq = 2;
-        check(q::tuneCacheStem(m, "m.gguf", 123) == "m.gguf-123.txt", "tune key: gfx1201 stem with WHIRL_FDQ8S=t2 (no gemmfq kernel) unchanged");
-        m.fdq = -1;
-        m.arch = Arch::gfx1151;
-        const std::string st = q::tuneCacheStem(m, "m.gguf", 123);
-        check(st == "m.gguf-123-gfx1151r3.txt", "tune key: gfx1151 stem = table revision 3 (got " + st + ")");
-        std::vector<std::string> all = {whirl::platform::paths::tuneCachePath(lad, st)};
-        for (const std::string& x : whirl::platform::paths::tuneReadPaths4(lad, st)) all.push_back(x);
-        for (const std::string& x : whirl::platform::paths::tuneReadPathsOld(lad, st)) all.push_back(x);
+        const auto reads = [&](Arch a, int fdq, bool has_fq) {
+            TkFake fk;
+            const q::tune_cache::Io io = fk.io();
+            q::tune_cache::resolveKeyed(lad, "C:\\m\\m.gguf", 123, d::profile(a).tune_cache_suffix, q::tuneSelectionSuffix(fdq, 1025, has_fq), 11,
+                                        [](const std::string&, std::size_t) { return false; }, io);
+            return fk.opened;
+        };
+        const auto has = [](const std::vector<std::string>& v, const std::string& p) { return std::find(v.begin(), v.end(), p) != v.end(); };
+        const std::string w = lad + "\\whirl\\tune4-", r = lad + "\\whirl-r9700\\tune4-";
+        const auto o1201 = reads(Arch::gfx1201, -1, false);
+        check(has(o1201, w + "m.gguf-123.txt") && has(o1201, r + "m.gguf-123.txt"), "tune key: gfx1201 reads the plain v0.2.x name");
+        const auto o1201s = reads(Arch::gfx1201, 2, false);
+        check(o1201s == o1201, "tune key: gfx1201 with WHIRL_FDQ8S=t2 (no gemmfq kernel) reads the same files");
+        const auto o51 = reads(Arch::gfx1151, -1, true);
+        check(has(o51, w + "m.gguf-123-gfx1151r3.txt") && has(o51, r + "m.gguf-123-gfx1151r3.txt"), "tune key: gfx1151 stem = table revision 3");
         bool old_rev = false;
-        for (const std::string& x : all) old_rev = old_rev || x.find("gfx1151r2") != std::string::npos || x.find("gfx1151.txt") != std::string::npos;
-        check(all.size() == 7 && !old_rev, "tune key: no write / read / fallback path names an older gfx1151 revision (r1, r2)");
-        static int fake_kernel = 0;
-        m.k.gemmfq[1] = &fake_kernel;
-        m.fdq = 2;
-        const std::string sk = q::tuneCacheStem(m, "m.gguf", 123);
-        check(sk == "m.gguf-123-gfx1151r3-fdq2-1025.txt", "tune key: gfx1151 stem with WHIRL_FDQ8S=t2 = its own table (got " + sk + ")");
-        m.k.gemmfq[1] = nullptr;
+        for (const std::string& x : o51) old_rev = old_rev || x.find("gfx1151r2") != std::string::npos || x.find("gfx1151.txt") != std::string::npos;
+        check(o51.size() == 8 && !old_rev, "tune key: no read path (tune5, ledger, tune4 / 3 / -) names an older gfx1151 revision (r1, r2)");
+        const auto o51s = reads(Arch::gfx1151, 2, true);
+        check(has(o51s, w + "m.gguf-123-gfx1151r3-fdq2-1025.txt") && o51s.size() == 8,
+              "tune key: gfx1151 with WHIRL_FDQ8S=t2 reads its own table (stem and tune5 name)");
+        check(!o51s.empty() && !o51.empty() && o51s[0] != o51[0] && !has(o51s, w + "m.gguf-123-gfx1151r3.txt"),
+              "tune key: gfx1151 WHIRL_FDQ8S=t2 reads neither the shared tune5 file nor the shared tune4 file");
     }
 
     // (4) loadOrTune reads the keyed file: the r2 table and the shared r3 table are both present
@@ -4722,6 +4758,131 @@ void testTuneCacheLongOld() {
     check(opened == want, "tune5 2c#7 control: tune5, the ledger, then tune4 / tune3 / tune- in the v0.2.5 order");
 }
 
+// v0251-tunetest (REVIEW-v0251-int C-1): tune_cache::tune5KeyedName / resolveKeyed (the merge of v0251-path's tune5 cache and
+// v0251-a3key's selection key), driven by a fake Io (no disk). Fails when: the selection stops changing the name; two
+// selections share a name; the no-selection name differs from resolve() / tune5Name; a table of another suffix (the
+// 0.2.5 r2 table) or another selection is read; a name leaves the kTune5NameMax budget; a ledger line of one key blocks
+// another. Mutations: scratch/v0251_tunetest/*.patch (HANDOFF lists the failing CHECK of each).
+void testTuneCacheSelection() {
+    namespace pp = whirl::platform::paths;
+    namespace pb = whirl::platform::path_budget;
+    const std::string base = "C:\\L", mp = "C:\\m\\Swift.gguf", name = "Swift.gguf";
+    const std::string r3 = "-gfx1151r3", r2 = "-gfx1151r2";
+    const std::uint64_t size = 10;
+    const std::string sels[] = {"-fdq0", "-fdq1-1025", "-fdq2-1025", "-fdq2-2048", "-fdqd-0", "-fdqd-2048"};
+    const auto accept = [](const std::string& t, std::size_t) { return t.rfind("TABLE", 0) == 0; };
+
+    // (K1-K4) the name
+    const std::string plain = tc::tune5KeyedName(name, size, r3, "");
+    check(plain == pp::tune5Name(name, size, r3), "tune sel K1: no selection -> tune5Name unchanged (v0251-path)");
+    std::set<std::string> names{plain};
+    const std::size_t h0 = plain.size() - 4 - r3.size() - 16;  // where h16 starts
+    for (const std::string& s : sels) {
+        const std::string n = tc::tune5KeyedName(name, size, r3, s);
+        check(n != plain, "tune sel K2: selection '" + s + "' changes the tune5 name");
+        check(names.insert(n).second, "tune sel K3: selection '" + s + "' has a name of its own (two selections never share a table)");
+        check(n.size() == plain.size() && n.substr(0, h0) == plain.substr(0, h0) && n.substr(h0 + 16) == plain.substr(h0 + 16),
+              "tune sel K4: selection '" + s + "' changes only the 16 hex digits (prefix, suffix, .txt stay): " + n);
+        std::string key = name;
+        key.push_back('\0');
+        key += std::to_string(size);
+        key.push_back('\0');
+        key += s;
+        char h16[17];
+        std::snprintf(h16, sizeof h16, "%016llx", static_cast<unsigned long long>(pp::fnv1a64(key)));
+        check(n.substr(h0, 16) == h16, "tune sel K5: h16 = fnv1a64(name NUL size NUL selection) for '" + s + "'");
+    }
+    // the key holds the name and the size as well
+    check(tc::tune5KeyedName(name, size, r3, "-fdq0") != tc::tune5KeyedName(name, size + 1, r3, "-fdq0"), "tune sel K6: same selection, another size -> another name");
+    check(tc::tune5KeyedName(name, size, r3, "-fdq0") != tc::tune5KeyedName("swift.gguf", size, r3, "-fdq0"), "tune sel K6: same selection, another name -> another name");
+    // K7: the 61-character budget, whatever the name / size / suffix / selection
+    for (const std::string& nm : {std::string("Swift.gguf"), std::string(5000, 'n'), std::string("\xE6\xA8\xA1\xE5\x9E\x8B-\xC3\xBC.gguf")})
+        for (const std::uint64_t sz : {std::uint64_t(0), size, ~std::uint64_t(0)})
+            for (const std::string& sf : {std::string(), r3})
+                for (const std::string& s : {std::string(), sels[2], sels[3]}) {
+                    const std::string n = tc::tune5KeyedName(nm, sz, sf, s);
+                    check(n.size() <= pb::kTune5NameMax && n.size() == pp::tune5Name(nm, sz, sf).size(),
+                          "tune sel K7: the tune5 name stays within kTune5NameMax (" + std::to_string(n.size()) + " chars, selection '" + s + "')");
+                }
+
+    // (K8) the reads of one resolve: tune5, the ledger, then the v0.2.5 names with the selection in the stem
+    const auto reads_for = [&](const std::string& sf, const std::string& sel) {
+        const std::string n5 = tc::tune5KeyedName(name, size, sf, sel);
+        const std::string stem = name + "-" + std::to_string(size) + sf + sel + ".txt";
+        return std::vector<std::string>{base + "\\whirl\\" + n5,
+                                        base + "\\whirl\\tune5-imported.txt",
+                                        base + "\\whirl\\tune4-" + stem,
+                                        base + "\\whirl-r9700\\tune4-" + stem,
+                                        base + "\\whirl\\tune3-" + stem,
+                                        base + "\\whirl-r9700\\tune3-" + stem,
+                                        base + "\\whirl\\tune-" + stem,
+                                        base + "\\whirl-r9700\\tune-" + stem};
+    };
+    {
+        TkFake a, b;
+        const tc::Plan pa = tc::resolve(base, mp, size, r3, 11, accept, a.io());
+        const tc::Plan pb2 = tc::resolveKeyed(base, mp, size, r3, "", 11, accept, b.io());
+        check(a.opened == reads_for(r3, ""), "tune sel K8: no selection reads tune5, ledger, tune4 / 3 / - in the v0.2.5 order, plain stem");
+        check(pa.write_path == base + "\\whirl\\" + pp::tune5Name(name, size, r3), "tune sel K8: no selection writes the tune5Name file (= resolve)");
+        check(b.opened == a.opened && pb2.write_path == pa.write_path && pb2.found == pa.found && pb2.name == pa.name,
+              "tune sel K8: resolveKeyed(.., \"\", ..) = resolve()");
+        TkFake c;
+        const tc::Plan ps = tc::resolveKeyed(base, mp, size, r3, "-fdq2-1025", 11, accept, c.io());
+        check(c.opened == reads_for(r3, "-fdq2-1025"), "tune sel K9: selection -fdq2-1025 reads its own tune5 name and the stems with '-fdq2-1025'");
+        check(ps.write_path == c.opened[0] && ps.write_path != pa.write_path, "tune sel K9: the table is written to the selection's own tune5 file");
+    }
+
+    // (K10) the matrix: a full set of files (tune5 + tune4 x2 + tune3 x2 + tune- x2) of ONE (suffix, selection) is read by
+    // that key only, never by another suffix (the 0.2.5 r2 table; the plain gfx1201 name) or another selection
+    const std::string sfxs[] = {"", r2, r3};
+    const std::string sel_all[] = {"", "-fdq0", "-fdq2-1025", "-fdq2-2048"};
+    for (const std::string& fs_ : sfxs)
+        for (const std::string& fe : sel_all)
+            for (const std::string& qs : sfxs)
+                for (const std::string& qe : sel_all) {
+                    TkFake f;
+                    for (const std::string& p : reads_for(fs_, fe)) f.files[p] = "TABLE " + fs_ + fe + "\n";
+                    f.files.erase(base + "\\whirl\\tune5-imported.txt");
+                    const tc::Plan p = tc::resolveKeyed(base, mp, size, qs, qe, 11, accept, f.io());
+                    const bool same = fs_ == qs && fe == qe;
+                    const std::string what = "files of suffix '" + fs_ + "' selection '" + fe + "', load suffix '" + qs + "' selection '" + qe + "'";
+                    if (same) {
+                        check(p.found == tc::Found::full && p.read_path == p.write_path, "tune sel K10: the key's own tune5 table is read: " + what);
+                    } else {
+                        check(p.found == tc::Found::none && f.copied.empty() && f.appended.empty(),
+                              "tune sel K10: another suffix / selection's tables are not read, copied or recorded: " + what);
+                    }
+                }
+
+    // (K11) import of a selection's tune4: copied to the selection's tune5 name, ledger line keyed by it
+    {
+        TkFake f;
+        const std::string sel = "-fdq2-1025";
+        const auto rd = reads_for(r3, sel);
+        f.files[rd[2]] = "TABLE four\n";
+        const tc::Plan p = tc::resolveKeyed(base, mp, size, r3, sel, 11, accept, f.io());
+        check(p.found == tc::Found::full && p.read_path == rd[2], "tune sel K11: the selection's tune4 is used");
+        check(f.copied == std::vector<std::string>{rd[0]} && f.files[rd[0]] == "TABLE four\n", "tune sel K11: copied to the selection's tune5 name");
+        const std::string led = f.files[rd[1]];
+        const std::string n5 = rd[0].substr(rd[0].rfind('\\') + 1);
+        check(led.rfind(n5 + "\t", 0) == 0, "tune sel K11: the ledger line starts with the selection's tune5 name");
+        // K12 (F-1 per key): a ledger line of the shared name does not block this selection's import; its own line does
+        TkFake g;
+        g.files[rd[2]] = "TABLE four\n";
+        g.files[rd[1]] = tc::tune5KeyedName(name, size, r3, "") + "\tSwift.gguf\t1\t2\n";
+        const tc::Plan p2 = tc::resolveKeyed(base, mp, size, r3, sel, 11, accept, g.io());
+        check(p2.found == tc::Found::full, "tune sel K12: the shared name's ledger line does not block the selection's import");
+        g.files.erase(rd[0]);  // tune5 deleted, the selection's own ledger line is there now
+        const tc::Plan p3 = tc::resolveKeyed(base, mp, size, r3, sel, 11, accept, g.io());
+        check(p3.found == tc::Found::none, "tune sel K12: after the selection's own import, deleting its tune5 tunes again (no old table read)");
+        // K13: tune3 of the selection -> buckets 0 / 1, nothing copied
+        TkFake h;
+        h.files[rd[4]] = "TABLE three\n";
+        const tc::Plan p4 = tc::resolveKeyed(base, mp, size, r3, sel, 11, accept, h.io());
+        check(p4.found == tc::Found::old_buckets01 && p4.read_path == rd[4] && h.copied.empty(), "tune sel K13: the selection's tune3 gives buckets 0 / 1");
+    }
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     if (argc == 2 && std::string(argv[1]) == "--child-envpaths") return childEnvPaths();  // bug-envpaths helper mode
@@ -4779,6 +4940,7 @@ int main(int argc, char** argv) {
     testTuneCacheDiskName();
     testTuneCacheImport();
     testTuneCacheEdges();
+    testTuneCacheSelection();  // v0251-tunetest
 #ifdef WHIRL_SOURCE_DIR
     testServerPoolViaStartup();  // arch025-surv
     testServerCtrlOrder();  // arch025-surv2

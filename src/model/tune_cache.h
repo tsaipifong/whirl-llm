@@ -70,6 +70,15 @@ using Accept = std::function<bool(const std::string& text, std::size_t n_buckets
 Plan resolve(const std::string& base, const std::string& model_path, std::uint64_t size, const std::string& suffix,
              std::size_t n_tune, const Accept& accept, const Io& io);
 
+// v0251-int / v0251-tunetest: resolve() with the a3key selection (device selection override: tuneSelectionSuffix, "" at
+// the defaults). resolve() is resolveKeyed(.., "", ..). selection != "" goes into the h16 of the tune5 name (the name
+// keeps its length, path_budget::kTune5NameMax) and into the stem of the v0.2.5 names, so a table is only ever read
+// back by the selection that tuned it. Declared here so tests/model drives them with a fake Io; loadOrTune calls
+// resolveKeyed.
+std::string tune5KeyedName(const std::string& name, std::uint64_t size, const std::string& suffix, const std::string& selection);
+Plan resolveKeyed(const std::string& base, const std::string& model_path, std::uint64_t size, const std::string& suffix,
+                  const std::string& selection, std::size_t n_tune, const Accept& accept, const Io& io);
+
 // The tune5 file text: the header line "# model <name> <size>" then the table (Model::writeTune). applyTuneText skips a
 // line whose first token is not a number, so a name such as 7b-model.gguf is never read as a table row.
 std::string fileText(const std::string& name, std::uint64_t size, const std::string& table);
