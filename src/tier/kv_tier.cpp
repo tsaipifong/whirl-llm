@@ -2486,6 +2486,15 @@ void declarePinned(const char* local_app_data, std::uint64_t bytes) {
     }
 }
 
+bool pinnedNoteLive(platform::proc::ProcState, std::uint64_t, std::uint64_t) { return true; }
+
+PinnedSweep sweepPinnedNotes(const PinnedNoteOps&, std::uint32_t, std::size_t) { return {}; }
+
+PinnedSweep sweepPinned(const char*, std::size_t) { return {}; }
+
+void retractPinned(const char*) {}
+PinnedNoteGuard::~PinnedNoteGuard() { retractPinned(lad); }  // v0251-p7iso: out of line (kv_tier.h)
+
 std::uint64_t hashStr(std::uint64_t h0, std::string_view s) {
     std::uint64_t h = h0;
     for (char c : s) {

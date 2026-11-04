@@ -61,6 +61,8 @@ std::wstring exePath() {
 
 std::uint32_t currentId() { return GetCurrentProcessId(); }
 
+ProcState processState(std::uint32_t, std::uint64_t*) { return ProcState::kUnknown; }
+
 Handle currentProcess() { return GetCurrentProcess(); }
 
 bool workingSetBytes(Handle h, std::uint64_t* bytes) {

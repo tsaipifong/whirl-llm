@@ -36,6 +36,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -5031,6 +5032,212 @@ static void testBackendCleanHelper() {
     CHECK(backendClean(nb, "stream"));
 }
 
+// v0251-pathb (B26-7, PATH-256 P7): %LOCALAPPDATA%\whirl\pinned\<pid>.txt was written by every server and never
+// deleted (6,947 notes on one machine, 2026-11-03). Pinned here:
+//  (1) the liveness rule (pinnedNoteLive) and the sweep (sweepPinnedNotes) on fake ops: only "<decimal pid>.txt" names;
+//      own note never swept and its pid never queried; kGone / pid reused (created after the note's last write) ->
+//      deleted; kUnknown and created <= last write -> kept; at most max_remove deletes per sweep; a failed delete counted
+//  (2) platform::proc::processState on real processes: this process kRunning (created <= now); an exited child whose
+//      handle we still hold kGone (OpenProcess alone would succeed); a pid no process has kGone; the System pid 4 not kGone
+//  (3) the real folder: declarePinned writes "pinned_mib <bytes >> 20>"; sweepPinned deletes the exited child's note and
+//      a live (suspended) child's note whose last write is before that child's creation (pid reuse), keeps a live child's
+//      fresh note, this process's note and a file that is not a note; retractPinned deletes this process's note (twice ok)
+//  (4) cost: 1,000 stale notes -> 256 per sweep (the rest at later starts), every sweep timed
+static std::uint64_t fileTimeNow() {
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    return (static_cast<std::uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+}
+
+static bool setNoteWriteTime(const fs::path& p, std::uint64_t t) {
+    HANDLE h = CreateFileW(p.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FILETIME ft{static_cast<DWORD>(t & 0xffffffffu), static_cast<DWORD>(t >> 32)};
+    const BOOL ok = SetFileTime(h, nullptr, nullptr, &ft);
+    CloseHandle(h);
+    return ok != 0;
+}
+
+static bool writeNote(const fs::path& p, const char* text) {
+    FILE* f = _wfopen(p.c_str(), L"wb");
+    if (f == nullptr) return false;
+    std::fputs(text, f);
+    std::fclose(f);
+    return true;
+}
+
+static std::string readNote(const fs::path& p) {
+    FILE* f = _wfopen(p.c_str(), L"rb");
+    if (f == nullptr) return "<missing>";
+    char b[128] = {};
+    const std::size_t n = std::fread(b, 1, sizeof(b) - 1, f);
+    std::fclose(f);
+    return std::string(b, n);
+}
+
+// a child of this test exe: suspended (running, never runs code) or run to its end (--child-exeid)
+static bool startChild(bool suspended, PROCESS_INFORMATION* pi) {
+    std::vector<wchar_t> b(32768);
+    const DWORD n = GetModuleFileNameW(nullptr, b.data(), static_cast<DWORD>(b.size()));
+    if (n == 0 || n >= b.size()) return false;
+    std::wstring cmd = L"\"" + std::wstring(b.data(), n) + L"\" --child-exeid";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    *pi = PROCESS_INFORMATION{};
+    return CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, suspended ? CREATE_SUSPENDED : 0, nullptr, nullptr,
+                          &si, pi) != 0;
+}
+
+static void testPinnedNotes(const fs::path& dir) {
+    namespace pproc = whirl::platform::proc;
+    using pproc::ProcState;
+    // (1) the rule
+    CHECK(!pinnedNoteLive(ProcState::kGone, 0, 100));
+    CHECK(pinnedNoteLive(ProcState::kUnknown, 0, 100));
+    CHECK(pinnedNoteLive(ProcState::kRunning, 50, 100));
+    CHECK(pinnedNoteLive(ProcState::kRunning, 100, 100));
+    CHECK(!pinnedNoteLive(ProcState::kRunning, 101, 100));
+    {
+        struct Fake {
+            ProcState st;
+            std::uint64_t created;
+        };
+        std::map<std::uint32_t, Fake> procs{{100, {ProcState::kGone, 0}},      {200, {ProcState::kRunning, 50}},
+                                           {300, {ProcState::kRunning, 500}}, {400, {ProcState::kUnknown, 0}},
+                                           {999, {ProcState::kGone, 0}},      {123, {ProcState::kGone, 0}}};
+        const std::vector<std::wstring> names{L"100.txt", L"200.txt", L"300.txt", L"400.txt", L"999.txt", L"abc.txt",
+                                              L"0123.txt", L"123.log", L"4294967296.txt", L"desktop.ini", L".txt"};
+        std::vector<std::wstring> removed;
+        std::vector<std::uint32_t> asked;
+        PinnedNoteOps o;
+        o.list = [&](const std::function<void(const std::wstring&, std::uint64_t)>& fn) {
+            for (const auto& n : names) fn(n, 100);
+        };
+        o.state = [&](std::uint32_t pid, std::uint64_t* created) {
+            asked.push_back(pid);
+            const auto it = procs.find(pid);
+            if (it == procs.end()) return ProcState::kGone;
+            *created = it->second.created;
+            return it->second.st;
+        };
+        o.remove = [&](const std::wstring& n) {
+            removed.push_back(n);
+            return true;
+        };
+        const PinnedSweep r = sweepPinnedNotes(o, 999, 256);
+        CHECK_EQ(r.removed, std::size_t{2});
+        CHECK((removed == std::vector<std::wstring>{L"100.txt", L"300.txt"}));
+        CHECK_EQ(r.seen, std::size_t{5});
+        CHECK_EQ(r.live, std::size_t{3});  // 200 (created before the note), 400 (unknown), 999 (this process)
+        CHECK_EQ(r.other, std::size_t{6});
+        CHECK(r.failed == 0 && !r.capped);
+        CHECK(std::find(asked.begin(), asked.end(), 999u) == asked.end());  // own pid never queried
+        // the cap
+        std::vector<std::wstring> many;
+        for (int k = 1; k <= 10; ++k) many.push_back(std::to_wstring(1000 + 4 * k) + L".txt");
+        o.list = [&](const std::function<void(const std::wstring&, std::uint64_t)>& fn) {
+            for (const auto& n : many) fn(n, 100);
+        };
+        removed.clear();
+        const PinnedSweep c3 = sweepPinnedNotes(o, 999, 3);
+        CHECK(c3.removed == 3 && c3.capped && removed.size() == 3);
+        removed.clear();
+        const PinnedSweep c0 = sweepPinnedNotes(o, 999, 0);
+        CHECK(c0.removed == 0 && c0.capped && removed.empty());
+        // a delete that fails
+        o.remove = [&](const std::wstring&) { return false; };
+        const PinnedSweep f = sweepPinnedNotes(o, 999, 256);
+        CHECK(f.removed == 0 && f.failed == 10 && !f.capped);
+    }
+    // (2) processState on real processes
+    {
+        std::uint64_t created = 0;
+        CHECK(pproc::processState(pproc::currentId(), &created) == ProcState::kRunning);
+        CHECK(created > 0 && created <= fileTimeNow());
+        PROCESS_INFORMATION pi{};
+        CHECK(startChild(false, &pi));
+        if (pi.hProcess != nullptr) {
+            CHECK(WaitForSingleObject(pi.hProcess, 60000) == WAIT_OBJECT_0);
+            std::uint64_t c = 0;
+            CHECK(pproc::processState(pi.dwProcessId, &c) == ProcState::kGone);  // exited; our handle keeps its object
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        CHECK(pproc::processState(4000000004u, &created) == ProcState::kGone);
+        CHECK(pproc::processState(4, &created) != ProcState::kGone);  // System: running (or access denied = unknown)
+    }
+    // (3) the real folder
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    const fs::path pdir = dir / L"whirl" / L"pinned";
+    const std::string lad = dir.string();
+    CHECK(sweepPinned(lad.c_str()).seen == 0);  // no folder yet: nothing, no error
+    CHECK(sweepPinned(nullptr).seen == 0);
+    declarePinned(lad.c_str(), (5ull << 20) + 7);
+    const fs::path own = pdir / (std::to_wstring(pproc::currentId()) + L".txt");
+    CHECK_EQ(readNote(own), std::string("pinned_mib 5\n"));
+    PROCESS_INFORMATION ended{}, live_fresh{}, live_reused{};
+    CHECK(startChild(false, &ended));
+    CHECK(ended.hProcess != nullptr && WaitForSingleObject(ended.hProcess, 60000) == WAIT_OBJECT_0);
+    CHECK(startChild(true, &live_fresh));
+    CHECK(startChild(true, &live_reused));
+    const fs::path n_ended = pdir / (std::to_wstring(ended.dwProcessId) + L".txt");
+    const fs::path n_fresh = pdir / (std::to_wstring(live_fresh.dwProcessId) + L".txt");
+    const fs::path n_reused = pdir / (std::to_wstring(live_reused.dwProcessId) + L".txt");
+    const fs::path n_system = pdir / L"4.txt";
+    const fs::path other = pdir / L"readme.txt";
+    CHECK(writeNote(n_ended, "pinned_mib 1\n") && writeNote(n_fresh, "pinned_mib 2\n") && writeNote(n_reused, "pinned_mib 3\n"));
+    CHECK(writeNote(n_system, "pinned_mib 4\n") && writeNote(other, "not a note\n"));
+    CHECK(setNoteWriteTime(n_reused, fileTimeNow() - 36000000000ull));  // an hour before that child started
+    const PinnedSweep r = sweepPinned(lad.c_str());
+    std::printf("pinned sweep (real): seen %zu removed %zu live %zu other %zu failed %zu\n", r.seen, r.removed, r.live, r.other,
+                r.failed);
+    CHECK(!fs::exists(n_ended) && !fs::exists(n_reused));
+    CHECK(fs::exists(n_fresh) && fs::exists(n_system) && fs::exists(own) && fs::exists(other));
+    CHECK(r.removed == 2 && r.live == 3 && r.other == 1 && r.failed == 0);
+    for (PROCESS_INFORMATION* p : {&live_fresh, &live_reused}) {
+        if (p->hProcess == nullptr) continue;
+        TerminateProcess(p->hProcess, 0);
+        WaitForSingleObject(p->hProcess, 10000);
+        CloseHandle(p->hThread);
+        CloseHandle(p->hProcess);
+    }
+    if (ended.hProcess != nullptr) {
+        CloseHandle(ended.hThread);
+        CloseHandle(ended.hProcess);
+    }
+    retractPinned(lad.c_str());
+    CHECK(!fs::exists(own));
+    retractPinned(lad.c_str());  // already gone: no error
+    CHECK(fs::exists(other));
+    {  // v0251-p7iso: PinnedNoteGuard (destructor now in kv_tier.cpp) deletes this process's note at scope exit
+        declarePinned(lad.c_str(), 1ull << 20);
+        CHECK(fs::exists(own));
+        { const PinnedNoteGuard g(lad.c_str()); }
+        CHECK(!fs::exists(own));
+        CHECK(fs::exists(other));
+    }
+    // (4) cost: 1,000 stale notes (pids no process has)
+    fs::remove_all(pdir, ec);
+    fs::create_directories(pdir, ec);
+    for (int k = 0; k < 1000; ++k) writeNote(pdir / (std::to_wstring(4000000004ull + 4ull * k) + L".txt"), "pinned_mib 1\n");
+    std::size_t total = 0, sweeps = 0;
+    for (;;) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const PinnedSweep s = sweepPinned(lad.c_str());
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("pinned sweep %zu: removed %zu capped %d in %.1f ms\n", sweeps, s.removed, s.capped ? 1 : 0, ms);
+        CHECK(s.removed <= kPinnedSweepMax);
+        CHECK(ms < 5000.0);
+        total += s.removed;
+        ++sweeps;
+        if (!s.capped || sweeps > 10) break;
+    }
+    CHECK_EQ(total, std::size_t{1000});
+    CHECK_EQ(sweeps, std::size_t{4});  // 256 + 256 + 256 + 232
+    fs::remove_all(dir, ec);
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::strcmp(argv[1], "--child-exeid") == 0) return childExeId();  // arch025-d7 helper mode
     whirl::test::clearWhirlEnv({L"WHIRL_TIER_ONLY", L"WHIRL_TIER_AMP"});  // FR-TEST P3-11
@@ -5054,6 +5261,10 @@ int main(int argc, char** argv) {
     if (want("testExeIdentityLongPath")) {
         std::printf("-- %s\n", "testExeIdentityLongPath");
         testExeIdentityLongPath(dir / L"d7_exeid_long");
+    }
+    if (want("testPinnedNotes")) {
+        std::printf("-- %s\n", "testPinnedNotes");
+        testPinnedNotes(dir / L"b267_pinned");
     }
     if (want("testLongLogLine")) {
         std::printf("-- %s\n", "testLongLogLine");
