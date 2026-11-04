@@ -1850,15 +1850,19 @@ int serveMain(int argc, char** argv, const char* program) {
     // (bug-emptyrootpaths: set but empty is nullopt = unset: log in the working folder, no default SSD folder)
     const std::optional<std::string> lad_v = platform::paths::localAppData();
     const char* lad = lad_v ? lad_v->c_str() : nullptr;
-    const std::string log_path = logPath(opt.log_file, [&] { return platform::paths::serverLogPath(lad_v); });  // (module server.args, leg 10)
-    try {
-        Log::open(log_path);
-    } catch (const std::exception& ex) {
-        std::fprintf(stderr, "warning: %s\n", ex.what());
+    // PATH-256 (2c #3 / #8): no default log file (the console only) when LOCALAPPDATA is over its budget, or unset with
+    // <working folder>\whirl-server.log over 255 UTF-16 units; "" below = that case
+    const std::string log_path = logPath(opt.log_file, [&] { return platform::paths::serverLogDefault().value_or(std::string()); });  // (module server.args, leg 10)
+    if (!log_path.empty()) {
+        try {
+            Log::open(log_path);
+        } catch (const std::exception& ex) {
+            std::fprintf(stderr, "warning: %s\n", ex.what());
+        }
     }
 
     try {
-        logI("WHIRL serve starting, log file {}", log_path);
+        logI("WHIRL serve starting, log file {}", log_path.empty() ? std::string("(none: the console only)") : log_path);
         LoadedModel lm;
         buildModel(opt, nreq, lad, lm);
         // the rest of the startup and the serving loop (arch025-C1b), in the old order

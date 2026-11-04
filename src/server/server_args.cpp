@@ -5,6 +5,8 @@
 
 #include "server_args.h"
 
+#include "platform/path_budget.h"  // PATH-256 2c #4: --kv-ssd-dir / WHIRL_KV_SSD_DIR at most 217 UTF-16 units
+
 #include "whirl/model_types.h"  // qwen35::max_drafts, qwen35::gdn_max_seg
 
 #include <algorithm>
@@ -171,6 +173,8 @@ Options parseServerArgs(const std::vector<std::string>& args, VisModeOk vis_mode
         else if (auto v10 = argValue(args, i, "--kv-ssd-dir")) {
             // bug-emptyrootpaths: "" + "\\whirl.lock" was the drive root (as llama.cpp --slot-save-path: refused)
             if (v10->empty()) throw ArgError("--kv-ssd-dir is empty (give a folder; to turn the SSD tier off use --kv-ssd-gb 0 or --kv-ssd-mode off)");
+            // PATH-256 (Sir Pifeng 「八、改」, pathlen256.DISCOVERY.md 2c #4): the one user path refused up front
+            if (const std::optional<std::string> why = platform::path_budget::kvSsdDirRefusal("--kv-ssd-dir", *v10)) throw ArgError(*why);
             opt.kv_ssd_dir = *v10;
         }
         else if (auto v11 = argValue(args, i, "--kv-ssd-gb")) opt.kv_ssd_gb = parseNum<std::uint64_t>(*v11, "--kv-ssd-gb");
@@ -227,6 +231,9 @@ ResolvedConfig resolveServerConfig(Options opt, std::optional<std::string> mode_
 void checkKvSsdDirEnv(const Options& opt, const std::optional<std::string>& kv_ssd_dir_env) {
     if (!opt.kv_ssd_dir && kv_ssd_dir_env && kv_ssd_dir_env->empty())
         throw ArgError("WHIRL_KV_SSD_DIR is empty (give a folder or remove the variable; to turn the SSD tier off use --kv-ssd-gb 0 or --kv-ssd-mode off)");
+    // PATH-256 2c #4: the variable has the flag's limit (217 UTF-16 units), named as the variable
+    if (!opt.kv_ssd_dir && kv_ssd_dir_env)
+        if (const std::optional<std::string> why = platform::path_budget::kvSsdDirRefusal("WHIRL_KV_SSD_DIR", *kv_ssd_dir_env)) throw ArgError(*why);
 }
 
 

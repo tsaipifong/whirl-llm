@@ -81,6 +81,10 @@ const OrderRow kOrder[] = {
 #if defined(_WIN32)
     {"platform.paths", "testLocalAppDataChild"},
 #endif
+    {"platform.paths", "testTune5Name"},  // PATH-256 P2
+#if defined(_WIN32)
+    {"platform.paths", "testLocalAppDataBudget"},  // PATH-256 P3
+#endif
 #if defined(_WIN32)
     {"hip.runtime", "testEnvPathsChild"},
 #endif
@@ -112,6 +116,7 @@ const OrderRow kOrder[] = {
     {"mem.governor", "testMemGovernorGrowOvershoot"},
     {"gpu_select", "testGpuSelect"},
     {"platform.fs", "testFsMappedOpen"},
+    {"platform.fs", "testPathLengthNote"},  // PATH-256 2c #5
 #if WHIRL_WITH_HIP && defined(_WIN32)
     {"gpu_select", "testProbeChild"},
 #endif

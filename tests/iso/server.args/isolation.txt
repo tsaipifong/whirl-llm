@@ -14,6 +14,8 @@ src       src/server/server_args.cpp
 src       src/common/numerics.cpp
 src       src/common/dump.cpp
 src       src/platform/env_win.cpp
+src       src/platform/path_budget_win.cpp
+src       src/platform/proc_win.cpp
 # headers (include closure of the sources above)
 hdr       include/whirl/dump.h
 hdr       include/whirl/hip.h
@@ -23,6 +25,8 @@ hdr       include/whirl/numerics.h
 hdr       src/platform/env.h
 hdr       src/server/server_args.h
 hdr       include/whirl/small_helpers.h
+hdr       src/platform/path_budget.h
+hdr       src/platform/proc.h
 # test program
 testsrc   tests/iso/server.args/server_args_tests.cpp
 testhdr   tests/iso/iso_test.h

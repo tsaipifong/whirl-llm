@@ -14,6 +14,7 @@
 #include "platform/fs_fake.h"
 #include "platform/net.h"
 #include "platform/net_fake.h"
+#include "platform/path_budget.h"
 #include "platform/paths.h"
 #include "platform/proc.h"
 #include "platform/sys.h"

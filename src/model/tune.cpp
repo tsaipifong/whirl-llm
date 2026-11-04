@@ -7,6 +7,9 @@
 
 #include "config/env_snapshot.h"
 #include "model/exec_dump.h"
+#include "model/tune_cache.h"
+#include "platform/fs.h"
+#include "platform/path_budget.h"
 #include "platform/paths.h"
 #include "whirl/dump.h"
 #include "whirl/model.h"
@@ -858,9 +861,14 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     for (const std::string& ign : p.ignored) log += "  " + ign + "\n";
     if (!m.load_note.empty()) log += "  " + m.load_note;
 
-    std::string cache_path;
-    std::vector<std::string> read_paths4, read_paths_old;
-    const std::string base = platform::paths::localAppData().value_or(std::string());  // arch025 PL1
+    // PATH-256 (v0.2.5.1 PLAN V1-22, pathlen256.DISCOVERY.md v3.1 2b-1): the tune5 file (at most 61 characters, keyed by
+    // the model's name on disk and its size), then a copy-only import of the v0.2.5 tables in their read order
+    // (model/tune_cache.h). Which table is read never changes an output: tune only picks kernels.
+    std::string cache_path, cache_name;
+    std::uint64_t cache_size = 0;
+    // only an older table: keep its buckets 0 / 1 (512 / 4096), tune the small-batch ones
+    bool have_old = false;
+    const std::string base = platform::paths::localAppData().value_or(std::string());  // arch025 PL1 (PATH-256 2c #3: nullopt when too long)
     if (!base.empty()) {
         std::error_code ec;
         const auto fsz = std::filesystem::file_size(widen(model_path), ec);
@@ -869,29 +877,20 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
             // gfx1151 table revision 2: the small-batch WMMA GEMMs (gemms) became candidates,
             // so tables written before them are tuned again.
             const std::string sfx = device::profile(m.arch).tune_cache_suffix;
-            const std::string bname = narrow(std::filesystem::path(widen(model_path)).filename().wstring());
-            const std::string stem = bname + "-" + std::to_string(fsz) + sfx + ".txt";
-            const std::string dir = platform::paths::whirlDir(base);
-            std::filesystem::create_directories(widen(dir), ec);
-            cache_path = platform::paths::tuneCachePath(base, stem);
-            // tables written by the research prototype are read as well (same format)
-            read_paths4 = platform::paths::tuneReadPaths4(base, stem);
-            read_paths_old = platform::paths::tuneReadPathsOld(base, stem);
+            std::filesystem::create_directories(widen(platform::paths::whirlDir(base)), ec);
+            const tune_cache::Plan plan = tune_cache::resolve(
+                base, model_path, fsz, sfx, n_tune, [&m](const std::string& text, std::size_t nb) { return m.readTune(text, nb); },
+                tune_cache::realIo());
+            for (const std::string& note : plan.notes) log += "  " + note + "\n";
+            if (plan.found == tune_cache::Found::full) {
+                log += "  prefill GEMM tune: cached (" + plan.read_path + ")\n";
+                return;
+            }
+            have_old = plan.found == tune_cache::Found::old_buckets01;
+            cache_path = plan.write_path;
+            cache_name = plan.name;
+            cache_size = plan.size;
         }
-    }
-    for (const std::string& p : read_paths4) {
-        std::string text;
-        if (tryRead(p, text) && m.readTune(text, n_tune)) {
-            log += "  prefill GEMM tune: cached (" + p + ")\n";
-            return;
-        }
-    }
-    // only an older table: keep its buckets 0 / 1 (512 / 4096), tune the small-batch ones
-    bool have_old = false;
-    for (const std::string& p : read_paths_old) {
-        if (have_old) break;
-        std::string text;
-        if (tryRead(p, text)) have_old = m.readTune(text, 2);
     }
     // one-time notice (stderr): the tuning pause would otherwise look like a hang
     // (measured: R9700 ~100 s for a 27B Q4_K_M model, a few s for MXFP4; Radeon 8060S
@@ -915,11 +914,127 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     log += fmt("  prefill GEMM autotune: %.1f s\n", (nowMs() - t0) / 1000.0);
     if (!cache_path.empty()) {
         try {
-            writeFile(cache_path, m.writeTune());
+            writeFile(cache_path, tune_cache::fileText(cache_name, cache_size, m.writeTune()));
         } catch (...) {
         }
     }
 }
 }  // namespace
+
+// PATH-256 P2 (v0.2.5.1 PLAN V1-22): the tune5 cache and the copy-only import of older tables (model/tune_cache.h,
+// pathlen256.DISCOVERY.md v3.1 2b-1; REVIEW-pathlen256-discovery-v3 F-1 / C-b)
+namespace tune_cache {
+namespace {
+std::string typedName(const std::string& path) { return narrow(std::filesystem::path(widen(path)).filename().wstring()); }
+}  // namespace
+
+Io realIo() {
+    Io io;
+    io.read = [](const std::string& path) -> std::optional<std::string> {
+        std::string text;
+        if (tryRead(path, text)) return text;
+        return std::nullopt;
+    };
+    // FindFirstFileW (platform::fs::forEachMatch) of the path: cFileName is the name the file system stores (any case,
+    // the 8.3 name). A pattern is not a file name (the \\?\ prefix itself holds a '?'); a failure (a folder without list
+    // permission) is nullopt and resolve() uses the typed name, as v0.2.5
+    io.disk_name = [](const std::string& model_path) -> std::optional<std::string> {
+        const std::wstring w = widen(model_path);
+        if (platform::path_budget::stripLongPrefix(w).find_first_of(L"*?") != std::wstring::npos) return std::nullopt;
+        std::optional<std::string> name;
+        platform::fs::forEachMatch(platform::fs::longPathForm(w), [&name](const wchar_t* n, std::uint64_t) {
+            if (!name) name = narrow(n);
+        });
+        return name;
+    };
+    io.copy_no_replace = [](const std::string& from, const std::string& to) {
+        return platform::fs::copyNoReplace(widen(from).c_str(), widen(to).c_str());
+    };
+    io.append = [](const std::string& path, const std::string& line) {
+        std::FILE* f = platform::fs::openStdio(widen(path).c_str(), L"ab");
+        if (f == nullptr) return false;
+        const bool wrote = std::fwrite(line.data(), 1, line.size(), f) == line.size();
+        return std::fclose(f) == 0 && wrote;
+    };
+    io.stamp = [](const std::string& path) -> std::optional<Stamp> {
+        const std::wstring w = platform::fs::longPathForm(widen(path));
+        platform::fs::Attributes a;
+        if (!platform::fs::attributes(w.c_str(), &a)) return std::nullopt;
+        Stamp s;
+        s.name = typedName(path);
+        s.size = a.size;
+        s.last_write = a.last_write;
+        platform::fs::forEachMatch(w, [&s](const wchar_t* n, std::uint64_t) { s.name = narrow(n); });
+        return s;
+    };
+    return io;
+}
+
+Plan resolve(const std::string& base, const std::string& model_path, std::uint64_t size, const std::string& suffix,
+             std::size_t n_tune, const Accept& accept, const Io& io) {
+    namespace pp = platform::paths;
+    namespace pb = platform::path_budget;
+    Plan p;
+    if (base.empty()) return p;
+    const std::optional<std::string> disk = io.disk_name(model_path);
+    p.name = disk ? *disk : typedName(model_path);
+    p.size = size;
+    const std::string n5 = pp::tune5Name(p.name, size, suffix);
+    p.write_path = pp::tune5Path(base, n5);
+    if (const std::optional<std::string> text = io.read(p.write_path); text && accept(*text, n_tune)) {
+        p.found = Found::full;
+        p.read_path = p.write_path;
+        return p;
+    }
+    // F-1: once a model's tune5 name is in the ledger, no old table of the model is read again (deleting tune5 tunes again)
+    const std::string ledger = pp::tune5LedgerPath(base);
+    if (const std::optional<std::string> led = io.read(ledger)) {
+        for (std::size_t pos = 0; pos < led->size();) {
+            std::size_t e = led->find('\n', pos);
+            if (e == std::string::npos) e = led->size();
+            const std::string_view line(led->data() + pos, e - pos);
+            if (line.size() > n5.size() && line.substr(0, n5.size()) == n5 && line[n5.size()] == '\t') return p;
+            pos = e + 1;
+        }
+    }
+    // the v0.2.5 names (built with the same name) in the v0.2.5 order; one longer than kPathMax is skipped (2c #7)
+    const std::string stem = p.name + "-" + std::to_string(size) + suffix + ".txt";
+    const auto fits = [](const std::string& path) { return pb::utf16Units(path) <= pb::kPathMax; };
+    const auto record = [&](const std::string& old) {
+        std::string line = n5 + "\t";
+        if (const std::optional<Stamp> st = io.stamp(old))
+            line += st->name + "\t" + std::to_string(st->size) + "\t" + std::to_string(st->last_write);
+        else
+            line += typedName(old) + "\t-\t-";
+        if (!io.append(ledger, line + "\n"))
+            p.notes.push_back("WARN prefill GEMM tune: cannot add a line to " + ledger +
+                              " (deleting the tune5 file would import the same old table again)");
+    };
+    for (const std::string& old : pp::tuneReadPaths4(base, stem)) {
+        if (!fits(old)) continue;
+        const std::optional<std::string> text = io.read(old);
+        if (!text || !accept(*text, n_tune)) continue;
+        io.copy_no_replace(old, p.write_path);  // never over an existing tune5; a failure only means this run used the old file
+        record(old);
+        p.found = Found::full;
+        p.read_path = old;
+        return p;
+    }
+    for (const std::string& old : pp::tuneReadPathsOld(base, stem)) {
+        if (!fits(old)) continue;
+        const std::optional<std::string> text = io.read(old);
+        if (!text || !accept(*text, 2)) continue;
+        record(old);
+        p.found = Found::old_buckets01;
+        p.read_path = old;
+        return p;
+    }
+    return p;
+}
+
+std::string fileText(const std::string& name, std::uint64_t size, const std::string& table) {
+    return "# model " + name + " " + std::to_string(size) + "\n" + table;
+}
+}  // namespace tune_cache
 
 }  // namespace whirl::qwen35

@@ -86,6 +86,53 @@ void testFsMappedOpen() {
     std::filesystem::remove_all(dir, ec);
 }
 
+// PATH-256 (v0.2.5.1 PLAN V1-22, pathlen256.DISCOVERY.md v3.1 2c #5 / #6): a file the user gives is never refused for
+// its length; when its open / write fails, the message adds the full path's length in UTF-16 units and, from 260 on,
+// the 259 limit of Windows without long path support (English, then Traditional Chinese). Written from the design before
+// the implementation; every expected text is literal.
+static void testPathLengthNote() {
+    namespace pfs = whirl::platform::fs;
+    const std::string zh_long = "\xef\xbc\x8cWindows \xe6\x9c\xaa\xe9\x96\x8b\xe9\x95\xb7\xe8\xb7\xaf\xe5\xbe\x91\xe6\x94\xaf\xe6\x8f\xb4"
+                                "\xe6\x99\x82\xe4\xb8\x8a\xe9\x99\x90 259 \xe5\xad\x97\xe5\x85\x83";  // ，Windows 未開長路徑支援時上限 259 字元
+    const auto zh = [](std::size_t n) {  // " / 路徑長 N 字元（UTF-16）"
+        return " / \xe8\xb7\xaf\xe5\xbe\x91\xe9\x95\xb7 " + std::to_string(n) + " \xe5\xad\x97\xe5\x85\x83\xef\xbc\x88UTF-16\xef\xbc\x89";
+    };
+    const std::string p40 = "C:\\" + std::string(37, 'a');
+    CHECK(pfs::pathLengthNote(p40) == " (the path is 40 characters long in UTF-16" + zh(40) + ")");
+    const std::string p259 = "C:\\" + std::string(256, 'a');
+    CHECK(pfs::pathLengthNote(p259) == " (the path is 259 characters long in UTF-16" + zh(259) + ")");
+    const std::string p260 = "C:\\" + std::string(257, 'a');
+    CHECK(pfs::pathLengthNote(p260) ==
+          " (the path is 260 characters long in UTF-16; Windows without long path support allows at most 259" + zh(260) + zh_long + ")");
+    // the unit is UTF-16: 100 Chinese characters after C:\ are 103 characters (303 bytes)
+    std::string z = "C:\\";
+    for (int i = 0; i < 100; ++i) z += "\xe4\xb8\xad";
+    CHECK(pfs::pathLengthNote(z).find("the path is 103 characters long in UTF-16") != std::string::npos);
+    // \\?\ is not counted; a relative path is measured as its full path
+    CHECK(pfs::pathLengthNote("\\\\?\\" + p40).find("the path is 40 characters") != std::string::npos);
+    std::error_code ec;
+    const std::size_t cwd = std::filesystem::current_path(ec).wstring().size();
+    CHECK(pfs::pathLengthNote("rel\\x.txt").find("the path is " + std::to_string(cwd + 10) + " characters") != std::string::npos);
+    // the open / write failures carry it (readFile: --image, @file, server local images; writeFile: --out, debug dumps;
+    // MappedFile: the GGUF file); a path of 300 characters (a string only: nothing is created)
+    const std::string base = whirl::narrow((whirl::test::testTmpBase() / L"pln").wstring());
+    const std::string p300 = base + "\\" + std::string(300 - base.size() - 1, 'f');
+    const auto what = [](const std::function<void()>& f) {
+        try {
+            f();
+        } catch (const std::exception& e) {
+            return std::string(e.what());
+        }
+        return std::string();
+    };
+    const std::string r = what([&] { whirl::readFile(p300); });
+    CHECK(r.rfind("cannot open " + p300 + " (the path is 300 characters long in UTF-16; Windows without long path support allows at most 259", 0) == 0);
+    const std::string w = what([&] { whirl::writeFile(base + "\\no-such-folder\\out.bin", "x"); });
+    CHECK(w.rfind("cannot write " + base + "\\no-such-folder\\out.bin (the path is " + std::to_string(base.size() + 23) + " characters long in UTF-16 / ", 0) == 0);
+    const std::string mp = what([&] { whirl::MappedFile m(p300); });
+    CHECK(mp.rfind("cannot open " + p300 + " (the path is 300 characters long in UTF-16;", 0) == 0);
+}
+
 }  // namespace
 
 // the old main()'s calls of this module, in their order (tests/unit/unit_tests.cpp ORDER lists all modules)
@@ -93,6 +140,7 @@ const whirl::test::Suite& unitSuite_platform_fs() {
     static const whirl::test::Suite s{"platform.fs",
                                       {
                                           {"testFsMappedOpen", [] { testFsMappedOpen(); }},
+                                          {"testPathLengthNote", [] { testPathLengthNote(); }},  // PATH-256 2c #5
                                       },
                                       nullptr};
     return s;

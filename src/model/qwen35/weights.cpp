@@ -28,7 +28,7 @@ constexpr std::size_t ti(GgmlType t) { return static_cast<std::size_t>(t); }
 
 Reader::Reader(const std::string& path) {
     f_ = platform::fs::openStdio(widen(path).c_str(), L"rb");  // arch025 PL2 (re-pointed from src/model/loader.cpp at the int3 merge)
-    if (!f_) throw ModelError("OpenFailed", path);
+    if (!f_) throw ModelError("OpenFailed", path + platform::fs::pathLengthNote(path));  // PATH-256 2c #5: the length in UTF-16
     setvbuf(f_, nullptr, _IONBF, 0);
 }
 

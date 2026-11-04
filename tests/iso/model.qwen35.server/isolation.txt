@@ -77,6 +77,7 @@ src       src/vision/prompt.cpp
 src       src/vision/stb_image_impl.cpp
 src       src/vision/kernel_image.cpp
 src       tests/iso/vision/fake_vision_objects.cpp
+src       src/platform/path_budget_win.cpp
 # headers (include closure of the sources above)
 hdr       include/whirl/common.h
 hdr       include/whirl/device_mem.h
@@ -121,6 +122,7 @@ hdr       src/hip/log_name.h
 hdr       src/model/arch_registry.h
 hdr       src/model/device_lock.h
 hdr       src/model/exec_dump.h
+hdr       src/model/tune_cache.h
 hdr       src/model/qwen35/arch_names.h
 hdr       src/model/qwen35/context.h
 hdr       src/model/qwen35/forward_internal.h
@@ -141,6 +143,7 @@ hdr       src/server/backend.h
 hdr       src/server/vision_iface.h
 hdr       src/spec/policy.h
 hdr       src/vision/stb_image.h
+hdr       src/platform/path_budget.h
 # test program (fake_hip.cpp: the HIP layer's link double)
 testsrc   tests/iso/model.qwen35.server/model_qwen35_server_tests.cpp
 testsrc   tests/iso/fake_hip.cpp

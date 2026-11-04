@@ -18,6 +18,7 @@ hdr       src/platform/fs.h
 hdr       src/platform/fs_fake.h
 hdr       src/platform/net.h
 hdr       src/platform/net_fake.h
+hdr       src/platform/path_budget.h
 hdr       src/platform/paths.h
 hdr       src/platform/proc.h
 hdr       src/platform/sys.h

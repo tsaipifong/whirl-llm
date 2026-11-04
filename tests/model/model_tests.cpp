@@ -22,6 +22,10 @@
 #include "whirl/gpu_select.h"  // arch025-surv testLockGpuAbandoned
 #include "model/device_lock.h"  // arch025-surv testLockGpuAbandoned
 #include "platform/proc.h"  // arch025-surv testLockGpuAbandoned
+#include "model/tune_cache.h"         // PATH-256 P2 testTuneCache*
+#include "model/qwen35/tune_table.h"  // PATH-256 P2 (applyTuneText on a tune5 file)
+#include "platform/path_budget.h"     // PATH-256 P2
+#include "platform/paths.h"           // PATH-256 P2 (tune5Name)
 
 #include <algorithm>
 #include <chrono>
@@ -4208,6 +4212,263 @@ void testServerSsdDirForExeId() {
 }
 #endif
 
+// ---- PATH-256 P2 (v0.2.5.1 PLAN V1-22): the tune5 cache and the copy-only import of older tables ----
+// Written from progress/pathlen256.DISCOVERY.md v3.1 2b-1 and 2e-1 (a)-(h) (REVIEW-pathlen256-discovery-v3 F-1, C-b)
+// before the implementation. tune_cache::resolve runs on real files in a private folder; accept() stands in for
+// Model::readTune and records every table it is given (a table is accepted when its text starts with "TABLE" or with
+// the tune5 header line), so nothing reaches the GPU.
+namespace tc = whirl::qwen35::tune_cache;
+
+std::string tcSlurp(const std::filesystem::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+void tcPut(const std::filesystem::path& p, const std::string& s) { std::ofstream(p, std::ios::binary) << s; }
+std::size_t tcLines(const std::filesystem::path& p) {
+    const std::string s = tcSlurp(p);
+    return static_cast<std::size_t>(std::count(s.begin(), s.end(), '\n'));
+}
+
+struct TcCase {
+    std::filesystem::path root, lad, models;
+    std::string lad8;
+    std::vector<std::string> seen;  // texts given to accept()
+    tc::Accept acc;
+    TcCase() {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        root = whirl::test::testTmpBase() / L"tune5";
+        fs::remove_all(root, ec);
+        lad = root / L"lad";
+        models = root / L"m";
+        fs::create_directories(lad / L"whirl", ec);
+        fs::create_directories(lad / L"whirl-r9700", ec);
+        fs::create_directories(models, ec);
+        lad8 = whirl::narrow(lad.wstring());
+        acc = [this](const std::string& text, std::size_t n) {
+            seen.push_back(text + "|" + std::to_string(n));
+            return text.rfind("TABLE", 0) == 0 || text.rfind("# model ", 0) == 0;
+        };
+    }
+    ~TcCase() {
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+    }
+};
+
+void testTuneCacheImport() {
+    namespace fs = std::filesystem;
+    namespace pp = whirl::platform::paths;
+    TcCase t;
+    const fs::path model = t.models / L"Swift.gguf";
+    tcPut(model, "0123456789");  // 10 bytes
+    const std::string mp = whirl::narrow(model.wstring());
+    const std::string sfx = "-gfx1151r2";
+    const std::string n5 = pp::tune5Name("Swift.gguf", 10, sfx);
+    const fs::path t5 = t.lad / L"whirl" / whirl::widen(n5);
+    const fs::path t4w = t.lad / L"whirl" / L"tune4-Swift.gguf-10-gfx1151r2.txt";
+    const fs::path t4r = t.lad / L"whirl-r9700" / L"tune4-Swift.gguf-10-gfx1151r2.txt";
+    const fs::path t3r = t.lad / L"whirl-r9700" / L"tune3-Swift.gguf-10-gfx1151r2.txt";
+    const fs::path ledger = t.lad / L"whirl" / L"tune5-imported.txt";
+    const tc::Io io = tc::realIo();
+    std::error_code ec;
+    // (a) only a tune4: read, COPIED to tune5, the tune4 unchanged, one ledger line
+    tcPut(t4w, "TABLE tune4 whirl\n");
+    const auto t4_time = fs::last_write_time(t4w, ec);
+    tc::Plan p = tc::resolve(t.lad8, mp, 10, sfx, 11, t.acc, io);
+    check(p.found == tc::Found::full, "tune5 (a): a tune4 table is used");
+    check(p.read_path == whirl::narrow(t4w.wstring()), "tune5 (a): read from the tune4 file");
+    check(p.write_path == whirl::narrow(t5.wstring()), "tune5 (a): the cache file is the tune5 name");
+    check(fs::exists(t5, ec) && tcSlurp(t5) == "TABLE tune4 whirl\n", "tune5 (a): tune4 copied to tune5");
+    check(tcSlurp(t4w) == "TABLE tune4 whirl\n" && fs::last_write_time(t4w, ec) == t4_time, "tune5 (a): tune4 left as it was");
+    check(tcLines(ledger) == 1 && tcSlurp(ledger).rfind(n5 + "\t", 0) == 0, "tune5 (a): one ledger line keyed by the tune5 name");
+    check(tcSlurp(ledger).find("tune4-Swift.gguf-10-gfx1151r2.txt\t18\t") != std::string::npos, "tune5 (a): the ledger names the old file and its size");
+    // (c) v0.2.5 on the same machine rewrites its tune4; tune5 exists: tune5 is used, nothing imported again
+    tcPut(t4w, "TABLE tune4 whirl rewritten by 0.2.5\n");
+    t.seen.clear();
+    p = tc::resolve(t.lad8, mp, 10, sfx, 11, t.acc, io);
+    check(p.found == tc::Found::full && p.read_path == whirl::narrow(t5.wstring()), "tune5 (c): tune5 is read first");
+    check(t.seen.size() == 1 && t.seen[0] == "TABLE tune4 whirl\n|11", "tune5 (c): only tune5 parsed");
+    check(tcLines(ledger) == 1 && tcSlurp(t5) == "TABLE tune4 whirl\n", "tune5 (c): no second import, tune5 unchanged");
+    // (b) tune5 deleted: the model is in the ledger, no old table is read, everything is tuned again
+    fs::remove(t5, ec);
+    t.seen.clear();
+    p = tc::resolve(t.lad8, mp, 10, sfx, 11, t.acc, io);
+    check(p.found == tc::Found::none && t.seen.empty(), "tune5 (b): deleted tune5 -> tune again (no old table read)");
+    check(p.write_path == whirl::narrow(t5.wstring()), "tune5 (b): the new table goes to the tune5 name");
+    check(tcSlurp(t4w) == "TABLE tune4 whirl rewritten by 0.2.5\n", "tune5 (b): tune4 still untouched");
+}
+
+void testTuneCacheEdges() {
+    namespace fs = std::filesystem;
+    namespace pp = whirl::platform::paths;
+    const std::string sfx = "-gfx1151r2";
+    std::error_code ec;
+    {  // (d) a stale tune5 (accept says no) and a good tune4: the copy refuses to overwrite, tune5 keeps its content
+        TcCase t;
+        const fs::path model = t.models / L"Swift.gguf";
+        tcPut(model, "0123456789");
+        const fs::path t5 = t.lad / L"whirl" / whirl::widen(pp::tune5Name("Swift.gguf", 10, sfx));
+        tcPut(t5, "STALE\n");
+        tcPut(t.lad / L"whirl" / L"tune4-Swift.gguf-10-gfx1151r2.txt", "TABLE good\n");
+        const tc::Plan p = tc::resolve(t.lad8, whirl::narrow(model.wstring()), 10, sfx, 11, t.acc, tc::realIo());
+        check(p.found == tc::Found::full && p.read_path.find("tune4-") != std::string::npos, "tune5 (d): the tune4 table is used");
+        check(tcSlurp(t5) == "STALE\n", "tune5 (d): an existing tune5 is never overwritten by the import");
+    }
+    {  // (e) only a tune3 (buckets 0 / 1): those buckets, the rest tuned and written as tune5; tune3 untouched, no copy
+        TcCase t;
+        const fs::path model = t.models / L"Swift.gguf";
+        tcPut(model, "0123456789");
+        const fs::path t5 = t.lad / L"whirl" / whirl::widen(pp::tune5Name("Swift.gguf", 10, sfx));
+        const fs::path t3 = t.lad / L"whirl-r9700" / L"tune3-Swift.gguf-10-gfx1151r2.txt";
+        tcPut(t3, "TABLE three\n");
+        const tc::Plan p = tc::resolve(t.lad8, whirl::narrow(model.wstring()), 10, sfx, 11, t.acc, tc::realIo());
+        check(p.found == tc::Found::old_buckets01 && p.read_path == whirl::narrow(t3.wstring()), "tune5 (e): tune3 gives buckets 0 / 1");
+        check(t.seen.size() == 1 && t.seen[0] == "TABLE three\n|2", "tune5 (e): tune3 applied for 2 buckets");
+        check(!fs::exists(t5, ec) && p.write_path == whirl::narrow(t5.wstring()), "tune5 (e): no tune5 copied from an old-format table");
+        check(tcSlurp(t3) == "TABLE three\n", "tune5 (e): tune3 untouched");
+        check(tcLines(t.lad / L"whirl" / L"tune5-imported.txt") == 1, "tune5 (e): the import is in the ledger");
+    }
+    {  // (h) tune4 AND tune3 of one model: imported once from tune4; after deleting tune5 neither is read (REVIEW v3 F-1)
+        TcCase t;
+        const fs::path model = t.models / L"Swift.gguf";
+        tcPut(model, "0123456789");
+        const std::string mp = whirl::narrow(model.wstring());
+        const fs::path t5 = t.lad / L"whirl" / whirl::widen(pp::tune5Name("Swift.gguf", 10, sfx));
+        tcPut(t.lad / L"whirl-r9700" / L"tune4-Swift.gguf-10-gfx1151r2.txt", "TABLE four\n");
+        tcPut(t.lad / L"whirl-r9700" / L"tune3-Swift.gguf-10-gfx1151r2.txt", "TABLE three\n");
+        tcPut(t.lad / L"whirl" / L"tune-Swift.gguf-10-gfx1151r2.txt", "TABLE zero\n");
+        tc::Plan p = tc::resolve(t.lad8, mp, 10, sfx, 11, t.acc, tc::realIo());
+        check(p.found == tc::Found::full && p.read_path.find("whirl-r9700\\tune4-") != std::string::npos, "tune5 (h): first start imports the tune4");
+        fs::remove(t5, ec);
+        t.seen.clear();
+        p = tc::resolve(t.lad8, mp, 10, sfx, 11, t.acc, tc::realIo());
+        check(p.found == tc::Found::none && t.seen.empty(), "tune5 (h): after deleting tune5 every bucket is tuned again, tune3 / tune- not read");
+    }
+    {  // (g) the ledger cannot be written: a warning, this run as usual (the table is used and copied)
+        TcCase t;
+        const fs::path model = t.models / L"Swift.gguf";
+        tcPut(model, "0123456789");
+        fs::create_directories(t.lad / L"whirl" / L"tune5-imported.txt", ec);  // a folder: the append fails
+        tcPut(t.lad / L"whirl" / L"tune4-Swift.gguf-10-gfx1151r2.txt", "TABLE good\n");
+        const tc::Plan p = tc::resolve(t.lad8, whirl::narrow(model.wstring()), 10, sfx, 11, t.acc, tc::realIo());
+        check(p.found == tc::Found::full, "tune5 (g): the run goes on");
+        check(p.notes.size() == 1 && p.notes[0].find("tune5-imported.txt") != std::string::npos, "tune5 (g): one warning naming the ledger");
+        check(fs::exists(t.lad / L"whirl" / whirl::widen(pp::tune5Name("Swift.gguf", 10, sfx)), ec), "tune5 (g): tune5 copied all the same");
+    }
+    {  // no LOCALAPPDATA: no cache at all, no file call
+        int calls = 0;
+        tc::Io io;
+        io.read = [&](const std::string&) { ++calls; return std::optional<std::string>(); };
+        io.disk_name = [&](const std::string&) { ++calls; return std::optional<std::string>(); };
+        io.copy_no_replace = [&](const std::string&, const std::string&) { ++calls; return false; };
+        io.append = [&](const std::string&, const std::string&) { ++calls; return false; };
+        io.stamp = [&](const std::string&) { ++calls; return std::optional<tc::Stamp>(); };
+        const tc::Plan p = tc::resolve("", "C:\\m\\x.gguf", 10, sfx, 11, [](const std::string&, std::size_t) { return true; }, io);
+        check(p.found == tc::Found::none && p.write_path.empty() && calls == 0, "tune5: no LOCALAPPDATA -> no cache, no file call");
+    }
+}
+
+// (f) the key is the name on disk: other spellings of the same file (case, 8.3) give the same tune5 file; C-b: when the
+// file system cannot tell (FindFirstFileW fails), the typed name is used as in v0.2.5
+void testTuneCacheDiskName() {
+    namespace fs = std::filesystem;
+    namespace pp = whirl::platform::paths;
+    const std::string sfx = "";
+    std::error_code ec;
+    {  // injected name function: C:\m\Swift.gguf and c:\M\SWIFT.GGUF are one file
+        std::vector<std::string> asked;
+        tc::Io io;
+        io.read = [](const std::string&) { return std::optional<std::string>(); };
+        io.disk_name = [&](const std::string& p) { asked.push_back(p); return std::optional<std::string>("Swift.gguf"); };
+        io.copy_no_replace = [](const std::string&, const std::string&) { return false; };
+        io.append = [](const std::string&, const std::string&) { return true; };
+        io.stamp = [](const std::string&) { return std::optional<tc::Stamp>(); };
+        const auto no = [](const std::string&, std::size_t) { return false; };
+        const tc::Plan a = tc::resolve("C:\\L", "C:\\m\\Swift.gguf", 7, sfx, 11, no, io);
+        const tc::Plan b = tc::resolve("C:\\L", "c:\\M\\SWIFT.GGUF", 7, sfx, 11, no, io);
+        check(a.write_path == "C:\\L\\whirl\\" + pp::tune5Name("Swift.gguf", 7, sfx), "tune5 (f): the key is the name on disk");
+        check(a.write_path == b.write_path && b.name == "Swift.gguf", "tune5 (f): another spelling, the same tune5 file");
+        check(asked.size() == 2 && asked[1] == "c:\\M\\SWIFT.GGUF", "tune5 (f): the name function gets the path as typed");
+        // C-b: the name function fails -> the typed file name
+        io.disk_name = [](const std::string&) { return std::optional<std::string>(); };
+        const tc::Plan c = tc::resolve("C:\\L", "c:\\M\\SWIFT.GGUF", 7, sfx, 11, no, io);
+        check(c.write_path == "C:\\L\\whirl\\" + pp::tune5Name("SWIFT.GGUF", 7, sfx) && c.name == "SWIFT.GGUF",
+              "tune5 C-b: no name from the file system -> the typed name (v0.2.5 behaviour)");
+    }
+    {  // the real name function (FindFirstFileW) on a real file
+        TcCase t;
+        const fs::path model = t.models / L"Swift-Long-Name.gguf";
+        tcPut(model, "0123456789");
+        const tc::Io io = tc::realIo();
+        const std::wstring up = (t.models / L"SWIFT-LONG-NAME.GGUF").wstring();
+        check(io.disk_name(whirl::narrow(up)) == std::optional<std::string>("Swift-Long-Name.gguf"), "tune5 (f): FindFirstFileW gives the stored name");
+        check(!io.disk_name(whirl::narrow((t.models / L"no-such.gguf").wstring())), "tune5 (f): a missing file has no name");
+        check(!io.disk_name(whirl::narrow((t.models / L"Swift*.gguf").wstring())), "tune5 (f): a pattern is not a file name");
+        const fs::path t5 = t.lad / L"whirl" / whirl::widen(pp::tune5Name("Swift-Long-Name.gguf", 10, sfx));
+        tcPut(t5, "TABLE five\n");
+        const tc::Plan p = tc::resolve(t.lad8, whirl::narrow(up), 10, sfx, 11, t.acc, io);
+        check(p.found == tc::Found::full && p.read_path == whirl::narrow(t5.wstring()), "tune5 (f): typed in capitals, the cached table is found");
+#ifdef _WIN32
+        wchar_t sh[1024];
+        const DWORD n = GetShortPathNameW(model.c_str(), sh, 1024);
+        if (n > 0 && n < 1024 && fs::path(sh).filename() != model.filename()) {
+            const tc::Plan s = tc::resolve(t.lad8, whirl::narrow(std::wstring(sh, n)), 10, sfx, 11, t.acc, io);
+            check(s.found == tc::Found::full && s.read_path == whirl::narrow(t5.wstring()), "tune5 (f): the 8.3 name finds the same table");
+        } else {
+            std::printf("  (tune5 (f) 8.3 case not run: no short name on this volume)\n");
+        }
+#endif
+    }
+}
+
+// the tune5 file text: header "# model <name> <size>", then the table; the real parser skips the header even for a
+// name that starts with a digit (7b-model.gguf), and the bucket rows still apply
+void testTuneCacheFileText() {
+    const std::string table = "0 1 2 3 4\n";
+    const std::string text = tc::fileText("7b-model.gguf", 12345, table);
+    check(text == "# model 7b-model.gguf 12345\n0 1 2 3 4\n", "tune5: header line then the table");
+    check(q::applyTuneText(text, 1, {}), "tune5: applyTuneText reads a tune5 file of 7b-model.gguf (header skipped)");
+    check(!q::applyTuneText("7b-model.gguf 12345\n" + table, 1, {}), "tune5: without '#' the name would be a broken row (control)");
+    // every device's suffix fits the budget of the name
+    for (hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151})
+        check(std::string(whirl::device::profile(a).tune_cache_suffix).size() <= whirl::platform::path_budget::kTuneSuffixMax,
+              "tune5: tune_cache_suffix within kTuneSuffixMax");
+}
+
+// 2c #7: an old table whose path is longer than kPathMax UTF-16 units is skipped (never opened); tune5 itself is read
+void testTuneCacheLongOld() {
+    std::vector<std::string> opened;
+    tc::Io io;
+    io.read = [&](const std::string& p) { opened.push_back(p); return std::optional<std::string>(); };
+    io.disk_name = [](const std::string&) { return std::optional<std::string>(); };
+    io.copy_no_replace = [](const std::string&, const std::string&) { return false; };
+    io.append = [](const std::string&, const std::string&) { return true; };
+    io.stamp = [](const std::string&) { return std::optional<tc::Stamp>(); };
+    const std::string lad = "C:\\" + std::string(whirl::platform::path_budget::kLocalAppDataMax - 3, 'L');  // 187
+    const std::string longname(100, 'n');
+    tc::resolve(lad, "C:\\m\\" + longname, 7, "", 11, [](const std::string&, std::size_t) { return false; }, io);
+    bool t5_read = false, over = false;
+    for (const std::string& p : opened) {
+        t5_read = t5_read || p.find("\\tune5-") != std::string::npos;
+        over = over || whirl::platform::path_budget::utf16Units(p) > whirl::platform::path_budget::kPathMax;
+    }
+    check(t5_read, "tune5 2c#7: the tune5 path is read");
+    check(!over, "tune5 2c#7: no path over 255 is opened (old names skipped)");
+    // control: a short base reads tune5, the ledger, then the old names in the v0.2.5 order
+    opened.clear();
+    tc::resolve("C:\\L", "C:\\m\\x.gguf", 7, "", 11, [](const std::string&, std::size_t) { return false; }, io);
+    const std::vector<std::string> want = {"C:\\L\\whirl\\" + whirl::platform::paths::tune5Name("x.gguf", 7, ""),
+                                           "C:\\L\\whirl\\tune5-imported.txt",
+                                           "C:\\L\\whirl\\tune4-x.gguf-7.txt",
+                                           "C:\\L\\whirl-r9700\\tune4-x.gguf-7.txt",
+                                           "C:\\L\\whirl\\tune3-x.gguf-7.txt",
+                                           "C:\\L\\whirl-r9700\\tune3-x.gguf-7.txt",
+                                           "C:\\L\\whirl\\tune-x.gguf-7.txt",
+                                           "C:\\L\\whirl-r9700\\tune-x.gguf-7.txt"};
+    check(opened == want, "tune5 2c#7 control: tune5, the ledger, then tune4 / tune3 / tune- in the v0.2.5 order");
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     if (argc == 2 && std::string(argv[1]) == "--child-envpaths") return childEnvPaths();  // bug-envpaths helper mode
@@ -4257,6 +4518,12 @@ int main(int argc, char** argv) {
     testMtpDefaults();
     testMxfp4Repack();
     testLockGpuAbandoned();  // arch025-surv
+    // PATH-256 P2 (v0.2.5.1 PLAN V1-22): tune5 cache + copy-only import
+    testTuneCacheFileText();
+    testTuneCacheLongOld();
+    testTuneCacheDiskName();
+    testTuneCacheImport();
+    testTuneCacheEdges();
 #ifdef WHIRL_SOURCE_DIR
     testServerPoolViaStartup();  // arch025-surv
     testServerCtrlOrder();  // arch025-surv2

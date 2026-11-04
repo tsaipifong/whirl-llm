@@ -30,6 +30,10 @@ target_sources(whirl_platform PRIVATE
   ${CMAKE_SOURCE_DIR}/src/platform/proc_win.cpp
   ${CMAKE_SOURCE_DIR}/src/platform/sys_win.cpp
   ${CMAKE_SOURCE_DIR}/src/platform/args_win.cpp)
+# PATH-256 (v0.2.5.1 PLAN V1-22): path_budget (every path limit with its unit, the install-folder / --kv-ssd-dir /
+# LOCALAPPDATA checks); kernel32 only
+target_sources(whirl_platform PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/platform/path_budget_win.cpp)
 # callers include "platform/<concern>.h"; never put src/platform itself on an include path (its time.h would shadow
 # the C library's <time.h>)
 target_include_directories(whirl_platform PUBLIC ${CMAKE_SOURCE_DIR}/src)

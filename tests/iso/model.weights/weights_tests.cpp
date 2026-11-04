@@ -129,6 +129,12 @@ void testReaderReadsAtOffset() {
     ISO_CHECK(b[0] == 6 && b[1] == 7 && b[2] == 8);
     ISO_CHECK(codeOf([&] { r.read(b, 3, 9); }).rfind("Truncated|", 0) == 0);  // short read
     ISO_CHECK(codeOf([&] { q::Reader x((tf.p.string() + ".missing")); }).rfind("OpenFailed|", 0) == 0);
+    // PATH-256 (pathlen256.DISCOVERY.md v3.1 2c #5): a model / mmproj / draft file that cannot be opened names its length
+    // in UTF-16 units (never refused for its length); the code stays OpenFailed. Written before the fix.
+    const std::string miss = tf.p.string() + ".missing";
+    ISO_CHECK(codeOf([&] { q::Reader x(miss); }) ==
+              "OpenFailed|OpenFailed: " + miss + " (the path is " + std::to_string(miss.size()) + " characters long in UTF-16 / " +
+                  "\xe8\xb7\xaf\xe5\xbe\x91\xe9\x95\xb7 " + std::to_string(miss.size()) + " \xe5\xad\x97\xe5\x85\x83\xef\xbc\x88UTF-16\xef\xbc\x89)");
 }
 
 void testVecUploadsThroughStaging() {

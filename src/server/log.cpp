@@ -38,7 +38,7 @@ void Log::open(const std::string& path) {
         std::filesystem::create_directories(p.parent_path(), ec);
     }
     std::FILE* f = platform::fs::openStdio(p.c_str(), L"ab");
-    if (!f) throw std::runtime_error("cannot open log file " + path);
+    if (!f) throw std::runtime_error("cannot open log file " + path + platform::fs::pathLengthNote(path));  // PATH-256 2c #5
     whirl::MutexLock lk(g_mutex);
     if (g_file) std::fclose(g_file);
     g_file = f;

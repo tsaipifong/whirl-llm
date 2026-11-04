@@ -44,6 +44,52 @@ void testResolve() {
     ISO_THROWS(checkKvSsdDirEnv(d, std::optional<std::string>("")), ArgError);
 }
 
+// PATH-256 P3 (v0.2.5.1 PLAN V1-22, pathlen256.DISCOVERY.md v3.1 2c #4, Sir Pifeng 「八、改」): --kv-ssd-dir and
+// WHIRL_KV_SSD_DIR longer than 217 UTF-16 units (full path) are refused with ArgError, the message in English and
+// Traditional Chinese naming the unit; 217 is accepted. The unit is UTF-16: 214 Chinese characters after C:\ (645 bytes)
+// pass. Written from the design before the implementation.
+std::string argErrorOf(const std::vector<std::string>& args) {
+    try {
+        parseServerArgs(args, visOk);
+    } catch (const ArgError& e) {
+        return e.what();
+    }
+    return {};
+}
+
+void testKvSsdDirBudget() {
+    const std::string d217 = "C:\\" + std::string(214, 'k');
+    const std::string d218 = d217 + "k";
+    const Options ok = parseServerArgs({"m.gguf", "--kv-ssd-dir", d217}, visOk);
+    ISO_CHECK(ok.kv_ssd_dir == std::optional<std::string>(d217));  // accepted as given
+    const std::string e = argErrorOf({"m.gguf", "--kv-ssd-dir", d218});
+    ISO_CHECK(e.rfind("--kv-ssd-dir is 218 characters long (UTF-16: every letter or Chinese character counts 1); the limit is 217.", 0) == 0);
+    ISO_CHECK(e.find("--kv-ssd-dir \xe9\x95\xb7 218 \xe5\xad\x97\xe5\x85\x83") != std::string::npos);  // --kv-ssd-dir 長 218 字元
+    std::string z214 = "C:\\";
+    for (int i = 0; i < 214; ++i) z214 += "\xe4\xb8\xad";  // 中
+    ISO_CHECK(argErrorOf({"m.gguf", "--kv-ssd-dir", z214}).empty());
+    ISO_CHECK(argErrorOf({"m.gguf", "--kv-ssd-dir", z214 + "\xe4\xb8\xad"}).find("is 218 characters long") != std::string::npos);
+    // the empty value keeps its own message
+    ISO_CHECK(argErrorOf({"m.gguf", "--kv-ssd-dir", ""}).rfind("--kv-ssd-dir is empty", 0) == 0);
+    // WHIRL_KV_SSD_DIR (no --kv-ssd-dir): the same limit, named by the variable
+    Options none;
+    bool threw = false;
+    std::string ee;
+    try {
+        checkKvSsdDirEnv(none, std::optional<std::string>(d218));
+    } catch (const ArgError& x) {
+        threw = true;
+        ee = x.what();
+    }
+    ISO_CHECK(threw && ee.rfind("WHIRL_KV_SSD_DIR is 218 characters long (UTF-16", 0) == 0);
+    checkKvSsdDirEnv(none, std::optional<std::string>(d217));  // accepted (no throw)
+    // --kv-ssd-dir given: the variable is not looked at (the flag wins, as at the tier setup)
+    Options given;
+    given.kv_ssd_dir = d217;
+    checkKvSsdDirEnv(given, std::optional<std::string>(d218));
+    ISO_CHECK(true);
+}
+
 // arch025-lane1 leg 8: the model name /v1/models and the startup lines show (5728296 src/server/server_main.cpp:953-958)
 std::string old_name(const std::string& base, const std::optional<std::string>& alias) {
     std::string name = alias ? *alias : base;
@@ -234,5 +280,5 @@ void testCliOverEnv() {
 }
 
 int main(int argc, char** argv) {
-    return iso::run("server.args", {{"defaults", testDefaults}, {"flags", testFlags}, {"resolve", testResolve}, {"served_model_name", testServedModelName}, {"kv_ssd_mode", testKvSsdMode}, {"kv_tier_setup", testKvTierSetup}, {"cli_over_env", testCliOverEnv}, {"ssd_dir_for_exe_id", testSsdDirForExeId}}, argc, argv);
+    return iso::run("server.args", {{"defaults", testDefaults}, {"flags", testFlags}, {"resolve", testResolve}, {"served_model_name", testServedModelName}, {"kv_ssd_mode", testKvSsdMode}, {"kv_tier_setup", testKvTierSetup}, {"cli_over_env", testCliOverEnv}, {"ssd_dir_for_exe_id", testSsdDirForExeId}, {"kv_ssd_dir_budget", testKvSsdDirBudget}}, argc, argv);
 }

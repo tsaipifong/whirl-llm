@@ -15,6 +15,8 @@
 // encoder), the shared helpers in common.cpp / decode.cpp, the CLI's model building in build_model.cpp, their
 // declarations in cli.h. This file: the help texts' assembly, the command table and wmain.
 #include "cli/cli.h"
+#include "platform/path_budget.h"
+#include "platform/paths.h"
 
 namespace cli {
 namespace {
@@ -127,9 +129,18 @@ using namespace cli;  // wmain sees the commands as it saw the old anonymous nam
 int wmain(int argc, wchar_t** wargv) {
     whirl::platform::console::setStdoutBinary();  // arch025 PL1: _setmode(_fileno(stdout), _O_BINARY)
     app::initConsole();
+    // PATH-256 (v0.2.5.1 PLAN V1-22, pathlen256.DISCOVERY.md 2c #2): an install folder longer than 150 UTF-8 bytes is
+    // refused first, for every argument (also --version, --help and the probe), before the probe branch and
+    // gpuPreflight, so before anything can load the AMD runtime (amdhip64 is loaded only by hip::runtime::load)
+    if (const std::optional<std::string> refuse = whirl::platform::path_budget::installDirRefusal("whirl")) {
+        std::fputs(refuse->c_str(), stderr);
+        return app::exit_usage;
+    }
     std::vector<std::string> argv = narrowArgs(argc, wargv);
     // s8-719 root fix: the GPU list helper (a child of this program, see gpu_select.h); never interactive
     if (argv.size() == 2 && argv[1] == whirl::gpusel::k_probe_arg) return whirl::gpusel::probeMain();
+    // PATH-256 2c #3: a LOCALAPPDATA over 187 UTF-16 units is not used (no tune cache); said once, not by the probe child
+    if (const std::optional<std::string> w = whirl::platform::paths::localAppDataWarning()) std::fputs(("whirl: " + *w).c_str(), stderr);
     if (argv.size() >= 2 && argv[1] == "--list-devices") argv[1] = "devices";  // llama.cpp's name for it
     if (argv.size() < 2) {
         std::fputs(k_help_main, stderr);
