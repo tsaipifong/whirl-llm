@@ -87,7 +87,8 @@
    "desc": "mixture of experts: route, gather, expert GEMV / GEMM, MXFP4 experts, precise f32 experts",
    "paths": [
     "kernels/moe*.hip",
-    "kernels/gfx1151/moe.hip"
+    "kernels/gfx1151/moe.hip",
+    "kernels/gfx1151/moe_router.hip"
    ],
    "deps": [
     "kernels.common",

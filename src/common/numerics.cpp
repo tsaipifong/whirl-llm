@@ -327,6 +327,11 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     const EnvValues& e = r.env;
     // loader.cpp:743 (fp8_prefill) and :550-553 (arch025-N2b-r2: numerics::loaderFlags, which Model::load also applies)
     numerics::loaderFlags(r, F);
+    // v0251-a11port (feat026-router): the fused MoE router by default on the gfx1151 code object (Radeon 8060S) for MoE
+    // models, every mode (bit-identical to moe_logits_f32 + moe_topk: kt moemx, golden); WHIRL_MOE_RFUSE overrides it by
+    // the loader's envFlag rule ("0" = off = the 0.2.5 path, any other value on). ops::chooseMoe still needs the kernel
+    // in the code object (the gfx1201 one has none) and the shape.
+    F.moe_rfuse = flagOr(e.moe_rfuse, t.gfx1151 && t.moe);
     // tune.cpp:852-861
     if (e.fp8) F.fp8_prefill = *e.fp8 != "0";
     if (e.fp8 && *e.fp8 == "0") F.moe_fp8 = false;
