@@ -31,6 +31,7 @@
 #include "draft_pick.hip"          // 2-bit MTP draft head, token tables, picks
 #include "gdn_ab.hip"              // GDN beta/alpha projection entries (gdn family; before moe.hip: code object unchanged)
 #include "moe.hip"                 // mixture of experts (incl. MXFP4 generic entries)
+#include "moe_prefill_mt.hip"      // feat026-moep: multi-fragment expert GEMMs, fused combine (v0251-a7port: gfx1151 default)
 #include "sample_cand.hip"         // sampling candidates
 #include "prefill_fused.hip"       // prefill activation fusions (f16)
 #include "../moe_f.hip"            // precise MoE decode experts (f32 activations; shared with gfx1201)

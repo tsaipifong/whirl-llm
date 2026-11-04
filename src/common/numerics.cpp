@@ -4,6 +4,7 @@
 #include "whirl/numerics.h"
 
 #include "whirl/dump.h"
+#include "whirl/kernels_abi.h"  // feat026-moep: kMoepGu / kMoepDn variant names, v0251-a7port kMoepDefault
 #include "whirl/small_helpers.h"  // lowerAscii (arch025-N6, lane 1 leg 11)
 
 #include <algorithm>
@@ -329,6 +330,27 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     const EnvValues& e = r.env;
     // loader.cpp:743 (fp8_prefill) and :550-553 (arch025-N2b-r2: numerics::loaderFlags, which Model::load also applies)
     numerics::loaderFlags(r, F);
+    // v0251-a7port: the Radeon 8060S MoE prefill expert GEMMs (feat026-moep) by default on the gfx1151 code object with
+    // MXFP4 routed experts, every mode (bit-identical: kt moemx, golden); ops::chooseMoe still needs the kernels in the
+    // code object and falls back to the fused_gu path without them. Everything else: off, as before.
+    if (t.gfx1151 && t.moe_mxfp4) {
+        F.moep_gu = static_cast<std::uint32_t>(kernels::kMoepDefault.gu) + 1;
+        F.moep_dn = static_cast<std::uint32_t>(kernels::kMoepDefault.dn) + 1;
+        F.moep_comb = kernels::kMoepDefault.comb;
+    }
+    // feat026-moep (was loader.cpp, envGet): WHIRL_MOEP_GU / _DN name a variant (index + 1); any other value ("0", "",
+    // an unknown name) is off; WHIRL_MOEP_COMB by std::strtoul (unparsable = 0 = moe_combine)
+    if (e.moep_gu) {
+        F.moep_gu = 0;
+        for (int i = 0; i < kernels::kMoepGuN; ++i)
+            if (*e.moep_gu == kernels::kMoepGu[i].name) F.moep_gu = static_cast<std::uint32_t>(i) + 1;
+    }
+    if (e.moep_dn) {
+        F.moep_dn = 0;
+        for (int i = 0; i < kernels::kMoepDnN; ++i)
+            if (*e.moep_dn == kernels::kMoepDn[i].name) F.moep_dn = static_cast<std::uint32_t>(i) + 1;
+    }
+    if (e.moep_comb) F.moep_comb = static_cast<std::uint32_t>(std::strtoul(e.moep_comb->c_str(), nullptr, 10));
     // tune.cpp:852-861
     if (e.fp8) F.fp8_prefill = *e.fp8 != "0";
     if (e.fp8 && *e.fp8 == "0") F.moe_fp8 = false;

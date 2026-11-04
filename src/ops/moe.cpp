@@ -43,6 +43,15 @@ bool fp8Gu(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k,
            p.sx_buf && k.gemm8_moe != nullptr && k.gemm8_moe32 != nullptr && k.gemm8_moeh != nullptr && k.gemm8_moe32h != nullptr &&
            k.moe_gather_fp8 != nullptr && silu_mul_x8h != nullptr;
 }
+// feat026-moep: the multi-fragment expert GEMMs (gfx1151, MXFP4 experts) when both variants are selected and present
+bool moepOk(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k) {
+    if (f.moep_gu < 0 || f.moep_dn < 0 || f.moep_gu >= kernels::kMoepGuN || f.moep_dn >= kernels::kMoepDnN) return false;
+    if (k.moep_gu[f.moep_gu] == nullptr || k.moep_dn[f.moep_dn] == nullptr || k.moe_tiles == nullptr) return false;
+    // the gate + up list goes into the 64-token tile buffer: its bn must be >= 64; the down list into moe_route's
+    // (sized for bn 32)
+    return p.gate_ty == GgmlType::mxfp4 && p.up_ty == GgmlType::mxfp4 && p.down_ty == GgmlType::mxfp4 && p.gate_rb == p.up_rb && p.tiles64_buf &&
+           kernels::kMoepGu[f.moep_gu].bn >= 64 && kernels::kMoepDn[f.moep_dn].bn >= 32;
+}
 }  // namespace
 
 u32 moeTile(u32 n, u32 K, u32 R) { return n * K < 48 * R ? 32 : moe_bn; }
@@ -78,10 +87,49 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKern
     // prefill: group (token, slot) pairs by expert, grouped GEMMs, combine
     const u32 pairs = n * K;
     const bool fp8 = fp8Gu(p, f, k, silu_mul_x8h), fused = fusedGu(p, k);
-    pl.bn = fused && !fp8 ? 32 : (f.moe_bn_force == 32 || f.moe_bn_force == 64) ? f.moe_bn_force : moeTile(n, K, R);
+    const bool moep = !fp8 && moepOk(p, f, k);
+    pl.bn = moep ? static_cast<u32>(kernels::kMoepDn[f.moep_dn].bn) : fused && !fp8 ? 32 : (f.moe_bn_force == 32 || f.moe_bn_force == 64) ? f.moe_bn_force : moeTile(n, K, R);
     pl.max_tiles = (pairs + pl.bn - 1) / pl.bn + R;
     const u32 bn = pl.bn, max_tiles = pl.max_tiles;
-    if (fp8) {
+    // combine: moe_combine4 (same bits) when selected and present
+    pl.comb4 = f.moep_comb == 1 && k.moe_combine4 != nullptr && E % 4 == 0;
+    pl.comb_grid = pl.comb4 ? D((E + 1023) / 1024, n) : D((E + 255) / 256, n);
+    if (moep) {
+        // feat026-moep: several 16-token fragments of one expert per block share every decoded A fragment; every
+        // stored value as gemm_moegu / gemm_moe32r (and moe_combine when fused into the down epilogue)
+        const kernels::MoepGuVariant& vg = kernels::kMoepGu[f.moep_gu];
+        const kernels::MoepDnVariant& vd = kernels::kMoepDn[f.moep_dn];
+        pl.kind = MoePrefillKind::moep;
+        pl.bits = MoeBits::moe_f16_gemm;
+        pl.gu_bn = static_cast<u32>(vg.bn);
+        pl.max_tiles64 = (pairs + pl.gu_bn - 1) / pl.gu_bn + R;
+        const int dv = f.moep_dn;
+        const bool lossy_ok = !f.prec_dec;  // not bit-identical: never in precise (owner precision policy)
+        const bool cnt_ok = p.cnt_buf && static_cast<u32>(vd.bm) >= kernels::kMoepMinBm;
+        pl.fgu = k.moep_gu[f.moep_gu];
+        pl.fdn = k.moep_dn[dv];
+        if (f.moep_comb == 2 && k.moep_dc[dv] != nullptr && cnt_ok) {
+            pl.comb_fused = true;
+            pl.fdn = k.moep_dc[dv];
+        } else if (lossy_ok && f.moep_comb == 3 && k.moep_dh[dv] != nullptr && k.moe_combine4h != nullptr && E % 4 == 0) {
+            pl.ydh = true;
+            pl.fdn = k.moep_dh[dv];
+        } else if (lossy_ok && f.moep_comb == 4 && k.moep_dhc[dv] != nullptr && cnt_ok) {
+            pl.ydh = pl.comb_fused = true;
+            pl.fdn = k.moep_dhc[dv];
+        } else if (lossy_ok && f.moep_comb == 5 && k.moep_da[dv] != nullptr && k.moe_combine4 != nullptr && E % 4 == 0) {
+            pl.comb_atomic = true;
+            pl.fdn = k.moep_da[dv];
+        }
+        if (pl.ydh || pl.comb_atomic) {
+            pl.bits = MoeBits::moe_lossy_gemm;  // not the f16 GEMM class (balance item f16 intermediates / fast candidate)
+            pl.comb4 = true;
+            pl.comb_grid = D((E + 1023) / 1024, n);
+        }
+        pl.gu_pgrid = D(pl.max_tiles64 * ((F + vg.gr - 1) / vg.gr));
+        pl.dn_pgrid = D(max_tiles * ((E + vd.bm - 1) / vd.bm));
+        if (pl.comb_fused) pl.comb4 = false;
+    } else if (fp8) {
         pl.kind = MoePrefillKind::fp8;
         pl.bits = MoeBits::moe_fp8_gemm;
         const u32 nby = (F + moe_bm - 1) / moe_bm, nbyd = (E + moe_bm - 1) / moe_bm;
