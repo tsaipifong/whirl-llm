@@ -44,4 +44,12 @@ std::vector<std::string> tuneReadPathsOld(const std::string& base, const std::st
     return out;
 }
 
+// PATH-256 test-first stubs (v0251-patha commit 1): declared in paths.h, no behaviour yet; the next commit implements them
+std::string tune5Name(const std::string&, std::uint64_t, const std::string&) { return std::string(); }
+std::string tune5Path(const std::string&, const std::string&) { return std::string(); }
+std::string tune5LedgerPath(const std::string&) { return std::string(); }
+std::uint64_t fnv1a64(std::string_view) { return 0; }
+std::optional<std::string> localAppDataWarning() { return std::nullopt; }
+std::optional<std::string> serverLogDefault() { return serverLogPath(localAppData()); }
+
 }  // namespace whirl::platform::paths

@@ -293,6 +293,9 @@ void unmapView(const void* p) { UnmapViewOfFile(p); }
 
 std::FILE* openStdio(const wchar_t* path, const wchar_t* mode) { return _wfopen(path, mode); }
 
+// PATH-256 test-first stub (v0251-patha commit 1): no copy yet
+bool copyNoReplace(const wchar_t*, const wchar_t*) { return false; }
+
 bool utf8ToWideStrict(std::string_view s, std::wstring* out) {
     if (s.empty()) {
         out->clear();

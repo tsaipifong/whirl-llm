@@ -4,6 +4,7 @@
 
 #include "../test_check.h"
 #include "../test_env.h"
+#include "platform/path_budget.h"
 #include "platform/paths.h"
 #include "whirl/common.h"
 
@@ -264,6 +265,81 @@ static void testLocalAppDataChild() {
 
 #endif  // _WIN32 (bug-lappdata helpers)
 
+// PATH-256 P2 (v0.2.5.1 PLAN V1-22, pathlen256.DISCOVERY.md v3.1 2b-1): the tune5 cache name. Written from the design
+// before the implementation; the expected names were computed independently (scratch/v0251_patha/vectors.py ->
+// vectors.out: FNV-1a 64 of name, NUL, size in decimal; p24 = 24 code points, [A-Za-z0-9._-] else '_', lower case).
+static void testTune5Name() {
+    namespace pp = whirl::platform::paths;
+    namespace pb = whirl::platform::path_budget;
+    // FNV-1a 64 published vectors (offset basis, "a", "foobar")
+    CHECK(pp::fnv1a64("") == 0xcbf29ce484222325ull);
+    CHECK(pp::fnv1a64("a") == 0xaf63dc4c8601ec8cull);
+    CHECK(pp::fnv1a64("foobar") == 0x85944171f73967e8ull);
+    CHECK(pp::tune5Name("Swift-1.5-27B-MXFP4.gguf", 16000000000ull, "-gfx1151r2") == "tune5-swift-1.5-27b-mxfp4.gguf-67e57738ddaf059d-gfx1151r2.txt");
+    CHECK(pp::tune5Name("Swift-1.5-27B-MXFP4.gguf", 16000000000ull, "") == "tune5-swift-1.5-27b-mxfp4.gguf-67e57738ddaf059d.txt");
+    CHECK(pp::tune5Name("Swift-1.5-27B-MXFP4.gguf", 16000000001ull, "") == "tune5-swift-1.5-27b-mxfp4.gguf-67e57638ddaf03ea.txt");  // other size: other file
+    CHECK(pp::tune5Name("7b-model.gguf", 12345, "") == "tune5-7b-model.gguf-4bccb3da46988d9c.txt");
+    CHECK(pp::tune5Name("\xe8\x94\xa1\xe6\xa8\xa1\xe5\x9e\x8b.gguf", 42, "-gfx1151r2") == "tune5-___.gguf-978e0998ad95539c-gfx1151r2.txt");  // 蔡模型.gguf
+    CHECK(pp::tune5Name("m.gguf", 1, "") == "tune5-m.gguf-9418e8a9d691fa68.txt");
+    CHECK(pp::tune5Name(std::string(300, 'A') + ".gguf", 123456789012ull, "-gfx1151r2") == "tune5-aaaaaaaaaaaaaaaaaaaaaaaa-93554b900012d05a-gfx1151r2.txt");
+    CHECK(pp::tune5Name("Qwen3.8-27B-UD-Q4_K_M.gguf", 16464440224ull, "") == "tune5-qwen3.8-27b-ud-q4_k_m.gg-73ee6de404c600b3.txt");
+    CHECK(pp::tune5Name("x\xf0\x9f\x98\x80y.gguf", 7, "") == "tune5-x_y.gguf-e338ef18f9f31715.txt");  // one code point, one '_'
+    // the hash keeps the case of the name (tune.cpp passes the name the file system stores, so typing does not matter)
+    CHECK(pp::tune5Name("SWIFT-1.5-27B-MXFP4.GGUF", 16000000000ull, "") != pp::tune5Name("Swift-1.5-27B-MXFP4.gguf", 16000000000ull, ""));
+    // bounded: at most kTune5NameMax whatever the name
+    CHECK(pp::tune5Name(std::string(5000, 'n'), ~0ull, "-gfx1151r2").size() == pb::kTune5NameMax);
+    const std::string b = "C:\\Users\\u\\AppData\\Local";
+    CHECK(pp::tune5Path(b, "tune5-m.gguf-9418e8a9d691fa68.txt") == "C:\\Users\\u\\AppData\\Local\\whirl\\tune5-m.gguf-9418e8a9d691fa68.txt");
+    CHECK(pp::tune5LedgerPath(b) == "C:\\Users\\u\\AppData\\Local\\whirl\\tune5-imported.txt");
+    // the generators at the budget: %LOCALAPPDATA% of exactly kLocalAppDataMax keeps every WHIRL file <= 255
+    const std::string lad(pb::kLocalAppDataMax, 'L');
+    const std::string t5 = pp::tune5Path(lad, pp::tune5Name(std::string(5000, 'n'), ~0ull, "-gfx1151r2"));
+    CHECK(t5.size() == pb::kPathMax);
+    CHECK(pp::tune5LedgerPath(lad).size() <= pb::kPathMax);
+    CHECK(pp::serverLogPath(std::optional<std::string>(lad)).size() == pb::kLocalAppDataMax + pb::kServerLogPart);
+    CHECK(pp::kvCacheDir(lad).size() + pb::kKvEntryName <= pb::kPathMax);
+    CHECK(pp::whirlDir(lad).size() + std::string("\\pinned\\4294967295.txt").size() <= pb::kPathMax);
+    // a 1-character base: the suffix parts are the declared constants
+    CHECK(pp::tune5Path("L", pp::tune5Name(std::string(5000, 'n'), ~0ull, "-gfx1151r2")).size() == 1 + pb::kLadPartMax);
+    CHECK(pp::serverLogPath(std::optional<std::string>("L")).size() == 1 + pb::kServerLogPart);
+}
+
+#ifdef _WIN32
+// PATH-256 P3 (2c #3, #8): LOCALAPPDATA over kLocalAppDataMax UTF-16 units is not used (one warning, both languages);
+// the server's default log goes to the console only then, or when LOCALAPPDATA is unset and <cwd>\whirl-server.log is
+// over kPathMax. The unit is UTF-16: 184 Chinese characters after C:\ (555 bytes) are within the limit.
+static void testLocalAppDataBudget() {
+    namespace pp = whirl::platform::paths;
+    namespace fs = std::filesystem;
+    std::optional<std::wstring> saved;
+    if (const wchar_t* v = _wgetenv(L"LOCALAPPDATA")) saved = v;
+    const std::wstring l187 = L"C:\\" + std::wstring(184, L'l');
+    const std::wstring l188 = L"C:\\" + std::wstring(185, L'l');
+    _wputenv_s(L"LOCALAPPDATA", l187.c_str());
+    CHECK(pp::localAppData() == std::optional<std::string>(whirl::narrow(l187)));
+    CHECK(!pp::localAppDataWarning());
+    CHECK(pp::serverLogDefault() == std::optional<std::string>(whirl::narrow(l187) + "\\whirl\\server.log"));
+    _wputenv_s(L"LOCALAPPDATA", l188.c_str());
+    CHECK(!pp::localAppData());
+    const std::optional<std::string> w = pp::localAppDataWarning();
+    CHECK(w && w->find("LOCALAPPDATA is 188 characters long (UTF-16") != std::string::npos);
+    CHECK(w && w->find("the limit is 187") != std::string::npos);
+    CHECK(w && w->find("LOCALAPPDATA \xe9\x95\xb7 188 \xe5\xad\x97\xe5\x85\x83") != std::string::npos);  // LOCALAPPDATA 長 188 字元
+    CHECK(!pp::serverLogDefault());  // no log file: the console only
+    const std::wstring z187 = L"C:\\" + std::wstring(184, L'\u4e2d');
+    _wputenv_s(L"LOCALAPPDATA", z187.c_str());
+    CHECK(pp::localAppData() == std::optional<std::string>(whirl::narrow(z187)));
+    CHECK(!pp::localAppDataWarning());
+    // unset: the working folder (as v0.2.4); this test's working folder is short, so <cwd>\whirl-server.log fits 255 (the
+    // over-255 case is path_budget::cwdLogFits, tests/iso/platform.path_budget: no test changes into a long folder)
+    _wputenv_s(L"LOCALAPPDATA", L"");
+    CHECK(!pp::localAppData() && !pp::localAppDataWarning());
+    std::error_code ec;
+    if (fs::current_path(ec).wstring().size() + 17 <= 255) CHECK(pp::serverLogDefault() == std::optional<std::string>("whirl-server.log"));
+    _wputenv_s(L"LOCALAPPDATA", saved ? saved->c_str() : L"");
+}
+#endif
+
 }  // namespace
 
 namespace {
@@ -285,6 +361,10 @@ const whirl::test::Suite& unitSuite_platform_paths() {
                                           {"testPlatformPaths", [] { testPlatformPaths(); }},
 #if defined(_WIN32)
                                           {"testLocalAppDataChild", [] { testLocalAppDataChild(); }},
+#endif
+                                          {"testTune5Name", [] { testTune5Name(); }},  // PATH-256 P2
+#if defined(_WIN32)
+                                          {"testLocalAppDataBudget", [] { testLocalAppDataBudget(); }},  // PATH-256 P3
 #endif
                                       },
                                       childModes};

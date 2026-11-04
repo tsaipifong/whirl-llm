@@ -121,6 +121,7 @@ hdr       src/hip/log_name.h
 hdr       src/model/arch_registry.h
 hdr       src/model/device_lock.h
 hdr       src/model/exec_dump.h
+hdr       src/model/tune_cache.h
 hdr       src/model/qwen35/arch_names.h
 hdr       src/model/qwen35/context.h
 hdr       src/model/qwen35/forward_internal.h

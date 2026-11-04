@@ -7,6 +7,7 @@
 
 #include "config/env_snapshot.h"
 #include "model/exec_dump.h"
+#include "model/tune_cache.h"
 #include "platform/paths.h"
 #include "whirl/dump.h"
 #include "whirl/model.h"
@@ -921,5 +922,21 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     }
 }
 }  // namespace
+
+// PATH-256 test-first stubs (v0251-patha commit 1): model/tune_cache.h declared, no behaviour yet (loadOrTune does not
+// use them); the next commit implements them and moves loadOrTune onto resolve()
+namespace tune_cache {
+Io realIo() {
+    Io io;
+    io.read = [](const std::string&) { return std::optional<std::string>(); };
+    io.disk_name = [](const std::string&) { return std::optional<std::string>(); };
+    io.copy_no_replace = [](const std::string&, const std::string&) { return false; };
+    io.append = [](const std::string&, const std::string&) { return false; };
+    io.stamp = [](const std::string&) { return std::optional<Stamp>(); };
+    return io;
+}
+Plan resolve(const std::string&, const std::string&, std::uint64_t, const std::string&, std::size_t, const Accept&, const Io&) { return Plan{}; }
+std::string fileText(const std::string&, std::uint64_t, const std::string& table) { return table; }
+}  // namespace tune_cache
 
 }  // namespace whirl::qwen35

@@ -116,6 +116,10 @@ void unmapView(const void* p);
 // _wfopen
 std::FILE* openStdio(const wchar_t* path, const wchar_t* mode);
 
+// PATH-256 (v0.2.5.1 PLAN V1-22, the tune5 import of src/model/tune.cpp): CopyFileExW(from, to, nullptr, nullptr,
+// nullptr, COPY_FILE_FAIL_IF_EXISTS): false (and `to` untouched) when `to` exists or the copy fails.
+bool copyNoReplace(const wchar_t* from, const wchar_t* to);
+
 // UTF-8 -> UTF-16 with MB_ERR_INVALID_CHARS (MultiByteToWideChar); false on invalid UTF-8 (out untouched). "" -> "".
 bool utf8ToWideStrict(std::string_view s, std::wstring* out);
 
