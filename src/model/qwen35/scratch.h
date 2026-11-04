@@ -52,6 +52,10 @@ struct Scratch {
     // prefill experts on the MXFP4 x fp8 grouped GEMM (WHIRL_MOE_FP8=0 -> f16 gemm_moe);
     // decode experts on the whole-block kernels (WHIRL_MOE_MXW=0 -> generic moe_gu / moe_down).
     DevPtr moe_sx = 0;
+    // feat026-moep: the fused combine's (token, row block) counters (zeroed at allocation, left zeroed by the kernel).
+    // v0251-a7port: not allocated (0): the gfx1151 default combine (moe_combine4) needs none, and WHIRL_MOEP_COMB=2 / 4
+    // fall back to the plain down twin + combine (ops::chooseMoe cnt_ok), so no buffer size or estimate changes
+    DevPtr moe_cnt = 0;
 };
 
 }  // namespace whirl::qwen35

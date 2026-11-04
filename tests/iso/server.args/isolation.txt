@@ -19,6 +19,8 @@ src       src/platform/proc_win.cpp
 # headers (include closure of the sources above)
 hdr       include/whirl/dump.h
 hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
 hdr       include/whirl/kv_format.h
 hdr       include/whirl/model_types.h
 hdr       include/whirl/numerics.h

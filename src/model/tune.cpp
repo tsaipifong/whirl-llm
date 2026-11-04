@@ -906,6 +906,12 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     m.num_plan.flags = f;
     if (f.prec_dec) refusePrecise();
     m.num_plan = p;
+    // feat026-moep (was loader.cpp at the load): a WHIRL_MOEP_GU / _DN value that names no variant is off, with a note
+    // (v0251-a7port: "0" and "" are the documented off values, no note)
+    if (env.moep_gu && f.moep_gu == 0 && !env.moep_gu->empty() && *env.moep_gu != "0")
+        std::fprintf(stderr, "whirl: WHIRL_MOEP_GU=%s: unknown variant (off)\n", env.moep_gu->c_str());
+    if (env.moep_dn && f.moep_dn == 0 && !env.moep_dn->empty() && *env.moep_dn != "0")
+        std::fprintf(stderr, "whirl: WHIRL_MOEP_DN=%s: unknown variant (off)\n", env.moep_dn->c_str());
     log += "  " + nu::logLine(p) + "\n";
     // bug-fastonly: WHIRL_RELAX / WHIRL_KV=q4 refused by precise / balance (fast-only items; the plan is untouched)
     for (const std::string& ign : p.ignored) log += "  " + ign + "\n";

@@ -29,6 +29,8 @@ hdr       include/whirl/common.h
 hdr       include/whirl/device_mem.h
 hdr       include/whirl/dump.h
 hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
 hdr       include/whirl/kv_format.h
 hdr       include/whirl/numerics.h
 hdr       include/whirl/small_helpers.h
