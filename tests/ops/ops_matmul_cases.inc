@@ -326,6 +326,43 @@ void testOpsGemmFq() {
     k1.gemmfq[1] = nullptr;
     CHECK(ops::chooseGemmF16(gate, 2048, deq2, t2, k1).kind == ops::GemmKind::gemmc);
     CHECK(ops::chooseGemmF16(gate, 2048, deq2, c2, k1).kind == ops::GemmKind::gemmfq);
+    // v0251-a3fix: from fdq_big_min (2305) rows the slot is fdq_big (-1 = fdq, as in every case above). The gfx1151
+    // default: t2 up to 2304 rows (the largest dense forward), c2 from 2305 (t2 is 1.33-1.35x the old pair at 4096 rows,
+    // c2 0.91-0.98; the tuner times bucket 1 at 4096 rows, the 8060S MoE forward is 4096 rows)
+    CHECK(t2.fdq_big == -1 && t2.fdq_big_min == 2305);
+    ops::GemmFlags dv = t2;
+    dv.fdq_big = 1;
+    p = ops::chooseGemmF16(gate, 2304, deq2, dv, k51);  // 2048 + a merged 256-row tail: still t2
+    CHECK(p.kind == ops::GemmKind::gemmfq && nameOf(p.f) == "gemmfq_t2_mxfp4" && p.grid.x == 9 && p.grid.y == 136);
+    p = ops::chooseGemmF16(gate, 2305, deq2, dv, k51);
+    CHECK(p.kind == ops::GemmKind::gemmfq && nameOf(p.f) == "gemmfq_c2_mxfp4" && p.grid.x == 19 && p.grid.y == 68 && p.block.x == 256);
+    p = ops::chooseGemmF16(gate, 4096, deq2, dv, k51);  // the bucket-1 tune size
+    CHECK(p.kind == ops::GemmKind::gemmfq && nameOf(p.f) == "gemmfq_c2_mxfp4" && p.grid.x == 32 && p.grid.y == 68 && !p.dequant);
+    p = ops::chooseGemmF16(down, 4096, deq2, dv, k51);
+    CHECK(p.kind == ops::GemmKind::gemmfq && nameOf(p.f) == "gemmfq_c2_mxfp4" && p.grid.x == 32 && p.grid.y == 20);
+    p = ops::chooseGemmF16(shg, 4096, deq1, dv, k51);  // the Ornith forward
+    CHECK(p.kind == ops::GemmKind::gemmfq && nameOf(p.f) == "gemmfq_c2_mxfp4" && p.grid.x == 32 && p.grid.y == 2);
+    // fdq_big 0: the old plan from 2305 rows, gemmfq below
+    ops::GemmFlags bo = t2;
+    bo.fdq_big = 0;
+    p = ops::chooseGemmF16(gate, 4096, deq2, bo, k51);
+    CHECK(p.kind == ops::GemmKind::gemmc && p.dequant && nameOf(p.f) == "gemm_c2_" + f16);
+    CHECK(ops::chooseGemmF16(gate, 2048, deq2, bo, k51).kind == ops::GemmKind::gemmfq);
+    // the big-row slot missing from the object: the old plan there (never the other slot)
+    kn::KernelTable kc = k51;
+    kc.gemmfq[0] = nullptr;
+    p = ops::chooseGemmF16(gate, 4096, deq2, dv, kc);
+    CHECK(p.kind == ops::GemmKind::gemmc && p.dequant);
+    // the row threshold still applies first (WHIRL_FDQ8S_MIN above 4096): the old plan
+    ops::GemmFlags hi = dv;
+    hi.fdq_min = 8192;
+    CHECK(ops::chooseGemmF16(gate, 4096, deq2, hi, k51).kind == ops::GemmKind::gemmc);
+    // a fused choice, f16 outputs and gfx1201 stay as they were at big rows too
+    CHECK(ops::chooseGemmF16(gate, 4096, 2, dv, k51).kind == ops::GemmKind::gemmc && !ops::chooseGemmF16(gate, 4096, 2, dv, k51).dequant);
+    ops::GemmFlags dh = dv;
+    dh.out_h16 = true;
+    CHECK(ops::chooseGemmF16(gate, 4096, deq2, dh, k51).kind != ops::GemmKind::gemmfq);
+    CHECK(ops::chooseGemmF16(gate, 4096, deq2, dv, k01).kind == ops::GemmKind::gemmh);
 }
 
 }  // namespace

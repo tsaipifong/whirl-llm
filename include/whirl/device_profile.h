@@ -42,6 +42,8 @@ struct Profile {
     // dequant_f16 + gemm_c<i>_f16); WHIRL_FDQ8S overrides it. Only the gfx1151 code object has the kernels, so a
     // slot here is also never selected on a family whose object lacks them (bitwise either way)
     std::uint8_t fdq_default;
+    // v0251-a3fix: the slot from ops::GemmFlags::fdq_big_min (2305) rows (same encoding; WHIRL_FDQ8S overrides it too)
+    std::uint8_t fdq_big;
     // q4 KV decode through attn_dq4: the smallest split count with the same key partition (FAST-8S-1)
     bool attn_dq4_dynamic_splits;
     // ---- tuning (src/model/tune.cpp)
@@ -70,6 +72,7 @@ inline constexpr Profile k_profile_gfx1201{
     .h16_from_candidates = false,
     .gemms_tie_larger_bm = false,
     .fdq_default = 0,
+    .fdq_big = 0,
     .attn_dq4_dynamic_splits = false,
     .tune_fast = false,
     .tune_cache_suffix = "",
@@ -90,6 +93,7 @@ inline constexpr Profile k_profile_gfx1151{
     .h16_from_candidates = true,
     .gemms_tie_larger_bm = true,
     .fdq_default = 2,  // t2 (v0251-a3port; v0251-judge1 sec 1 screening)
+    .fdq_big = 1,      // c2 from 2305 rows (v0251-a3fix; scratch/v0251_a3/gpu/8060s_20261104-0439/results.txt:106-124)
     .attn_dq4_dynamic_splits = true,
     .tune_fast = true,
     .tune_cache_suffix = "-gfx1151r2",

@@ -2565,6 +2565,11 @@ void testFdqEnv() {
         check(m.gemmFlags().fdq == 1 && m.gemmFlags().fdq_min == 2048, "fdq: WHIRL_FDQ8S=c2 WHIRL_FDQ8S_MIN=2048 reach GemmFlags");
         m.fdq = 0;
         check(m.gemmFlags().fdq == 0, "fdq: WHIRL_FDQ8S=0 -> off");
+        check(m.gemmFlags().fdq_big == -1, "fdq: WHIRL_FDQ8S set -> one slot for every row count (fdq_big -1)");
+        m.fdq = -1;
+        // v0251-a3fix: unset -> the device's slot from 2305 rows (device::Profile::fdq_big: gfx1201 0; gfx1151 1 = c2
+        // is pinned by tests/device testProfiles), so the bucket-1 tune (4096 rows) times the kernel that wins there
+        check(m.gemmFlags().fdq_big == 0 && m.gemmFlags().fdq_big_min == 2305, "fdq: gfx1201 default from 2305 rows = off (fdq_big 0)");
     }
 }
 

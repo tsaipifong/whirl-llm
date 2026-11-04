@@ -124,6 +124,12 @@ struct GemmFlags {
     // WHIRL_FDQ8S / WHIRL_FDQ8S_MIN set it (config::fdqEnv at the load)
     int fdq = 0;
     std::uint32_t fdq_min = 1025;
+    // v0251-a3fix: from fdq_big_min rows the slot is fdq_big instead (-1 = fdq, the WHIRL_FDQ8S A/B case; 0 = the old
+    // plan there). Context::gemmFlags: device::Profile::fdq_big unless WHIRL_FDQ8S is set. gfx1151: t2 is 1.33-1.35x
+    // the old pair at 4096 rows (the tune bucket 1 size and the 8060S MoE forward), c2 0.91-0.98; 2305 = one more than
+    // the largest dense forward (prefill_exec_default 2048 + prefill_merge 256), whose rows keep t2
+    int fdq_big = -1;
+    std::uint32_t fdq_big_min = 2305;
     std::uint32_t gv_max = 16;
 };
 enum class GemmKind : std::uint8_t { gemvh, gemms, gemmhq, gemmh, gemmc, gemmfq };
