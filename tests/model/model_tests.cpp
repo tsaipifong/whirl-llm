@@ -3,6 +3,7 @@
 // draft allocation (cycle cost, slot acceptance, allocDrafts).
 // SPDX-License-Identifier: Apache-2.0
 
+#include "../kernels/kt_ggemv_widths.h"
 #include "../test_env.h"
 #include "config/env_snapshot.h"
 #include "whirl/device_profile.h"
@@ -1406,6 +1407,91 @@ void testLoadEstimate() {
     }
 }
 
+// v0251-a6bench (feat026-ggemv): the ggemv bench (whirl-kernel-test --bench ggemv, tests/kernels/kt_ggemv_widths.h)
+// must time every verify width WHIRL_GEMV_K can select. Before this item it timed nt 2 / 4 only, while Swift's MTP
+// verify on the 8060S runs 2..drafts + 1 rows (auto, max 8 drafts) and the A6 pick 2:7,4:6 hardly ran. Checked here on
+// the runtime itself: (1) the bench table == the gemvk dispatch range 2..kGemvkMaxNt (ops/matmul.cpp chooseGemvTile,
+// kernels_abi.cpp loader, gemv_gk.hip entries); (2) every default MTP verify width of Swift (dense) and Ornith (moe) on
+// gfx1151 that has a gemvk kernel is in the table; (3) for every table width, WHIRL_GEMV_K "n:v" (and "n" = auto) is
+// parsed into Model::gemv_k and the Model's own tables route that width to gemvk_nt<n>v<v> (plain and grouped twin).
+void testGgemvBenchWidths() {
+    namespace kn = whirl::kernels;
+    const std::vector<int> bench = kt::ggemvBenchNts();
+    std::vector<int> runtime;
+    for (int n = 2; n <= kn::kGemvkMaxNt; ++n) runtime.push_back(n);
+    check(bench == runtime, "ggemv bench widths " + kt::joinNts(bench) + " == runtime gemvk widths " + kt::joinNts(runtime));
+    auto inBench = [&](int n) { return std::find(bench.begin(), bench.end(), n) != bench.end(); };
+    for (const bool moe : {false, true}) {
+        const q::MtpDefaults d = q::mtpDefaults(moe, whirl::hip::Arch::gfx1151);
+        const char* who = moe ? "Ornith (moe)" : "Swift (dense)";
+        std::string missing, beyond;
+        for (std::uint32_t nd = 1; nd <= d.drafts; ++nd) {
+            const int rows = static_cast<int>(nd) + 1;
+            if (rows > kn::kGemvkMaxNt) beyond += (beyond.empty() ? "" : ",") + std::to_string(rows);
+            else if (!inBench(rows)) missing += (missing.empty() ? "" : ",") + std::to_string(rows);
+        }
+        check(missing.empty(), std::string("ggemv bench: ") + who + " 8060S MTP verify widths 2.." + std::to_string(d.drafts + 1) +
+                                   " with a gemvk kernel are timed (missing: " + (missing.empty() ? "none" : missing) + ")");
+        if (!beyond.empty())
+            std::printf("  [info] %s 8060S MTP verify widths %s have no gemvk kernel (kGemvkMaxNt %d): production gemvq only\n", who,
+                        beyond.c_str(), kn::kGemvkMaxNt);
+    }
+    // parse + lookup per width on fake kernels (no GPU)
+    static int fake[kn::kGemvkMaxNt + 1][kn::kNGemvk][2];
+    q::Model m;
+    for (int nt = 2; nt <= kn::kGemvkMaxNt; ++nt)
+        for (int v = 1; v < kn::kNGemvk; ++v) {
+            m.k.gemvk[v][nt - 2] = &fake[nt][v][0];
+            m.k.gemvk_g[v][nt - 2] = &fake[nt][v][1];
+        }
+    q::Mat w;
+    w.ty = gguf::GgmlType::mxfp4;
+    w.nrows = 6144;
+    w.ncols = 5120;
+    const whirl::ops::MatShape s3[3] = {m.matShape(w), m.matShape(w), m.matShape(w)};
+    bool all_parse = true, all_route = true, all_auto = true;
+    std::string bad;
+    for (const int nt : bench) {
+        const int v = 1 + (nt % (kn::kNGemvk - 1));  // a different variant per width
+        m.gemv_k = {};
+        q::parseGemvK(m, std::to_string(nt) + ":" + std::to_string(v));
+        bool ok = m.gemv_k[static_cast<std::size_t>(nt)] == v;
+        for (std::size_t i = 0; i < m.gemv_k.size(); ++i) ok = ok && (static_cast<int>(i) == nt || m.gemv_k[i] == 0);
+        all_parse = all_parse && ok;
+        const whirl::ops::GemvTune tn{&m.gemv_r, &m.gemv_w, &m.gemv_w_head, 0, &m.gemv_k};
+        const whirl::ops::GemvPlan p1 = whirl::ops::chooseGemvTile(s3, 1, static_cast<std::uint32_t>(nt), m.k, tn);
+        const whirl::ops::GemvPlan p3 = whirl::ops::chooseGemvTile(s3, 3, static_cast<std::uint32_t>(nt), m.k, tn);
+        const bool route = p1.f == &fake[nt][v][0] && p3.f == &fake[nt][v][1] &&
+                           p1.rows_per_block == static_cast<std::uint32_t>(kn::gemvkRows(v));
+        all_route = all_route && route;
+        if (!ok || !route) bad += " nt" + std::to_string(nt);
+        m.gemv_k = {};
+        q::parseGemvK(m, std::to_string(nt));  // no ":v" = auto
+        all_auto = all_auto && m.gemv_k[static_cast<std::size_t>(nt)] == whirl::ops::kGemvkAuto;
+    }
+    check(all_parse, "WHIRL_GEMV_K: every bench width n:v is parsed into Model::gemv_k[n] (only that n)" + bad);
+    check(all_route, "WHIRL_GEMV_K: every bench width routes to gemvk_nt<n>v<v> (plain) / ggemvk (grouped)" + bad);
+    check(all_auto, "WHIRL_GEMV_K: every bench width without :v selects auto");
+    // a width past the table has no gemvk entry: the selector leaves it on production
+    m.gemv_k = {};
+    q::parseGemvK(m, std::to_string(kn::kGemvkMaxNt + 1) + ":2");
+    const whirl::ops::GemvTune tn{&m.gemv_r, &m.gemv_w, &m.gemv_w_head, 0, &m.gemv_k};
+    const whirl::ops::GemvPlan pn = whirl::ops::chooseGemvTile(s3, 1, static_cast<std::uint32_t>(kn::kGemvkMaxNt + 1), m.k, tn);
+    bool is_fake = false;
+    for (auto& a : fake)
+        for (auto& b : a) is_fake = is_fake || pn.f == &b[0] || pn.f == &b[1];
+    check(!is_fake, "WHIRL_GEMV_K: width kGemvkMaxNt + 1 keeps the production kernel (no gemvk entry)");
+    // --bench-nt: a subset of the table only (splits a GPU round; never adds a width)
+    std::vector<int> sub;
+    std::string err;
+    check(kt::parseBenchNt("6,5", sub, err) && sub == std::vector<int>{5, 6}, "--bench-nt 6,5 -> 5,6 (table order) " + err);
+    check(kt::parseBenchNt("3,5,6,7,8", sub, err) && sub.size() == 5, "--bench-nt 3,5,6,7,8 accepted " + err);
+    check(!kt::parseBenchNt(std::to_string(kn::kGemvkMaxNt + 1), sub, err), "--bench-nt kGemvkMaxNt + 1 refused (" + err + ")");
+    check(!kt::parseBenchNt("1", sub, err) && !kt::parseBenchNt("5,5", sub, err) && !kt::parseBenchNt("", sub, err) &&
+              !kt::parseBenchNt("x", sub, err) && !kt::parseBenchNt("5,,6", sub, err),
+          "--bench-nt 1 / 5,5 / empty / x / 5,,6 refused");
+}
+
 // RC-R1 / PREFILL-R2: f32 / f16 matrices (no int8 GEMV) at n = 2..gvMax() rows take the multi-token
 // GEMV loop, bitwise == n = 1 per token: up to 16 rows, up to 32 inside a wide verify (small_max 32),
 // and only the n = 1 kernel is required (without gemv_<T>_4 / _8 the loop runs _1 per token).
@@ -2610,6 +2696,7 @@ int main() {
     testForwardEnv();
     testPlanVsLoadOrTune();  // arch025-N2a
     testFloatGemvDispatch();
+    testGgemvBenchWidths();  // v0251-a6bench
     testArchWhitelist();
     testLoadEstimate();
     testLoadValidation();
