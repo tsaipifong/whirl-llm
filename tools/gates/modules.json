@@ -1244,7 +1244,7 @@
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_moe_precise", "st_moe_balance", "st_moe_fast"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2},
-     "arch": {"gfx1151": {"paths": ["kernels/gfx1151/moe.hip", "kernels/gfx1151/moe_down8.hip", "kernels/gfx1151/moe_prefill_mt.hip"], "tests": ["tests/kernels/test_moe*.cpp"], "steps": ["kt_full", "golden_swift", "golden_moe", "st_moe_precise", "st_moe_balance", "st_moe_fast"]}},
+     "arch": {"gfx1151": {"paths": ["kernels/gfx1151/moe.hip", "kernels/gfx1151/moe_down8.hip", "kernels/gfx1151/moe_prefill_mt.hip", "kernels/gfx1151/moe_router.hip"], "tests": ["tests/kernels/test_moe*.cpp"], "steps": ["kt_full", "golden_swift", "golden_moe", "st_moe_precise", "st_moe_balance", "st_moe_fast"]}},
      "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
   },
   "kernels.sample": {
