@@ -194,7 +194,7 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 | `--mtp-drafts N` | 每回合固定的 MTP 草稿數，1～10（預設：依模型類型由成本模型決定） |
 | `--decode-min-tps N` | decode 保底速度：其他請求在 prefill 時，每個串流中（decode 中）的請求至少維持 N tok/s；做法是縮短 prefill forward、穿插 decode cycle（預設 20；`0` = 關閉，prefill forward 不受限）。任何 N 的輸出都相同（[server.md](server.md#batching)） |
 | `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設：實體記憶體的 1/4，至少 8 GiB 或一個完整長度 session（若更大；27B 模型約 9 GiB），最多 32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；0.2.2.1 起不論指定或自動，RAM 層一律以 20480 MiB 為上限（測試機上更大的 pinned RAM 層會在第一個請求當機，原因調查中；0.2.2.2 起自動大小以一般訊息註明，指定的大小印 `adjusted:`，且先套上限再檢查是否超過可用記憶體的一半，超過時降到一半）；整合式 GPU（Radeon 8060S）：作業系統可見記憶體的 1/8，下限為一個最大 context 的條目（27B 模型在 262k 約 6 GiB），上限 16 GiB，且不超過啟動時可用記憶體的 1/4；作業系統可見記憶體低於 32 GB 則關閉（BIOS 的 VRAM 保留區不計；64 GB 的電腦為 8 GiB））。啟動日誌會印出選定的大小與原因。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層。**Radeon 8060S**（內顯）：預設開啟，大小如上（KV pool 是 BIOS 保留區，主記憶體層是另外 pin 住的作業系統記憶體；128k 的 session 從 RAM 或 SSD 還原，不必重新 prefill）；`--kv-ram-mb 0` 關閉兩個 host 層，`--kv-ssd-gb 0` / `--kv-ssd-mode off` 只關 SSD 層 |
-| `--kv-ssd-dir PATH` | SSD 層目錄（預設 `%LOCALAPPDATA%\whirl\kvcache`） |
+| `--kv-ssd-dir PATH` | SSD 層目錄（預設 `%LOCALAPPDATA%\whirl\kvcache`）；最長 217 字元（UTF-16：中英文每字都算 1），超過會在啟動時拒絕 |
 | `--kv-ssd-gb N` | SSD 層容量上限，GiB（預設 64；`0` = 不用 SSD 層） |
 | `--kv-ssd-mode M` | SSD 層何時寫入：`shutdown`（預設；只寫重用過的項目：關閉 WHIRL 時——Ctrl+C、關閉主控台視窗、登出、作業系統關機，後三者只有約 5 秒——、主記憶體層必須擠出時，以及閒置約 5 分鐘後；一次性的 prompt 永遠不寫）、`always`（閒置超過 `--kv-ssd-delay` 後寫入）、`off`（不寫 SSD 檔案）。見[SSD 層如何儲存 session](#ssd-tier) |
 | `--kv-ssd-delay SEC` | `--kv-ssd-mode always`：session 連續 SEC 秒沒有變動才寫入 SSD（預設 300）。在這之前又被使用的 session 直接從主記憶體服務，不會寫入 |
@@ -442,7 +442,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_SLOT_DRAFTS=1` | 依預期接受率在 slot 之間分配草稿預算 |
 | `WHIRL_TIMING_RESET=0` | 跨請求保留 MTP 計時表（不建議） |
 | `WHIRL_KV_RAM_MB=N` | 主記憶體層，MiB（= `--kv-ram-mb`） |
-| `WHIRL_KV_SSD_DIR=PATH` | SSD 層目錄（= `--kv-ssd-dir`） |
+| `WHIRL_KV_SSD_DIR=PATH` | SSD 層目錄（= `--kv-ssd-dir`；最長 217 字元，超過會拒絕） |
 | `WHIRL_KV_SSD_GB=N` | SSD 層容量上限，GiB（= `--kv-ssd-gb`） |
 | `WHIRL_KV_TIER_MIN=N` | 複製到 host 層的最小 session，單位 token（預設 2048） |
 | `WHIRL_KV_SSD_DELAY_MS=MS` | `always` 模式下主記憶體層項目延後多久再寫入 SSD（預設 300000；`--kv-ssd-delay` 優先） |
@@ -526,7 +526,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 
 | 路徑 | 內容 |
 |---|---|
-| `%LOCALAPPDATA%\whirl\tune4-<模型檔名>-<檔案大小>…txt` | 每個模型檔與 GPU 調校好的 prefill GEMM 組態。刪掉就會重新調校 |
+| `%LOCALAPPDATA%\whirl\tune5-…txt` | 每個模型檔與 GPU 調校好的 prefill GEMM 組態（由模型檔名與大小產生的短檔名）。刪掉這個檔就會重新調校（舊的 `tune4-…` 檔會被複製一次，原檔留給舊版 WHIRL 用，不會再被讀）。WHIRL 的安裝資料夾路徑上限 150 位元組（UTF-8，中文每字 3），超過會拒絕啟動；超過 187 字元的 `%LOCALAPPDATA%` 不會被使用（並顯示警告） |
 | `%LOCALAPPDATA%\whirl\kvcache\` | 伺服器前綴快取的 SSD 層（`--kv-ssd-dir`，上限 `--kv-ssd-gb`） |
 | `%LOCALAPPDATA%\whirl\server.log` | 伺服器 log（`--log-file`） |
 

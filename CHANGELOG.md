@@ -3,6 +3,57 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
+## 0.2.5.1 — 2026-11-06 (Radeon 8060S speed update)
+
+A speed update for the Radeon 8060S (AMD Ryzen AI Max+ 395). Same command-line options, same server API, same model
+files as 0.2.5; on the Radeon 8060S the output is bit-identical to 0.2.5 in every mode (precise, balance, fast). The
+R9700's GPU code is identical to 0.2.5 (the compiled R9700 kernels were compared; only an internal build ID differs);
+its numbers are 0.2.5's, not re-measured.
+
+### Faster on the Radeon 8060S
+
+Five new 8060S kernel paths. Against 0.2.5 on the 8060S (max power (80 W), ASUS ROG Flow Z13, best of 3 runs per cell
+for both versions): prefill +2% to +10% in all three modes on both models; Swift-1.5 27B decode
++5.8% to +12.1% in balance and +3.7% to +8.1% in fast (QA document 2k to 128k tokens; the coding chat in balance); Swift precise decode and Ornith decode
+about unchanged (see below).
+
+- **MXFP4 prefill matrix multiplies** unpack the 4-bit weights inside the multiply (Swift-1.5 27B, and the shared expert
+  of Ornith-1.5-35B-A3B): Swift prefill +10.5% at 2k, +6.4% at 8k, +5.6% at 32k (paired runs of this item alone).
+- **Ornith expert matrix multiplies in prefill**: +2.5% to +3.1% at 2k to 8k tokens; prompts under 32 tokens per expert
+  keep the 0.2.5 path.
+- **int8-KV attention for MTP draft checks** (Swift in balance and fast): +5.0% decode after a 128k-token document.
+- **Matrix-vector product for MTP draft checks** (Swift in balance and fast): +4.5% to +6.0% decode.
+- **Ornith expert router in decode** as one GPU step (every mode): +1.5% without drafts, +0.7% with MTP drafts (within
+  noise).
+- Ornith decode cells move by -6.3% to +6.4% between the versions because the number of accepted MTP drafts changes with
+  each run's text (at 64k in balance: 0.71 -> 0.60 accepted drafts per decode step, while each step ran +0.5% faster).
+  Swift precise decode uses none of the new paths.
+- The first load of each model on the 8060S tunes the GPU kernels once more (the new prefill kernel joined the tuning).
+  The 0.2.5 tables are kept for 0.2.5.
+
+### Fixed
+
+- **Install folder length is checked first.** If the folder of `whirl.exe` / `whirl-server.exe` is longer than 150
+  bytes in UTF-8 (English letters and digits 1 byte, Chinese characters 3), WHIRL refuses to start with a message in
+  English and Traditional Chinese, before the GPU runtime is loaded. Before, a very long install path could make WHIRL
+  stop without a clear message once it started using the GPU. Files you pass (models and others) have no extra limit;
+  when a file cannot be opened, the message now names the path's length.
+- **SSD cache folder at most 217 characters.** `--kv-ssd-dir` / `WHIRL_KV_SSD_DIR` longer than 217 characters (UTF-16,
+  every letter or Chinese character counts 1) is refused at start. A `%LOCALAPPDATA%` longer than 187 characters is
+  not used, with a warning.
+- **Shorter tune cache file names**: `tune5-…` instead of `tune4-<model file name>…`; an existing `tune4-…` file is
+  copied once and kept for older versions.
+- **whirl-server: pinned-memory notes no longer pile up.** A server deletes its own note when it exits and, at start,
+  removes the notes of servers that have exited.
+
+### Corrections
+
+- The 0.2.5 entry below ("Long paths") says that an SSD cache folder longer than 260 characters works, that WHIRL works
+  when it is started through a `\\?\` path, and that the AMD graphics driver stops WHIRL when its own path is several
+  hundred characters long (346 characters tested, 150 works). From 0.2.5.1: the install folder may be at most 150 bytes
+  in UTF-8 (also when WHIRL is started through a `\\?\` path) and the SSD cache folder at most 217 characters; longer
+  ones are refused with a message. The 0.2.5 entry stays as it was.
+
 ## 0.2.5 — 2026-11-03 (bug fixes and internal restructuring)
 
 No new feature (feature freeze until the modularization is done). This release finishes WHIRL's modularization and

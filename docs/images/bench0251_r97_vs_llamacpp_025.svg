@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="530" viewBox="0 0 1400 530" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<rect width="1400" height="530" fill="#ffffff"/>
+<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="white"/><line x1="0" y1="0" x2="0" y2="6" stroke="#000" stroke-opacity="0.55" stroke-width="2.4"/></pattern></defs>
+<text x="64" y="30" font-size="19" font-weight="600" fill="#1f2328">Radeon AI PRO R9700: WHIRL 0.2.5 vs official llama.cpp b11960 (0.2.5, not re-measured)</text>
+<text x="64" y="52" font-size="12.5" fill="#57606a">tok/s · 0.2.5 numbers, not re-measured · median of 3 runs (WHIRL Swift: 4) · llama.cpp: Swift MTP+n-gram, Ornith plain</text>
+<text x="226.0" y="80" font-size="13.5" font-weight="600" text-anchor="middle" fill="#1f2328">Swift-1.5 27B · prefill</text>
+<line x1="74" x2="378" y1="452.0" y2="452.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="456.0" font-size="10.5" text-anchor="end" fill="#57606a">0</text>
+<line x1="74" x2="378" y1="380.0" y2="380.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="384.0" font-size="10.5" text-anchor="end" fill="#57606a">800</text>
+<line x1="74" x2="378" y1="308.0" y2="308.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="312.0" font-size="10.5" text-anchor="end" fill="#57606a">1,600</text>
+<line x1="74" x2="378" y1="236.0" y2="236.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="240.0" font-size="10.5" text-anchor="end" fill="#57606a">2,400</text>
+<line x1="74" x2="378" y1="164.0" y2="164.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="168.0" font-size="10.5" text-anchor="end" fill="#57606a">3,200</text>
+<line x1="74" x2="378" y1="92.0" y2="92.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="96.0" font-size="10.5" text-anchor="end" fill="#57606a">4,000</text>
+<rect x="86.7" y="160.4" width="24.0" height="291.6" fill="#2a78d6"/>
+<text x="98.7" y="156.4" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 101.7 156.4)">3,240</text>
+<rect x="112.7" y="346.6" width="24.0" height="105.4" fill="#eb6834"/>
+<text x="124.7" y="342.6" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 127.7 342.6)">1,171</text>
+<rect x="138.7" y="379.0" width="24.0" height="73.0" fill="#1baf7a"/>
+<text x="150.7" y="375.0" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 153.7 375.0)">812</text>
+<text x="124.7" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">2k</text>
+<rect x="188.0" y="273.3" width="24.0" height="178.7" fill="#2a78d6"/>
+<text x="200.0" y="269.3" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 203.0 269.3)">1,986</text>
+<rect x="214.0" y="378.4" width="24.0" height="73.6" fill="#eb6834"/>
+<text x="226.0" y="374.4" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 229.0 374.4)">818</text>
+<rect x="240.0" y="395.5" width="24.0" height="56.5" fill="#1baf7a"/>
+<text x="252.0" y="391.5" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 255.0 391.5)">628</text>
+<text x="226.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">96k</text>
+<rect x="289.3" y="297.5" width="24.0" height="154.5" fill="#2a78d6"/>
+<text x="301.3" y="293.5" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 304.3 293.5)">1,717</text>
+<rect x="315.3" y="386.9" width="24.0" height="65.1" fill="#eb6834"/>
+<text x="327.3" y="382.9" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 330.3 382.9)">723</text>
+<rect x="341.3" y="400.9" width="24.0" height="51.1" fill="#1baf7a"/>
+<text x="353.3" y="396.9" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 356.3 396.9)">568</text>
+<text x="327.3" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">128k</text>
+<line x1="74" x2="378" y1="452" y2="452" stroke="#57606a" stroke-width="1"/>
+<text x="556.0" y="80" font-size="13.5" font-weight="600" text-anchor="middle" fill="#1f2328">Ornith-1.5-35B-A3B · prefill</text>
+<line x1="404" x2="708" y1="452.0" y2="452.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="399" y="456.0" font-size="10.5" text-anchor="end" fill="#57606a">0</text>
+<line x1="404" x2="708" y1="380.0" y2="380.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="399" y="384.0" font-size="10.5" text-anchor="end" fill="#57606a">3,000</text>
+<line x1="404" x2="708" y1="308.0" y2="308.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="399" y="312.0" font-size="10.5" text-anchor="end" fill="#57606a">6,000</text>
+<line x1="404" x2="708" y1="236.0" y2="236.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="399" y="240.0" font-size="10.5" text-anchor="end" fill="#57606a">9,000</text>
+<line x1="404" x2="708" y1="164.0" y2="164.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="399" y="168.0" font-size="10.5" text-anchor="end" fill="#57606a">12,000</text>
+<line x1="404" x2="708" y1="92.0" y2="92.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="399" y="96.0" font-size="10.5" text-anchor="end" fill="#57606a">15,000</text>
+<rect x="416.7" y="167.5" width="24.0" height="284.5" fill="#2a78d6"/>
+<text x="428.7" y="163.5" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 431.7 163.5)">11,854</text>
+<rect x="442.7" y="350.5" width="24.0" height="101.5" fill="#eb6834"/>
+<text x="454.7" y="346.5" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 457.7 346.5)">4,230</text>
+<rect x="468.7" y="385.3" width="24.0" height="66.7" fill="#1baf7a"/>
+<text x="480.7" y="381.3" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 483.7 381.3)">2,780</text>
+<text x="454.7" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">2k</text>
+<rect x="518.0" y="326.8" width="24.0" height="125.2" fill="#2a78d6"/>
+<text x="530.0" y="322.8" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 533.0 322.8)">5,216</text>
+<rect x="544.0" y="385.5" width="24.0" height="66.5" fill="#eb6834"/>
+<text x="556.0" y="381.5" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 559.0 381.5)">2,772</text>
+<rect x="570.0" y="403.1" width="24.0" height="48.9" fill="#1baf7a"/>
+<text x="582.0" y="399.1" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 585.0 399.1)">2,038</text>
+<text x="556.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">96k</text>
+<rect x="619.3" y="348.8" width="24.0" height="103.2" fill="#2a78d6"/>
+<text x="631.3" y="344.8" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 634.3 344.8)">4,301</text>
+<rect x="645.3" y="395.3" width="24.0" height="56.7" fill="#eb6834"/>
+<text x="657.3" y="391.3" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 660.3 391.3)">2,363</text>
+<rect x="671.3" y="409.8" width="24.0" height="42.2" fill="#1baf7a"/>
+<text x="683.3" y="405.8" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 686.3 405.8)">1,759</text>
+<text x="657.3" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">128k</text>
+<line x1="404" x2="708" y1="452" y2="452" stroke="#57606a" stroke-width="1"/>
+<text x="886.0" y="80" font-size="13.5" font-weight="600" text-anchor="middle" fill="#1f2328">Swift-1.5 27B · decode</text>
+<line x1="734" x2="1038" y1="452.0" y2="452.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="729" y="456.0" font-size="10.5" text-anchor="end" fill="#57606a">0</text>
+<line x1="734" x2="1038" y1="380.0" y2="380.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="729" y="384.0" font-size="10.5" text-anchor="end" fill="#57606a">24.0</text>
+<line x1="734" x2="1038" y1="308.0" y2="308.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="729" y="312.0" font-size="10.5" text-anchor="end" fill="#57606a">48.0</text>
+<line x1="734" x2="1038" y1="236.0" y2="236.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="729" y="240.0" font-size="10.5" text-anchor="end" fill="#57606a">72.0</text>
+<line x1="734" x2="1038" y1="164.0" y2="164.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="729" y="168.0" font-size="10.5" text-anchor="end" fill="#57606a">96.0</text>
+<line x1="734" x2="1038" y1="92.0" y2="92.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="729" y="96.0" font-size="10.5" text-anchor="end" fill="#57606a">120</text>
+<rect x="741.1" y="172.9" width="19.3" height="279.1" fill="#2a78d6"/>
+<text x="750.7" y="168.9" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 753.7 168.9)">93.1</text>
+<rect x="762.4" y="301.4" width="19.3" height="150.6" fill="#eb6834"/>
+<text x="772.0" y="297.4" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 775.0 297.4)">50.2</text>
+<rect x="783.6" y="318.8" width="19.3" height="133.2" fill="#1baf7a"/>
+<text x="793.3" y="314.8" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 796.3 314.8)">44.4</text>
+<text x="772.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">QA 2k</text>
+<rect x="817.1" y="284.8" width="19.3" height="167.2" fill="#2a78d6"/>
+<text x="826.7" y="280.8" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 829.7 280.8)">55.8</text>
+<rect x="838.4" y="346.7" width="19.3" height="105.3" fill="#eb6834"/>
+<text x="848.0" y="342.7" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 851.0 342.7)">35.1</text>
+<rect x="859.6" y="334.4" width="19.3" height="117.6" fill="#1baf7a"/>
+<text x="869.3" y="330.4" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 872.3 330.4)">39.2</text>
+<text x="848.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">QA 96k</text>
+<rect x="893.1" y="291.2" width="19.3" height="160.8" fill="#2a78d6"/>
+<text x="902.7" y="287.2" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 905.7 287.2)">53.6</text>
+<rect x="914.4" y="358.7" width="19.3" height="93.3" fill="#eb6834"/>
+<text x="924.0" y="354.7" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 927.0 354.7)">31.1</text>
+<rect x="935.6" y="344.9" width="19.3" height="107.1" fill="#1baf7a"/>
+<text x="945.3" y="340.9" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 948.3 340.9)">35.7</text>
+<text x="924.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">QA 128k</text>
+<rect x="969.1" y="134.0" width="19.3" height="318.0" fill="#2a78d6"/>
+<text x="978.7" y="130.0" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 981.7 130.0)">106</text>
+<rect x="990.4" y="280.7" width="19.3" height="171.3" fill="#eb6834"/>
+<text x="1000.0" y="276.7" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1003.0 276.7)">57.1</text>
+<rect x="1011.6" y="292.7" width="19.3" height="159.3" fill="#1baf7a"/>
+<text x="1021.3" y="288.7" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1024.3 288.7)">53.1</text>
+<text x="1000.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">chat</text>
+<line x1="734" x2="1038" y1="452" y2="452" stroke="#57606a" stroke-width="1"/>
+<text x="1216.0" y="80" font-size="13.5" font-weight="600" text-anchor="middle" fill="#1f2328">Ornith-1.5-35B-A3B · decode</text>
+<line x1="1064" x2="1368" y1="452.0" y2="452.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="1059" y="456.0" font-size="10.5" text-anchor="end" fill="#57606a">0</text>
+<line x1="1064" x2="1368" y1="380.0" y2="380.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="1059" y="384.0" font-size="10.5" text-anchor="end" fill="#57606a">60.0</text>
+<line x1="1064" x2="1368" y1="308.0" y2="308.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="1059" y="312.0" font-size="10.5" text-anchor="end" fill="#57606a">120</text>
+<line x1="1064" x2="1368" y1="236.0" y2="236.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="1059" y="240.0" font-size="10.5" text-anchor="end" fill="#57606a">180</text>
+<line x1="1064" x2="1368" y1="164.0" y2="164.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="1059" y="168.0" font-size="10.5" text-anchor="end" fill="#57606a">240</text>
+<line x1="1064" x2="1368" y1="92.0" y2="92.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="1059" y="96.0" font-size="10.5" text-anchor="end" fill="#57606a">300</text>
+<rect x="1071.1" y="152.6" width="19.3" height="299.4" fill="#2a78d6"/>
+<text x="1080.7" y="148.6" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1083.7 148.6)">250</text>
+<rect x="1092.4" y="318.0" width="19.3" height="134.0" fill="#eb6834"/>
+<text x="1102.0" y="314.0" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1105.0 314.0)">112</text>
+<rect x="1113.6" y="324.4" width="19.3" height="127.6" fill="#1baf7a"/>
+<text x="1123.3" y="320.4" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1126.3 320.4)">106</text>
+<text x="1102.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">QA 2k</text>
+<rect x="1147.1" y="267.9" width="19.3" height="184.1" fill="#2a78d6"/>
+<text x="1156.7" y="263.9" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1159.7 263.9)">153</text>
+<rect x="1168.4" y="356.4" width="19.3" height="95.6" fill="#eb6834"/>
+<text x="1178.0" y="352.4" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1181.0 352.4)">79.7</text>
+<rect x="1189.6" y="360.1" width="19.3" height="91.9" fill="#1baf7a"/>
+<text x="1199.3" y="356.1" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1202.3 356.1)">76.6</text>
+<text x="1178.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">QA 96k</text>
+<rect x="1223.1" y="278.8" width="19.3" height="173.2" fill="#2a78d6"/>
+<text x="1232.7" y="274.8" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1235.7 274.8)">144</text>
+<rect x="1244.4" y="363.1" width="19.3" height="88.9" fill="#eb6834"/>
+<text x="1254.0" y="359.1" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1257.0 359.1)">74.1</text>
+<rect x="1265.6" y="367.2" width="19.3" height="84.8" fill="#1baf7a"/>
+<text x="1275.3" y="363.2" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1278.3 363.2)">70.7</text>
+<text x="1254.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">QA 128k</text>
+<rect x="1299.1" y="158.5" width="19.3" height="293.5" fill="#2a78d6"/>
+<text x="1308.7" y="154.5" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1311.7 154.5)">245</text>
+<rect x="1320.4" y="314.6" width="19.3" height="137.4" fill="#eb6834"/>
+<text x="1330.0" y="310.6" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1333.0 310.6)">115</text>
+<rect x="1341.6" y="324.9" width="19.3" height="127.1" fill="#1baf7a"/>
+<text x="1351.3" y="320.9" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 1354.3 320.9)">106</text>
+<text x="1330.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">chat</text>
+<line x1="1064" x2="1368" y1="452" y2="452" stroke="#57606a" stroke-width="1"/>
+<text x="16" y="272.0" font-size="12" fill="#57606a" text-anchor="middle" transform="rotate(-90 16 272.0)">tok/s</text>
+<rect x="64.0" y="481" width="14" height="14" fill="#2a78d6"/>
+<text x="84.0" y="493" font-size="12" fill="#1f2328">WHIRL 0.2.5 (balance)</text>
+<rect x="504.0" y="481" width="14" height="14" fill="#eb6834"/>
+<text x="524.0" y="493" font-size="12" fill="#1f2328">llama.cpp b11960 ROCm</text>
+<rect x="944.0" y="481" width="14" height="14" fill="#1baf7a"/>
+<text x="964.0" y="493" font-size="12" fill="#1f2328">llama.cpp b11960 Vulkan</text>
+</svg>

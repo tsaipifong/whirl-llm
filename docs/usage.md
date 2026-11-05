@@ -237,7 +237,7 @@ request slots, a prefix cache in VRAM and host RAM / SSD tiers for idle sessions
 | `--draft-model FILE` | DFlash2 drafter GGUF for `--draft dflash` (wins over `WHIRL_DRAFT_MODEL`, as for `chat`) |
 | `--decode-min-tps N` | decode floor: while other requests prefill, every streaming (decoding) request keeps at least N tok/s; prefill forwards are shortened and decode cycles interleaved to hold it (default 20; `0` = off, prefill forwards are not limited). Outputs are identical for any N ([server.md](guide/en/server.md#batching)) |
 | `--kv-ram-mb N` | host RAM tier of the prefix cache, MiB of pinned memory (default: 1/4 of physical RAM, at least 8 GiB or one full-length session if that is larger — about 9 GiB for the 27B model —, at most 32 GiB, and at most half of the RAM available at startup; 16 GiB on a 64 GB PC; since 0.2.2.1 every RAM tier, given or automatic, is capped at 20480 MiB, because a larger pinned RAM tier crashed on the first request on a test machine (cause under investigation); since 0.2.2.2 the automatic size is capped with an info line and an explicit size with an `adjusted:` line, and the cap comes first, then a size above half of the RAM available at startup goes to half of it; integrated GPUs: OS-visible RAM / 8 within [one max-context entry (about 6 GiB for the 27B model at 262k), 16 GiB], at most 1/4 of the RAM available at startup, off under 32 GB of OS-visible RAM (the BIOS VRAM carve-out does not count; 8 GiB on a 64 GB machine)). The startup log prints the chosen size and why. Idle sessions are copied there and restored instead of prefilled again. `0` disables both host tiers. **Radeon 8060S** (integrated GPU): on by default with the size above (the KV pool is the BIOS carve-out, the tier is separate pinned OS RAM; a 128k session is restored from RAM or SSD instead of being prefilled again); `--kv-ram-mb 0` turns both host tiers off, `--kv-ssd-gb 0` / `--kv-ssd-mode off` only the SSD tier |
-| `--kv-ssd-dir PATH` | SSD tier directory (default `%LOCALAPPDATA%\whirl\kvcache`) |
+| `--kv-ssd-dir PATH` | SSD tier directory (default `%LOCALAPPDATA%\whirl\kvcache`); at most 217 characters (UTF-16: every letter or Chinese character counts 1), longer is refused at start |
 | `--kv-ssd-gb N` | SSD tier size cap in GiB (default 64; `0` = no SSD tier) |
 | `--kv-ssd-mode M` | when the SSD tier writes: `shutdown` (default; only reused entries are ever written: when WHIRL is closed — Ctrl+C, console window closed, logoff, OS shutdown; the last three allow only about 5 s — when RAM must evict them, and after about 5 minutes idle; a one-shot prompt is never written), `always` (idle sessions go to the SSD after `--kv-ssd-delay`), `off` (no SSD files). See [how the SSD tier stores sessions](#ssd-tier) |
 | `--kv-ssd-delay SEC` | `--kv-ssd-mode always`: write a session to the SSD once it has been unchanged for SEC seconds (default 300). A session that is used again sooner is served from RAM and never written |
@@ -581,7 +581,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_SLOT_DRAFTS=1` | split the draft budget between slots by expected acceptance |
 | `WHIRL_TIMING_RESET=0` | keep the MTP timing table across requests (not recommended) |
 | `WHIRL_KV_RAM_MB=N` | host RAM tier in MiB (= `--kv-ram-mb`) |
-| `WHIRL_KV_SSD_DIR=PATH` | SSD tier directory (= `--kv-ssd-dir`) |
+| `WHIRL_KV_SSD_DIR=PATH` | SSD tier directory (= `--kv-ssd-dir`; at most 217 characters, longer is refused) |
 | `WHIRL_KV_SSD_GB=N` | SSD tier size cap in GiB (= `--kv-ssd-gb`) |
 | `WHIRL_KV_TIER_MIN=N` | smallest session copied to the host tiers, in tokens (default 2048) |
 | `WHIRL_KV_SSD_DELAY_MS=MS` | delay before a RAM-tier entry is written to the SSD in `always` mode (default 300000; `--kv-ssd-delay` overrides) |
@@ -671,7 +671,7 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 
 | Path | Content |
 |---|---|
-| `%LOCALAPPDATA%\whirl\tune4-<model file name>-<file size>…txt` | the tuned prefill GEMM configuration per model file and GPU. Delete it to tune again |
+| `%LOCALAPPDATA%\whirl\tune5-…txt` | the tuned prefill GEMM configuration per model file and GPU (a short name derived from the model file name and size). Delete it to tune again (an older `tune4-…` file is copied once, kept for older WHIRL versions and not read again). The install folder of WHIRL may be at most 150 bytes in UTF-8 (Chinese characters count 3); WHIRL refuses to start from a longer one. A `%LOCALAPPDATA%` longer than 187 characters is not used (with a warning) |
 | `%LOCALAPPDATA%\whirl\kvcache\` | SSD tier of the server's prefix cache (`--kv-ssd-dir`, capped by `--kv-ssd-gb`) |
 | `%LOCALAPPDATA%\whirl\server.log` | server log (`--log-file`) |
 
