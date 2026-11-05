@@ -26,9 +26,9 @@ constexpr double kRopeRtol = 1e-4, kRopeAtol = 1e-5;
 // cmpTol scale of one head of hd values whose dims i and i + n_rot / 2 (i < n_rot / 2) are rotated as pair i: pre = the values
 // just before the rotation, ref = the double reference after it; scale[i] multiplies rtol in the bound atol + rtol * scale[i]
 inline void ropeBoundScale(const double* pre, const double* ref, double* scale, int hd, int n_rot) {
-    (void)pre;
-    (void)n_rot;
-    for (int i = 0; i < hd; ++i) scale[i] = std::fabs(ref[i]);  // TEST-FIRST commit: the current rule (= cmpTolRel(1e-4, 1e-5))
+    (void)ref;  // the error of a rotated element follows its pair, not |ref| (see the top of this file)
+    for (int i = 0; i < hd; ++i) scale[i] = std::fabs(pre[i]);
+    for (int i = 0; i < n_rot / 2; ++i) scale[i] = scale[i + n_rot / 2] = std::fabs(pre[i]) + std::fabs(pre[i + n_rot / 2]);
 }
 
 // cmpTol's metric (kt.cpp): max over i of |got - ref| / (atol + rtol * scale[i]); above 1 fails (NaN counts as above)

@@ -1063,8 +1063,8 @@ void testAttn(Ctx& c) {
         if (mv.rot)
             c.rep.add(cmpTolRel(std::string(mv.m) + " q vs CPU (multi-section RoPE {t,h,w}, sections 4/3/3)", g2, ref, 1e-4, 1e-5));
         else
-            c.rep.add(cmpTol(std::string(mv.m) + " q vs CPU (multi-section RoPE {t,h,w}, sections 4/3/3)", g2, ref, sc, kRopeRtol,
-                             kRopeAtol));
+            c.rep.add(cmpTol(std::string(mv.m) + " q vs CPU (multi-section RoPE {t,h,w}, sections 4/3/3; pair scale)", g2, ref, sc,
+                             kRopeRtol, kRopeAtol));
         // (c) rdelta: RoPE at pos - 37 (all sections), KV row pos: q == attn_prep at pos - 37
         if (!mv.rot) {
             std::vector<int> pos2(pos);
