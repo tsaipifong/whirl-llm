@@ -16,6 +16,7 @@
 #include <numeric>
 
 #include "cpu_ref.h"
+#include "kt_rope_bound.h"
 
 namespace kt {
 
@@ -951,6 +952,18 @@ void testAttn(Ctx& c) {
                       {"attn_prep_q8h", "attn_prep_m_q8h", Fmt::q8, true},
                       {"attn_prep_q8v", "attn_prep_m_q8v", Fmt::q8v, false},
                       {"attn_prep_q4", "attn_prep_m_q4", Fmt::q4, true}};
+    // v0251-tiers B26-53 (a): the RoPE bound's own CPU self-test (kt_rope_bound.h; no GPU, no Ctx rng draw): the 0.2.5.1 gate
+    // element and fp32 angles with powf 1 ulp high stay inside the bound, a wrong section / h-w swap / wrong pair / f16 output not
+    for (const RopeBoundCase& bc : ropeBoundSelftest()) {
+        Result r;
+        r.name = "rope bound selftest " + bc.name + (bc.expect_pass ? ": inside the bound" : ": outside the bound");
+        r.kind = Kind::exact;
+        r.n = 1;
+        r.pass = (bc.metric <= 1.0) == bc.expect_pass;
+        r.mismatches = r.pass ? 0 : 1;
+        r.note = "metric " + std::to_string(bc.metric) + " of the bound";
+        c.rep.add(r);
+    }
     for (const MV& mv : mvs) {
         auto fm = c.fnOpt(mv.m);
         auto fp = c.fnOpt(mv.plain);
@@ -1011,7 +1024,7 @@ void testAttn(Ctx& c) {
         c.sync();
         const auto got = qd.down<float>(nqf);
         std::vector<float> g2;
-        std::vector<double> ref;
+        std::vector<double> ref, sc;  // sc: kt_rope_bound.h scale of the non-rotated variants
         for (int t = 0; t < n; ++t)
             for (int h = 0; h < kHeads; ++h) {
                 const float* x = qf.data() + (static_cast<std::size_t>(t) * kHeads + h) * kQStride;
@@ -1020,6 +1033,7 @@ void testAttn(Ctx& c) {
                 for (int i = 0; i < kHd; ++i) ss += static_cast<double>(x[i]) * x[i];
                 const double r = 1.0 / std::sqrt(ss / kHd + eps);
                 for (int i = 0; i < kHd; ++i) v[static_cast<std::size_t>(i)] = x[i] * r * qw[static_cast<std::size_t>(i)];
+                const std::vector<double> pre(v);  // the head just before the rotation
                 for (int i = 0; i < kRot / 2; ++i) {
                     const int pi = pairPos(i, rp[3 * static_cast<std::size_t>(t)], rp[3 * static_cast<std::size_t>(t) + 1], rp[3 * static_cast<std::size_t>(t) + 2]);
                     const double th = pi * std::pow(static_cast<double>(theta_scale), i);
@@ -1037,12 +1051,20 @@ void testAttn(Ctx& c) {
                         }
                     for (double& e : v) e /= std::sqrt(static_cast<double>(kHd));
                 }
+                std::vector<double> hs(kHd);
+                if (!mv.rot) ropeBoundScale(pre.data(), v.data(), hs.data(), kHd, kRot);
                 for (int i = 0; i < kHd; ++i) {
                     ref.push_back(v[static_cast<std::size_t>(i)]);
                     g2.push_back(got[(static_cast<std::size_t>(t) * kHeads + h) * kQStride + i]);
+                    sc.push_back(hs[static_cast<std::size_t>(i)]);
                 }
             }
-        c.rep.add(cmpTolRel(std::string(mv.m) + " q vs CPU (multi-section RoPE {t,h,w}, sections 4/3/3)", g2, ref, 1e-4, 1e-5));
+        // the Walsh-Hadamard variants (_q8h, _q4) average the 64 angle errors (R9700 0.124, MC max 0.31): |ref| stays their scale
+        if (mv.rot)
+            c.rep.add(cmpTolRel(std::string(mv.m) + " q vs CPU (multi-section RoPE {t,h,w}, sections 4/3/3)", g2, ref, 1e-4, 1e-5));
+        else
+            c.rep.add(cmpTol(std::string(mv.m) + " q vs CPU (multi-section RoPE {t,h,w}, sections 4/3/3)", g2, ref, sc, kRopeRtol,
+                             kRopeAtol));
         // (c) rdelta: RoPE at pos - 37 (all sections), KV row pos: q == attn_prep at pos - 37
         if (!mv.rot) {
             std::vector<int> pos2(pos);
