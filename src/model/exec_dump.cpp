@@ -81,6 +81,11 @@ std::string execDump(const Model& m) {
         if (any) add(std::format("gemv_w[{}]", t), hexRow(m.tuneTable().gemv_w[t]));
     }
     add("gemv_w_head", hexRow(m.tuneTable().gemv_w_head));
+    {
+        bool any = false;  // v0251-a6port: only when a gemvk width is set (8060S dense default, WHIRL_GEMV_K)
+        for (std::uint8_t v : m.tuneTable().gemv_k) any = any || v != 0;
+        if (any) add("gemv_k", hexRow(m.tuneTable().gemv_k));
+    }
     WD_FB(fp8_prefill);
     WD_FU(fp8_mask);
     WD_SU(mm_class);

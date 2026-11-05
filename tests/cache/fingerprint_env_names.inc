@@ -51,6 +51,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_GEMVH_WAVES",  // src/kernels_host/kernels_abi.cpp
     "WHIRL_GEMVX_VARIANT",  // src/kernels_host/kernels_abi.cpp
     "WHIRL_GEMV_BITWISE_FLOAT",  // src/config/env_snapshot.cpp
+    "WHIRL_GEMV_K",  // src/config/env_snapshot.cpp (v0251-a6port)
     "WHIRL_GEMV_MAX",  // src/common/numerics.cpp
     "WHIRL_GEMV_R",  // src/config/env_snapshot.cpp
     "WHIRL_GEMV_W",  // src/config/env_snapshot.cpp

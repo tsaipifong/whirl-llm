@@ -36,12 +36,14 @@ public:
     Value head_gemvx, prec_gemvh, prec_gs;
     // src/model/loader.cpp (v0251-a3port, through qwen35::fdqEnv at Model::load): the gemmfq slot / row threshold
     Value fdq8s, fdq8s_min;
+    // src/model/config.cpp applyGemvEnv / applyGemvKEnv (v0251-a6port, feat026-ggemv): the gfx1151 gemvk table override
+    Value gemv_k;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 60;
+    static constexpr std::size_t n_names = 61;
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

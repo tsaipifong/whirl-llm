@@ -35,6 +35,9 @@ struct TuneTable {
     GemvR gemv_r = defaultGemvR();
     GemvW gemv_w = defaultGemvW();
     GemvR gemv_w_head = defaultGemvWHead();
+    // v0251-a6port (feat026-ggemv): gfx1151 MXFP4 gemvk variant (1..9, 15 = auto by K) per verify width n; 0 = the
+    // gemvq path of 0.2.5. Load default: qwen35::defaultGemvK (device profile row); WHIRL_GEMV_K replaces it.
+    GemvR gemv_k{};
 };
 
 // The tune table as text (Model::writeTune): one line "bucket type rows cols choice" per distinct (bucket, type, rows,

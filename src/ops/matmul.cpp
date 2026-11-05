@@ -84,6 +84,19 @@ GemvPlan chooseGemvTile(const MatShape* mats, std::size_t n_mats, std::uint32_t 
             rows_per_block = 8 * static_cast<std::uint32_t>((*tn.gemv_r)[n]);
         }
     }
+    // feat026-ggemv: opt-in gfx1151 gemvk (same bits per row and token as gemvq; only where the code object has it)
+    if (wf == nullptr && n >= 2 && n <= static_cast<std::uint32_t>(kernels::kGemvkMaxNt) && w.ty == GgmlType::mxfp4 &&
+        tn.gemv_k != nullptr && (*tn.gemv_k)[n] != 0) {
+        std::uint32_t total_rows = 0;
+        for (std::size_t si = 0; si < n_mats; ++si) total_rows += mats[si].nrows;
+        const std::uint8_t sel = (*tn.gemv_k)[n];
+        const std::uint8_t v = sel == kGemvkAuto ? gemvkAuto(w.ncols, total_rows) : sel;
+        if (v >= 1 && v < kernels::kNGemvk && k.gemvk[v][n - 2] != nullptr) {
+            f = k.gemvk[v][n - 2];
+            fg = k.gemvk_g[v][n - 2];
+            rows_per_block = static_cast<std::uint32_t>(kernels::gemvkRows(v));
+        }
+    }
     GemvPlan p;
     // one-token entries always take GvArgs (gv_grp); a multi-token group takes the twin
     const bool twin = n >= 2 && n_mats > 1 && fg != nullptr && n <= gvNmax(w.ty, tn.gv_nmax_override);
@@ -99,6 +112,25 @@ GemvPlan chooseGemvTile(const MatShape* mats, std::size_t n_mats, std::uint32_t 
         for (std::size_t si = 0; si < n_mats; ++si) p.grid[si] = D((mats[si].nrows + rows_per_block - 1) / rows_per_block);
     }
     return p;
+}
+
+std::uint8_t gemvkAuto(std::uint32_t ncols, std::uint32_t total_rows) {
+    const std::uint32_t nsb = ncols / 256;
+    std::uint32_t kw = 0;
+    for (std::uint32_t c : {8u, 4u, 2u})  // largest KW without idle slots and >= 4 superblocks per wave
+        if (kw == 0 && nsb % c == 0 && nsb / c >= 4) kw = c;
+    if (kw == 0)
+        for (std::uint32_t c : {2u, 4u, 8u})  // else the most superblocks per wave without idle slots
+            if (kw == 0 && nsb % c == 0) kw = c;
+    if (kw == 0) {  // else the least idle: waste = KW * ceil(nsb / KW) - nsb
+        std::uint32_t best = ~0u;
+        for (std::uint32_t c : {2u, 4u, 8u}) {
+            const std::uint32_t waste = c * ((nsb + c - 1) / c) - nsb;
+            if (waste < best) best = waste, kw = c;
+        }
+    }
+    while (kw < 8 && (total_rows + 16 * (8 / kw) - 1) / (16 * (8 / kw)) < 80) kw *= 2;
+    return kw == 8 ? 6 : kw == 4 ? 2 : 4;
 }
 
 GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::MatmulKernels& k, bool head_gemvx) {

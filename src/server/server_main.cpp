@@ -720,6 +720,9 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     (void)settings::envU32("DRAFT_WINDOW_MIN", model.nf().draft_window_min, settingsWarn);
     if (settings::envGet("GEMV_R") || settings::envGet("GEMV_W") || settings::envGet("GEMV_WH"))
         logW("WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH are not supported by whirl-server (ignored)");
+    // v0251-a6port: WHIRL_GEMV_K replaces the load's gfx1151 gemvk table (A/B; off = the 0.2.5 path; bitwise either way)
+    if (const auto gk = qwen35::applyGemvKEnv(model))
+        logI("WHIRL_GEMV_K={}: gfx1151 MXFP4 gemvk verify GEMV table replaced (A/B; off = the 0.2.5 path)", *gk);
     const bool& use_mtp = b.use_mtp = model.mtp.has_value() && settings::mtp();
     const qwen35::MtpDefaults& def = b.def = qwen35::mtpDefaults(model.cfg.moe, model.arch);
     // (MTP_DRAFTS / MTP_PMIN / MTP_NMIN: the readers shared with the CLI's mtpOpts, config.settings, arch025-N15 rest)

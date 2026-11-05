@@ -30,6 +30,9 @@ struct Profile {
     // ---- GEMV / GEMM dispatch (src/model/qwen35/forward/dispatch.cpp)
     // rows per block of the multi-row quantized GEMV per batch size 0..16 (Model::gemv_r default)
     std::array<std::uint8_t, 17> gemv_r;
+    // gfx1151 MXFP4 gemvk variant (kernels/gfx1151/gemv_gk.hip, 1..9) per verify width 0..16, 0 = the gemvq path
+    // (v0251-a6port; qwen35::defaultGemvK picks the row of the model class, WHIRL_GEMV_K replaces it): dense / MoE
+    std::array<std::uint8_t, 17> gemvk_dense, gemvk_moe;
     // f16-in GEMV grid: kernels::gemvhGrid(nrows) blocks (else one block per 16 rows)
     bool gemvh_grid_by_rows;
     // f16 GEMM outputs (h16) are decided from the tuner's candidate list, not the tuned choices (the code
@@ -70,6 +73,8 @@ inline constexpr Profile k_profile_gfx1201{
     .arch = hip::Arch::gfx1201,
     .uma_no_vram_fit_check = false,
     .gemv_r = {1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2},
+    .gemvk_dense = {},  // the gfx1201 object has no gemvk
+    .gemvk_moe = {},
     .gemvh_grid_by_rows = false,
     .h16_from_candidates = false,
     .gemms_tie_larger_bm = false,
@@ -91,6 +96,11 @@ inline constexpr Profile k_profile_gfx1151{
     .arch = hip::Arch::gfx1151,
     .uma_no_vram_fit_check = true,
     .gemv_r = {1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2},
+    // v0251-a6port: Swift (dense) verify widths 5 / 6 on gemvk v7 (KW 8, PF 2): the A6 kernel bench pick (sum of the
+    // 8 Swift shapes 0.900 / 0.897 of gemvq_nt*r2, scratch/feat026_ggemv/results_8060s_b2a.txt) and its e2e (balance
+    // decode 2k +7.91 %, 128k +5.43 %, results_8060s_h2.txt). MoE (Ornith) stays on gemvq until its own e2e passes.
+    .gemvk_dense = {0, 0, 0, 0, 0, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    .gemvk_moe = {},
     .gemvh_grid_by_rows = true,
     .h16_from_candidates = true,
     .gemms_tie_larger_bm = true,

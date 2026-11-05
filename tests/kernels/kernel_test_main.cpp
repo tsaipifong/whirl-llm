@@ -31,6 +31,7 @@
 
 #include "cpu_ref.h"
 #include "kt_bench.h"
+#include "kt_ggemv_widths.h"
 #include "whirl/common.h"
 #include "whirl/leak_count.h"
 
@@ -55,6 +56,8 @@ int usage() {
         "          [--rot-mb N] [--rot-cap-mb N] [--moe-layers N] [--no-anchor]: kernel timing (kt::Bench) instead of tests\n"
         "          fdq: in-object A/B (ABBA) of the shipped dequant_f16_mxfp4 + gemm_c<i>_f16 pair vs gemmfq_<v>_mxfp4\n"
         "          [--fdq-n ROWS,...] (default 1024,1280,2048,4096) [--fdq-v c2,t2] (gfx1151 code object)\n"
+        "          [--bench-nt 5,6]: ggemv widths, a subset of the gemvk table (--list-bench-nt prints it and exits 0)\n"
+        "          [--bench-v 7]: ggemv: only these gemvk variants (1..9) next to the production kernel\n"
         "  --device  index, gfx arch, name substring, r9700 or 8060s (default: WHIRL_DEVICE, else the\n"
         "            first R9700, else the first GPU this build has kernels for)\n"
         "  models default to WHIRL_TEST_Q4 (else WHIRL_TEST_GGUF) / WHIRL_TEST_MX / WHIRL_TEST_MOE /\n"
@@ -118,6 +121,26 @@ int main(int argc, char** argv) {
                     if (a == "--fdq-v") bo.fdq_v.push_back(f);
                     else bo.fdq_n.push_back(std::stoi(f));
                 }
+            } else if (a == "--bench-nt") {
+                std::string err;
+                if (!kt::parseBenchNt(next(), bo.ggemv_nt, err)) {
+                    std::printf("whirl-kernel-test: %s\n", err.c_str());
+                    return usage();
+                }
+            } else if (a == "--bench-v") {  // v0251-a6port: the kt-bench ABBA rounds time production vs the picked variant
+                const std::string lv = next();
+                bo.ggemv_v.clear();
+                for (std::size_t p0 = 0; p0 <= lv.size();) {
+                    std::size_t e1 = lv.find(',', p0);
+                    if (e1 == std::string::npos) e1 = lv.size();
+                    const int v = std::stoi(lv.substr(p0, e1 - p0));  // throws on a non-number: usage below
+                    if (v < 1 || v > 9) throw std::invalid_argument("--bench-v: variants are 1..9");
+                    bo.ggemv_v.push_back(v);
+                    p0 = e1 + 1;
+                }
+            } else if (a == "--list-bench-nt") {  // before any device call: the runners size their estimate from it
+                std::printf("ggemv bench widths: %s\n", kt::joinNts(kt::ggemvBenchNts()).c_str());
+                return 0;
             } else return usage();
         } catch (const std::exception& e) {
             std::printf("%s\n", e.what());
@@ -135,8 +158,12 @@ int main(int argc, char** argv) {
         }
     }
     const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "misc", "attnbench",
-                               "gemvh", "gemvhbench", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision"};  // = fams below
+                               "gemvh", "gemvhbench", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk"};  // = fams below
     const bool bench = !bo.families.empty();
+    if ((!bo.ggemv_nt.empty() || !bo.ggemv_v.empty()) && bo.families.count("ggemv") == 0) {
+        std::printf("whirl-kernel-test: --bench-nt / --bench-v need --bench ggemv\n");
+        return usage();
+    }
     if (!bench && (!bo.jsonl.empty() || !bo.ab_hsaco.empty())) {
         std::printf("whirl-kernel-test: --jsonl / --ab need --bench\n");
         return usage();
@@ -248,7 +275,7 @@ int main(int argc, char** argv) {
                         {"gemvh", kt::testGemvh}, {"gemvhbench", kt::benchGemvh}, {"dflash", kt::testDflash},
                         {"ws4", kt::testAttnWs4}, {"ws4bench", kt::benchAttnWs4},
                         {"ws4g", kt::testAttnWs4g}, {"ws4gbench", kt::benchAttnWs4g},
-                        {"vision", kt::testVision}};
+                        {"vision", kt::testVision}, {"gemvk", kt::testGemvk}};  // gemvk: v0251-a6port
     if (bench) {
         const auto t0 = std::chrono::steady_clock::now();
         try {

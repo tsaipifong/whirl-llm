@@ -227,6 +227,7 @@ int main() {
     testPreciseRule();
     testMatmulPath();
     testGemvTile();
+    testGemvK();  // v0251-a6port (feat026-ggemv)
     testGemvWide();
     testOpsGemm();
     testOpsGemmFq();  // v0251-a3port

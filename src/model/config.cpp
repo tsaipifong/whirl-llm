@@ -6,6 +6,7 @@
 #include "model/qwen35/arch_names.h"  // the family's GGUF names (arch025-lane2 leg 5)
 #include "whirl/model.h"
 #include "config/env_snapshot.h"
+#include "whirl/ops/matmul.h"  // ops::kGemvkAuto (v0251-a6port)
 
 #include <algorithm>
 #include <array>
@@ -283,8 +284,34 @@ void parseGemvWHead(Model& m, std::string_view list) {
     });
 }
 
+GemvR defaultGemvK(hip::Arch arch, bool moe) {
+    const device::Profile& p = device::profile(arch);
+    return moe ? p.gemvk_moe : p.gemvk_dense;
+}
+
+void parseGemvK(Model& m, std::string_view list) {
+    if (list.empty()) return;  // '' = not set (as the other GEMV lists)
+    GemvR t{};
+    if (list != "off")
+        parseNtList(list, ops::kGemvkAuto, [&](std::uint32_t nt, std::uint32_t v) {
+            if (nt <= static_cast<std::uint32_t>(kernels::kGemvkMaxNt) && (v < static_cast<std::uint32_t>(kernels::kNGemvk) || v == ops::kGemvkAuto))
+                t[nt] = static_cast<std::uint8_t>(v);
+        });
+    m.tuneTable().gemv_k = t;  // replaces the load's default row ("0" / "off": all 0)
+}
+
+std::optional<std::string> applyGemvKEnv(Model& m) {
+    const auto env = whirl::config::snapshotOf(m);
+    if (const auto& v = env->gemv_k) {
+        parseGemvK(m, *v);
+        return *v;
+    }
+    return std::nullopt;
+}
+
 void applyGemvEnv(Model& m) {
     const auto env = whirl::config::snapshotOf(m);  // the load's (arch025-N1)
+    if (const auto& v = env->gemv_k) parseGemvK(m, *v);  // v0251-a6port
     if (const auto& v = env->gemv_r) parseGemvR(m, *v);
     if (const auto& v = env->gemv_w) parseGemvW(m, *v);
     if (const auto& v = env->gemv_wh) parseGemvWHead(m, *v);

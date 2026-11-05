@@ -268,6 +268,16 @@ void parseGemvR(Model& m, std::string_view list);
 void parseGemvW(Model& m, std::string_view list);
 void parseGemvWHead(Model& m, std::string_view list);
 void applyGemvEnv(Model& m);
+// v0251-a6port (feat026-ggemv): the gfx1151 MXFP4 gemvk table (TuneTable::gemv_k). defaultGemvK = the device
+// profile's row of the model class (gemvk_dense / gemvk_moe; all 0 off the 8060S), set by the load.
+// WHIRL_GEMV_K=nt:v,... REPLACES the table (v 1..9, 15 = auto by K through ops::gemvkAuto, "nt" alone = auto,
+// nt 2..kGemvkMaxNt); "off" or "0" = all 0 = the 0.2.5 path; "" = not set. Every variant is bitwise == the
+// gemvq path (checkGemvBitwise, kt gemvk), so the table moves speed only. applyGemvEnv reads it for the CLI.
+GemvR defaultGemvK(hip::Arch arch, bool moe);
+void parseGemvK(Model& m, std::string_view list);
+// whirl-server: WHIRL_GEMV_K of the load's snapshot (the server ignores GEMV_R / _W / _WH); the value it applied, or
+// nullopt when unset
+std::optional<std::string> applyGemvKEnv(Model& m);
 
 // v0251-a3port (feat026-fdq): the fused-dequant MXFP4 prefill GEMM switches of a load's snapshot (Model::load ->
 // Context::fdq / fdq_min). WHIRL_FDQ8S: unset or "" -> -1 (the device default, device::Profile::fdq_default);

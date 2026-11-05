@@ -24,7 +24,8 @@
     "kernels/gfx1151/gemv_q.hip",
     "kernels/gfx1151/gemv_mr.hip",
     "kernels/gfx1151/gemv_wunit.hip",
-    "kernels/gfx1151/gemv_q6.hip"
+    "kernels/gfx1151/gemv_q6.hip",
+    "kernels/gfx1151/gemv_gk.hip"
    ],
    "deps": [
     "kernels.common"
