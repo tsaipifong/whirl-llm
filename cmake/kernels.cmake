@@ -37,6 +37,7 @@ if(WHIRL_WITH_HIP)
   file(GLOB WHIRL_KERNEL_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/kernels/*.cpp)
   add_executable(whirl-kernel-test ${WHIRL_KERNEL_TEST_SOURCES})
   target_include_directories(whirl-kernel-test PRIVATE ${CMAKE_SOURCE_DIR}/kernels)  # iq_tables.h (host copy of the grid)
-  target_link_libraries(whirl-kernel-test PRIVATE whirl_kernels_host whirl)
+  # whirl_ops: the attn_dq4 dynamic-split rows call the production split rule ops::dq4Splits (v0252-n2; no HIP in it)
+  target_link_libraries(whirl-kernel-test PRIVATE whirl_kernels_host whirl whirl_ops)
   target_compile_definitions(whirl-kernel-test PRIVATE WHIRL_KT_VERSION="${PROJECT_VERSION}")  # --bench rows: tool_ver
 endif()

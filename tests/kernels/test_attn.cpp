@@ -15,8 +15,12 @@
 #include <algorithm>
 #include <numeric>
 
+#include <cstdint>
+#include <span>
+
 #include "cpu_ref.h"
 #include "kt_rope_bound.h"
+#include "whirl/ops/attention.h"  // ops::dq4Splits: the host's attn_dq4 split count (v0252-n2 dynamic-split rows)
 
 namespace kt {
 
@@ -430,6 +434,61 @@ void dq4Long(Ctx& c) {
                 ref(pos, w0, rwo, rws);
                 c.rep.add(cmpTol("attn_dq4 draft window W " + std::to_string(w) + " (keys from " + std::to_string(w0) + ") vs CPU" + tag, ow.o, rwo, rws,
                                  1e-2, 1e-4));
+            }
+        }
+    }
+    // v0252-n2 (FAST-8S-1 item 1 on gfx1201 too): the split count the host launches for host-known rows,
+    // ops::dq4Splits (the production rule, src/ops/attention.cpp), gives the 256 grid's partials bit for bit in its
+    // splits, the 256 grid writes (-inf, 0) in every split past it, and the combined outputs are bitwise equal. Two
+    // verify rows per case, without and with the MTP draft window (W 16384 from 64k, the server default).
+    {
+        const int win_def = winArg(16384, 65536);
+        std::vector<int> dyn_ctx = {300, 1100, 2048, 2049, 4097, 8192, 8193, 16385, 32768, 32769, 65600, 70001, 131072 + 77};
+        if (c.quick) dyn_ctx = {1100, 8193, 70001};
+        for (const int ctx : dyn_ctx) {
+            const std::vector<int> pos = {ctx - 1, ctx - 2};
+            for (const int win : {0, win_def}) {
+                if (win != 0 && ctx < 65536) continue;  // below the window threshold: same as win 0
+                const std::int32_t pr[2] = {pos[0], pos[1]};
+                const int s = static_cast<int>(whirl::ops::dq4Splits(std::span<const std::int32_t>(pr, 2), win, 256));
+                const std::string tag = " (ctx " + std::to_string(ctx) + (win ? ", draft window" : "") + ", dyn grid.y " + std::to_string(s) +
+                                        " vs 256) [kv q4 dyn]";
+                if (s >= 256) {
+                    c.rep.skip("attndq4", "attn_dq4 dynamic split" + tag, "dq4Splits keeps the full grid here");
+                    continue;
+                }
+                const Out full = run(pos, 256, win), dyn = run(pos, s, win);
+                std::size_t bad = 0, bad_empty = 0, nml = 0, nempty = 0;
+                for (int t = 0; t < nq; ++t)
+                    for (int sp = 0; sp < 256; ++sp)
+                        for (int hh = 0; hh < kHeads; ++hh) {
+                            const std::size_t i256 = (static_cast<std::size_t>(t) * 256 + sp) * kHeads + hh;
+                            if (sp >= s) {
+                                bad_empty += !(full.ml[i256 * 2] == -INFINITY && full.ml[i256 * 2 + 1] == 0.f);
+                                ++nempty;
+                                continue;
+                            }
+                            const std::size_t is = (static_cast<std::size_t>(t) * s + sp) * kHeads + hh;
+                            // an empty split writes only (ml); its acc is never written (nor read by the combine)
+                            const bool keyed = full.ml[i256 * 2] != -INFINITY;
+                            bad += std::memcmp(&full.ml[i256 * 2], &dyn.ml[is * 2], 8) != 0;
+                            if (keyed) bad += std::memcmp(&full.acc[i256 * kHd], &dyn.acc[is * kHd], kHd * 4) != 0;
+                            nml += keyed ? 2 : 1;
+                        }
+                Result r1;
+                r1.name = "attn_dq4 grid.y 256: splits past the dynamic count write (-inf, 0)" + tag;
+                r1.n = nempty;
+                r1.mismatches = bad_empty;
+                r1.pass = bad_empty == 0;
+                c.rep.add(r1);
+                Result r2;
+                r2.name = "attn_dq4 dynamic grid == grid.y 256 in its splits (ml, acc bits)" + tag;
+                r2.kind = Kind::invariant;
+                r2.n = nml;
+                r2.mismatches = bad;
+                r2.pass = bad == 0;
+                c.rep.add(r2);
+                c.rep.add(cmpExact("attn_dq4 dynamic grid combined == grid.y 256 combined" + tag, dyn.o, full.o, Kind::invariant));
             }
         }
     }
