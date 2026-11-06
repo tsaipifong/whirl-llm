@@ -6,6 +6,7 @@
 #include "../test_env.h"
 #include "../../kernels/gemm_small_addr.h"
 #include "../../kernels/gfx1151/mx_inject.h"  // v0251-a3port: the gemmfq decode helpers (host + device)
+#include "gemvh_map_check.h"  // v0252-c2port (feat026-gemvh): gfx1201 direct gemvh lane -> byte map
 
 #include <algorithm>
 #include <atomic>
@@ -232,6 +233,9 @@ void testMxInject() {
     CHECK(order_bad == 0);
 }
 
+// v0252-c2port (feat026-gemvh): the gfx1201 direct gemvh candidates read the bytes dec_group_h reads (kernels/gemv_hv_map.h)
+void testGemvhDirectMap() { CHECK(whirl_gvh_check::run(false) == 0); }
+
 }  // namespace
 
 // the old main()'s calls of this module, in their order (tests/unit/unit_tests.cpp ORDER lists all modules)
@@ -240,6 +244,7 @@ const whirl::test::Suite& unitSuite_kernels_gemm() {
                                       {
                                           {"testKernelFetchBounds", [] { testKernelFetchBounds(); }},
                                           {"testMxInject", [] { testMxInject(); }},  // v0251-a3port
+                                          {"testGemvhDirectMap", [] { testGemvhDirectMap(); }},  // v0252-c2port
                                       },
                                       nullptr};
     return s;
