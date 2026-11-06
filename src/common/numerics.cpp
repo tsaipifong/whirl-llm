@@ -382,6 +382,12 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     setNe0(F.gemmhq_on, e.gemmhq);
     setNe0(F.attn_kx_on, e.attn_kx);
     setNe0(F.attn_kg_on, e.attn_kg);
+    // v0252-c1port (feat026-attnkg97 / -97k): WHIRL_ATTN_KGVAR by std::strtoul; 1 = attn_kgv, 3 = attn_kgk (both designed
+    // bit-identical: class B, every mode), any other value 0 = the shipped attn_kg (var 2 attn_kgw is not ported)
+    if (e.attn_kgvar) {
+        const unsigned long v = std::strtoul(e.attn_kgvar->c_str(), nullptr, 10);
+        F.attn_kg_var = v == 1 || v == 3 ? static_cast<std::uint32_t>(v) : 0u;
+    }
     setNe0(F.attn_dqf_on, e.attn_dqf);
     if (e.attn_seg) F.attn_seg = static_cast<std::uint32_t>(std::strtoul(e.attn_seg->c_str(), nullptr, 10)) / 256 * 256;
     setNe0(F.gdn_ba_on, e.gdn_ba);
