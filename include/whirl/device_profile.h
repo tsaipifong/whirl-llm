@@ -80,7 +80,9 @@ inline constexpr Profile k_profile_gfx1201{
     .gemms_tie_larger_bm = false,
     .fdq_default = 0,
     .fdq_big = 0,
-    .attn_dq4_dynamic_splits = false,
+    // v0252-n2: FAST-8S-1 item 1 on the R9700 (same shared attn_dq4 / combine kernels; the dq4 rows are one query per
+    // group here too, so the split rule gives the 256 grid's partitions: bitwise the same output)
+    .attn_dq4_dynamic_splits = true,
     .tune_fast = false,
     .tune_cache_suffix = "",
     .tune_time_hint = "2 minutes (a few seconds for MXFP4 models)",
