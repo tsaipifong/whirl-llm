@@ -82,6 +82,10 @@ struct EngineOptions {
     // WHIRL_TAIL_CK=0 turns it off (debug).
     bool tail_ck = true;
     std::uint32_t tail_ck_min = sched::tail_ck_min_default;
+    // v0252-n10: the TAIL-CK checkpoint written inside the solo prefill forward that contains the tail point
+    // (PrefillPhase::soloLen, sched::tailInside, ServerModel::setStateCapture) instead of ending a forward there; the
+    // same bits (progress/v0252-n10.DESIGN.md). whirl-server sets it from device::Profile::tail_ck_in_forward (gfx1201).
+    bool tail_ck_in_forward = false;
     std::size_t n_spe = 2;
     bool ckpt_host = false;
     std::size_t prefill_exec = prefill_exec_default;

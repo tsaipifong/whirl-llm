@@ -38,6 +38,28 @@ void SlotPages::saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::opt
     slot->kind = kind;
 }
 
+std::size_t SlotPages::beginTailCapture(Slot& sl, std::uint32_t pos, std::uint32_t row) {
+    // (soloLen: sl.restore == nullptr, so saveCkpt's restore-tail cut has nothing to do here)
+    tb_.waitSpill(sl);
+    const std::size_t idx = ps_.cache().ckptSlotFor(sl.ckpts, pos);
+    Ckpt& c = sl.ckpts[idx];
+    c.valid = false;
+    m_.setStateCapture(row, c.conv, c.ssm);
+    return idx;
+}
+
+void SlotPages::commitTailCapture(Slot& sl, std::size_t idx, std::uint32_t pos, std::optional<DevPtr> hid) {
+    Ckpt& c = sl.ckpts[idx];
+    // (CkptStore::save's rows: the hidden row; no logits row, as saveCkpt(.., "prefix", hid, nullopt))
+    if (hid) ops_.copyAsync(c.hid, *hid, static_cast<std::uint64_t>(m_.cfg().n_embd) * 4, m_.stream());
+    c.has_logits = false;
+    sl.ckpt_seq += 1;
+    c.valid = true;
+    c.pos = pos;
+    c.seq = sl.ckpt_seq;
+    c.kind = "prefix";
+}
+
 void SlotPages::dropCache(Slot& sl) {
     for (Ckpt& c : sl.ckpts) c.valid = false;
     sl.cache_tokens.clear();

@@ -251,6 +251,10 @@ public:
     bool keep_hidden = false;
     bool all_logits = false;
     std::uint32_t snap_rows = 0;
+    // v0252-n10 (TAIL-CK inside a forward, gfx1201): the state capture armed by setStateCapture for the next solo prefill
+    // forward (0 = none): the conv / ssm state after its first ck_cap_row rows into ck_cap_conv[i] / ck_cap_ssm[i]
+    std::uint32_t ck_cap_row = 0;
+    std::vector<DevPtr> ck_cap_conv, ck_cap_ssm;
     std::uint32_t draft_vocab = 0;  // WHIRL_DRAFT_VOCAB=N: the first N rows only (old experiment)
     float draft_p_min = 0;
     std::uint32_t draft_n_min = 0;
@@ -338,6 +342,14 @@ public:
     void prefillMtpChunk(std::span<const std::uint32_t> tokens, std::uint32_t pos0, std::size_t off, std::size_t n,
                          std::optional<DevPtr> prev_hidden);
     bool canSegment() const;
+    // v0252-n10 (server::ServerModel::stateCaptureOk / setStateCapture; forward/gdn.cpp): can the next solo prefill forward
+    // of n rows write the recurrent state after its first `row` rows - the chunked DeltaNet scan on both sides of a
+    // 64-aligned row, not the GDN-8S strix chunks, no verify snapshots, not segmented. setStateCapture arms it for that
+    // forward only (forward / prefillMtpChunk clear it on every exit; forward throws BadStateCapture for a capture it
+    // cannot take). The capture writes what a forward ending at `row` leaves: the conv rolling state through
+    // gdn_conv_state(_h)'s snapshot argument, the f32 recurrent state of the scan launch that ends at `row`.
+    bool stateCaptureOk(std::uint32_t n, std::uint32_t row) const;
+    void setStateCapture(std::uint32_t row, std::span<const DevPtr> conv, std::span<const DevPtr> ssm);
     void prefillSegs(std::span<const PSeg> segs, bool with_mtp);
     void segLogitsToFront(std::uint32_t k);
     void decodeStep();

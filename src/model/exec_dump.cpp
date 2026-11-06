@@ -4,8 +4,8 @@
 // One "D exec: key=value" line per member, in declaration order of include/whirl/model.h. Listed: every scalar
 // configuration member that load / loadOrTune sets and the forward reads. Not listed (per-call state that a forward
 // sets and resets, the same after every load): row_n, row_pos, row_base, fwd_pos0, xq_n, x16_count, x16_fp8,
-// cur_seq, kv_off, ctl_off, cap_rows, cap_n, n_inj, attn_win, rdelta, the device pointers and the kernel table (the
-// launch log pins the kernels). tools/gates/exec_dump_check.py keeps the two lists complete against model.h.
+// cur_seq, kv_off, ctl_off, cap_rows, cap_n, n_inj, attn_win, rdelta, ck_cap_row (v0252-n10), the device pointers and
+// the kernel table (the launch log pins the kernels). tools/gates/exec_dump_check.py keeps the two lists complete against model.h.
 
 #include "whirl/dump.h"
 #include "whirl/model.h"

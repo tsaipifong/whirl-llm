@@ -65,6 +65,10 @@ struct Profile {
     bool mtp_costly_verify_rows;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
+    // v0252-n10: whirl-server writes the TAIL-CK checkpoint inside the solo prefill forward that contains the tail point
+    // (sched::tailInside, EngineOptions::tail_ck_in_forward) instead of ending a forward there; the CLI keeps its forward
+    // end (same bits: docs/guide/en/kv-and-caching.md section 7, progress/v0252-n10.DESIGN.md). 0.2.5.2: gfx1201 only
+    bool tail_ck_in_forward;
     // ---- vision
     unsigned vision_attn_threads;  // kernels/vision/vision.hip vis_attn2 block size of this code object
 };
@@ -89,6 +93,7 @@ inline constexpr Profile k_profile_gfx1201{
     .mtp_costly_verify_rows = false,
     .prefill_exec_moe = 2048,
     .prefill_fill_batch = false,
+    .tail_ck_in_forward = true,  // v0252-n10 (R9700 precise pp 2k: one forward instead of 1024 + 1034)
     .vision_attn_threads = 128,
 };
 
@@ -115,6 +120,7 @@ inline constexpr Profile k_profile_gfx1151{
     .mtp_costly_verify_rows = true,
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
+    .tail_ck_in_forward = false,  // v0252-n10: 0.2.5.2 does not touch the Radeon 8060S (the 0.2.5.1 forward end stays)
     .vision_attn_threads = 256,
 };
 

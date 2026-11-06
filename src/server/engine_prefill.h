@@ -43,9 +43,17 @@ public:
     PrefillPhase& operator=(const PrefillPhase&) = delete;
 
     std::size_t chunkLen(const Slot& sl) const;
+    // v0252-n10: sl's next forward when it runs alone (prefillStep): len rows, and cap > 0 = the TAIL-CK checkpoint is
+    // written inside it after its first cap rows (EngineOptions::tail_ck_in_forward, sched::tailInside,
+    // ServerModel::stateCaptureOk); cap 0 = chunkLen's forward (which ends at the tail point when it reaches it)
+    struct SoloFwd {
+        std::size_t len = 0;
+        std::size_t cap = 0;
+    };
+    SoloFwd soloLen(const Slot& sl) const;
     std::vector<DecodeFloor::SlotTok> floorProtected() const;
     void maybeSplitCkpt(Slot& sl, DevPtr hid_row);
-    void prefillStep(Slot& sl);
+    std::size_t prefillStep(Slot& sl);  // the rows it ran
     std::size_t prefillGroup(Slot& first, std::size_t row_budget);
     void finishPrefill(Slot& sl);
     void runPrefill(Slot* pf, bool& idle_wait, std::size_t& pf_rows, bool& floor_pf);
@@ -55,6 +63,8 @@ public:
     bool floorOn() const { return fl_.floor.on(); }
 
 private:
+    // the forward size limit of sl's next forward (opt_.prefill_exec; one chunk while another slot decodes under the floor)
+    std::size_t execRows(const Slot& sl) const;
     // slot_end, called by name from the bodies above
     void failSlot(Slot& sl, const std::string& err) { se_.failSlot(sl, err); }
     void finishJob(Slot& sl) { se_.finishJob(sl); }

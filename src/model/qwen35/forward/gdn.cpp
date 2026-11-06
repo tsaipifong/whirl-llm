@@ -21,6 +21,31 @@ ops::GdnShape gdnShapeOf(const Config& c) {
 }
 }  // namespace
 
+// v0252-n10: per (64-row chunk, v-head) strides of the chunked DeltaNet scratch in bytes, as the kernels index it
+// (kernels/gdn_prefill.hip gdn_chunk_prep / gdn_chunk_scan: W and U [GCH][GDK] f32, M [GCH][GCH] f32, G [GCH] f32 at
+// (chunk * n_v_heads + head); kernels/gdn_prefill_wmma.hip gdn_wprep / gdn_wscan_impl: T | M f16 A-fragments of
+// GW_TM_HALVES = 2 * GW_TILES * 256 halves, G [GCH] f32). GCH 64 and GDK 128 = d_state = head_v (chooseGdnScan's shape).
+namespace {
+constexpr u64 kGcWU = 64ull * 128 * 4, kGcM = 64ull * 64 * 4, kGcG = 64ull * 4, kGwTM = 2ull * 10 * 256 * 2;
+}  // namespace
+
+bool Context::stateCaptureOk(u32 n, u32 row) const {
+    if (row < 64 || row % 64 != 0 || row >= n || n - row < 64 || n > max_batch) return false;
+    if (!psegs.empty() || bplan != nullptr || snap_rows != 0 || fused(n) || cfg.d_conv != 4) return false;
+    // the chunked scan on both sides of row (the f32 or the f16-WMMA pair; the strix chunks are not split here)
+    const ops::GdnShape gs = gdnShapeOf(cfg);
+    if (ops::chooseGdnScan(nf().gdn_chunked, row, gs) != ops::GdnScan::chunked || ops::chooseGdnScan(nf().gdn_chunked, n - row, gs) != ops::GdnScan::chunked)
+        return false;
+    return !nf().gdn_strix;
+}
+
+void Context::setStateCapture(u32 row, std::span<const DevPtr> conv, std::span<const DevPtr> ssm) {
+    if (conv.size() != cfg.n_layer || ssm.size() != cfg.n_layer) throw ModelError("BadStateCapture");
+    ck_cap_conv.assign(conv.begin(), conv.end());
+    ck_cap_ssm.assign(ssm.begin(), ssm.end());
+    ck_cap_row = row;
+}
+
 GdnSegs Context::gdnSegsBatch(const BatchPlan& bp, std::size_t i, bool conv) const {
     GdnSegs segs;
     i32 row = 0;
@@ -82,17 +107,41 @@ void Context::gdnChunked(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr be
                     gc_u + 2 * qk, I(H), I(Hk), I(n), I(nch), scale, u64(0), u64(0), u64(0), u64(0), 0.0f, false);
         return;
     }
+    // v0252-n10: a TAIL-CK capture (setStateCapture, a solo forward) splits the scan LAUNCH at ck_cap_row (64-aligned,
+    // stateCaptureOk): rows [0, cap) are the scan a forward ending at cap runs (same kernel, n_tok = cap, the same
+    // chunk-local prep data), its f32 state goes to the checkpoint, and rows [cap, n) are the scan of a forward starting
+    // at cap (chunk data, rows, beta and the output offset by cap; the state read back as f32). The prep runs once.
+    const u32 cap = psegs.empty() ? ck_cap_row : 0;
+    const u64 H = cfg.n_v_heads, cc = cap / 64;
     if (pl.kind == ops::GdnChunk::wmma) {
         hip::launch(k.gdn_wprep, D(cfg.n_v_heads, n_chunks), D(256), 0, stream, conv_o, alpha_b, beta_b, gc_w, gc_g, I(n), I(cfg.n_k_heads),
                     I(cfg.n_v_heads), I(ch));
-        hip::launch(k.gdn_wscan8, D(cfg.n_v_heads, cfg.headV() / 128), D(256), 0, stream, conv_o, gc_w, gc_g, beta_b, ssm_state[i], out, I(n),
+        if (cap == 0) {
+            hip::launch(k.gdn_wscan8, D(cfg.n_v_heads, cfg.headV() / 128), D(256), 0, stream, conv_o, gc_w, gc_g, beta_b, ssm_state[i], out, I(n),
+                        I(cfg.n_k_heads), I(cfg.n_v_heads), I(ch), scale);
+            return;
+        }
+        hip::launch(k.gdn_wscan8, D(cfg.n_v_heads, cfg.headV() / 128), D(256), 0, stream, conv_o, gc_w, gc_g, beta_b, ssm_state[i], out, I(cap),
                     I(cfg.n_k_heads), I(cfg.n_v_heads), I(ch), scale);
+        hip::copyAsync(ck_cap_ssm[i], ssm_state[i], static_cast<std::size_t>(ssmBytes()), stream);
+        hip::launch(k.gdn_wscan8, D(cfg.n_v_heads, cfg.headV() / 128), D(256), 0, stream, conv_o + static_cast<u64>(cap) * ch * 4, gc_w + cc * H * kGwTM,
+                    gc_g + cc * H * kGcG, beta_b + static_cast<u64>(cap) * H * 4, ssm_state[i], out + static_cast<u64>(cap) * H * cfg.headV() * 4,
+                    I(n - cap), I(cfg.n_k_heads), I(cfg.n_v_heads), I(ch), scale);
         return;
     }
     hip::launch(k.gdn_chunk_prep, D(n_chunks, cfg.n_v_heads), D(256), 0, stream, conv_o, alpha_b, beta_b, gc_w, gc_u, gc_m, gc_g, I(n),
                 I(cfg.n_k_heads), I(cfg.n_v_heads), I(ch));
-    hip::launch(k.gdn_chunk_scan, D(cfg.n_v_heads, cfg.headV() / 32), D(256), 0, stream, conv_o, gc_w, gc_u, gc_m, gc_g, ssm_state[i], out, I(n),
+    if (cap == 0) {
+        hip::launch(k.gdn_chunk_scan, D(cfg.n_v_heads, cfg.headV() / 32), D(256), 0, stream, conv_o, gc_w, gc_u, gc_m, gc_g, ssm_state[i], out, I(n),
+                    I(cfg.n_k_heads), I(cfg.n_v_heads), I(ch), scale);
+        return;
+    }
+    hip::launch(k.gdn_chunk_scan, D(cfg.n_v_heads, cfg.headV() / 32), D(256), 0, stream, conv_o, gc_w, gc_u, gc_m, gc_g, ssm_state[i], out, I(cap),
                 I(cfg.n_k_heads), I(cfg.n_v_heads), I(ch), scale);
+    hip::copyAsync(ck_cap_ssm[i], ssm_state[i], static_cast<std::size_t>(ssmBytes()), stream);
+    hip::launch(k.gdn_chunk_scan, D(cfg.n_v_heads, cfg.headV() / 32), D(256), 0, stream, conv_o + static_cast<u64>(cap) * ch * 4, gc_w + cc * H * kGcWU,
+                gc_u + cc * H * kGcWU, gc_m + cc * H * kGcM, gc_g + cc * H * kGcG, ssm_state[i], out + static_cast<u64>(cap) * H * cfg.headV() * 4,
+                I(n - cap), I(cfg.n_k_heads), I(cfg.n_v_heads), I(ch), scale);
 }
 
 void Context::gdnScan(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta_b, DevPtr out, u32 n, float scale) {
@@ -228,8 +277,11 @@ void Context::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
             } else {
                 hip::launch(k.gdn_conv_par, D((ch + 255) / 256, n), D(256), 0, stream, qkv, conv_state[i], g.conv, conv_out, I(ch), I(n));
             }
+            // v0252-n10: a TAIL-CK capture takes the rolling state right after row ck_cap_row - 1 through the kernel's snapshot
+            // argument: the three inputs before ck_cap_row, the state a forward ending at ck_cap_row leaves (same f32 values)
+            const bool cap_c = ck_cap_row > 0 && psegs.empty();
             hip::launch(cv.state_h ? k.gdn_conv_state_h : k.gdn_conv_state, D((ch + 255) / 256), D(256), 0, stream, qkv, conv_state[i], I(ch),
-                        I(n), snap_rows > 0 ? snap_conv[0][i] : u64(0), i32(0));
+                        I(n), cap_c ? ck_cap_conv[i] : snap_rows > 0 ? snap_conv[0][i] : u64(0), cap_c ? I(ck_cap_row - 1) : i32(0));
         } else {
             hip::launch(k.gdn_conv_seq, D((ch + 255) / 256), D(256), 0, stream, qkv, conv_state[i], g.conv, conv_out, I(ch), I(n));
         }

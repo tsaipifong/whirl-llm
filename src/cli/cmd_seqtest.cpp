@@ -394,6 +394,136 @@ int cmdSeqtest(const Args& a) {
     }
     out(fmt("  CLI-SCHED: %u/%u CLI prefills differ from the server's forwards\n", cli_bad, cli_total));
     ok = ok && cli_bad == 0;
+    // v0252-n10 gate (part of ok where device::Profile::tail_ck_in_forward, the R9700; nothing runs or prints elsewhere):
+    // whirl-server writes the TAIL-CK checkpoint inside the forward that holds the tail point (sched::tailInside +
+    // Model::setStateCapture). That state must be bitwise the state a forward ending at the tail point leaves (0.2.5.1's
+    // server, and the CLI): conv + recurrent state of every DeltaNet layer; the whole prompt's last-row logits equal;
+    // a resume from the captured state gives the cold reference; with MTP (prefillMtpChunk splits its rows at the tail
+    // row) also the checkpoint's hidden row (hn row cap - 1). Control: a capture one 64-row chunk later must differ.
+    u32 n10_bad = 0, n10_total = 0;
+    if (device::profile(m.arch).tail_ck_in_forward && slot_ctx < long_n + 64) {
+        out(fmt("  N10: needs --slot-ctx >= %u (got %u)\n", long_n + 64, slot_ctx));
+        ok = false;
+    } else if (device::profile(m.arch).tail_ck_in_forward) {
+        m.selectSeq(0);
+        const std::vector<u32> lp = goldenLongIds(tok, long_n);  // 9500 tokens: tail @9216 inside the forward [8192, 9500)
+        const std::span<const u32> ls(lp);
+        const std::size_t N = lp.size(), th = tok.ct.thinkOpenSplit(lp);
+        const std::span<const std::uint32_t> noimg;
+        const std::size_t tail = sched::tailPoint(N, 0, th, noimg);
+        const std::size_t ex = sched::prefillExec(std::nullopt, device::profile(m.arch), m.cfg.moe, m.max_batch);
+        std::vector<u32> gl;  // the DeltaNet layers
+        for (u32 li = 0; li < m.cfg.n_layer; ++li)
+            if (m.ssm_state[li] != 0) gl.push_back(li);
+        const u64 cb = m.convBytes(), sb = m.ssmBytes(), E = m.cfg.n_embd;
+        auto stateHost = [&](std::span<const hip::DevPtr> conv, std::span<const hip::DevPtr> ssm) {
+            hip::sync();  // the forward's stream work (and its capture copies) done
+            std::vector<std::uint8_t> h(gl.size() * (cb + sb));
+            std::size_t o = 0;
+            for (u32 li : gl) {
+                hip::download(h.data() + o, conv[li], cb);
+                o += cb;
+                hip::download(h.data() + o, ssm[li], sb);
+                o += sb;
+            }
+            return h;
+        };
+        // the capture destinations, sliced like a server checkpoint; the hidden row of a resume
+        const hip::DevPtr cap_buf = m.alloc(gl.size() * (cb + sb)), hid_dev = m.alloc(E * 4);
+        std::vector<hip::DevPtr> cconv(m.cfg.n_layer, 0), cssm(m.cfg.n_layer, 0);
+        {
+            u64 o = 0;
+            for (u32 li : gl) {
+                cconv[li] = cap_buf + o;
+                o += cb;
+                cssm[li] = cap_buf + o;
+                o += sb;
+            }
+        }
+        auto runOne = [&](std::span<const u32> ids, u32 pos0, std::size_t off, std::size_t n, bool mtp, std::optional<hip::DevPtr> prev) {
+            if (mtp)
+                m.prefillMtpChunk(ids, pos0, off, n, prev);
+            else
+                m.forward(ids.subspan(off, n), pos0 + static_cast<u32>(off));
+        };
+        auto n10check = [&](bool same, const char* what, std::string& line) {
+            n10_total += 1;
+            n10_bad += same ? 0 : 1;
+            line += std::string(line.empty() ? "" : ", ") + what + (same ? " ==" : " DIFFER (FAIL)");
+        };
+        for (int mt = 0; mt < (m.mtp.has_value() ? 2 : 1); ++mt) {
+            const bool mtp = mt == 1;
+            // (a) 0.2.5.1's forwards (the tail point ends a forward): the state and hidden row after the forward ending there
+            m.reset();
+            const std::array<std::size_t, 1> st = {tail};
+            std::vector<std::uint8_t> s_ref;
+            std::vector<float> hid_ref(E), hid_cap(E);
+            std::size_t cur = 0;
+            for (const std::size_t e : sched::forwardEnds(N, 0, th, noimg, 0, ex, st, m.max_batch)) {
+                runOne(ls, 0, cur, e - cur, mtp, std::nullopt);
+                if (e == tail) {
+                    s_ref = stateHost(m.conv_state, m.ssm_state);
+                    hip::download(hid_ref.data(), m.scratch().hn + (e - cur - 1) * E * 4, E * 4);
+                }
+                cur = e;
+            }
+            const u64 ref = rowHash(m, 0);
+            // (b) the server's forwards with the capture inside (shift 0), and the control capture one chunk later
+            auto capRun = [&](std::size_t shift, bool& took) {
+                m.reset();
+                took = false;
+                const std::span<const std::size_t> none;
+                for (std::size_t c = 0; c < N;) {
+                    const sched::TailForward t = sched::tailInside(N, 0, th, noimg, c, ex, none, tail, m.max_batch);
+                    const std::size_t row = t.cap + shift;
+                    const bool arm = t.cap > 0 && m.stateCaptureOk(static_cast<u32>(t.len), static_cast<u32>(row));
+                    if (arm) m.setStateCapture(static_cast<u32>(row), cconv, cssm);
+                    runOne(ls, 0, c, t.len, mtp, std::nullopt);
+                    if (arm) {
+                        took = true;
+                        hip::download(hid_cap.data(), m.scratch().hn + (row - 1) * E * 4, E * 4);
+                    }
+                    c += t.len;
+                }
+                return rowHash(m, 0);
+            };
+            bool took = false;
+            const u64 got = capRun(0, took);
+            const std::vector<std::uint8_t> s_cap = stateHost(cconv, cssm);
+            std::string line;
+            n10check(took, "capture taken", line);
+            n10check(took && s_cap == s_ref, "state", line);
+            n10check(got == ref, "logits", line);
+            if (mtp) n10check(took && std::memcmp(hid_cap.data(), hid_ref.data(), E * 4) == 0, "hidden row", line);
+            // (c) a resume from the captured state at the tail point (the server's next request: state loaded, the hidden
+            // row as prev_hidden), its own forwards from there
+            m.reset();
+            hip::sync();
+            for (u32 li : gl) {
+                hip::copyAsync(m.conv_state[li], cconv[li], cb, m.stream);
+                hip::copyAsync(m.ssm_state[li], cssm[li], sb, m.stream);
+            }
+            hip::upload(hid_dev, hid_cap.data(), E * 4);
+            hip::sync();
+            const std::span<const u32> rest = ls.subspan(tail);
+            std::size_t c2 = 0;
+            for (const std::size_t e : sched::forwardEnds(N, 0, th, noimg, tail, ex, {}, m.max_batch)) {
+                runOne(rest, static_cast<u32>(tail), c2, e - tail - c2, mtp, c2 == 0 ? std::optional<hip::DevPtr>(hid_dev) : std::nullopt);
+                c2 = e - tail;
+            }
+            n10check(rowHash(m, 0) == ref, "resume", line);
+            // (d) control: one 64-row chunk later the state must differ (the comparison sees a wrong row)
+            bool took_c = false;
+            (void)capRun(64, took_c);
+            const bool differs = took_c && stateHost(cconv, cssm) != s_ref;
+            n10_total += 1;
+            n10_bad += differs ? 0 : 1;
+            line += differs ? ", control (64 rows later) differs" : ", control (64 rows later) SAME (FAIL: the check is blind)";
+            out(fmt("  N10 tail checkpoint inside the forward%s (N %zu, tail @%zu, exec %zu): %s\n", mtp ? " +MTP" : "", N, tail, ex, line.c_str()));
+        }
+        out(fmt("  N10: %u/%u in-forward tail checkpoint checks differ\n", n10_bad, n10_total));
+        ok = ok && n10_bad == 0;
+    }
     out(fmt("  head logits bits: %u/%u verify / batched rows differ from the solo decode row\n", lh_bad, lh_total));
     ok = ok && lh_bad == 0;
     out(ok ? "seqtest: ok\n" : "seqtest: FAIL\n");

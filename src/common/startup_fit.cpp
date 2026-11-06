@@ -399,12 +399,19 @@ PoolAdjust poolAdjust(bool uma, std::optional<std::uint32_t> ctx, std::optional<
     return r;
 }
 
-TailCkLine tailCkLine(bool tail_ck, std::size_t n_ck, std::size_t tail_ck_slots, std::uint32_t tail_ck_min, double ck_mib) {
+TailCkLine tailCkLine(bool tail_ck, std::size_t n_ck, std::size_t tail_ck_slots, std::uint32_t tail_ck_min, double ck_mib, bool cold_resume) {
     TailCkLine r;
     if (!tail_ck) {
         r.warn = true;
         r.text = "prefix cache: tail checkpoint off (WHIRL_TAIL_CK=0, debug override): a second question about the same long "
                  "document re-prefills it";
+    } else if (n_ck >= tail_ck_slots && cold_resume) {
+        // v0252-n10: COLD-RESUME (--precise) keeps the tail checkpoint for every prompt (PrefixStore::tailCk), not only
+        // from tail_ck_min tokens (the 0.2.2 - 0.2.5.1 line said ">= 4096" in precise too)
+        r.text = std::format("prefix cache: tail checkpoint on: every prompt (COLD-RESUME, --precise; otherwise prompts >= {} tokens) keeps "
+                             "one of the {} per-slot checkpoints ({:.1f} MiB) at the start of its last chunk, so the next turn and another "
+                             "question about the same document resume there",
+                             tail_ck_min, n_ck, ck_mib);
     } else if (n_ck >= tail_ck_slots) {
         r.text = std::format("prefix cache: tail checkpoint on: prompts >= {} tokens keep one of the {} per-slot checkpoints ({:.1f} MiB) at the "
                              "start of their last chunk, so another question about the same document resumes there",

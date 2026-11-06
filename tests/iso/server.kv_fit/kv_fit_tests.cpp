@@ -368,20 +368,36 @@ std::pair<bool, std::string> old_tail(bool tail_ck, std::size_t n_ck, std::size_
                                    "+{:.1f} MiB VRAM per slot each)",
                                    n_ck, tail_ck_slots, tail_ck_slots, ck_mb)};
 }
+// v0252-n10: in --precise (COLD-RESUME) every prompt keeps the tail checkpoint (PrefixStore::tailCk: cold_resume ||
+// N >= tail_ck_min); the 0.2.2 - 0.2.5.1 line said "prompts >= 4096 tokens" there too (progress/v0252-a12.HANDOFF.md)
+std::string precise_tail(std::size_t n_ck, std::uint32_t tail_ck_min, double ck_mb) {
+    return std::format("prefix cache: tail checkpoint on: every prompt (COLD-RESUME, --precise; otherwise prompts >= {} tokens) keeps one of "
+                       "the {} per-slot checkpoints ({:.1f} MiB) at the start of its last chunk, so the next turn and another question about "
+                       "the same document resume there",
+                       tail_ck_min, n_ck, ck_mb);
+}
 void testTailCkLine() {
     std::size_t n = 0;
-    for (const bool on : {false, true})
-        for (const std::size_t nck : {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{8}})
-            for (const std::size_t slots : {std::size_t{0}, std::size_t{1}, std::size_t{3}, std::size_t{4}})
-                for (const std::uint32_t mn : {0u, 2048u, 8192u, 0xffffffffu})
-                    for (const double mb : {0.0, 0.05, 0.25, 12.34, 149.95, 1e6}) {
-                        const auto o = old_tail(on, nck, slots, mn, mb);
-                        const sf::TailCkLine t = sf::tailCkLine(on, nck, slots, mn, mb);
-                        ISO_CHECK(t.warn == o.first);
-                        ISO_CHECK(t.text == o.second);
-                        ++n;
-                    }
-    std::printf("tail checkpoint line: %zu cases == c1ca7ce\n", n);
+    for (const bool cr : {false, true})
+        for (const bool on : {false, true})
+            for (const std::size_t nck : {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{8}})
+                for (const std::size_t slots : {std::size_t{0}, std::size_t{1}, std::size_t{3}, std::size_t{4}})
+                    for (const std::uint32_t mn : {0u, 2048u, 8192u, 0xffffffffu})
+                        for (const double mb : {0.0, 0.05, 0.25, 12.34, 149.95, 1e6}) {
+                            // balance / fast (cr false): the c1ca7ce line, unchanged; precise: only the "on" text changes
+                            const auto o = old_tail(on, nck, slots, mn, mb);
+                            const std::string want = cr && on && nck >= slots ? precise_tail(nck, mn, mb) : o.second;
+                            const sf::TailCkLine t = sf::tailCkLine(on, nck, slots, mn, mb, cr);
+                            ISO_CHECK(t.warn == o.first);
+                            ISO_CHECK(t.text == want);
+                            ++n;
+                        }
+    // the literal precise line of a default R9700 server (4 checkpoints per slot at --parallel 1)
+    ISO_CHECK(sf::tailCkLine(true, 4, 3, 4096, 149.9, true).text ==
+              "prefix cache: tail checkpoint on: every prompt (COLD-RESUME, --precise; otherwise prompts >= 4096 tokens) keeps one of the 4 "
+              "per-slot checkpoints (149.9 MiB) at the start of its last chunk, so the next turn and another question about the same "
+              "document resume there");
+    std::printf("tail checkpoint line: %zu cases (balance / fast == c1ca7ce)\n", n);
 }
 // :457 (buildModel) and :1013 (makeEngine): shared prefix checkpoints; the planned value is read only when used
 std::uint32_t old_spe(std::size_t n_ck, bool no_pc, std::uint32_t planned, int& reads) { return (n_ck == 0 || no_pc) ? 0 : (++reads, planned); }
