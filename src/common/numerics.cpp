@@ -540,6 +540,9 @@ void runtimeFlags(Front front, const RuntimeValues& v, bool k_gdn_v0, Flags& F) 
 
 }  // namespace
 
+// v0252-c1acc test-first stub (interface only): no value is parsed yet
+std::optional<std::uint32_t> parseKgVar(std::string_view) { return std::nullopt; }
+
 // loader.cpp:537-540 and :730 before arch025-N2b (envFlag = flagOr)
 void loaderFlags(const Request& r, Flags& F) {
     const EnvValues& e = r.env;

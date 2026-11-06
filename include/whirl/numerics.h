@@ -213,6 +213,10 @@ struct ItemState {
 // v0252-c1port: attn_kg_var = WHIRL_ATTN_KGVAR by std::strtoul, kept only as 1 (attn_kgv) or 3 (attn_kgk), any other
 // value 0 (the shipped attn_kg; var 2 attn_kgw of feat026-attnkg97 is not ported: not bit-identical); default 0 on
 // every card. Not in the S0b-2 dump either (the launch log pins the kernel).
+// v0252-c1acc (REVIEW-v0252-c1 C-1 / C-3): default kAttnKgVarAuto on the gfx1201 code object (ops::kAttnKgAuto picks the
+// variant per NP x KV path), 0 on the gfx1151 one (no attn_kg there); WHIRL_ATTN_KGVAR = "auto" or a whole decimal 0 / 1 /
+// 3 (parseKgVar) overrides it in every mode; any other value keeps the default and Plan::ignored carries one note. Still
+// in bitsKey (C-4, conservative: the default change re-keys the gfx1201 KV tiers once).
 #define WHIRL_NUMERICS_FLAGS(X)                                  \
     X(B, use_graph, true, "use_graph")                           \
     X(B, no_fuse, false, "no_fuse")                              \
@@ -322,6 +326,11 @@ struct Plan {
 // overrides afterwards until N2b). Throws std::invalid_argument / std::out_of_range where loadOrTune threw
 // (WHIRL_RELAX_K / _ALPHA / _EPS / _DELTA that std::stoul / std::stof reject, with relaxacc on).
 Plan plan(const Request& r, const Target& t);
+// v0252-c1acc: attn_kg_var "auto" (= ops::kAttnKgVarAuto; numerics is in the core library and does not include ops)
+inline constexpr std::uint32_t kAttnKgVarAuto = 255;
+// v0252-c1acc: WHIRL_ATTN_KGVAR -> "auto" = kAttnKgVarAuto, a whole decimal 0 / 1 / 3 = that var; anything else
+// (2, 4, "", "x", "3x", "-1") = std::nullopt (invalid: the default stays and plan() notes it in Plan::ignored)
+std::optional<std::uint32_t> parseKgVar(std::string_view s);
 // arch025-N2b-r2: the five flags every load decides (Model::load, before loadOrTune; before N2b loader.cpp:537-540 and
 // :730): fp8_prefill = the item fp8; moe_fp8 = WHIRL_MOE_FP8 (r.env) else the item moefp8; moe_mxw / moe_wide / moe_rbf =
 // WHIRL_MOE_MXW / _WIDE / _RBF else true / false / true. WHIRL_FP8 is not applied here (plan() applies it in loadOrTune, as

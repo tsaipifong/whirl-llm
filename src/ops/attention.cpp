@@ -202,6 +202,9 @@ Function attnKgVariant(std::uint32_t var, const kernels::AttnKernels& k, std::ui
     }
 }
 
+// v0252-c1acc test-first stub (interface only): the auto table is not read yet (every (np, path) -> 0)
+std::uint32_t attnKgAutoVar(std::uint32_t, KgPath) { return 0; }
+
 // WMMA prefill attention of n queries at positions pos0 .. (keys 0 .. pos0 + n - 1), split over head ranges so
 // one launch does at most ~4096 x 128k query-key pairs x all heads. Same results as one launch.
 // f16 / q8 / q8h / q8v KV: attn_kg (NP query heads of one KV head per block; bit-identical to attn_kx) when NP

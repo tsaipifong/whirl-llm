@@ -49,7 +49,7 @@ std::string envOr(const char* name) {
 
 int usage() {
     std::printf(
-        "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,misc,dflash,gemvh,ws4,ws4g,vision] [--quick] [-v]\n"
+        "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,misc,dflash,gemvh,ws4,ws4g,vision,attnkgl] [--quick] [-v]\n"
         "                         [--q4 GGUF] [--mx GGUF] [--moe GGUF] [--moemx GGUF]\n"
         "  --require-all  a kernel missing from the code object fails unless the arch lacks it by design\n"
         "  --bench gemv,gemvh,gemm,attn,moe,gdn,fdq [--jsonl FILE] [--ab HSACO] [--burst-idle S] [--bench-max-s S]\n"
@@ -158,7 +158,7 @@ int main(int argc, char** argv) {
         }
     }
     const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "misc", "attnbench",
-                               "gemvh", "gemvhbench", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk"};  // = fams below
+                               "gemvh", "gemvhbench", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk", "attnkgl"};  // = fams below
     const bool bench = !bo.families.empty();
     if ((!bo.ggemv_nt.empty() || !bo.ggemv_v.empty()) && bo.families.count("ggemv") == 0) {
         std::printf("whirl-kernel-test: --bench-nt / --bench-v need --bench ggemv\n");
@@ -275,7 +275,8 @@ int main(int argc, char** argv) {
                         {"gemvh", kt::testGemvh}, {"gemvhbench", kt::benchGemvh}, {"dflash", kt::testDflash},
                         {"ws4", kt::testAttnWs4}, {"ws4bench", kt::benchAttnWs4},
                         {"ws4g", kt::testAttnWs4g}, {"ws4gbench", kt::benchAttnWs4g},
-                        {"vision", kt::testVision}, {"gemvk", kt::testGemvk}};  // gemvk: v0251-a6port
+                        {"vision", kt::testVision}, {"gemvk", kt::testGemvk},  // gemvk: v0251-a6port
+                        {"attnkgl", kt::testAttnKgLong}};  // attnkgl: v0252-c1acc (on request)
     if (bench) {
         const auto t0 = std::chrono::steady_clock::now();
         try {
@@ -292,7 +293,7 @@ int main(int argc, char** argv) {
     for (const Fam& f : fams) {
         if (bench) break;
         if (!only.empty() && !only.count(f.name)) continue;
-        if (only.empty() && (std::string(f.name) == "attnbench" || std::string(f.name) == "gemvhbench" || std::string(f.name) == "ws4bench" || std::string(f.name) == "ws4gbench")) continue;  // timing only, on request
+        if (only.empty() && (std::string(f.name) == "attnbench" || std::string(f.name) == "gemvhbench" || std::string(f.name) == "ws4bench" || std::string(f.name) == "ws4gbench" || std::string(f.name) == "attnkgl")) continue;  // timing only / long (attnkgl), on request
         const auto t0 = std::chrono::steady_clock::now();
         std::printf("== %s\n", f.name);
         std::fflush(stdout);

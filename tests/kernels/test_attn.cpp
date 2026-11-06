@@ -1446,4 +1446,127 @@ void testAttnDq4(Ctx& c) {
     dq4Long(c);
 }
 
+// v0252-c1acc (REVIEW-v0252-c1 AO-2), family "attnkgl" (on request: --only attnkgl): the C1 variants bit for bit at
+// product lengths and the product head counts. Shapes: Ornith-1.5-35B-A3B 16 / 2 heads (group 8, NP 4) and Swift-1.5
+// 27B 24 / 4 (group 6, NP 6); L = 32768 and 131072 keys (WHIRL_KT_KGL_L overrides, --quick 32768 only); queries: the
+// last full 4096-row chunk (pos0 = L - 4096: a multi-chunk prefill's last forward) and 301 rows at the end (partial
+// tiles). Paths, each in one launch and in two head-range launches (the host's TDR split):
+//   * f16: a random f16 cache behind a shuffled page table; attn_kg<np>, attn_kgv<np>, attn_kgk<np> == attn_prefill_wmma
+//     (the reference every attn_kg kernel is bit-identical to; precise golden is recorded on it);
+//   * Q8P: a random q8 cache, kv_dq_rows of keys 0 .. pos0 + n - 1 into contiguous f16 rows, then attn_kg<np> (attn_kgf),
+//     attn_kgv<np>, attn_kgk<np> on the rows == attn_prefill_wmma_q8 on the cache (Swift balance q8h, Ornith WHIRL_KV=q8).
+// A kernel missing from the code object (gfx1151) is a skip row. The AO-4 mutation object (WHIRL_KGK_INJECT=1, loaded
+// through WHIRL_KT_CODE_OBJECT) must fail the attn_kgk rows here and in "attn".
+void testAttnKgLong(Ctx& c) {
+    c.rep.family = "attnkgl";
+    if (!c.fnOpt("attn_kg4") && !c.fnOpt("attn_kg6")) {
+        c.rep.skip("attnkgl", "attn_kg family", "not in this code object (gfx1151)");
+        return;
+    }
+    std::vector<int> lens = {32768, 131072};
+    if (c.quick) lens = {32768};
+    if (const char* e = std::getenv("WHIRL_KT_KGL_L")) lens = {std::atoi(e)};
+    struct Shape {
+        int heads, nkv, np;
+        const char* model;
+    };
+    const float scale = 1.0f / 16.0f;
+    for (const Shape sh : {Shape{16, 2, 4, "Ornith"}, Shape{24, 4, 6, "Swift"}}) {
+        const std::string s = std::to_string(sh.np);
+        const int rel = sh.nkv * kHd;
+        for (const int L : lens) {
+            const int pages = (L + wk::kKvPage - 1) / wk::kKvPage;
+            const std::size_t prow = static_cast<std::size_t>(pages) * wk::kKvPage, nel = prow * static_cast<std::size_t>(rel);
+            std::vector<int> pt(static_cast<std::size_t>(pages)), idt(static_cast<std::size_t>(pages) + 1);
+            std::iota(pt.begin(), pt.end(), 0);
+            std::shuffle(pt.begin(), pt.end(), c.rng);
+            std::iota(idt.begin(), idt.end(), 0);
+            Buf dpt(pt), did(idt);
+            Buf dk16, dv16, dk8, dv8, dks, dvs;
+            {
+                std::vector<std::uint16_t> h(nel);
+                for (int which = 0; which < 2; ++which) {
+                    const std::vector<float> f = c.randn(nel, 0.5f);
+                    for (std::size_t i = 0; i < nel; ++i) h[i] = f2h(f[i]);
+                    (which ? dv16 : dk16) = Buf(h);
+                }
+                std::vector<std::int8_t> q8(nel);
+                std::uniform_int_distribution<int> qd(-127, 127);
+                std::uniform_real_distribution<float> sd(0.002f, 0.01f);
+                std::vector<std::uint16_t> sc(nel / 32);
+                for (int which = 0; which < 2; ++which) {
+                    for (auto& x : q8) x = static_cast<std::int8_t>(qd(c.rng));
+                    for (auto& x : sc) x = f2h(sd(c.rng) * (which ? 0.5f : 1.f));
+                    (which ? dv8 : dk8) = Buf(q8);
+                    (which ? dvs : dks) = Buf(sc);
+                }
+            }
+            wk::KvArgs af{}, a8{};
+            af.k = dk16.p();
+            af.v = dv16.p();
+            af.ptab = dpt.p();
+            a8.k = dk8.p();
+            a8.v = dv8.p();
+            a8.ks = dks.p();
+            a8.vs = dvs.p();
+            a8.ptab = dpt.p();
+            struct Case {
+                int n, p0;
+            };
+            for (const Case cs : {Case{4096, L - 4096}, Case{301, L - 301}}) {
+                const int n = cs.n, p0 = cs.p0, rows = p0 + n;
+                const std::vector<float> qp = c.randn(static_cast<std::size_t>(n) * sh.heads * kQStride);
+                Buf dq(qp), dpos(std::vector<int>{p0});
+                const std::size_t on = static_cast<std::size_t>(n) * sh.heads * kHd;
+                const std::string where = std::string(" (") + sh.model + " " + std::to_string(sh.heads) + "/" + std::to_string(sh.nkv) + ", L " +
+                                          std::to_string(L) + ", n " + std::to_string(n) + " at " + std::to_string(p0) + ")";
+                for (const bool q8p : {false, true}) {
+                    const auto fref = c.fnOpt(q8p ? "attn_prefill_wmma_q8" : "attn_prefill_wmma");
+                    const auto fdq = c.fnOpt("kv_dq_rows");
+                    if (!fref || (q8p && !fdq)) {
+                        c.rep.skip("attnkgl", std::string(q8p ? "Q8P" : "f16") + where, "reference kernel not in this code object");
+                        continue;
+                    }
+                    Buf ref(on * 4);
+                    ref.fill(0x7f);
+                    hip::launch(fref, {cdiv(n, 128), static_cast<unsigned>(sh.heads), 1}, {256, 1, 1}, 0, c.s, dq.p(), q8p ? a8 : af, ref.p(), sh.heads,
+                                sh.nkv, kQStride, dpos.p(), n, scale, 0);
+                    c.sync();
+                    const auto want = ref.down<float>(on);
+                    // Q8P: the dequantized rows (contiguous, identity page table), as ops::chooseAttnPrefill's dq_rows step
+                    Buf rk(q8p ? static_cast<std::size_t>(rows) * rel * 2 : 16), rv(q8p ? static_cast<std::size_t>(rows) * rel * 2 : 16);
+                    wk::KvArgs ar{};
+                    if (q8p) {
+                        hip::launch(fdq, {static_cast<unsigned>(cdiv(static_cast<long long>(rows) * rel, 2048)), 1, 1}, {256, 1, 1}, 0, c.s, a8, rk.p(),
+                                    rv.p(), rows, rel);
+                        ar.k = rk.p();
+                        ar.v = rv.p();
+                        ar.ptab = did.p();
+                    }
+                    const std::string base = "attn_kg";  // Q8P: the f16 attn_kg<np> on the rows (the host loads it as attn_kgf<np>)
+                    for (const std::string& name : {base + s, "attn_kgv" + s, "attn_kgk" + s}) {
+                        const auto fk = c.fnOpt(name);
+                        if (!fk) {
+                            c.rep.skip("attnkgl", name + where, "not in this code object");
+                            continue;
+                        }
+                        for (const int split : {1, 2}) {
+                            const int hp = sh.heads / split;
+                            Buf ob(on * 4);
+                            ob.fill(0x7f);
+                            for (int h0 = 0; h0 < sh.heads; h0 += hp)
+                                hip::launch(fk, {cdiv(n, 16), static_cast<unsigned>(hp / sh.np), 1}, {static_cast<unsigned>(64 * sh.np), 1, 1}, 0, c.s,
+                                            dq.p(), q8p ? ar : af, ob.p(), sh.heads, sh.nkv, kQStride, dpos.p(), n, scale, h0);
+                            c.sync();
+                            c.rep.add(cmpExact((q8p ? "kv_dq_rows + " : "") + name + " == " + (q8p ? "attn_prefill_wmma_q8" : "attn_prefill_wmma") +
+                                                   (split > 1 ? " (2 head-range launches)" : "") + where,
+                                               ob.down<float>(on), want, Kind::invariant));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 }  // namespace kt

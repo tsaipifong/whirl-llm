@@ -205,6 +205,8 @@ bool kgShapesMatch(const ops::AttnPrefillPlan& pl) {
     return true;
 }
 
+void testAttnKgAuto();
+
 void testAttnKgVariant() {
     const kn::KernelTable kv = kgTable(true), k0 = kgTable(false);
     // (1) the selector alone: var 1 -> attn_kgv<np>, var 3 -> attn_kgk<np>, np 6 / 4 / 2 only
@@ -332,6 +334,106 @@ void testAttnKgVariant() {
                 }
                 CHECK(same);
             }
+    }
+    testAttnKgAuto();  // v0252-c1acc
+}
+
+
+// v0252-c1acc (REVIEW-v0252-c1 C-1 / C-3): attn_kg_var "auto" (ops::kAttnKgVarAuto, the gfx1201 default) = the explicit
+// table ops::kAttnKgAuto: var 3 only on NP 4 plain f16 (Ornith precise / balance) and NP 6 Q8P (Swift balance), var 0 on
+// every other (NP, KV path): Swift precise f16 (NP 6, unproven: AO-1 confound), NP 4 Q8P (not measured), NP 2 and any
+// other np. Explicit 0 / 1 / 3 bypass the table; the 8060S set and FC-1c / q4 are unchanged. Fails before c1acc (the
+// test-first stub attnKgAutoVar returns 0 for every row).
+void testAttnKgAuto() {
+    CHECK(ops::kAttnKgVarAuto == 255);  // == numerics::kAttnKgVarAuto (static_assert in src/model/qwen35/forward/attn.cpp)
+    // (1) the table: exactly the two measured rows; every other (np, path) -> 0
+    CHECK(std::size(ops::kAttnKgAuto) == 2);
+    for (const std::uint32_t np : {0u, 1u, 2u, 3u, 4u, 6u, 8u, 12u, 16u})
+        for (const ops::KgPath path : {ops::KgPath::f16, ops::KgPath::q8p}) {
+            const bool on = (np == 4 && path == ops::KgPath::f16) || (np == 6 && path == ops::KgPath::q8p);
+            CHECK(ops::attnKgAutoVar(np, path) == (on ? 3u : 0u));
+            CHECK(ops::attnKgVarFor(ops::kAttnKgVarAuto, np, path) == (on ? 3u : 0u));
+            for (const std::uint32_t var : {0u, 1u, 3u, 2u}) CHECK(ops::attnKgVarFor(var, np, path) == var);  // explicit: as given
+        }
+    // (2) chooseAttnPrefill with auto: the kernel per model shape and KV path
+    const kn::KernelTable kv = kgTable(true);
+    struct Want {
+        std::uint32_t heads, kv, np;
+        const char *f16, *q8p;
+    };
+    for (const Want w : {Want{24, 4, 6, "attn_kg6", "attn_kgk6"}, Want{16, 2, 4, "attn_kgk4", "attn_kgf4"}, Want{4, 2, 2, "attn_kg2", "attn_kgf2"}}) {
+        ops::AttnPrefillProblem p;
+        p.n = 512;
+        p.pos0 = 1536;
+        p.head_dim = 256;
+        p.n_head = w.heads;
+        p.n_head_kv = w.kv;
+        p.scale = 1.0f / 16.0f;
+        ops::AttnPrefillFlags f;
+        f.attn_kg_var = ops::kAttnKgVarAuto;
+        {
+            const auto pl = ops::chooseAttnPrefill(p, f, kv);
+            CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == w.f16 && pl.steps[0].block.x == 64 * w.np && kgShapesMatch(pl));
+        }
+        // a long prefill split into head ranges: every range takes the same kernel
+        p.n = 4096;
+        p.pos0 = 131072;
+        {
+            const auto pl = ops::chooseAttnPrefill(p, f, kv);
+            CHECK(pl.steps.size() == 2 && nameOf(pl.steps[0].f) == w.f16 && nameOf(pl.steps[1].f) == w.f16 && kgShapesMatch(pl));
+        }
+        p.n = 512;
+        p.pos0 = 1536;
+        p.kv_q8 = true;
+        p.dq_rows = 8192;
+        p.dq_ptab = true;
+        p.dq_st_ml = true;
+        {
+            const auto pl = ops::chooseAttnPrefill(p, f, kv);
+            CHECK(pl.steps.size() == 2 && pl.steps[0].op == ops::AttnStep::Op::dq_rows && nameOf(pl.steps[1].f) == w.q8p && kgShapesMatch(pl));
+        }
+        // FC-1c (keys past the scratch): attn_kgs, never a variant
+        p.pos0 = 20000;
+        {
+            const auto pl = ops::chooseAttnPrefill(p, f, kv);
+            bool kgs_only = true;
+            for (const auto& st : pl.steps)
+                if (st.op == ops::AttnStep::Op::attn) kgs_only = kgs_only && nameOf(st.f) == "attn_kgs" + std::to_string(w.np);
+            CHECK(kgs_only && kgShapesMatch(pl));
+        }
+        // explicit 0 overrides the table on both paths; explicit 3 takes attn_kgk on both
+        p.pos0 = 1536;
+        for (const bool q8 : {false, true}) {
+            p.kv_q8 = q8;
+            p.dq_ptab = q8;  // production allocates dq_ptab only for quantized KV (model_scratch.cpp:64-72); f16 KV never has it
+            ops::AttnPrefillFlags f0, f3;
+            f0.attn_kg_var = 0;
+            f3.attn_kg_var = 3;
+            const auto a = ops::chooseAttnPrefill(p, f0, kv), b = ops::chooseAttnPrefill(p, f3, kv);
+            const std::string s = std::to_string(w.np);
+            CHECK(nameOf(a.steps.back().f) == (q8 ? "attn_kgf" : "attn_kg") + s && nameOf(b.steps.back().f) == "attn_kgk" + s);
+        }
+    }
+    // (3) the 8060S set: auto changes nothing (no attn_kg there; numerics also keeps 0 on gfx1151)
+    {
+        const kn::KernelTable k8 = attnTable(true, true, true, false);
+        ops::AttnPrefillProblem p;
+        p.n = 512;
+        p.head_dim = 256;
+        p.n_head = 16;
+        p.n_head_kv = 2;
+        p.scale = 1.0f / 16.0f;
+        for (const bool q8 : {false, true}) {
+            p.kv_q8 = q8;
+            p.dq_rows = q8 ? 8192 : 0;
+            p.dq_ptab = p.dq_st_ml = q8;
+            ops::AttnPrefillFlags f0, fa;
+            fa.attn_kg_var = ops::kAttnKgVarAuto;
+            const auto a = ops::chooseAttnPrefill(p, f0, k8), b = ops::chooseAttnPrefill(p, fa, k8);
+            bool same = a.steps.size() == b.steps.size() && !a.steps.empty();
+            for (std::size_t i = 0; same && i < a.steps.size(); ++i) same = a.steps[i].f == b.steps[i].f && a.steps[i].grid.y == b.steps[i].grid.y;
+            CHECK(same);
+        }
     }
 }
 

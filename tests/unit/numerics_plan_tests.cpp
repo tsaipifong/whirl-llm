@@ -887,10 +887,13 @@ static void testRfuseDefault() {
 }
 
 // v0252-c1port (C1, feat026-attnkg97 / -97k): WHIRL_ATTN_KGVAR is a load-time variable of class B (an EnvValues field,
-// not an A/B switch: var 1 attn_kgv and var 3 attn_kgk are designed bit-identical to attn_kg): std::strtoul, kept only
-// as 1 or 3, any other value 0 (var 2 attn_kgw is not ported: not bit-identical); default 0 on every card x model x
-// mode (C1 changes no default); no override note, no refusal note, never lossy, and it changes only the attn_kg_var
-// flag. Fails before the port (loadFlags does not read the variable).
+// not an A/B switch: var 1 attn_kgv and var 3 attn_kgk are designed bit-identical to attn_kg); never lossy, no override
+// note, and a valid value changes only the attn_kg_var flag.
+// v0252-c1acc (REVIEW-v0252-c1 C-1 / C-3): the default is kAttnKgVarAuto on the R9700 card (gfx1201: ops::kAttnKgAuto
+// picks the variant per NP x KV path) and 0 on the 8060S (no attn_kg there), every model x mode; "auto" and a whole
+// decimal 0 / 1 / 3 override it; any other value (2, 4, "", "x", "-1", "3x") keeps the default and Plan::ignored carries
+// exactly one note naming it (before c1acc it silently became 0). Fails before c1acc (default 0 everywhere; the
+// test-first stub parseKgVar accepts nothing).
 static void testKgVarFlag() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -898,15 +901,20 @@ static void testKgVarFlag() {
         for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
         return nu::plan(r, t);
     };
-    const std::pair<const char*, std::uint32_t> cases[] = {{"1", 1}, {"3", 3}, {"03", 3}, {"3x", 3}, {"0", 0}, {"2", 0},
-                                                           {"4", 0}, {"", 0},  {"x", 0},  {"-1", 0}};
+    const std::uint32_t A = nu::kAttnKgVarAuto;
+    NCHECK(A == 255, "kAttnKgVarAuto {}", A);
+    const std::pair<const char*, std::uint32_t> valid[] = {{"1", 1}, {"3", 3}, {"03", 3}, {"0", 0}, {"auto", A}};
+    const char* const invalid[] = {"2", "4", "", "x", "-1", "3x", "AUTO", " 3"};
+    for (const auto& [v, want] : valid) NCHECK(nu::parseKgVar(v) == want, "parseKgVar('{}')", v);
+    for (const char* v : invalid) NCHECK(!nu::parseKgVar(v).has_value(), "parseKgVar('{}') must be invalid", v);
     for (const char* mode : {"precise", "balance", "fast"})
         for (const CardFake& c : k_cards)
             for (const char* model : {"swift", "moe"}) {
                 const nu::Target t = target(c, model, false);
+                const std::uint32_t dflt = t.gfx1151 ? 0u : A;
                 const nu::Plan d = pl(t, mode, {});
-                NCHECK(d.flags.attn_kg_var == 0, "attn_kg_var default {} {} {}: {} (want 0)", c.name, model, mode, d.flags.attn_kg_var);
-                for (const auto& [v, want] : cases) {
+                NCHECK(d.flags.attn_kg_var == dflt, "attn_kg_var default {} {} {}: {} (want {})", c.name, model, mode, d.flags.attn_kg_var, dflt);
+                for (const auto& [v, want] : valid) {
                     const nu::Plan p = pl(t, mode, {{"ATTN_KGVAR", v}});
                     NCHECK(p.flags.attn_kg_var == want, "attn_kg_var {} {} {}: WHIRL_ATTN_KGVAR='{}' -> {} (want {})", c.name, model, mode, v,
                            p.flags.attn_kg_var, want);
@@ -915,6 +923,15 @@ static void testKgVarFlag() {
                     NCHECK(a.bitsKey() == p.bitsKey() && nu::logLine(p) == nu::logLine(d) && p.overrides == d.overrides &&
                                p.lossy_override == d.lossy_override && p.ignored.empty(),
                            "attn_kg_var {} {} {}: WHIRL_ATTN_KGVAR='{}' changes only the attn_kg_var flag", c.name, model, mode, v);
+                }
+                for (const char* v : invalid) {
+                    const nu::Plan p = pl(t, mode, {{"ATTN_KGVAR", v}});
+                    NCHECK(p.flags.attn_kg_var == dflt, "attn_kg_var {} {} {}: invalid WHIRL_ATTN_KGVAR='{}' -> {} (want the default {})", c.name, model,
+                           mode, v, p.flags.attn_kg_var, dflt);
+                    std::size_t notes = 0;
+                    for (const std::string& n : p.ignored) notes += n.rfind(std::string("WHIRL_ATTN_KGVAR=") + v + " ignored", 0) == 0;
+                    NCHECK(notes == 1 && p.ignored.size() == 1 && p.bitsKey() == d.bitsKey() && p.overrides == d.overrides,
+                           "attn_kg_var {} {} {}: invalid WHIRL_ATTN_KGVAR='{}': one Plan::ignored note, nothing else changes", c.name, model, mode, v);
                 }
             }
 }
@@ -929,7 +946,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testMoepDefault();  // v0251-a7port (fails before the port: the plan has no gfx1151 default)
     testMoepCombMode();  // v0251-a7pol B26-41 (the refusal rows fail on cfce7ea)
     testRfuseDefault();  // v0251-a11port (fails before the port: the plan has no gfx1151 default)
-    testKgVarFlag();  // v0252-c1port (fails before the port: loadFlags does not read WHIRL_ATTN_KGVAR)
+    testKgVarFlag();  // v0252-c1port; v0252-c1acc auto default + invalid-value note (fails before c1acc)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)

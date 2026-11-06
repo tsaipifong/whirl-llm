@@ -17,11 +17,41 @@
 
 namespace kt {
 
+// v0252-c1acc (AO-1): one bitwise row of the prefill bench as a check (kt Report), so a mismatch fails the family
+static void benchBitRow(Ctx& c, const std::string& what, int heads, int nkv, int L, int rd, std::size_t bad, std::size_t n) {
+    Result r;
+    r.family = "attnbench";
+    r.name = "prefill bench " + what + " (heads " + std::to_string(heads) + " / kv " + std::to_string(nkv) + ", L " + std::to_string(L) +
+             ", round " + std::to_string(rd + 1) + ")";
+    r.kind = Kind::invariant;
+    r.n = n;
+    r.mismatches = bad;
+    r.pass = bad == 0;
+    c.rep.add(r);
+}
+
 // WHIRL_KT_BENCH_PREFILL=1: prefill attention timing instead (Q8P): n = 4096 queries at the end of
 // L keys (WHIRL_KT_BENCH_L, default 32768 and 131072), 24 / 4 heads, attn_kg6 for f16 / q8v / q8 KV
 // (plus WHIRL_KT_BENCH_KERNELS, comma-separated "name:fmt" with fmt f16|q8|q8v, NP 6 grid).
+// v0252-c11 (C11): WHIRL_KT_BENCH_HEADS / WHIRL_KT_BENCH_NKV set the head shape (default 24 / 4; Ornith 16 / 2 for the
+// NP 4 vs NP 8 bench, e.g. WHIRL_KT_BENCH_KERNELS=attn_kg4:f16:4:1,attn_kg8:f16:8:1); a kernel whose NP does not divide
+// the GQA group (or the heads) is skipped with a line; f16 outputs are compared bitwise with the first f16 kernel's.
+// v0252-c1acc (REVIEW-v0252-c1 AO-1): the f16 cache (fmt "f16") is its own random buffer pair (N(0, 0.5) f16, as
+// llama.cpp test-backend-ops initializes every tensor with random data before timing), never written by any kernel,
+// so every f16 kernel reads the same contents; before, dk16 / dv16 were the constant 0x3030 until the first "dq" kernel
+// overwrote them with dequantized random rows (f16 rows after a dq row read other data than the first). "dq" keeps its
+// own scratch. WHIRL_KT_BENCH_ROUNDS (default 2): every round times every kernel, odd rounds in the reverse order; each
+// bitwise line is also a check (Result), so the family reports pass / fail.
 static void benchPrefill(Ctx& c) {
-    const int hd = 256, qstride = 2 * hd, heads = 24, nkv = 4, n = 4096;
+    const int hd = 256, qstride = 2 * hd, n = 4096;
+    const int heads = std::getenv("WHIRL_KT_BENCH_HEADS") ? std::atoi(std::getenv("WHIRL_KT_BENCH_HEADS")) : 24;
+    const int nkv = std::getenv("WHIRL_KT_BENCH_NKV") ? std::atoi(std::getenv("WHIRL_KT_BENCH_NKV")) : 4;
+    if (heads <= 0 || nkv <= 0 || heads % nkv != 0) {
+        std::printf("   prefill: WHIRL_KT_BENCH_HEADS %d / WHIRL_KT_BENCH_NKV %d is not a GQA shape\n", heads, nkv);
+        return;
+    }
+    std::printf("   prefill heads %d / kv %d (group %d)\n", heads, nkv, heads / nkv);
+    const int rounds = std::getenv("WHIRL_KT_BENCH_ROUNDS") ? std::max(1, std::atoi(std::getenv("WHIRL_KT_BENCH_ROUNDS"))) : 2;
     const float scale = 1.0f / 16.0f;
     std::vector<int> lens = {32768, 131072};
     if (const char* e = std::getenv("WHIRL_KT_BENCH_L")) lens = {std::atoi(e)};
@@ -87,15 +117,34 @@ static void benchPrefill(Ctx& c) {
             }
         }
         Buf dk8(k8), dv8(v8), dks(ksc), dvs(vsc);
-        Buf dk16(nel * 2), dv16(nel * 2);
+        Buf dk16(nel * 2), dv16(nel * 2);  // the "dq" / "dqs" scratch (kv_dq_rows writes it before every such launch)
         dk16.fill(0x30);
         dv16.fill(0x30);
+        // v0252-c1acc (AO-1): the f16 cache, random and read-only (every f16 kernel of every round reads these contents)
+        std::vector<std::uint16_t> kc16(nel), vc16(nel);
+        {
+            const auto kf = c.randn(nel, 0.5f), vf = c.randn(nel, 0.5f);
+            for (std::size_t i = 0; i < nel; ++i) {
+                kc16[i] = f2h(kf[i]);
+                vc16[i] = f2h(vf[i]);
+            }
+        }
+        Buf dkc(kc16), dvc(vc16);
         const std::vector<float> qp = c.randn(static_cast<std::size_t>(n) * heads * qstride);
         Buf dq(qp), dpos(std::vector<int>{L - n});
         Buf out(static_cast<std::size_t>(n) * heads * hd * 4);
+        std::vector<float> ref_q8, ref_f16;
+        std::string ref_q8_name, ref_f16_name;
+        for (int rd = 0; rd < rounds; ++rd) {
+        std::vector<K> order = ks;
+        if (rd % 2) std::reverse(order.begin(), order.end());
+        {
+            std::string names;
+            for (const K& kk : order) names += " " + kk.name + ":" + kk.fmt;
+            std::printf("   prefill L %d round %d order:%s\n", L, rd + 1, names.c_str());
+        }
         double base_us = 0;
-        std::vector<float> ref_q8;
-        for (const K& kk : ks) {
+        for (const K& kk : order) {
             const std::string& name = kk.name;
             const std::string& fmt = kk.fmt;
             const auto f = fnX(name);
@@ -103,9 +152,13 @@ static void benchPrefill(Ctx& c) {
                 std::printf("   %s: not in this code object\n", name.c_str());
                 continue;
             }
+            if (kk.np <= 0 || (heads / nkv) % kk.np != 0 || heads % kk.np != 0) {  // v0252-c11: NP must divide the group
+                std::printf("   %s: NP %d does not divide group %d (heads %d / kv %d), skipped\n", name.c_str(), kk.np, heads / nkv, heads, nkv);
+                continue;
+            }
             wk::KvArgs a{};
-            a.k = fmt == "q8" ? dk8.p() : dk16.p();
-            a.v = fmt == "f16" ? dv16.p() : dv8.p();
+            a.k = fmt == "q8" ? dk8.p() : dkc.p();  // c1acc: q8v's f16 K is the random cache too ("dq" / "dqs" re-point it below)
+            a.v = fmt == "f16" ? dvc.p() : dv8.p();
             a.ks = fmt == "q8" ? dks.p() : 0;
             a.vs = fmt == "f16" ? 0 : dvs.p();
             a.ptab = dpt.p();
@@ -178,13 +231,30 @@ static void benchPrefill(Ctx& c) {
                 const auto o = out.down<float>(static_cast<std::size_t>(n) * heads * hd);
                 if (ref_q8.empty()) {
                     ref_q8 = o;
+                    ref_q8_name = name + ":" + fmt;
                 } else {
                     std::size_t bad = 0;
                     for (std::size_t i = 0; i < o.size(); ++i) bad += std::memcmp(&o[i], &ref_q8[i], 4) != 0;
                     std::printf("   prefill %-22s bitwise mismatches vs first q8: %zu of %zu\n", name.c_str(), bad, o.size());
+                    benchBitRow(c, name + ":" + fmt + " == " + ref_q8_name, heads, nkv, L, rd, bad, o.size());
+                }
+            }
+            if (fmt == "f16") {  // v0252-c11: bitwise vs the first f16 kernel (attn_kg8 vs attn_kg4 in the C11 bench)
+                launch();
+                c.sync();
+                const auto o = out.down<float>(static_cast<std::size_t>(n) * heads * hd);
+                if (ref_f16.empty()) {
+                    ref_f16 = o;
+                    ref_f16_name = name + ":f16";
+                } else {
+                    std::size_t bad = 0;
+                    for (std::size_t i = 0; i < o.size(); ++i) bad += std::memcmp(&o[i], &ref_f16[i], 4) != 0;
+                    std::printf("   prefill %-22s bitwise mismatches vs first f16: %zu of %zu\n", name.c_str(), bad, o.size());
+                    benchBitRow(c, name + ":f16 == " + ref_f16_name, heads, nkv, L, rd, bad, o.size());
                 }
             }
         }
+        }  // rounds
     }
 }
 

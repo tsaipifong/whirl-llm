@@ -78,7 +78,8 @@ struct AttnPrefillFlags {
     std::uint32_t attn_seg = 0;
     // v0252-c1port (C1, feat026-attnkg97 / -97k): the f16 attn_kg variant (numerics flag attn_kg_var, WHIRL_ATTN_KGVAR):
     // 0 the shipped attn_kg, 1 attn_kgv, 3 attn_kgk (both designed bit-identical: every mode); taken on the plain f16
-    // path and on Q8P (kv_dq_rows + f16 attn_kgf), never on q8 / q8v without the scratch, FC-1c (attn_kgs) or q4
+    // path and on Q8P (kv_dq_rows + f16 attn_kgf), never on q8 / q8v without the scratch, FC-1c (attn_kgs) or q4;
+    // v0252-c1acc: kAttnKgVarAuto = the per-(NP, path) table kAttnKgAuto
     std::uint32_t attn_kg_var = 0;
 };
 // v0252-c1port (C1): the f16 attn_kg variant `var` for NP query heads per block, or nullptr = none (the caller keeps
@@ -86,6 +87,28 @@ struct AttnPrefillFlags {
 // only; any other var, and any other np (8, ...), gives nullptr - never the kernel of another NP (that kernel with
 // this np's grid / block would compute wrong output; DISCOVERY v4 C3-1).
 Function attnKgVariant(std::uint32_t var, const kernels::AttnKernels& k, std::uint32_t np);
+// v0252-c1acc (REVIEW-v0252-c1 C-1 / C-3): attn_kg_var "auto" (numerics::kAttnKgVarAuto, the gfx1201 default) picks
+// the variant per (NP, KV path) from the explicit table kAttnKgAuto: var 3 (attn_kgk) only on the paths measured
+// faster in the C1 screening (NP 4 on plain f16 KV = Ornith precise / balance; NP 6 on Q8P = Swift balance), var 0 (the
+// shipped attn_kg) on every other (NP, path) - the AO-1 re-bench extends it by a table edit. An explicit
+// WHIRL_ATTN_KGVAR=0 / 1 / 3 bypasses the table.
+inline constexpr std::uint32_t kAttnKgVarAuto = 255;
+enum class KgPath : std::uint8_t { f16, q8p };  // plain f16 KV from the cache; Q8P = kv_dq_rows + the f16 kernel
+struct KgAutoRow {
+    std::uint32_t np;
+    KgPath path;
+    std::uint32_t var;
+};
+inline constexpr KgAutoRow kAttnKgAuto[] = {
+    {4, KgPath::f16, 3},  // Ornith 16 / 2 heads, f16 KV: e2e pp balance 128k +19.8 % (scratch/v0252_c1/gpu/20261106-1320_s)
+    {6, KgPath::q8p, 3},  // Swift 24 / 4 heads, q8h KV in Q8P: e2e pp balance 128k +5.1 %, attnbench dq -8..-12.5 %
+};
+// the table's var for (np, path), 0 for any (np, path) not in it
+std::uint32_t attnKgAutoVar(std::uint32_t np, KgPath path);
+// the var chooseAttnPrefill uses: auto -> attnKgAutoVar(np, path), any other value as given
+inline std::uint32_t attnKgVarFor(std::uint32_t var, std::uint32_t np, KgPath path) {
+    return var == kAttnKgVarAuto ? attnKgAutoVar(np, path) : var;
+}
 // one launch of the plan: what it reads (the cache, or the dequantized copy of keys [r0, r1)) and its geometry
 struct AttnStep {
     enum class Op : std::uint8_t { dq_rows, dq_rows_r, attn };

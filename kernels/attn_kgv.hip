@@ -260,6 +260,12 @@ KGV_ENTRY(attn_kgv2, 2, false)
 // LDS as attn_kgv: Sx 2 x 2NP x 32 float8 + P^T 2 x NP x 2 x 32 half8 + alpha 2 x NP x 32 + l NP x 32.
 // grid (ceil(n_tok / 16), heads / NP), block 64 * NP; NP even, divides n_head / n_kv.
 // ---------------------------------------------------------------------------
+// v0252-c1acc (REVIEW-v0252-c1 AO-4): WHIRL_KGK_INJECT (kernel-mutation RED only, never set by the build; product objects
+// are built without it, so it is 0): 1 = the two heads of a pair swap their S^T tiles in Sx. A code object built with
+// -DWHIRL_KGK_INJECT=1 and loaded through WHIRL_KT_CODE_OBJECT must make the kt attn_kgk* bitwise rows FAIL.
+#ifndef WHIRL_KGK_INJECT
+#define WHIRL_KGK_INJECT 0
+#endif
 template <int NP>
 __device__ __forceinline__ void attn_kgk_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
                                               int q_stride, const int *pos, int n_tok, float scale, int h0) {
@@ -316,8 +322,14 @@ __device__ __forceinline__ void attn_kgk_impl(const float *q, const KvArgs &kv, 
                 own1 = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, qf[1][st], own1);
             }
             // buffer par was last read by the PV waves in tile k0 - 2 * FA_K, before the previous barrier
+#if WHIRL_KGK_INJECT == 1
+            // kernel-mutation RED only (never set by the build): the two heads of the pair swap their S^T tiles
+            Sx[par][(pr * 2 + 0) * 2 + kh][lane] = own1;
+            Sx[par][(pr * 2 + 1) * 2 + kh][lane] = own0;
+#else
             Sx[par][(pr * 2 + 0) * 2 + kh][lane] = own0;
             Sx[par][(pr * 2 + 1) * 2 + kh][lane] = own1;
+#endif
             __syncthreads();
         }
         __syncthreads();  // the PV waves' final barrier (last P^T / alpha and every head's l)
