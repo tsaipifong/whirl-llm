@@ -12,6 +12,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_ATTN_DQ4",  // src/common/numerics.cpp
     "WHIRL_ATTN_DQF",  // src/common/numerics.cpp
     "WHIRL_ATTN_KG",  // src/common/numerics.cpp
+    "WHIRL_ATTN_KG8",  // src/common/numerics.cpp (v0252-c11)
     "WHIRL_ATTN_KGVAR",  // src/common/numerics.cpp (feat026-attnkg97, v0252-c1port)
     "WHIRL_ATTN_KX",  // src/common/numerics.cpp
     "WHIRL_ATTN_SEG",  // src/common/numerics.cpp

@@ -80,7 +80,16 @@ struct AttnPrefillFlags {
     // 0 the shipped attn_kg, 1 attn_kgv, 3 attn_kgk (both designed bit-identical: every mode); taken on the plain f16
     // path and on Q8P (kv_dq_rows + f16 attn_kgf), never on q8 / q8v without the scratch, FC-1c (attn_kgs) or q4
     std::uint32_t attn_kg_var = 0;
+    // v0252-c11 (C11): the NP-8 attn_kg (numerics flag attn_kg8, WHIRL_ATTN_KG8; designed bit-identical to attn_kg4): when
+    // the GQA group and the launch's head range are multiples of 8 and the code object has attn_kg8 (gfx1201), the plain
+    // f16 path takes attn_kg8 and Q8P takes attn_kgf8, grid (ceil(n / 16), heads / 8), block 512; it comes before
+    // attn_kg_var (the variants have no NP 8). Never on q8 / q8v without the scratch, FC-1c (attn_kgs) or q4.
+    bool attn_kg8 = false;
 };
+// v0252-c11 (C11; DISCOVERY v4 C3-1): the f16 attn_kg on Q8P's dequantized rows for NP query heads per block, exhaustive:
+// np 8 -> attn_kgf8, 6 -> attn_kgf6, 4 -> attn_kgf4, 2 -> attn_kgf2, any other np nullptr (the caller then keeps the
+// path without the dequantized copy) - never the kernel of another NP under this np's grid / block.
+Function attnKgf(const kernels::AttnKernels& k, std::uint32_t np);
 // v0252-c1port (C1): the f16 attn_kg variant `var` for NP query heads per block, or nullptr = none (the caller keeps
 // its shipped kernel, whose NP is the same). Exhaustive: var 1 -> attn_kgv<np>, var 3 -> attn_kgk<np> for np 6 / 4 / 2
 // only; any other var, and any other np (8, ...), gives nullptr - never the kernel of another NP (that kernel with

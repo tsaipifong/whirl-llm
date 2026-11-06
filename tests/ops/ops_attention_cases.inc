@@ -199,7 +199,7 @@ bool kgShapesMatch(const ops::AttnPrefillPlan& pl) {
         const std::string n = nameOf(s.f);
         if (n.rfind("attn_kg", 0) != 0 || n.empty()) continue;
         const char d = n.back();
-        if (d != '6' && d != '4' && d != '2') return false;
+        if (d != '8' && d != '6' && d != '4' && d != '2') return false;  // v0252-c11: NP 8 (attn_kg8 / attn_kgf8) too
         if (s.block.x != 64u * static_cast<unsigned>(d - '0')) return false;
     }
     return true;
@@ -332,6 +332,163 @@ void testAttnKgVariant() {
                 }
                 CHECK(same);
             }
+    }
+}
+
+// v0252-c11 (C11; DISCOVERY v4 C3-1): the NP-8 attn_kg for GQA 8 (Ornith 16 / 2) behind attn_kg8 (WHIRL_ATTN_KG8).
+// ops::attnKgf is exhaustive (np 8 / 6 / 4 / 2 written out, any other np -> nullptr, never attn_kgf2 under another
+// NP's grid / block); chooseAttnPrefill takes attn_kg8 (plain f16 KV from the cache) or attn_kgf8 (Q8P) only with the
+// flag on, the kernel in the code object, the GQA group and the launch's head range multiples of 8, grid
+// (ceil(n / 16), heads / 8), block 512; before attn_kg_var; never on q8 / q8v without the scratch, FC-1c (attn_kgs), q4
+// or the 8060S set; flag off (the default) = the shipped plan in every case. Fails before the kernel commit (stub
+// attnKgf = the shipped ternary, no NP-8 branch in chooseAttnPrefill).
+void testAttnKg8() {
+    kn::KernelTable k8 = kgTable(true);  // gfx1201 with C1's variants and C11's attn_kg8 / attn_kgf8
+    k8.attn_kg8 = tag("attn_kg8");
+    k8.attn_kgf8 = tag("attn_kgf8");
+    const kn::KernelTable k0 = kgTable(true);  // no attn_kg8 in the code object
+    // (1) attnKgf alone: every NP written out, any other np nullptr
+    for (const std::uint32_t np : {8u, 6u, 4u, 2u}) CHECK(nameOf(ops::attnKgf(k8, np)) == "attn_kgf" + std::to_string(np));
+    for (const std::uint32_t np : {0u, 1u, 3u, 5u, 12u, 16u}) CHECK(ops::attnKgf(k8, np) == nullptr);
+    CHECK(ops::attnKgf(k0, 8) == nullptr);
+    // NP 8 has no attn_kg_var variant (C1's selector stays nullptr for np 8)
+    for (const std::uint32_t var : {0u, 1u, 3u}) CHECK(ops::attnKgVariant(var, k8, 8) == nullptr);
+    struct Shape {
+        std::uint32_t heads, kv, np_off, np_on;  // shipped NP, NP with attn_kg8 on
+    };
+    // Ornith 16 / 2 (GQA 8), 24 / 3 (GQA 8), 32 / 2 (GQA 16), Swift 24 / 4 (GQA 6), 4 / 2 (GQA 2), 8 / 2 (GQA 4)
+    for (const Shape sh : {Shape{16, 2, 4, 8}, Shape{24, 3, 4, 8}, Shape{32, 2, 4, 8}, Shape{24, 4, 6, 6}, Shape{4, 2, 2, 2}, Shape{8, 2, 4, 4}}) {
+        ops::AttnPrefillProblem p;
+        p.n = 512;
+        p.pos0 = 1536;
+        p.head_dim = 256;
+        p.n_head = sh.heads;
+        p.n_head_kv = sh.kv;
+        p.scale = 1.0f / 16.0f;
+        auto plan = [&](bool on, std::uint32_t var, const kn::KernelTable& k) {
+            ops::AttnPrefillFlags f;
+            f.attn_kg8 = on;
+            f.attn_kg_var = var;
+            return ops::chooseAttnPrefill(p, f, k);
+        };
+        auto one = [&](const ops::AttnPrefillPlan& pl, const std::string& want, std::uint32_t np) {
+            return pl.steps.size() == 1 && nameOf(pl.steps[0].f) == want && !pl.steps[0].from_copy && !pl.steps[0].ranged &&
+                   pl.steps[0].grid.x == 32 && pl.steps[0].grid.y == sh.heads / np && pl.steps[0].block.x == 64 * np && pl.steps[0].head0 == 0 &&
+                   kgShapesMatch(pl);
+        };
+        const std::string so = std::to_string(sh.np_off), sn = std::to_string(sh.np_on);
+        const bool takes8 = sh.np_on == 8;
+        // (2) f16 KV from the cache: off = shipped (and C1's variant of the shipped NP); on = attn_kg8 where it fits, before var
+        CHECK(one(plan(false, 0, k8), "attn_kg" + so, sh.np_off));
+        CHECK(one(plan(false, 3, k8), "attn_kgk" + so, sh.np_off));
+        CHECK(one(plan(true, 0, k8), "attn_kg" + sn, sh.np_on));
+        CHECK(one(plan(true, 3, k8), (takes8 ? "attn_kg" : "attn_kgk") + sn, sh.np_on));
+        CHECK(one(plan(true, 1, k8), (takes8 ? "attn_kg" : "attn_kgv") + sn, sh.np_on));
+        // no attn_kg8 in the code object: the flag changes nothing
+        CHECK(one(plan(true, 0, k0), "attn_kg" + so, sh.np_off));
+        CHECK(one(plan(true, 3, k0), "attn_kgk" + so, sh.np_off));
+        // (3) Q8P (keys inside the dequant scratch): kv_dq_rows once, then attn_kgf8 (on) / attn_kgf<np> (off)
+        p.kv_q8 = true;
+        p.dq_rows = 8192;
+        p.dq_ptab = true;
+        p.dq_st_ml = true;
+        for (const bool on : {false, true}) {
+            const auto pl = plan(on, 0, k8);
+            const std::uint32_t np = on ? sh.np_on : sh.np_off;
+            CHECK(pl.steps.size() == 2 && pl.steps[0].op == ops::AttnStep::Op::dq_rows && pl.steps[0].nrows == 2048 &&
+                  nameOf(pl.steps[1].f) == "attn_kgf" + std::to_string(np) && pl.steps[1].from_copy && !pl.steps[1].ranged &&
+                  pl.steps[1].grid.x == 32 && pl.steps[1].grid.y == sh.heads / np && pl.steps[1].block.x == 64 * np && kgShapesMatch(pl));
+        }
+        {  // Q8P with attn_kg8 on and var 3: NP 8 first; without attn_kgf8 in the table: the shipped NP with the variant
+            kn::KernelTable kn8 = k8;
+            kn8.attn_kgf8 = nullptr;
+            const auto pa = plan(true, 3, k8), pb = plan(true, 3, kn8);
+            CHECK(pa.steps.size() == 2 && nameOf(pa.steps[1].f) == (takes8 ? "attn_kgf8" : "attn_kgk" + so) && kgShapesMatch(pa));
+            CHECK(pb.steps.size() == 2 && nameOf(pb.steps[1].f) == "attn_kgk" + so && pb.steps[1].block.x == 64 * sh.np_off && kgShapesMatch(pb));
+        }
+        // (4) q8 / q8h past the scratch (FC-1c): attn_kgs<shipped NP> over key ranges, flag on or off (no kgs8)
+        p.pos0 = 20000;
+        for (const bool on : {false, true}) {
+            const auto pl = plan(on, 0, k8);
+            std::size_t kgs = 0, other = 0;
+            for (const auto& st : pl.steps)
+                if (st.op == ops::AttnStep::Op::attn) (st.ranged && nameOf(st.f).rfind("attn_kgs", 0) == 0 && nameOf(st.f).back() != '8' ? kgs : other) += 1;
+            CHECK(kgs == 3 && other == 0 && kgShapesMatch(pl));
+        }
+        // (5) q8 / q8v from the cache (no dequant scratch): the shipped attn_kg<np> (_q8 / _q8v in a real table), flag on or off
+        p.pos0 = 1536;
+        p.dq_rows = 0;
+        p.dq_ptab = false;
+        p.dq_st_ml = false;
+        for (const bool on : {false, true}) CHECK(one(plan(on, 0, k8), "attn_kg" + so, sh.np_off));
+        // (6) q4 KV on the gfx1201 set (no attn_kg*_q4): FC-1c attn_kgs, flag on or off
+        {
+            kn::KernelTable kq4 = k8;
+            kq4.attn_kg6 = kq4.attn_kg4 = kq4.attn_kg2 = nullptr;
+            kq4.kv_dq_rows = nullptr;
+            p.dq_rows = 8192;
+            p.dq_ptab = true;
+            p.dq_st_ml = true;
+            for (const bool on : {false, true}) {
+                const auto pl = plan(on, 0, kq4);
+                std::size_t kgs = 0, other = 0;
+                for (const auto& st : pl.steps)
+                    if (st.op == ops::AttnStep::Op::attn) (nameOf(st.f).rfind("attn_kgs", 0) == 0 && nameOf(st.f).back() != '8' ? kgs : other) += 1;
+                CHECK(kgs == 1 && other == 0 && kgShapesMatch(pl));
+            }
+        }
+        p.kv_q8 = false;
+        p.dq_rows = 0;
+        p.dq_ptab = false;
+        p.dq_st_ml = false;
+        // (7) head ranges (Windows TDR budget): 2 ranges -> heads / 2 per launch (NP 8 where heads / 2 % 8 == 0);
+        // 4 ranges (keys past 3 x 128k) -> heads / 4 (Ornith: 4 heads per launch -> the shipped NP 4 even with the flag)
+        p.n = 4096;
+        for (const std::uint32_t pos0 : {131072u, 393216u}) {
+            p.pos0 = pos0;
+            const std::uint32_t parts = pos0 == 131072u ? 2 : 4;
+            const std::uint32_t hp = sh.heads / parts;
+            if (sh.heads % parts != 0) continue;
+            const std::uint32_t npw = (takes8 && hp % 8 == 0) ? 8 : sh.np_off;
+            if (hp % sh.np_off != 0) continue;
+            const auto pl = plan(true, 0, k8);
+            bool ok = pl.steps.size() == parts;
+            for (std::uint32_t q = 0; ok && q < pl.steps.size(); ++q)
+                ok = nameOf(pl.steps[q].f) == "attn_kg" + std::to_string(npw) && pl.steps[q].head0 == q * hp && pl.steps[q].grid.y == hp / npw &&
+                     pl.steps[q].block.x == 64 * npw;
+            CHECK(ok && kgShapesMatch(pl));
+        }
+        p.n = 512;
+        p.pos0 = 1536;
+    }
+    // (8) the 8060S set (no attn_kg / attn_kg8): WHIRL_ATTN_KG8 changes nothing, f16 and q8 KV, Ornith and Swift shapes
+    {
+        const kn::KernelTable ks = attnTable(true, true, true, false);
+        for (const std::uint32_t heads : {16u, 24u}) {
+            ops::AttnPrefillProblem p;
+            p.n = 512;
+            p.head_dim = 256;
+            p.n_head = heads;
+            p.n_head_kv = heads == 16 ? 2 : 4;
+            p.scale = 1.0f / 16.0f;
+            for (const bool q8 : {false, true})
+                for (const std::uint32_t pos0 : {0u, 20000u}) {
+                    p.kv_q8 = q8;
+                    p.pos0 = pos0;
+                    p.dq_rows = q8 ? 8192 : 0;
+                    p.dq_ptab = p.dq_st_ml = q8;
+                    ops::AttnPrefillFlags f0, f1;
+                    f1.attn_kg8 = true;
+                    const auto a = ops::chooseAttnPrefill(p, f0, ks), b = ops::chooseAttnPrefill(p, f1, ks);
+                    bool same = a.steps.size() == b.steps.size() && !a.steps.empty();
+                    for (std::size_t i = 0; same && i < a.steps.size(); ++i) {
+                        const auto &x = a.steps[i], &y = b.steps[i];
+                        same = x.op == y.op && x.f == y.f && x.grid.x == y.grid.x && x.grid.y == y.grid.y && x.block.x == y.block.x &&
+                               x.from_copy == y.from_copy && x.ranged == y.ranged && x.r0 == y.r0 && x.r1 == y.r1 && x.head0 == y.head0;
+                    }
+                    CHECK(same);
+                }
+        }
     }
 }
 

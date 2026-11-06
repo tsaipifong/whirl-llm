@@ -202,6 +202,9 @@ Function attnKgVariant(std::uint32_t var, const kernels::AttnKernels& k, std::ui
     }
 }
 
+// v0252-c11 test-first stub (interface only): the shipped ternary, unchanged (np 6 / 4, anything else attn_kgf2)
+Function attnKgf(const kernels::AttnKernels& k, std::uint32_t np) { return np == 6 ? k.attn_kgf6 : np == 4 ? k.attn_kgf4 : k.attn_kgf2; }
+
 // WMMA prefill attention of n queries at positions pos0 .. (keys 0 .. pos0 + n - 1), split over head ranges so
 // one launch does at most ~4096 x 128k query-key pairs x all heads. Same results as one launch.
 // f16 / q8 / q8h / q8v KV: attn_kg (NP query heads of one KV head per block; bit-identical to attn_kx) when NP
@@ -253,7 +256,7 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
     // then the f16 attn_kg: the same f16 K / V values as attn_kg_q8 converts in its waves (bit-identical)
     const u32 rows = p.pos0 + n, row_el = p.n_head_kv * p.head_dim;
     if (kg != nullptr && f.attn_dqf_on && k.kv_dq_rows != nullptr && p.dq_ptab && rows <= p.dq_rows) {
-        Function kf = np == 6 ? k.attn_kgf6 : np == 4 ? k.attn_kgf4 : k.attn_kgf2;
+        Function kf = attnKgf(k, np);
         // v0252-c1port: the attn_kg variant of this NP on the dequantized rows (same grid / block / bits as attn_kgf)
         if (kf != nullptr)
             if (const Function v = attnKgVariant(f.attn_kg_var, k, np)) kf = v;

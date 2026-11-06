@@ -89,6 +89,8 @@ struct EnvValues {
     Raw moe_fp8, moe_mxw, moe_wide, moe_rbf, moep_gu, moep_dn, moep_comb, moe_rfuse;
     // v0252-c1port (feat026-attnkg97 / -97k): attn_kgvar (WHIRL_ATTN_KGVAR, the gfx1201 f16 attn_kg variant; class B)
     Raw attn_kgvar;
+    // v0252-c11 (C11): attn_kg8 (WHIRL_ATTN_KG8, the gfx1201 NP-8 f16 attn_kg for GQA 8; class B)
+    Raw attn_kg8;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -96,7 +98,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 34;
+    static constexpr std::size_t n_fields = 35;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -213,7 +215,10 @@ struct ItemState {
 // v0252-c1port: attn_kg_var = WHIRL_ATTN_KGVAR by std::strtoul, kept only as 1 (attn_kgv) or 3 (attn_kgk), any other
 // value 0 (the shipped attn_kg; var 2 attn_kgw of feat026-attnkg97 is not ported: not bit-identical); default 0 on
 // every card. Not in the S0b-2 dump either (the launch log pins the kernel).
-#define WHIRL_NUMERICS_FLAGS(X)                                  \
+// v0252-c11: attn_kg8 = WHIRL_ATTN_KG8 by std::strtoul, kept only as 1 (the NP-8 attn_kg8 where the GQA group and the
+// head range allow it; designed bit-identical to attn_kg4), any other value 0; default 0 on every card. Not in the S0b-2
+// dump (the launch log pins the kernel).
+#define WHIRL_NUMERICS_FLAGS(X)                                 \
     X(B, use_graph, true, "use_graph")                           \
     X(B, no_fuse, false, "no_fuse")                              \
     X(U, dbg_flags, 0, "dbg_flags")                              \
@@ -247,6 +252,7 @@ struct ItemState {
     X(U, attn_seg, 0, "attn_seg")                                \
     X(B, attn_kg_on, true, "attn_kg_on")                         \
     X(U, attn_kg_var, 0, "")                                     \
+    X(U, attn_kg8, 0, "")                                        \
     X(B, ffn_h16, false, "ffn_h16")                              \
     X(B, h16_dq, false, "h16_dq")                                \
     X(B, g8t, false, "g8t")                                      \

@@ -465,6 +465,27 @@ void testAttn(Ctx& c) {
             c.rep.add(r);
         }
     }
+    // v0252-c11 (C11): the NP-8 f16 attn_kg (attn_kg8, kernels/attn_kg8.hip) is in the gfx1201 code object and in the host
+    // table (kernels_abi.cpp loadAttn), and absent from the gfx1151 object and table (the 8060S is untouched). Fails before
+    // the kernel commit (no kernel). Its bitwise rows (== attn_kg4 == attn_prefill_wmma on GQA 8: Ornith 16 / 2 and 24 / 3,
+    // short and long paged KV, kv_dq_rows + kernel) are in the attn_kg loops below.
+    {
+        const bool g1201 = c.mod.arch() == hip::Arch::gfx1201;
+        const hip::Function f = c.fnOpt("attn_kg8");
+        Result r;
+        r.kind = Kind::invariant;
+        r.n = 1;
+        if (g1201) {
+            r.name = "attn_kg8 (C11) in the gfx1201 code object and loaded into the host table";
+            r.pass = f != nullptr && c.k.attn_kg8 == f;
+            if (!r.pass) r.note = f == nullptr ? "missing from the code object" : "not in AttnKernels (loadAttn)";
+        } else {
+            r.name = "attn_kg8 absent from this non-gfx1201 code object and from the host table";
+            r.pass = f == nullptr && c.k.attn_kg8 == nullptr;
+        }
+        r.mismatches = r.pass ? 0 : 1;
+        c.rep.add(r);
+    }
     const int L = c.quick ? 600 : 1100;  // cached positions (crosses page boundaries)
     for (Fmt fmt : {Fmt::f16, Fmt::q8, Fmt::q8v, Fmt::q4}) {
         const std::string fs = fmtSuffix(fmt);
@@ -771,7 +792,9 @@ void testAttn(Ctx& c) {
                 for (const auto& [name, np] : {std::pair{"attn_kg6", 6}, std::pair{"attn_kg4", 4}, std::pair{"attn_kg2", 2},
                                                // v0252-c1port (C1): f16 only (no _q8 / _q8v entries: fnOpt skips them)
                                                std::pair{"attn_kgv6", 6}, std::pair{"attn_kgv4", 4}, std::pair{"attn_kgv2", 2},
-                                               std::pair{"attn_kgk6", 6}, std::pair{"attn_kgk4", 4}, std::pair{"attn_kgk2", 2}}) {
+                                               std::pair{"attn_kgk6", 6}, std::pair{"attn_kgk4", 4}, std::pair{"attn_kgk2", 2},
+                                               // v0252-c11 (C11): NP 8, f16 only (group 8 = 24 / 3; 12-head ranges skip it)
+                                               std::pair{"attn_kg8", 8}}) {
                     if (grp % np != 0) continue;
                     auto fk = c.fnOpt(name + fs);
                     if (!fk) continue;
@@ -789,6 +812,36 @@ void testAttn(Ctx& c) {
                                            ob.down<float>(ref.size()), ref, Kind::invariant));
                     }
                 }
+            }
+            // v0252-c11 (C11): the Ornith shape, 16 query heads / 2 KV heads (GQA 8; the pool read with 2 KV heads):
+            // attn_kg8 (one launch, and two 8-head range launches) == attn_kg4 (same) == attn_prefill_wmma, bitwise
+            // (f16 only: attn_kg8 has no _q8 / _q8v entry, so fnOpt skips the other formats)
+            if (auto f8 = c.fnOpt("attn_kg8" + fs)) {
+                constexpr int oh = 16, okv = 2;
+                const std::size_t on = static_cast<std::size_t>(n) * kHeads * kHd;  // buffers sized for 24 heads
+                auto runKg = [&](hip::Function f, int np, int hp) {
+                    Buf ob(on * 4);
+                    ob.zero();
+                    for (int h0 = 0; h0 < oh; h0 += hp)
+                        hip::launch(f, {cdiv(n, 16), static_cast<unsigned>(hp / np), 1}, {static_cast<unsigned>(64 * np), 1, 1}, 0, c.s, dqp.p(),
+                                    pool.args(), ob.p(), oh, okv, kQStride, pos.p(), n, kScale, h0);
+                    c.sync();
+                    return ob.down<float>(on);
+                };
+                Buf rb(on * 4);
+                rb.zero();
+                hip::launch(c.fn("attn_prefill_wmma" + fs), {cdiv(n, 128), static_cast<unsigned>(oh), 1}, {256, 1, 1}, 0, c.s, dqp.p(),
+                            pool.args(), rb.p(), oh, okv, kQStride, pos.p(), n, kScale, 0);
+                c.sync();
+                const auto ref = rb.down<float>(on);
+                const auto k4 = runKg(c.fn("attn_kg4" + fs), 4, oh), k4s = runKg(c.fn("attn_kg4" + fs), 4, oh / 2);
+                const auto k8 = runKg(f8, 8, oh), k8s = runKg(f8, 8, oh / 2);
+                c.rep.add(cmpExact("attn_kg4" + fs + " == attn_prefill_wmma" + fs + " (Ornith 16 / 2, group 8)" + tag, k4, ref, Kind::invariant));
+                c.rep.add(cmpExact("attn_kg8" + fs + " == attn_kg4" + fs + " (Ornith 16 / 2, group 8)" + tag, k8, k4, Kind::invariant));
+                c.rep.add(cmpExact("attn_kg8" + fs + " == attn_prefill_wmma" + fs + " (Ornith 16 / 2, group 8)" + tag, k8, ref, Kind::invariant));
+                c.rep.add(cmpExact("attn_kg8" + fs + " 2 head-range launches == attn_kg4" + fs + " 2 head-range launches (Ornith 16 / 2)" + tag, k8s, k4s,
+                                   Kind::invariant));
+                c.rep.add(cmpExact("attn_kg8" + fs + " 2 head-range launches == one (Ornith 16 / 2)" + tag, k8s, k8, Kind::invariant));
             }
             {  // two head-range launches (h0 = 0, 12) == one launch
                 Buf out(static_cast<std::size_t>(n) * kHeads * kHd * 4);
@@ -1190,6 +1243,24 @@ void testAttn(Ctx& c) {
                 const auto got = rb.down<float>(on);
                 const std::string where = " (long KV, group " + std::to_string(grp) + ", n " + std::to_string(n) + " at " + std::to_string(p0) + ")";
                 c.rep.add(cmpExact("attn_prefill_wmma" + fs + " head-split launches == one" + where, sb.down<float>(on), got, Kind::invariant));
+                // v0252-c11 (C11): f16 KV, group 8 (24 / 3), long shuffled-page context: attn_kg4 and attn_kg8 from the cache ==
+                // attn_prefill_wmma, and attn_kg8 == attn_kg4, bitwise
+                if (fmt == Fmt::f16 && grp == 8) {
+                    if (const auto f8 = c.fnOpt("attn_kg8")) {
+                        auto runKg = [&](hip::Function f, int np) {
+                            Buf ob(on * 4);
+                            ob.fill(0x7f);
+                            hip::launch(f, {cdiv(n, 16), static_cast<unsigned>(kHeads / np), 1}, {static_cast<unsigned>(64 * np), 1, 1}, 0, c.s, dq.p(), a,
+                                        ob.p(), kHeads, nkv, kQStride, dpos.p(), n, kScale, 0);
+                            c.sync();
+                            return ob.down<float>(on);
+                        };
+                        const auto k4 = runKg(c.fn("attn_kg4"), 4), k8 = runKg(f8, 8);
+                        c.rep.add(cmpExact("attn_kg4 == attn_prefill_wmma" + where, k4, got, Kind::invariant));
+                        c.rep.add(cmpExact("attn_kg8 == attn_prefill_wmma" + where, k8, got, Kind::invariant));
+                        c.rep.add(cmpExact("attn_kg8 == attn_kg4" + where, k8, k4, Kind::invariant));
+                    }
+                }
                 // q8 / q8h prefill (Q8P): kv_dq_rows (keys 0 .. p0 + n - 1 into contiguous f16 rows) +
                 // the f16 attn_kg on them == attn_prefill_wmma_q8 bitwise (one and two head-range launches)
                 if (fmt == Fmt::q8) {
@@ -1208,7 +1279,9 @@ void testAttn(Ctx& c) {
                         for (const auto& [name, np] : {std::pair{"attn_kg6", 6}, std::pair{"attn_kg4", 4}, std::pair{"attn_kg2", 2},
                                                        // v0252-c1port (C1): the variants on the dequantized rows (Q8P)
                                                        std::pair{"attn_kgv6", 6}, std::pair{"attn_kgv4", 4}, std::pair{"attn_kgv2", 2},
-                                                       std::pair{"attn_kgk6", 6}, std::pair{"attn_kgk4", 4}, std::pair{"attn_kgk2", 2}}) {
+                                                       std::pair{"attn_kgk6", 6}, std::pair{"attn_kgk4", 4}, std::pair{"attn_kgk2", 2},
+                                                       // v0252-c11 (C11): NP 8 on the dequantized rows (Q8P attn_kgf8; group 8 = 24 / 3)
+                                                       std::pair{"attn_kg8", 8}}) {
                             const auto fk = c.fnOpt(name);
                             if (!fk || grp % np != 0) continue;
                             for (const int split : {1, 2}) {

@@ -83,6 +83,10 @@
 //            -97k): the f16 attn_kg with the same arguments, grid and block; kgv = each head pair shares its V^T
 //            fragments (WHIRL_ATTN_KGVAR=1), kgk = K and V^T shared (2 S^T + 2 softmax / P.V waves per head pair;
 //            WHIRL_ATTN_KGVAR=3); designed bit-identical to attn_kg (every mode), picked by ops::attnKgVariant
+//   attn_kg8 (gfx1201 only, kernels/attn_kg8.hip; v0252-c11): attn_kg_impl<8> for f16 KV, the same arguments, grid
+//            (ceil(n_tok / 16), heads / 8), block 512: one block = the 8 query heads of one KV head (GQA 8, Ornith
+//            16 / 2), one K / V pass instead of NP 4's two; same per-head arithmetic as attn_kg4 (bit-identical);
+//            WHIRL_ATTN_KG8=1 (default 0)
 //   kv_dq_rows(KvArgs, f16* k16, f16* v16, n_rows, row_el) (q8 / q8h: keys [0, n_rows) of one
 //            sequence (tab0) dequantized into contiguous f16 rows; grid ceil(n_rows * row_el / 2048), block 256)
 //   kv_dq_rows_r[_q4](KvArgs, f16* k16, f16* v16, r0, n_rows, row_el): keys [r0, r0 + n_rows) into
@@ -653,8 +657,11 @@ struct AttnKernels {
     // shared K + V^T (kgk, var 3); loaded for every KV format (f16 entries: the plain f16 path and Q8P)
     F attn_kgv6{}, attn_kgv4{}, attn_kgv2{};
     F attn_kgk6{}, attn_kgk4{}, attn_kgk2{};
+    // v0252-c11 (C11): the f16 NP-8 attn_kg (gfx1201; null elsewhere): attn_kg8 on f16 KV from the cache, attn_kgf8 (the
+    // same entry) on Q8P's dequantized rows
+    F attn_kg8{};
     // q8 / q8h KV prefill (Q8P): kv_dq_rows + the f16 attn_kg variants (null otherwise)
-    F kv_dq_rows{}, attn_kgf6{}, attn_kgf4{}, attn_kgf2{};
+    F kv_dq_rows{}, attn_kgf6{}, attn_kgf4{}, attn_kgf2{}, attn_kgf8{};
     // FC-1c: key-range variants (prefills past the f16 scratch, q4 prefill): kv_dq_rows_r (q8 / q8h)
     // or kv_dq_rows_r_q4 (q4) + attn_kgs* (f16 attn_kg over a key range, softmax state carried)
     F kv_dq_rows_r{}, attn_kgs6{}, attn_kgs4{}, attn_kgs2{};

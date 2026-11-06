@@ -220,6 +220,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOEP_COMB", &S::moep_comb},
         {"MOE_RFUSE", &S::moe_rfuse},
         {"ATTN_KGVAR", &S::attn_kgvar},
+        {"ATTN_KG8", &S::attn_kg8},
     }};
     return t;
 }

@@ -234,6 +234,7 @@ int main() {
     testAttnDecode();
     testAttnPrefill();
     testAttnKgVariant();  // v0252-c1port (fails before the port: the stub has no variant, chooseAttnPrefill never asks)
+    testAttnKg8();  // v0252-c11 (fails before the kernel commit: attnKgf is the shipped ternary, chooseAttnPrefill has no NP 8)
     testOpsMoe();
     testOpTables();
     testActChoice();

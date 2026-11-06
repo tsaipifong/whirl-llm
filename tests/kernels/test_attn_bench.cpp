@@ -20,8 +20,18 @@ namespace kt {
 // WHIRL_KT_BENCH_PREFILL=1: prefill attention timing instead (Q8P): n = 4096 queries at the end of
 // L keys (WHIRL_KT_BENCH_L, default 32768 and 131072), 24 / 4 heads, attn_kg6 for f16 / q8v / q8 KV
 // (plus WHIRL_KT_BENCH_KERNELS, comma-separated "name:fmt" with fmt f16|q8|q8v, NP 6 grid).
+// v0252-c11 (C11): WHIRL_KT_BENCH_HEADS / WHIRL_KT_BENCH_NKV set the head shape (default 24 / 4; Ornith 16 / 2 for the
+// NP 4 vs NP 8 bench, e.g. WHIRL_KT_BENCH_KERNELS=attn_kg4:f16:4:1,attn_kg8:f16:8:1); a kernel whose NP does not divide
+// the GQA group (or the heads) is skipped with a line; f16 outputs are compared bitwise with the first f16 kernel's.
 static void benchPrefill(Ctx& c) {
-    const int hd = 256, qstride = 2 * hd, heads = 24, nkv = 4, n = 4096;
+    const int hd = 256, qstride = 2 * hd, n = 4096;
+    const int heads = std::getenv("WHIRL_KT_BENCH_HEADS") ? std::atoi(std::getenv("WHIRL_KT_BENCH_HEADS")) : 24;
+    const int nkv = std::getenv("WHIRL_KT_BENCH_NKV") ? std::atoi(std::getenv("WHIRL_KT_BENCH_NKV")) : 4;
+    if (heads <= 0 || nkv <= 0 || heads % nkv != 0) {
+        std::printf("   prefill: WHIRL_KT_BENCH_HEADS %d / WHIRL_KT_BENCH_NKV %d is not a GQA shape\n", heads, nkv);
+        return;
+    }
+    std::printf("   prefill heads %d / kv %d (group %d)\n", heads, nkv, heads / nkv);
     const float scale = 1.0f / 16.0f;
     std::vector<int> lens = {32768, 131072};
     if (const char* e = std::getenv("WHIRL_KT_BENCH_L")) lens = {std::atoi(e)};
@@ -94,13 +104,17 @@ static void benchPrefill(Ctx& c) {
         Buf dq(qp), dpos(std::vector<int>{L - n});
         Buf out(static_cast<std::size_t>(n) * heads * hd * 4);
         double base_us = 0;
-        std::vector<float> ref_q8;
+        std::vector<float> ref_q8, ref_f16;
         for (const K& kk : ks) {
             const std::string& name = kk.name;
             const std::string& fmt = kk.fmt;
             const auto f = fnX(name);
             if (!f) {
                 std::printf("   %s: not in this code object\n", name.c_str());
+                continue;
+            }
+            if (kk.np <= 0 || (heads / nkv) % kk.np != 0 || heads % kk.np != 0) {  // v0252-c11: NP must divide the group
+                std::printf("   %s: NP %d does not divide group %d (heads %d / kv %d), skipped\n", name.c_str(), kk.np, heads / nkv, heads, nkv);
                 continue;
             }
             wk::KvArgs a{};
@@ -182,6 +196,18 @@ static void benchPrefill(Ctx& c) {
                     std::size_t bad = 0;
                     for (std::size_t i = 0; i < o.size(); ++i) bad += std::memcmp(&o[i], &ref_q8[i], 4) != 0;
                     std::printf("   prefill %-22s bitwise mismatches vs first q8: %zu of %zu\n", name.c_str(), bad, o.size());
+                }
+            }
+            if (fmt == "f16") {  // v0252-c11: bitwise vs the first f16 kernel (attn_kg8 vs attn_kg4 in the C11 bench)
+                launch();
+                c.sync();
+                const auto o = out.down<float>(static_cast<std::size_t>(n) * heads * hd);
+                if (ref_f16.empty()) {
+                    ref_f16 = o;
+                } else {
+                    std::size_t bad = 0;
+                    for (std::size_t i = 0; i < o.size(); ++i) bad += std::memcmp(&o[i], &ref_f16[i], 4) != 0;
+                    std::printf("   prefill %-22s bitwise mismatches vs first f16: %zu of %zu\n", name.c_str(), bad, o.size());
                 }
             }
         }

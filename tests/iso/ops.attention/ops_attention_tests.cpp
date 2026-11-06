@@ -11,6 +11,7 @@ int main(int argc, char** argv) {
                     {{"attn_decode", testAttnDecode},
                      {"attn_prefill", testAttnPrefill},
                      {"attn_kgvar", testAttnKgVariant},  // v0252-c1port
+                     {"attn_kg8", testAttnKg8},          // v0252-c11
                      {"attn_prep", testAttnPrepRules}},
                     argc, argv);
 }
