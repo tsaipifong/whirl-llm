@@ -186,10 +186,35 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
     return pl;
 }
 
+// v0252-c1port (C1, feat026-attnkg97 / -97k): the f16 attn_kg variant for NP query heads per block. Exhaustive in np
+// (DISCOVERY v4 C3-1): each NP is written out and any other np gives nullptr, so a new NP (C11's 8) can never get
+// another NP's kernel under its own grid / block - the coupling llama.cpp gets from one template parameter for the
+// kernel and its launch (fattn.cu:230-252). var 1 attn_kgv, var 3 attn_kgk (both designed bit-identical to attn_kg);
+// var 0 and every other value: nullptr (var 2 attn_kgw is not ported: not bit-identical).
+Function attnKgVariant(std::uint32_t var, const kernels::AttnKernels& k, std::uint32_t np) {
+    if (var != 1 && var != 3) return nullptr;
+    const bool kgk = var == 3;
+    switch (np) {
+        case 6: return kgk ? k.attn_kgk6 : k.attn_kgv6;
+        case 4: return kgk ? k.attn_kgk4 : k.attn_kgv4;
+        case 2: return kgk ? k.attn_kgk2 : k.attn_kgv2;
+        default: return nullptr;
+    }
+}
+
+// v0252-c1acc (C-1): the auto table's var for (np, path); 0 for any (np, path) not in kAttnKgAuto
+std::uint32_t attnKgAutoVar(std::uint32_t np, KgPath path) {
+    for (const KgAutoRow& r : kAttnKgAuto)
+        if (r.np == np && r.path == path) return r.var;
+    return 0;
+}
+
 // WMMA prefill attention of n queries at positions pos0 .. (keys 0 .. pos0 + n - 1), split over head ranges so
 // one launch does at most ~4096 x 128k query-key pairs x all heads. Same results as one launch.
 // f16 / q8 / q8h / q8v KV: attn_kg (NP query heads of one KV head per block; bit-identical to attn_kx) when NP
 // divides the GQA group, the head ranges stay whole groups of NP and the softmax scale is a power of two.
+// v0252-c1port (C1): with attn_kg_var set, the f16 attn_kg launch (plain f16 KV, and Q8P's f16 attn_kgf on the
+// dequantized rows) takes attnKgVariant's kernel for the same NP, grid and block when the code object has it.
 AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefillFlags& f, const kernels::AttnKernels& k) {
     AttnPrefillPlan pl;
     auto& st = pl.steps;
@@ -235,7 +260,10 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
     // then the f16 attn_kg: the same f16 K / V values as attn_kg_q8 converts in its waves (bit-identical)
     const u32 rows = p.pos0 + n, row_el = p.n_head_kv * p.head_dim;
     if (kg != nullptr && f.attn_dqf_on && k.kv_dq_rows != nullptr && p.dq_ptab && rows <= p.dq_rows) {
-        const Function kf = np == 6 ? k.attn_kgf6 : np == 4 ? k.attn_kgf4 : k.attn_kgf2;
+        Function kf = np == 6 ? k.attn_kgf6 : np == 4 ? k.attn_kgf4 : k.attn_kgf2;
+        // v0252-c1port: the attn_kg variant of this NP on the dequantized rows (same grid / block / bits as attn_kgf)
+        if (kf != nullptr)
+            if (const Function v = attnKgVariant(attnKgVarFor(f.attn_kg_var, np, KgPath::q8p), k, np)) kf = v;
         if (kf != nullptr) {
             AttnStep dq;
             dq.op = AttnStep::Op::dq_rows;
@@ -311,6 +339,10 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
             return pl;
         }
     }
+    // v0252-c1port: f16 KV from the cache takes the attn_kg variant of this NP (same grid / block / bits); q8 / q8v
+    // from the cache keep attn_kg<np>_q8 / _q8v (the variants are f16 kernels)
+    if (kg != nullptr && !p.kv_q8)
+        if (const Function v = attnKgVariant(attnKgVarFor(f.attn_kg_var, np, KgPath::f16), k, np)) kg = v;
     for (u32 q = 0; q < parts; ++q) {
         if (kg != nullptr)
             attn(kg, D((n + 15) / 16, hp / np), D(64 * np), q * hp, false, false, 0, 0);

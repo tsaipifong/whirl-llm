@@ -10,6 +10,7 @@ int main(int argc, char** argv) {
     return iso::run("ops.attention",
                     {{"attn_decode", testAttnDecode},
                      {"attn_prefill", testAttnPrefill},
+                     {"attn_kgvar", testAttnKgVariant},  // v0252-c1port
                      {"attn_prep", testAttnPrepRules}},
                     argc, argv);
 }

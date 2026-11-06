@@ -212,6 +212,9 @@ void testGemvk(Ctx& c);   // "gemvk": gfx1151 K-balanced MXFP4 multi-token GEMV 
 void testGemm(Ctx& c);
 void testAttn(Ctx& c);
 void testAttnDq4(Ctx& c);  // "attndq4": attn_dq4 at 256 splits / contexts up to 256k / random draft windows
+// v0252-c1acc (AO-2): "attnkgl" (on request): attn_kg / kgf / kgv / kgk <np> == attn_prefill_wmma[_q8] bit for bit at
+// L 32k / 128k, Ornith 16 / 2 (NP 4) and Swift 24 / 4 (NP 6), f16 paged cache and Q8P rows (test_attn.cpp)
+void testAttnKgLong(Ctx& c);
 void testGemvh(Ctx& c);   // "gemvh": bitwise sweep of precise-decode gemvh/gemvh2
 void benchGemvh(Ctx& c);  // "gemvhbench": timing only
 void benchAttn(Ctx& c);  // "attnbench": timing only, run with --only attnbench

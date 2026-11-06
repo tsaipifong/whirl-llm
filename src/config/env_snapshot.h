@@ -38,12 +38,14 @@ public:
     Value fdq8s, fdq8s_min;
     // src/model/config.cpp applyGemvEnv / applyGemvKEnv (v0251-a6port, feat026-ggemv): the gfx1151 gemvk table override
     Value gemv_k;
+    // numerics::loadFlags through numericsRequest (v0252-c1port, feat026-attnkg97): the gfx1201 f16 attn_kg variant
+    Value attn_kgvar;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 61;
+    static constexpr std::size_t n_names = 62;
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

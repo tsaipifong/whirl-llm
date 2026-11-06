@@ -87,6 +87,8 @@ struct EnvValues {
     // src/model/loader.cpp:550-553; feat026-moep: moep_gu / moep_dn / moep_comb (WHIRL_MOEP_GU / _DN / _COMB);
     // v0251-a11port (feat026-router): moe_rfuse (WHIRL_MOE_RFUSE)
     Raw moe_fp8, moe_mxw, moe_wide, moe_rbf, moep_gu, moep_dn, moep_comb, moe_rfuse;
+    // v0252-c1port (feat026-attnkg97 / -97k): attn_kgvar (WHIRL_ATTN_KGVAR, the gfx1201 f16 attn_kg variant; class B)
+    Raw attn_kgvar;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -94,7 +96,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 33;
+    static constexpr std::size_t n_fields = 34;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -208,6 +210,13 @@ struct ItemState {
 // MoeFlags combine; v0251-a7port: on the Radeon 8060S (Target::gfx1151) with MXFP4 routed experts plan() starts from
 // kernels::kMoepDefault, WHIRL_MOEP_GU / _DN name a variant ("0", "" or an unknown name = off), WHIRL_MOEP_COMB by
 // std::strtoul. Not in the S0b-2 dump (recorded before them): the launch log pins the kernels.
+// v0252-c1port: attn_kg_var = WHIRL_ATTN_KGVAR by std::strtoul, kept only as 1 (attn_kgv) or 3 (attn_kgk), any other
+// value 0 (the shipped attn_kg; var 2 attn_kgw of feat026-attnkg97 is not ported: not bit-identical); default 0 on
+// every card. Not in the S0b-2 dump either (the launch log pins the kernel).
+// v0252-c1acc (REVIEW-v0252-c1 C-1 / C-3): default kAttnKgVarAuto on the gfx1201 code object (ops::kAttnKgAuto picks the
+// variant per NP x KV path), 0 on the gfx1151 one (no attn_kg there); WHIRL_ATTN_KGVAR = "auto" or a whole decimal 0 / 1 /
+// 3 (parseKgVar) overrides it in every mode; any other value keeps the default and Plan::ignored carries one note. Still
+// in bitsKey (C-4, conservative: the default change re-keys the gfx1201 KV tiers once).
 #define WHIRL_NUMERICS_FLAGS(X)                                  \
     X(B, use_graph, true, "use_graph")                           \
     X(B, no_fuse, false, "no_fuse")                              \
@@ -241,6 +250,7 @@ struct ItemState {
     X(B, attn_dqf_on, true, "attn_dqf_on")                       \
     X(U, attn_seg, 0, "attn_seg")                                \
     X(B, attn_kg_on, true, "attn_kg_on")                         \
+    X(U, attn_kg_var, 0, "")                                     \
     X(B, ffn_h16, false, "ffn_h16")                              \
     X(B, h16_dq, false, "h16_dq")                                \
     X(B, g8t, false, "g8t")                                      \
@@ -316,6 +326,11 @@ struct Plan {
 // overrides afterwards until N2b). Throws std::invalid_argument / std::out_of_range where loadOrTune threw
 // (WHIRL_RELAX_K / _ALPHA / _EPS / _DELTA that std::stoul / std::stof reject, with relaxacc on).
 Plan plan(const Request& r, const Target& t);
+// v0252-c1acc: attn_kg_var "auto" (= ops::kAttnKgVarAuto; numerics is in the core library and does not include ops)
+inline constexpr std::uint32_t kAttnKgVarAuto = 255;
+// v0252-c1acc: WHIRL_ATTN_KGVAR -> "auto" = kAttnKgVarAuto, a whole decimal 0 / 1 / 3 = that var; anything else
+// (2, 4, "", "x", "3x", "-1") = std::nullopt (invalid: the default stays and plan() notes it in Plan::ignored)
+std::optional<std::uint32_t> parseKgVar(std::string_view s);
 // arch025-N2b-r2: the five flags every load decides (Model::load, before loadOrTune; before N2b loader.cpp:537-540 and
 // :730): fp8_prefill = the item fp8; moe_fp8 = WHIRL_MOE_FP8 (r.env) else the item moefp8; moe_mxw / moe_wide / moe_rbf =
 // WHIRL_MOE_MXW / _WIDE / _RBF else true / false / true. WHIRL_FP8 is not applied here (plan() applies it in loadOrTune, as

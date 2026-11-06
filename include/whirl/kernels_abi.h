@@ -79,6 +79,10 @@
 //            n_kv, q_stride, pos, n_tok, scale, int h0)
 //   attn_kg6 / attn_kg4 / attn_kg2[_q8|_q8v] (f16 / q8 / q8h / q8v KV; same arguments; grid
 //            (ceil(n_tok / 16), heads / NP), block 64 * NP, NP | n_head / n_kv)
+//   attn_kgv6 / 4 / 2, attn_kgk6 / 4 / 2 (gfx1201 only, kernels/attn_kgv.hip; v0252-c1port of feat026-attnkg97 /
+//            -97k): the f16 attn_kg with the same arguments, grid and block; kgv = each head pair shares its V^T
+//            fragments (WHIRL_ATTN_KGVAR=1), kgk = K and V^T shared (2 S^T + 2 softmax / P.V waves per head pair;
+//            WHIRL_ATTN_KGVAR=3); designed bit-identical to attn_kg (every mode), picked by ops::attnKgVariant
 //   kv_dq_rows(KvArgs, f16* k16, f16* v16, n_rows, row_el) (q8 / q8h: keys [0, n_rows) of one
 //            sequence (tab0) dequantized into contiguous f16 rows; grid ceil(n_rows * row_el / 2048), block 256)
 //   kv_dq_rows_r[_q4](KvArgs, f16* k16, f16* v16, r0, n_rows, row_el): keys [r0, r0 + n_rows) into
@@ -645,6 +649,10 @@ struct AttnKernels {
     F attn_ws4{};  // gfx1151 4-wave pipelined attn_wsplit1 (same arguments / bits, one query per group): decode rows (WHIRL_ATTN_WS4=0: old path)
     F attn_ws4g[3]{};  // gfx1151 multi-row verify, CG 1..3 tiles (attn_ws4g{1,2,3}[_q8]; 256 threads, grid.x = n_kv x column groups)
     F attn_kg6{}, attn_kg4{}, attn_kg2{};  // f16 / q8 / q8h / q8v KV (null if not built)
+    // v0252-c1port (C1): the f16 attn_kg variants (gfx1201; null elsewhere): head-pair shared V^T (kgv, var 1) and
+    // shared K + V^T (kgk, var 3); loaded for every KV format (f16 entries: the plain f16 path and Q8P)
+    F attn_kgv6{}, attn_kgv4{}, attn_kgv2{};
+    F attn_kgk6{}, attn_kgk4{}, attn_kgk2{};
     // q8 / q8h KV prefill (Q8P): kv_dq_rows + the f16 attn_kg variants (null otherwise)
     F kv_dq_rows{}, attn_kgf6{}, attn_kgf4{}, attn_kgf2{};
     // FC-1c: key-range variants (prefills past the f16 scratch, q4 prefill): kv_dq_rows_r (q8 / q8h)
