@@ -54,6 +54,15 @@ private:
 struct SlotPages {
     // checkpoints
     void saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::optional<DevPtr> hid, std::optional<DevPtr> logits);
+    // v0252-n10: the TAIL-CK checkpoint written inside a prefill forward (PrefillPhase::prefillStep, soloLen's
+    // conditions: no restore tail, the checkpoints in VRAM). beginTailCapture, before that forward: what saveCkpt does
+    // before it copies (a spill still reading the slot's checkpoint buffers waited for), the checkpoint of pos chosen as
+    // saveCkpt chooses it, marked invalid until the commit (a forward that throws leaves no half-written valid one), and
+    // the model armed to write the recurrent state after the forward's first `row` rows into it; its index.
+    // commitTailCapture, after the forward: the MTP hidden row (hid) and the index fields saveCkpt(sl, pos, "prefix",
+    // hid, nullopt) sets.
+    std::size_t beginTailCapture(Slot& sl, std::uint32_t pos, std::uint32_t row);
+    void commitTailCapture(Slot& sl, std::size_t idx, std::uint32_t pos, std::optional<DevPtr> hid);
     void dropCache(Slot& sl);
     void freePages(Slot& sl);
     // pages (arch024 M3: the bookkeeping is pool_'s; these pass the slot's pages and the evictor)

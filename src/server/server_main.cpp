@@ -1016,6 +1016,8 @@ void ServerRun::makeEngine() {
     eo.lcp_on = settings::envFlag("SYS_LCP", true);
     eo.n_ck = lm.n_ck;
     eo.tail_ck = settings::tailCk();  // debug knob: WHIRL_TAIL_CK=0 turns the tail checkpoint off
+    // v0252-n10: the tail checkpoint written inside the prefill forward (R9700 only in 0.2.5.2; the 8060S row is false)
+    eo.tail_ck_in_forward = device::profile(model.arch).tail_ck_in_forward;
     eo.n_spe = startfit::sharedCkpts(lm.n_ck, lm.no_pc, [&] { return lm.n_spe_plan; });  // (module server.kv_fit, arch025-lane1 leg 10)
     eo.ckpt_host = settings::envFlag("CKPT_HOST", false);
     eo.prefill_exec = lm.prefill_exec;
@@ -1401,7 +1403,7 @@ void ServerRun::reportPool() {
              "turn re-prefills from the previous prompt's last schedule point (WHIRL_COLD_RESUME=0: longest checkpoint)");
     if (!lm.no_pc) {
         // (startfit::tailCkLine, module server.kv_fit: the engine's TAIL-CK rule as a line; arch025-lane1 leg 10)
-        if (const startfit::TailCkLine tl = startfit::tailCkLine(eo.tail_ck, lm.n_ck, tail_ck_slots, eo.tail_ck_min, ck_mb); tl.warn)
+        if (const startfit::TailCkLine tl = startfit::tailCkLine(eo.tail_ck, lm.n_ck, tail_ck_slots, eo.tail_ck_min, ck_mb, eo.cold_resume); tl.warn)
             logW("{}", tl.text);
         else
             logI("{}", tl.text);

@@ -319,7 +319,7 @@ MockModel::State MockModel::runRows(Seq& s, std::span<const std::uint32_t> toks,
 }
 
 void MockModel::prefillOne(std::uint32_t si, std::span<const std::uint32_t> toks, std::uint32_t pos0, std::uint32_t r0,
-                           std::uint32_t logits_row, std::optional<server::DevPtr> prev_hidden, bool mtp) {
+                           std::uint32_t logits_row, std::optional<server::DevPtr> prev_hidden, bool mtp, std::uint32_t cap) {
     spinUs(mc_.prefill_us_per_row * static_cast<double>(toks.size()));
     Seq& s = seqs_[si];
     commitSeq(si);
@@ -327,6 +327,16 @@ void MockModel::prefillOne(std::uint32_t si, std::span<const std::uint32_t> toks
         if (readHidden(*prev_hidden).pos != pos0 - 1) hid_mismatch_ += 1;
     }
     if (mc_.sched_grid > 0 && pos0 % mc_.sched_grid != 0 && !toks.empty()) writeH(s, mix(readH(s), 0x7a11c0ffeeull, pos0));
+    // v0252-n10: a capture inside this forward: the state after the first cap rows into the checkpoint buffers. The rows
+    // run in two parts (one forward: no forward-start perturbation at cap), the same sequential arithmetic.
+    if (cap > 0) {
+        const State a = runRows(s, toks.first(cap), pos0, r0, true);
+        writeHTo(sc_conv_, sc_ssm_, a.h);
+        captures_ += 1;
+        toks = toks.subspan(cap);
+        pos0 += cap;
+        r0 += cap;
+    }
     const State st = runRows(s, toks, pos0, r0, true);
     writeLogits(logits_row, st.h, st.kv);
     if (mtp && !toks.empty()) {
@@ -381,18 +391,59 @@ void MockModel::prefillRows(std::size_t n) {
     if (r > max_pf_rows_.load()) max_pf_rows_.store(r);
 }
 
+bool MockModel::stateCaptureOk(std::uint32_t n, std::uint32_t row) const {
+    // the real model's limits (qwen35::Context::stateCaptureOk): a 64-aligned row with >= 64 rows on either side
+    return mc_.state_capture && row >= 64 && row % 64 == 0 && row < n && n - row >= 64 && n <= mc_.max_batch;
+}
+
+void MockModel::setStateCapture(std::uint32_t row, std::span<const server::DevPtr> conv, std::span<const server::DevPtr> ssm) {
+    if (conv.size() != cfg_.n_layer || ssm.size() != cfg_.n_layer) poison_ += 1;
+    sc_row_ = row;
+    sc_conv_.assign(conv.begin(), conv.end());
+    sc_ssm_.assign(ssm.begin(), ssm.end());
+}
+
+std::uint32_t MockModel::takeCapture(std::size_t n, bool solo) {
+    const std::uint32_t c = sc_row_;
+    sc_row_ = 0;
+    pf_forwards_ += 1;
+    if (c == 0) return 0;
+    if (!solo || !stateCaptureOk(static_cast<std::uint32_t>(n), c)) {
+        poison_ += 1;  // the engine armed a capture the model's contract does not allow
+        return 0;
+    }
+    return c;
+}
+
+void MockModel::writeHTo(std::span<const server::DevPtr> conv, std::span<const server::DevPtr> ssm, std::uint64_t h) const {
+    for (std::uint32_t i = 0; i < cfg_.n_layer && i < conv.size() && i < ssm.size(); ++i) {
+        if (cfg_.isAttn(i)) continue;
+        if (conv[i] == 0 || ssm[i] == 0) {
+            poison_ += 1;  // a DeltaNet layer without a destination
+            continue;
+        }
+        std::uint64_t* ss = at<std::uint64_t>(ssm[i]);
+        std::uint64_t* cc = at<std::uint64_t>(conv[i]);
+        ss[0] = h;
+        ss[1] = h ^ (i * kSaltS);
+        cc[0] = h ^ (i * kSaltC);
+    }
+}
+
 void MockModel::forward(std::span<const std::uint32_t> tokens, std::uint32_t pos0) {
     prefillRows(tokens.size());
     cap_.clear();
-    prefillOne(cur_, tokens, pos0, 0, 0, std::nullopt, false);
+    const std::uint32_t c = takeCapture(tokens.size(), true);
+    prefillOne(cur_, tokens, pos0, 0, 0, std::nullopt, false, c);
 }
 
 void MockModel::prefillMtpChunk(std::span<const std::uint32_t> tokens, std::uint32_t pos0, std::size_t off, std::size_t n,
                                 std::optional<server::DevPtr> prev_hidden) {
     prefillRows(n);
     cap_.clear();
+    const std::uint32_t c = takeCapture(n, true);
     prefillOne(cur_, tokens.subspan(off, n), pos0 + static_cast<std::uint32_t>(off), 0, 0,
-               off == 0 ? prev_hidden : std::nullopt, true);
+               off == 0 ? prev_hidden : std::nullopt, true, c);
 }
 
 void MockModel::prefillSegs(std::span<const server::PSeg> segs, bool with_mtp) {
@@ -400,6 +451,7 @@ void MockModel::prefillSegs(std::span<const server::PSeg> segs, bool with_mtp) {
     for (const server::PSeg& sg : segs) rows += sg.n;
     prefillRows(rows);
     cap_.clear();
+    (void)takeCapture(rows, false);
     std::uint32_t r0 = 0;
     for (std::size_t k = 0; k < segs.size(); ++k) {
         const server::PSeg& sg = segs[k];

@@ -43,6 +43,9 @@ void testProfiles() {
     const std::array<std::uint8_t, 17> kb = {0, 0, 0, 0, 0, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, k0{};
     CHECK(b.gemvk_dense == kb);
     CHECK(b.gemvk_moe == k0 && a.gemvk_dense == k0 && a.gemvk_moe == k0);
+    // v0252-n10: the TAIL-CK checkpoint inside the prefill forward on the R9700 only (0.2.5.2 leaves the 8060S as 0.2.5.1)
+    CHECK(a.tail_ck_in_forward);
+    CHECK(!b.tail_ck_in_forward);
     // constexpr: the field reads fold like the arch comparisons they replaced
     static_assert(d::profile(Arch::gfx1151).prefill_exec_moe == 4096 && !d::profile(Arch::gfx1201).tune_fast);
     // REVIEW-ARCH3 P3-3: a value with no row throws instead of getting the gfx1201 row (a new enumerator without a

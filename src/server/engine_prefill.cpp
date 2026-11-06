@@ -40,6 +40,9 @@ std::size_t PrefillPhase::chunkLen(const Slot& sl) const {
     return sched::execLen(N, sl.sys_split, sl.pf_split, imgs, cur, exec, stops, m_.maxBatch());
 }
 
+// v0252-n10 test-first stub: the 0.2.5.1 forward (commit 2 takes the tail checkpoint inside the forward)
+PrefillPhase::SoloFwd PrefillPhase::soloLen(const Slot& sl) const { return {chunkLen(sl), 0}; }
+
 void PrefillPhase::maybeSplitCkpt(Slot& sl, DevPtr hid_row) {
     const std::size_t cur = sl.reuse + sl.pf_off;
     // item S: shared prefix checkpoints (a failure only loses the checkpoint)
@@ -63,7 +66,7 @@ void PrefillPhase::maybeSplitCkpt(Slot& sl, DevPtr hid_row) {
     sc_.saveCkpt(sl, sl.pf_split, "think-open", opt_.use_mtp ? std::optional<DevPtr>(hid_row) : std::nullopt, std::nullopt);
 }
 
-void PrefillPhase::prefillStep(Slot& sl) {
+std::size_t PrefillPhase::prefillStep(Slot& sl) {
     Job& job = *sl.job;
     const std::span<const std::uint32_t> toks = std::span<const std::uint32_t>(job.tokens).subspan(sl.reuse);
     const std::size_t n = chunkLen(sl);
@@ -80,6 +83,7 @@ void PrefillPhase::prefillStep(Slot& sl) {
     prefill_tok_cum_ += n;
     maybeSplitCkpt(sl, m_.hn() + static_cast<std::uint64_t>(n - 1) * m_.cfg().n_embd * 4);
     if (sl.pf_off == toks.size()) finishPrefill(sl);
+    return n;
 }
 
 // Returns the rows run (0 when nothing ran). row_budget caps the rows of the

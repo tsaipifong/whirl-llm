@@ -21,6 +21,10 @@ ops::GdnShape gdnShapeOf(const Config& c) {
 }
 }  // namespace
 
+// v0252-n10 test-first stubs: no state capture (commit 2 implements it)
+bool Context::stateCaptureOk(u32, u32) const { return false; }
+void Context::setStateCapture(u32, std::span<const DevPtr>, std::span<const DevPtr>) { throw ModelError("BadStateCapture"); }
+
 GdnSegs Context::gdnSegsBatch(const BatchPlan& bp, std::size_t i, bool conv) const {
     GdnSegs segs;
     i32 row = 0;

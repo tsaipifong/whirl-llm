@@ -36,6 +36,10 @@ void testOptionalHookDefaults() {
     ISO_CHECK(std::strcmp(m.profileClassName(0), "?") == 0);
     ISO_CHECK(m.verifyRows() == whirl::qwen35::max_small_batch);
     ISO_CHECK(m.dflashMaxDrafts() == 0 && m.captureN() == 0 && m.dflashRing() == 0);
+    // v0252-n10: a model without the in-forward state capture never takes the tail checkpoint inside a forward
+    ISO_CHECK(!m.stateCaptureOk(2058, 1024));
+    const srv::DevPtr none[2] = {0, 0};
+    m.setStateCapture(1024, none, none);  // no-op
     m.scratchClobbered();  // no-ops
     m.visRelease();
     m.profileStop();

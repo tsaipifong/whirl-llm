@@ -82,6 +82,9 @@ struct MockConfig {
     // with these row bytes, in kvArrays() order K, V, extra...: none = f16-shaped (K, V), two = q8h / q4-shaped (K, V,
     // K scales, V scales). The mock never reads them; the engine copies, spills and restores them like the real ones.
     std::vector<std::uint32_t> kv_extra_rows;
+    // v0252-n10: the in-forward state capture (ServerModel::stateCaptureOk / setStateCapture) is available; false = a model
+    // without it (the engine then keeps the TAIL-CK forward end)
+    bool state_capture = true;
 };
 
 class MockModel final : public server::ServerModel {
@@ -129,6 +132,15 @@ public:
     void prefillSegs(std::span<const server::PSeg> segs, bool with_mtp) override;
     void segLogitsToFront(std::uint32_t k) override;
     std::uint32_t argmax() override;
+    // v0252-n10: the state capture, as the real model's contract says: the recurrent hash after the first `row` rows of
+    // the next solo prefill forward (forward / prefillMtpChunk) written into the given buffers in writeH's layout. A
+    // capture the contract does not allow (armed for a segmented forward, a row not inside the forward or not 64-aligned)
+    // poisons the output; captures() counts the ones written.
+    bool stateCaptureOk(std::uint32_t n, std::uint32_t row) const override;
+    void setStateCapture(std::uint32_t row, std::span<const server::DevPtr> conv, std::span<const server::DevPtr> ssm) override;
+    std::uint64_t captures() const { return captures_.load(); }
+    // prefill forwards run so far (forward / prefillMtpChunk / prefillSegs each count one)
+    std::uint64_t prefillForwards() const { return pf_forwards_.load(); }
 
     void setDraftCutoff(float, std::uint32_t) override {}
     void mtpBatchStepEx(std::span<const server::MSeg> segs, std::uint32_t r, bool draft) override;
@@ -204,7 +216,13 @@ private:
     // hidden rows (hn rows r0 ..), returns the state after the last token
     State runRows(Seq& s, std::span<const std::uint32_t> toks, std::uint32_t pos0, std::uint32_t r0, bool commit);
     void prefillOne(std::uint32_t s, std::span<const std::uint32_t> toks, std::uint32_t pos0, std::uint32_t r0,
-                    std::uint32_t logits_row, std::optional<server::DevPtr> prev_hidden, bool mtp);
+                    std::uint32_t logits_row, std::optional<server::DevPtr> prev_hidden, bool mtp, std::uint32_t cap = 0);
+    // v0252-n10: the capture armed by setStateCapture, taken (and cleared) by the next prefill forward
+    std::uint32_t takeCapture(std::size_t n, bool solo);
+    void writeHTo(std::span<const server::DevPtr> conv, std::span<const server::DevPtr> ssm, std::uint64_t h) const;
+    std::uint32_t sc_row_ = 0;  // (engine thread only)
+    std::vector<server::DevPtr> sc_conv_, sc_ssm_;
+    std::atomic<std::uint64_t> captures_{0}, pf_forwards_{0};  // written by the engine thread, read by the test
     std::uint32_t corruptDraft(std::uint32_t truth, std::uint64_t key) const;
     std::uint64_t stepH(std::uint64_t h, std::uint32_t tok, std::uint32_t pos) const;
     struct CapRow {

@@ -93,7 +93,8 @@ inline std::size_t tailPoint(std::size_t n, std::size_t sys, std::size_t think, 
 
 // rows of the forward that starts at cur: whole chunks up to exec (+ merged tail), at most max_rows
 // rows (the prefill batch; 0 = exec + prefill_merge), not past the next forced split, never across a
-// stop (a kept checkpoint); exec <= prefill_chunk = one chunk per forward
+// stop (a kept checkpoint; v0252-n10: on gfx1201 the TAIL-CK point is not a stop for a solo forward, tailInside);
+// exec <= prefill_chunk = one chunk per forward
 inline std::size_t execLen(std::size_t n, std::size_t sys, std::size_t think, std::span<const std::uint32_t> imgs, std::size_t cur,
                            std::size_t exec, std::span<const std::size_t> stops, std::size_t max_rows = 0) {
     const std::size_t lim = schedNext(n, sys, think, imgs, cur);
@@ -111,6 +112,22 @@ inline std::size_t execLen(std::size_t n, std::size_t sys, std::size_t think, st
     for (std::size_t st : stops)
         if (st > cur && st < cur + len) len = st - cur;
     return len;
+}
+
+// v0252-n10 (gfx1201 only: device::Profile::tail_ck_in_forward): the TAIL-CK checkpoint taken inside a forward instead
+// of ending one. len = the rows execLen gives the forward that starts at cur when the tail point is not a stop (the
+// other stops, a shared-prefix checkpoint, still are); cap = the tail point's row in that forward when it lies strictly
+// inside it (0 < cap < len: the forward writes the checkpoint state after its first cap rows), else 0 (the tail point is
+// a forward end anyway, or not in this forward; len is then also execLen's with the tail stop). The tail point is a
+// schedule point and a forward never crosses a forced split, so cap is a whole number of prefill_chunk rows.
+struct TailForward {
+    std::size_t len = 0;
+    std::size_t cap = 0;
+};
+inline TailForward tailInside(std::size_t n, std::size_t sys, std::size_t think, std::span<const std::uint32_t> imgs, std::size_t cur,
+                              std::size_t exec, std::span<const std::size_t> other_stops, std::size_t tail, std::size_t max_rows = 0) {
+    const std::size_t len = execLen(n, sys, think, imgs, cur, exec, other_stops, max_rows);
+    return {len, tail > cur && tail < cur + len ? tail - cur : 0};
 }
 
 // the forward ends of a prefill of n tokens that starts (or resumes) at `from` (a schedule point)

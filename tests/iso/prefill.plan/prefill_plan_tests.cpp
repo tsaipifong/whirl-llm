@@ -58,6 +58,57 @@ void testForwards() {
     ISO_CHECK(s::soloForwardEnds(5000, 0, 0, k_noimg, 0, 2048, 0) == s::forwardEnds(5000, 0, 0, k_noimg, 0, 2048, none));
 }
 
+// v0252-n10: the TAIL-CK checkpoint taken inside the forward (gfx1201). The 2058-token precise prompt of the 0.2.5 pp 2k
+// cell ran [0, 1024) + [1024, 2058) because the tail point 1024 was a stop (progress/v0252-a12.HANDOFF.md); inside a
+// forward it is one 2058-row forward with the checkpoint after row 1024. 8k: the forward [6144, 8200) holds the tail
+// point 7168. Where the tail point is a forward end anyway, or not in the forward, nothing changes (cap 0, the length
+// execLen gives with the tail stop).
+void testTailInside() {
+    const Sizes none;
+    const s::TailForward a = s::tailInside(2058, 0, 0, k_noimg, 0, 2048, none, 1024, 4096);
+    ISO_CHECK(a.len == 2058 && a.cap == 1024);
+    const Sizes tail2k = {1024};
+    ISO_CHECK(s::execLen(2058, 0, 0, k_noimg, 0, 2048, tail2k, 4096) == 1024);  // 0.2.5.1: the tail stop ends the forward
+    const s::TailForward b = s::tailInside(8200, 0, 0, k_noimg, 6144, 2048, none, 7168, 4096);
+    ISO_CHECK(b.len == 2056 && b.cap == 1024);
+    const s::TailForward b0 = s::tailInside(8200, 0, 0, k_noimg, 0, 2048, none, 7168, 4096);
+    ISO_CHECK(b0.len == 2048 && b0.cap == 0);  // the earlier forwards of the 8k prompt do not hold the tail point
+    // 7000 tokens: chunks ... 5120, 6144, 7000; the forward [4096, 6144) ends at the tail point 6144 by itself
+    const s::TailForward c = s::tailInside(7000, 0, 0, k_noimg, 4096, 2048, none, 6144, 4096);
+    ISO_CHECK(c.len == 2048 && c.cap == 0);
+    // one chunk per forward (decode floor): the tail point is always a forward end
+    const s::TailForward d = s::tailInside(2058, 0, 0, k_noimg, 0, 1024, none, 1024, 4096);
+    ISO_CHECK(d.len == 1024 && d.cap == 0);
+    // another stop (a shared-prefix checkpoint) still ends the forward
+    const Sizes lcp = {1024};
+    const s::TailForward e = s::tailInside(3000, 0, 0, k_noimg, 0, 2048, lcp, 2048, 4096);
+    ISO_CHECK(e.len == 1024 && e.cap == 0);
+    // a forced split (think-open at N - 1, the tail moved one schedule point earlier by COLD-RESUME): never crossed
+    const s::TailForward f = s::tailInside(2059, 0, 2058, k_noimg, 0, 2048, none, 1024, 4096);
+    ISO_CHECK(f.len == 2058 && f.cap == 1024);
+    // max_rows caps the forward below the tail point: no capture
+    const s::TailForward g = s::tailInside(2058, 0, 0, k_noimg, 0, 2048, none, 1024, 1024);
+    ISO_CHECK(g.len == 1024 && g.cap == 0);
+    // property: cap is a whole number of chunks inside the forward, and cap == 0 gives execLen's length with the tail stop
+    std::size_t bad = 0, inside = 0;
+    for (std::size_t n = 1300; n <= 12000; n += 37) {
+        const std::size_t t = s::tailPoint(n, 0, 0, k_noimg);
+        for (std::size_t cur = 0; cur < n;) {
+            const s::TailForward r = s::tailInside(n, 0, 0, k_noimg, cur, 2048, none, t, 4096);
+            const Sizes st = {t};
+            const std::size_t old = s::execLen(n, 0, 0, k_noimg, cur, 2048, st, 4096);
+            if (r.cap == 0 && r.len != old) ++bad;
+            if (r.cap > 0) {
+                ++inside;
+                if (r.cap % s::prefill_chunk != 0 || r.cap >= r.len || cur + r.cap != t || old != r.cap) ++bad;
+            }
+            cur += r.len;
+        }
+    }
+    ISO_CHECK(bad == 0);
+    ISO_CHECK(inside > 0);
+}
+
 void testExecSize() {
     ISO_CHECK(s::prefillExecFor(2048, 4096) == 2048);
     ISO_CHECK(s::prefillExecFor(8192, 4096) == 3072);              // a forward + the merged tail must fit the batch
@@ -153,6 +204,7 @@ int main(int argc, char** argv) {
                     {{"chunks", testChunks},
                      {"schedule_points", testSchedulePoints},
                      {"forwards", testForwards},
+                     {"tail_inside", testTailInside},
                      {"exec_size", testExecSize},
                      {"splits_from_tokens", testSplitsFromTokens},
                      {"chat_token_facts", testChatTokenFacts},

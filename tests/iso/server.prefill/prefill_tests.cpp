@@ -33,7 +33,7 @@ void checkDefined(M... m) {
     (checkOne(m != nullptr), ...);
 }
 
-void testFunctionsLinked() { checkDefined(&X::chunkLen, &X::floorProtected, &X::maybeSplitCkpt, &X::prefillStep, &X::prefillGroup, &X::finishPrefill, &X::runPrefill, &X::noteFloor, &X::floorLogPeriod, &X::floorOn); }
+void testFunctionsLinked() { checkDefined(&X::chunkLen, &X::soloLen, &X::floorProtected, &X::maybeSplitCkpt, &X::prefillStep, &X::prefillGroup, &X::finishPrefill, &X::runPrefill, &X::noteFloor, &X::floorLogPeriod, &X::floorOn); }
 
 }  // namespace
 }  // namespace whirl::server

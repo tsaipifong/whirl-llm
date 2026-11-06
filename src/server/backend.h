@@ -78,6 +78,17 @@ public:
     virtual void prefillSegs(std::span<const PSeg> segs, bool with_mtp) = 0;
     virtual void segLogitsToFront(std::uint32_t k) = 0;
     virtual std::uint32_t argmax() = 0;
+    // v0252-n10: the TAIL-CK checkpoint written inside a prefill forward (EngineOptions::tail_ck_in_forward, gfx1201).
+    // stateCaptureOk: the next solo prefill forward of n rows (forward / prefillMtpChunk, not prefillSegs) can write the
+    // recurrent state as it is after its first `row` rows - bitwise what a forward ending there leaves (Model: the
+    // chunked DeltaNet scan split at that 64-aligned row, the conv rolling state through gdn_conv_state's snapshot).
+    // setStateCapture: arm that for the next solo prefill forward only (per layer the conv / ssm destinations, laid out
+    // as convState() / ssmState(), 0 for an attention layer); with MTP, prefillMtpChunk then runs the MTP row at `row`
+    // on its own, as a forward ending there would (Model::prefillMtpChunk). Cleared by that forward, also when it throws.
+    virtual bool stateCaptureOk(std::uint32_t n, std::uint32_t row) const { (void)n, (void)row; return false; }
+    virtual void setStateCapture(std::uint32_t row, std::span<const DevPtr> conv, std::span<const DevPtr> ssm) {
+        (void)row, (void)conv, (void)ssm;
+    }
 
     // ---- speculative decoding
     virtual void setDraftCutoff(float p_min, std::uint32_t n_min) = 0;

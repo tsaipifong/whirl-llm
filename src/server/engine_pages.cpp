@@ -38,6 +38,15 @@ void SlotPages::saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::opt
     slot->kind = kind;
 }
 
+// v0252-n10 test-first stubs (commit 2 implements them; nothing calls them at commit 1)
+std::size_t SlotPages::beginTailCapture(Slot&, std::uint32_t, std::uint32_t) {
+    throw std::logic_error("v0252-n10: beginTailCapture is not implemented at the test-first commit");
+}
+
+void SlotPages::commitTailCapture(Slot&, std::size_t, std::uint32_t, std::optional<DevPtr>) {
+    throw std::logic_error("v0252-n10: commitTailCapture is not implemented at the test-first commit");
+}
+
 void SlotPages::dropCache(Slot& sl) {
     for (Ckpt& c : sl.ckpts) c.valid = false;
     sl.cache_tokens.clear();

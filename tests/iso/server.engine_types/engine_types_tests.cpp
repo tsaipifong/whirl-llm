@@ -67,6 +67,7 @@ void testOptionsDefaults() {
     ISO_CHECK(o.tier_min_gain == 512u && o.gather_ms == 30 && o.decode_min_tps == 0 && o.profile == 0);
     ISO_CHECK(o.sys_min == 2048u && o.lcp_on && o.n_ck == 2u);
     ISO_CHECK(o.tail_ck && o.tail_ck_min == whirl::sched::tail_ck_min_default && o.tail_ck_min == 4096u);
+    ISO_CHECK(!o.tail_ck_in_forward);  // v0252-n10: off unless whirl-server sets it from the device profile (gfx1201)
     ISO_CHECK(o.n_spe == 2u && !o.ckpt_host && o.prefill_exec == 2048u && o.seed == 0u && !o.spec_sample);
     ISO_CHECK(!o.relax.on && o.relax.k == 4u);
 }

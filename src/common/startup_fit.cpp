@@ -399,7 +399,8 @@ PoolAdjust poolAdjust(bool uma, std::optional<std::uint32_t> ctx, std::optional<
     return r;
 }
 
-TailCkLine tailCkLine(bool tail_ck, std::size_t n_ck, std::size_t tail_ck_slots, std::uint32_t tail_ck_min, double ck_mib) {
+TailCkLine tailCkLine(bool tail_ck, std::size_t n_ck, std::size_t tail_ck_slots, std::uint32_t tail_ck_min, double ck_mib, bool cold_resume) {
+    (void)cold_resume;  // v0252-n10 test-first stub: the 0.2.5.1 text in precise too
     TailCkLine r;
     if (!tail_ck) {
         r.warn = true;

@@ -2104,6 +2104,125 @@ void testColdResumeEngine() {
     }
 }
 
+// v0252-n10: the TAIL-CK checkpoint written inside the prefill forward (EngineOptions::tail_ck_in_forward = the gfx1201
+// device profile). The R9700 precise pp 2k cell (a 2058-token prompt) ran [0, 1024) + [1024, 2058) since 0.2.2, because
+// COLD-RESUME keeps a tail checkpoint for every prompt and a checkpoint ended a forward (progress/v0252-a12.HANDOFF.md).
+// Inside the forward: one 2058-row forward, the checkpoint state after its first 1024 rows, and the next turn still
+// resumes from that checkpoint (@1024) with the cold run's answer. Off (the gfx1151 row): the 0.2.5.1 forwards.
+// sched_grid 1024: a forward that starts off the 1024 grid perturbs the state, so a wrong split changes the text.
+ServerSetup dflashSetup(bool ngram);  // (the DFlash2 tests below)
+void testTailInsideForward() {
+    for (const bool mtp : {false, true}) {
+        for (const bool inside : {false, true}) {
+            ServerSetup su = baseSetup(mtp);
+            su.eo.n_ck = 3;  // enough for the tail checkpoint (cache::ckpt_keep_prefix_min)
+            su.eo.cold_resume = true;
+            su.eo.tail_ck_in_forward = inside;
+            su.mc.sched_grid = 1024;
+            ServerSetup su_nc = su;
+            su_nc.eo.no_prefix_cache = true;
+            TestServer srv(su);
+            TestServer cold(su_nc);
+            g_log.clear();
+            const auto p1 = makePrompt(2058, 41);
+            auto r1 = srv.post("/v1/completions", completionBody(p1, 40));
+            const auto out1 = srv.model().greedyReference(p1, 40, true);
+            CHECK_EQ(completionText(r1), decode(out1));
+            CHECK(g_log.count("keeping a tail checkpoint @1024 (1034 tokens before the prompt end)") == 1);
+            if (inside) {
+                CHECK_EQ(srv.model().prefillForwards(), 1u);   // one forward instead of 1024 + 1034
+                CHECK_EQ(srv.model().maxPrefillRows(), 2058u);
+                CHECK_EQ(srv.model().captures(), 1u);
+                CHECK(g_log.count("tail checkpoint @1024 written inside the 2058-row forward [0, 2058)") == 1);
+            } else {
+                CHECK_EQ(srv.model().prefillForwards(), 2u);   // 0.2.5.1 (gfx1151): the tail point ends a forward
+                CHECK_EQ(srv.model().maxPrefillRows(), 1034u);
+                CHECK_EQ(srv.model().captures(), 0u);
+                CHECK(g_log.count("written inside the") == 0);
+            }
+            // turn 2 = turn 1 + its output + a new message: precise resumes from the tail checkpoint @1024 (gen-end and
+            // prompt-end @2058 are not on turn 2's schedule), with the cold run's answer
+            std::vector<std::uint32_t> p2 = p1;
+            p2.insert(p2.end(), out1.begin(), out1.end());
+            const auto p2b = makePrompt(static_cast<std::uint32_t>(p2.size() + 400), 42, p2);
+            auto r2 = srv.post("/v1/completions", completionBody(p2b, 40));
+            auto r2c = cold.post("/v1/completions", completionBody(p2b, 40));
+            CHECK_EQ(completionText(r2), completionText(r2c));
+            CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(p2b, 40, true)));
+            CHECK_EQ(cachedTokens(r2), 1024u);
+            CHECK_EQ(srv.model().poison(), 0u);
+            CHECK_EQ(srv.model().hidMismatch(), 0u);
+            if (g_verbose)
+                std::fprintf(stderr, "  mtp %d inside %d: forwards %llu, max rows %u\n", mtp ? 1 : 0, inside ? 1 : 0,
+                             static_cast<unsigned long long>(srv.model().prefillForwards()), srv.model().maxPrefillRows());
+        }
+    }
+}
+
+// v0252-n10, every mode: a prompt of >= 4096 tokens keeps the tail checkpoint (balance: no COLD-RESUME). 8200 tokens:
+// 0.2.5.1 ran [0, 2048) [2048, 4096) [4096, 6144) [6144, 7168) [7168, 8200); inside the forward the last two are one
+// forward [6144, 8200) with the checkpoint after row 1024 (@7168). Another question about the same document resumes
+// there (cached 7168) with the reference answer, both ways.
+void testTailInsideLongPrompt() {
+    for (const bool inside : {false, true}) {
+        ServerSetup su = baseSetup();
+        su.mc.parallel = 1;
+        su.mc.slot_ctx = 32768;
+        su.mc.pool_tokens = 98304;
+        su.eo.n_ck = 4;
+        su.eo.tail_ck_in_forward = inside;
+        su.mc.sched_grid = 1024;
+        TestServer srv(su);
+        g_log.clear();
+        const auto doc = makePrompt(8100, 52);
+        const auto q1 = makePrompt(8200, 53, doc);
+        auto r1 = srv.post("/v1/completions", completionBody(q1, 24));
+        CHECK_EQ(completionText(r1), decode(srv.model().greedyReference(q1, 24, true)));
+        CHECK(g_log.count("keeping a tail checkpoint @7168 (1032 tokens before the prompt end)") == 1);
+        CHECK_EQ(srv.model().prefillForwards(), inside ? 4u : 5u);
+        CHECK_EQ(srv.model().maxPrefillRows(), inside ? 2056u : 2048u);
+        CHECK_EQ(srv.model().captures(), inside ? 1u : 0u);
+        CHECK(g_log.count("tail checkpoint @7168 written inside the 2056-row forward [6144, 8200)") == (inside ? 1u : 0u));
+        const auto q2 = makePrompt(8210, 54, doc);
+        auto r2 = srv.post("/v1/completions", completionBody(q2, 24));
+        CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(q2, 24, true)));
+        CHECK_EQ(cachedTokens(r2), 7168u);
+        CHECK_EQ(srv.model().poison(), 0u);
+        CHECK_EQ(srv.model().hidMismatch(), 0u);
+    }
+}
+
+// v0252-n10: where the capture does not apply, the 0.2.5.1 forward end stays (tail_ck_in_forward on): a model without the
+// capture (MockConfig::state_capture false), DFlash2 drafts (PrefillPhase::soloLen; WHIRL_CKPT_HOST is the same kind of
+// condition there, not run here). The answers and the resume point are the same either way.
+void testTailInsideFallbacks() {
+    enum class Why { no_capture, dflash };
+    for (const Why why : {Why::no_capture, Why::dflash}) {
+        ServerSetup su = why == Why::dflash ? dflashSetup(false) : baseSetup();
+        su.eo.n_ck = 3;
+        su.eo.cold_resume = true;
+        su.eo.tail_ck_in_forward = true;
+        su.mc.sched_grid = 1024;
+        if (why == Why::no_capture) su.mc.state_capture = false;
+        TestServer srv(su);
+        g_log.clear();
+        const auto p1 = makePrompt(2058, 61);
+        auto r1 = srv.post("/v1/completions", completionBody(p1, 32));
+        const auto out1 = srv.model().greedyReference(p1, 32, true);
+        CHECK_EQ(completionText(r1), decode(out1));
+        CHECK_EQ(srv.model().prefillForwards(), 2u);
+        CHECK_EQ(srv.model().captures(), 0u);
+        CHECK(g_log.count("written inside the") == 0);
+        std::vector<std::uint32_t> p2 = p1;
+        p2.insert(p2.end(), out1.begin(), out1.end());
+        const auto p2b = makePrompt(static_cast<std::uint32_t>(p2.size() + 300), 62, p2);
+        auto r2 = srv.post("/v1/completions", completionBody(p2b, 32));
+        CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(p2b, 32, true)));
+        CHECK_EQ(cachedTokens(r2), 1024u);
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+}
+
 // TAIL-CK (PREFIX-QA, REL3): the same long document with a different question, one message each.
 // Before, the 2nd question re-prefilled the whole document (no checkpoint at or before the
 // divergence on first sight; the LCP 'prefix' checkpoint only helped the 3rd). Now the tail
@@ -9565,6 +9684,9 @@ int main(int argc, char** argv) {
         {"tier_bridge_restore", testTierBridgeRestore},
         {"prefix_store", testPrefixStore},
         {"cold_resume_engine", testColdResumeEngine},
+        {"tail_inside_forward", testTailInsideForward},
+        {"tail_inside_long", testTailInsideLongPrompt},
+        {"tail_inside_fallbacks", testTailInsideFallbacks},
         {"rev5a_sessions", testRevS5aSessions},
         {"rev5a_guards", testRevS5aGuards},
         {"rev5a_long_probe", testRevS5aLongAnswerProbe},

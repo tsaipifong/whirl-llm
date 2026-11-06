@@ -309,12 +309,13 @@ struct PoolAdjust {
 PoolAdjust poolAdjust(bool uma, std::optional<std::uint32_t> ctx, std::optional<std::uint32_t> ctx_per_slot, std::uint32_t slot_ctx,
                       std::uint32_t fit_pool, std::uint32_t fit_slot_ctx, bool fit_msg);
 // The "prefix cache: tail checkpoint ..." line, the log mirror of the engine's TAIL-CK rule (EngineOptions::tail_ck,
-// tail_ck_slots passed in); warn = a warning (the debug override WHIRL_TAIL_CK=0).
+// tail_ck_slots passed in); warn = a warning (the debug override WHIRL_TAIL_CK=0). cold_resume (EngineOptions::cold_resume,
+// --precise): every prompt keeps one (PrefixStore::tailCk), the line says so (v0252-n10); false = the 0.2.5.1 text.
 struct TailCkLine {
     bool warn = false;
     std::string text;
 };
-TailCkLine tailCkLine(bool tail_ck, std::size_t n_ck, std::size_t tail_ck_slots, std::uint32_t tail_ck_min, double ck_mib);
+TailCkLine tailCkLine(bool tail_ck, std::size_t n_ck, std::size_t tail_ck_slots, std::uint32_t tail_ck_min, double ck_mib, bool cold_resume);
 // Shared prefix checkpoints (system messages / common prefixes): none without slot checkpoints or with the prefix cache
 // off, else planned() (WHIRL_SYS_CKPTS at load, the fit's plan at the engine). planned is called only then, so the env
 // read happens exactly when it did. One rule for buildModel and makeEngine.
