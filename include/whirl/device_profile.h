@@ -93,7 +93,9 @@ inline constexpr Profile k_profile_gfx1201{
     .gdn_strix = false,
     .numerics_8060s = false,
     .mtp_costly_verify_rows = false,
-    .draft64k_moe = false,
+    // v0252-n2 (N1): Ornith on the R9700, cost model ~+3.0 % chat [estimate] (research draft_vocab
+    // 2026-10-26-draft64k-per-arch.md; feat027-draft64k97 b334a52); drafts only, output unchanged
+    .draft64k_moe = true,
     .prefill_exec_moe = 2048,
     .prefill_fill_batch = false,
     .vision_attn_threads = 128,

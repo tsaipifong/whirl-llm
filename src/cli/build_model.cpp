@@ -9,7 +9,7 @@
 
 namespace cli {
 
-// WHIRL_DRAFT_VOCAB: unset = the embedded 64k subset on dense qwen35 models with the 248320-token
+// WHIRL_DRAFT_VOCAB: unset = the embedded 64k subset on dense qwen35 models (MoE: device profile draft64k_moe) with the 248320-token
 // vocabulary; 64k = embedded; 48k / <file> = a frequency subset file; N = the first N draft-head rows
 // (old experiment); off = full head. Special and byte tokens are always added.
 void applyDraftVocab(q::Model& model, const Tokenizer& tok) {
