@@ -76,7 +76,16 @@ struct AttnPrefillProblem {
 struct AttnPrefillFlags {
     bool attn_kg_on = true, attn_kx_on = true, attn_dqf_on = true;
     std::uint32_t attn_seg = 0;
+    // v0252-c1port (C1, feat026-attnkg97 / -97k): the f16 attn_kg variant (numerics flag attn_kg_var, WHIRL_ATTN_KGVAR):
+    // 0 the shipped attn_kg, 1 attn_kgv, 3 attn_kgk (both designed bit-identical: every mode); taken on the plain f16
+    // path and on Q8P (kv_dq_rows + f16 attn_kgf), never on q8 / q8v without the scratch, FC-1c (attn_kgs) or q4
+    std::uint32_t attn_kg_var = 0;
 };
+// v0252-c1port (C1): the f16 attn_kg variant `var` for NP query heads per block, or nullptr = none (the caller keeps
+// its shipped kernel, whose NP is the same). Exhaustive: var 1 -> attn_kgv<np>, var 3 -> attn_kgk<np> for np 6 / 4 / 2
+// only; any other var, and any other np (8, ...), gives nullptr - never the kernel of another NP (that kernel with
+// this np's grid / block would compute wrong output; DISCOVERY v4 C3-1).
+Function attnKgVariant(std::uint32_t var, const kernels::AttnKernels& k, std::uint32_t np);
 // one launch of the plan: what it reads (the cache, or the dequantized copy of keys [r0, r1)) and its geometry
 struct AttnStep {
     enum class Op : std::uint8_t { dq_rows, dq_rows_r, attn };

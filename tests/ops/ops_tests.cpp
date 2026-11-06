@@ -233,6 +233,7 @@ int main() {
     testOpsGemmFq();  // v0251-a3port
     testAttnDecode();
     testAttnPrefill();
+    testAttnKgVariant();  // v0252-c1port (fails before the port: the stub has no variant, chooseAttnPrefill never asks)
     testOpsMoe();
     testOpTables();
     testActChoice();

@@ -688,6 +688,7 @@ void testFastOnlyOverrides() {
         // through the plan's refusal (v0251-a7pol B26-41, testMoepCombMode), so the variable's class stays 'L'.
         {"MOEP_GU", 'B'},  {"MOEP_DN", 'B'},   {"MOEP_COMB", 'L'},
         {"MOE_RFUSE", 'B'},  // v0251-a11port: fused router, bit-identical to moe_logits_f32 + moe_topk (kt moemx, golden)
+        {"ATTN_KGVAR", 'B'},  // v0252-c1port: attn_kgv / attn_kgk, designed bit-identical to attn_kg (kt attn, golden)
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -885,6 +886,39 @@ static void testRfuseDefault() {
             }
 }
 
+// v0252-c1port (C1, feat026-attnkg97 / -97k): WHIRL_ATTN_KGVAR is a load-time variable of class B (an EnvValues field,
+// not an A/B switch: var 1 attn_kgv and var 3 attn_kgk are designed bit-identical to attn_kg): std::strtoul, kept only
+// as 1 or 3, any other value 0 (var 2 attn_kgw is not ported: not bit-identical); default 0 on every card x model x
+// mode (C1 changes no default); no override note, no refusal note, never lossy, and it changes only the attn_kg_var
+// flag. Fails before the port (loadFlags does not read the variable).
+static void testKgVarFlag() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    const std::pair<const char*, std::uint32_t> cases[] = {{"1", 1}, {"3", 3}, {"03", 3}, {"3x", 3}, {"0", 0}, {"2", 0},
+                                                           {"4", 0}, {"", 0},  {"x", 0},  {"-1", 0}};
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const nu::Plan d = pl(t, mode, {});
+                NCHECK(d.flags.attn_kg_var == 0, "attn_kg_var default {} {} {}: {} (want 0)", c.name, model, mode, d.flags.attn_kg_var);
+                for (const auto& [v, want] : cases) {
+                    const nu::Plan p = pl(t, mode, {{"ATTN_KGVAR", v}});
+                    NCHECK(p.flags.attn_kg_var == want, "attn_kg_var {} {} {}: WHIRL_ATTN_KGVAR='{}' -> {} (want {})", c.name, model, mode, v,
+                           p.flags.attn_kg_var, want);
+                    nu::Plan a = d;
+                    a.flags.attn_kg_var = want;
+                    NCHECK(a.bitsKey() == p.bitsKey() && nu::logLine(p) == nu::logLine(d) && p.overrides == d.overrides &&
+                               p.lossy_override == d.lossy_override && p.ignored.empty(),
+                           "attn_kg_var {} {} {}: WHIRL_ATTN_KGVAR='{}' changes only the attn_kg_var flag", c.name, model, mode, v);
+                }
+            }
+}
+
 void testNumericsPlan(int& pass, int& fail) {
     testPlanTable();
     testApplyFrontEqualsPlan();  // arch025-N2b (replaces testUnwiredCallerUnchanged: no caller passes Target::gdn_strix now)
@@ -895,6 +929,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testMoepDefault();  // v0251-a7port (fails before the port: the plan has no gfx1151 default)
     testMoepCombMode();  // v0251-a7pol B26-41 (the refusal rows fail on cfce7ea)
     testRfuseDefault();  // v0251-a11port (fails before the port: the plan has no gfx1151 default)
+    testKgVarFlag();  // v0252-c1port (fails before the port: loadFlags does not read WHIRL_ATTN_KGVAR)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)

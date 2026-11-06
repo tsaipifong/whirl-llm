@@ -186,6 +186,9 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
     return pl;
 }
 
+// v0252-c1port test-first stub (interface only): no variant yet, every caller keeps the shipped attn_kg
+Function attnKgVariant(std::uint32_t, const kernels::AttnKernels&, std::uint32_t) { return nullptr; }
+
 // WMMA prefill attention of n queries at positions pos0 .. (keys 0 .. pos0 + n - 1), split over head ranges so
 // one launch does at most ~4096 x 128k query-key pairs x all heads. Same results as one launch.
 // f16 / q8 / q8h / q8v KV: attn_kg (NP query heads of one KV head per block; bit-identical to attn_kx) when NP

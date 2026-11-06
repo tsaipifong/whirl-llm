@@ -439,6 +439,32 @@ void dq4Long(Ctx& c) {
 
 void testAttn(Ctx& c) {
     c.rep.family = "attn";
+    // v0252-c1port (C1, feat026-attnkg97 / -97k): the f16 attn_kg variants attn_kgv6/4/2 (var 1) and attn_kgk6/4/2
+    // (var 3) are in the gfx1201 code object and loaded into the host table (kernels_abi.cpp loadAttn), and absent from
+    // the gfx1151 object and table (0.2.5.2 leaves the 8060S untouched). Fails before the port (no kernel). Their bitwise
+    // rows (== attn_prefill_wmma, groups 6 and 8, one and two head-range launches; kv_dq_rows + kernel) are in the two
+    // attn_kg loops below.
+    {
+        const bool g1201 = c.mod.arch() == hip::Arch::gfx1201;
+        const char* const names[6] = {"attn_kgv6", "attn_kgv4", "attn_kgv2", "attn_kgk6", "attn_kgk4", "attn_kgk2"};
+        const hip::Function host[6] = {c.k.attn_kgv6, c.k.attn_kgv4, c.k.attn_kgv2, c.k.attn_kgk6, c.k.attn_kgk4, c.k.attn_kgk2};
+        for (int i = 0; i < 6; ++i) {
+            const hip::Function f = c.fnOpt(names[i]);
+            Result r;
+            r.kind = Kind::invariant;
+            r.n = 1;
+            if (g1201) {
+                r.name = std::string(names[i]) + " (C1) in the gfx1201 code object and loaded into the host table";
+                r.pass = f != nullptr && host[i] == f;
+                if (!r.pass) r.note = f == nullptr ? "missing from the code object" : "not in AttnKernels (loadAttn)";
+            } else {
+                r.name = std::string(names[i]) + " absent from this non-gfx1201 code object and from the host table";
+                r.pass = f == nullptr && host[i] == nullptr;
+            }
+            r.mismatches = r.pass ? 0 : 1;
+            c.rep.add(r);
+        }
+    }
     const int L = c.quick ? 600 : 1100;  // cached positions (crosses page boundaries)
     for (Fmt fmt : {Fmt::f16, Fmt::q8, Fmt::q8v, Fmt::q4}) {
         const std::string fs = fmtSuffix(fmt);
@@ -742,7 +768,10 @@ void testAttn(Ctx& c) {
                 c.sync();
                 const auto ref = rb.down<float>(static_cast<std::size_t>(n) * kHeads * kHd);
                 const int grp = kHeads / nkv;
-                for (const auto& [name, np] : {std::pair{"attn_kg6", 6}, std::pair{"attn_kg4", 4}, std::pair{"attn_kg2", 2}}) {
+                for (const auto& [name, np] : {std::pair{"attn_kg6", 6}, std::pair{"attn_kg4", 4}, std::pair{"attn_kg2", 2},
+                                               // v0252-c1port (C1): f16 only (no _q8 / _q8v entries: fnOpt skips them)
+                                               std::pair{"attn_kgv6", 6}, std::pair{"attn_kgv4", 4}, std::pair{"attn_kgv2", 2},
+                                               std::pair{"attn_kgk6", 6}, std::pair{"attn_kgk4", 4}, std::pair{"attn_kgk2", 2}}) {
                     if (grp % np != 0) continue;
                     auto fk = c.fnOpt(name + fs);
                     if (!fk) continue;
@@ -1176,7 +1205,10 @@ void testAttn(Ctx& c) {
                         f.k = k16.p();
                         f.v = v16.p();
                         f.ptab = did.p();
-                        for (const auto& [name, np] : {std::pair{"attn_kg6", 6}, std::pair{"attn_kg4", 4}, std::pair{"attn_kg2", 2}}) {
+                        for (const auto& [name, np] : {std::pair{"attn_kg6", 6}, std::pair{"attn_kg4", 4}, std::pair{"attn_kg2", 2},
+                                                       // v0252-c1port (C1): the variants on the dequantized rows (Q8P)
+                                                       std::pair{"attn_kgv6", 6}, std::pair{"attn_kgv4", 4}, std::pair{"attn_kgv2", 2},
+                                                       std::pair{"attn_kgk6", 6}, std::pair{"attn_kgk4", 4}, std::pair{"attn_kgk2", 2}}) {
                             const auto fk = c.fnOpt(name);
                             if (!fk || grp % np != 0) continue;
                             for (const int split : {1, 2}) {
