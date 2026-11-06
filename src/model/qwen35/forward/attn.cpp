@@ -162,6 +162,7 @@ void Context::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u
     pf.attn_dqf_on = nf().attn_dqf_on;
     pf.attn_seg = nf().attn_seg;
     pf.attn_kg_var = nf().attn_kg_var;  // v0252-c1port (C1): WHIRL_ATTN_KGVAR, default 0 = the shipped attn_kg
+    pf.attn_kg8 = nf().attn_kg8 != 0;  // v0252-c11 (C11): WHIRL_ATTN_KG8, default 0 = the shipped NP
     const ops::AttnPrefillPlan pl = ops::chooseAttnPrefill(pp, pf, k);
     const i32 H = I(cfg.n_head), HKV = I(cfg.n_head_kv), QS = I(2 * cfg.head_dim);
     for (const ops::AttnStep& s : pl.steps) {

@@ -389,6 +389,9 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
         const unsigned long v = std::strtoul(e.attn_kgvar->c_str(), nullptr, 10);
         F.attn_kg_var = v == 1 || v == 3 ? static_cast<std::uint32_t>(v) : 0u;
     }
+    // v0252-c11 (C11): WHIRL_ATTN_KG8 by std::strtoul; 1 = the NP-8 attn_kg8 where it fits (designed bit-identical to
+    // attn_kg4: class B, every mode), any other value 0 = the shipped NP
+    if (e.attn_kg8) F.attn_kg8 = std::strtoul(e.attn_kg8->c_str(), nullptr, 10) == 1 ? 1u : 0u;
     setNe0(F.attn_dqf_on, e.attn_dqf);
     if (e.attn_seg) F.attn_seg = static_cast<std::uint32_t>(std::strtoul(e.attn_seg->c_str(), nullptr, 10)) / 256 * 256;
     setNe0(F.gdn_ba_on, e.gdn_ba);

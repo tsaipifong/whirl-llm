@@ -372,12 +372,15 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         k.attn_kgk6 = L.opt("attn_kgk6");
         k.attn_kgk4 = L.opt("attn_kgk4");
         k.attn_kgk2 = L.opt("attn_kgk2");
+        // v0252-c11 (C11): the NP-8 f16 attn_kg (gfx1201 only): the plain f16 path, and attn_kgf8 below (Q8P)
+        if (kv == KvFormat::f16) k.attn_kg8 = L.opt("attn_kg8");
         if (kv == KvFormat::q8 || kv == KvFormat::q8h || kv == KvFormat::q4) {
             if (kv != KvFormat::q4) k.kv_dq_rows = L.opt("kv_dq_rows");
             k.kv_dq_rows_r = L.opt(kv == KvFormat::q4 ? "kv_dq_rows_r_q4" : "kv_dq_rows_r");
             k.attn_kgf6 = L.opt("attn_kg6");
             k.attn_kgf4 = L.opt("attn_kg4");
             k.attn_kgf2 = L.opt("attn_kg2");
+            k.attn_kgf8 = L.opt("attn_kg8");  // v0252-c11 (gfx1201 only; the f16 entry on the dequantized rows)
             k.attn_kgs6 = L.opt("attn_kgs6");
             k.attn_kgs4 = L.opt("attn_kgs4");
             k.attn_kgs2 = L.opt("attn_kgs2");

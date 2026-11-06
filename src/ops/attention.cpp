@@ -202,8 +202,17 @@ Function attnKgVariant(std::uint32_t var, const kernels::AttnKernels& k, std::ui
     }
 }
 
-// v0252-c11 test-first stub (interface only): the shipped ternary, unchanged (np 6 / 4, anything else attn_kgf2)
-Function attnKgf(const kernels::AttnKernels& k, std::uint32_t np) { return np == 6 ? k.attn_kgf6 : np == 4 ? k.attn_kgf4 : k.attn_kgf2; }
+// v0252-c11 (C11; DISCOVERY v4 C3-1): Q8P's f16 attn_kg for NP query heads per block, every NP written out; any other np
+// gives nullptr (no dequantized-copy launch), never the kernel of another NP under this np's grid / block
+Function attnKgf(const kernels::AttnKernels& k, std::uint32_t np) {
+    switch (np) {
+        case 8: return k.attn_kgf8;
+        case 6: return k.attn_kgf6;
+        case 4: return k.attn_kgf4;
+        case 2: return k.attn_kgf2;
+        default: return nullptr;
+    }
+}
 
 // WMMA prefill attention of n queries at positions pos0 .. (keys 0 .. pos0 + n - 1), split over head ranges so
 // one launch does at most ~4096 x 128k query-key pairs x all heads. Same results as one launch.
@@ -211,6 +220,9 @@ Function attnKgf(const kernels::AttnKernels& k, std::uint32_t np) { return np ==
 // divides the GQA group, the head ranges stay whole groups of NP and the softmax scale is a power of two.
 // v0252-c1port (C1): with attn_kg_var set, the f16 attn_kg launch (plain f16 KV, and Q8P's f16 attn_kgf on the
 // dequantized rows) takes attnKgVariant's kernel for the same NP, grid and block when the code object has it.
+// v0252-c11 (C11): with attn_kg8 set, a GQA group and head range that are multiples of 8 take NP 8 instead (attn_kg8
+// on f16 KV from the cache, attn_kgf8 on Q8P; grid (ceil(n / 16), hp / 8), block 512) when the code object has it;
+// it comes before attn_kg_var (no variant has NP 8). q8 / q8v from the cache, FC-1c and q4 keep their kernels.
 AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefillFlags& f, const kernels::AttnKernels& k) {
     AttnPrefillPlan pl;
     auto& st = pl.steps;
@@ -251,14 +263,23 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
                 break;
             }
     }
+    // v0252-c11 (C11): NP 8 is possible when a shipped attn_kg was chosen (f16 KV conditions above) and the GQA group and
+    // every launch's head range are multiples of 8; which kernel (attn_kg8 / attn_kgf8) depends on the path below
+    const bool np8 = f.attn_kg8 && kg != nullptr && grp % 8 == 0 && hp % 8 == 0;
     const bool kx = f.attn_kx_on && k.attn_kx != nullptr && p.head_dim == 256;
     // q8 / q8h KV: keys 0 .. pos0 + n - 1 dequantized once into f16 rows (ffn_g / ffn_u, free during attention),
     // then the f16 attn_kg: the same f16 K / V values as attn_kg_q8 converts in its waves (bit-identical)
     const u32 rows = p.pos0 + n, row_el = p.n_head_kv * p.head_dim;
     if (kg != nullptr && f.attn_dqf_on && k.kv_dq_rows != nullptr && p.dq_ptab && rows <= p.dq_rows) {
         Function kf = attnKgf(k, np);
+        // v0252-c11: NP 8 on the dequantized rows (attn_kgf8) where the group and the head range allow it
+        if (np8 && kf != nullptr)
+            if (const Function f8 = attnKgf(k, 8)) {
+                kf = f8;
+                np = 8;
+            }
         // v0252-c1port: the attn_kg variant of this NP on the dequantized rows (same grid / block / bits as attn_kgf)
-        if (kf != nullptr)
+        if (kf != nullptr && np != 8)
             if (const Function v = attnKgVariant(f.attn_kg_var, k, np)) kf = v;
         if (kf != nullptr) {
             AttnStep dq;
@@ -337,8 +358,14 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
     }
     // v0252-c1port: f16 KV from the cache takes the attn_kg variant of this NP (same grid / block / bits); q8 / q8v
     // from the cache keep attn_kg<np>_q8 / _q8v (the variants are f16 kernels)
-    if (kg != nullptr && !p.kv_q8)
-        if (const Function v = attnKgVariant(f.attn_kg_var, k, np)) kg = v;
+    if (kg != nullptr && !p.kv_q8) {
+        if (np8 && k.attn_kg8 != nullptr) {  // v0252-c11: f16 KV from the cache, NP 8
+            kg = k.attn_kg8;
+            np = 8;
+        } else if (const Function v = attnKgVariant(f.attn_kg_var, k, np)) {
+            kg = v;
+        }
+    }
     for (u32 q = 0; q < parts; ++q) {
         if (kg != nullptr)
             attn(kg, D((n + 15) / 16, hp / np), D(64 * np), q * hp, false, false, 0, 0);
