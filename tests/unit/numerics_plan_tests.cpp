@@ -83,6 +83,10 @@ nu::Target target(const CardFake& c, std::string_view model, bool kv_explicit) {
     t.gdn_strix_shape = true;
     t.k_gemm8t = c.k_gemm8t;
     t.k_gdn_v0 = c.k_gdn_v0;
+    // v0252-f5 (moeskip): both code objects have moe_topk_skip / moe_skip_apply / moe_route_skip / moe_combine_skip; the
+    // per-card fast default rule as shipped (moeskip_fast_default_r9700 / _8060s)
+    t.k_moe_skip = true;
+    t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     return t;
 }
 
@@ -115,7 +119,7 @@ std::map<std::string, std::string> splitKv(std::string_view s) {
 const std::set<std::string> k_not_plan_env = {"GEMV_BITWISE_FLOAT"};
 
 void testPlanTable() {
-    std::size_t n_cells = 0, n_fields = 0, n_repin = 0;
+    std::size_t n_cells = 0, n_fields = 0, n_repin = 0, n_f5 = 0;
     // the value of one S0b-2 dump key in a plan ("" + known = false: not decided by the plan)
     auto keyOf = [](const nu::Plan& p, const std::string& k, bool& known) {
         known = true;
@@ -180,12 +184,25 @@ void testPlanTable() {
                 if (*fi.dump_key) NCHECK(want.count(fi.dump_key) == 1, "{} {}: dump has no {}", c.card, c.cell, fi.dump_key);
             continue;
         }
-        for (const auto& [k, v] : want) {
+        for (const auto& [k, v0] : want) {
             ++n_fields;
             bool known = false;
             const std::string got = keyOf(p, k, known);
             if (k.rfind("num_plan.override[", 0) == 0) ++n_over;
             NCHECK(known, "{} {}: key {} not decided by the plan", c.card, c.cell, k);
+            // v0252-f5 (moeskip opt-in, fast_optin_items): a plain --fast no longer requests moeskip, so its old "skipped"
+            // entry left the fast log line. Description only: the item was off and stays off (no flag, item state or bitsKey
+            // change); every other character of the dump's line is still compared. RE-PIN at the next S0b-2 GPU dump.
+            std::string v = v0;
+            if (k == "num_plan" && std::string_view(c.mode) == "fast") {
+                static const std::string old_skip = "moeskip (not yet implemented (balance behaviour)), ";
+                const std::size_t at = v.find(old_skip);
+                NCHECK(at != std::string::npos, "{} {}: the dump's fast line has no '{}' (re-pinned already? drop this rule)", c.card, c.cell, old_skip);
+                if (at != std::string::npos) {
+                    v.erase(at, old_skip.size());
+                    ++n_f5;
+                }
+            }
             NCHECK(got == v, "{} {}: {} = '{}', S0b-2 dump '{}'", c.card, c.cell, k, got, v);
         }
         NCHECK(p.overrides.size() == n_over, "{} {}: {} overrides, dump {}", c.card, c.cell, p.overrides.size(), n_over);
@@ -195,6 +212,7 @@ void testPlanTable() {
             if (*fi.dump_key) NCHECK(want.count(fi.dump_key) == 1, "{} {}: dump has no {}", c.card, c.cell, fi.dump_key);
     }
     NCHECK(n_repin == 10, "bug-fastonly re-pin cells {} (expected the 10 env_RELAX* balance cells)", n_repin);
+    NCHECK(n_f5 == 4, "v0252-f5 fast cells without the old moeskip entry {} (expected the 4 plain fast cells)", n_f5);
     NCHECK(n_cells == 68, "cells {}", n_cells);
     std::printf("  numerics plan table: %zu S0b-2 cells, %zu fields compared\n", n_cells, n_fields);
 }
@@ -689,6 +707,7 @@ void testFastOnlyOverrides() {
         {"MOEP_GU", 'B'},  {"MOEP_DN", 'B'},   {"MOEP_COMB", 'L'},
         {"MOE_RFUSE", 'B'},  // v0251-a11port: fused router, bit-identical to moe_logits_f32 + moe_topk (kt moemx, golden)
         {"ATTN_KGVAR", 'B'},  // v0252-c1port: attn_kgv / attn_kgk, designed bit-identical to attn_kg (kt attn, golden)
+        {"MOESKIP", 'F'},     // v0252-f5: moeskip, fast-only (applyFastOnlyOverride; drops routed experts)
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -936,6 +955,170 @@ static void testKgVarFlag() {
             }
 }
 
+// v0252-f5 (F5 moeskip, ported from feat027-moeskip-r1 4b6474b; DISCOVERY v4 F5 :206, rule :192): the selector side of the
+// plan. moeskip drops routed MoE slots whose renormalized router weight is below a threshold (fast-only, opt-in):
+//  S1 the item: fast-only, implemented, opt-in (fast_optin_items), never a balance item; the shipped per-card default pins
+//     (both off until G5 / G6) and the default threshold / min-keep;
+//  S2 shipped state: a plain --fast never requests it (both cards, both models): no "moeskip" in the log line or /props,
+//     moe_skip_thr 0 everywhere;
+//  S3 the per-card fast default rule (Target::moeskip_default, what flipping a constant does): plain fast with an MXFP4
+//     MoE model requests and enables it with the default threshold (not an override); a dense model is not requested
+//     (plan unchanged); precise / balance and an explicit fast list ignore the rule;
+//  S4 explicit requests (fast:moeskip, fast:all, a list with it): on, flags = the defaults, the note says what it does;
+//  S5 skip reasons (dense, experts not MXFP4, no kernels);
+//  S6 WHIRL_MOESKIP: precise / balance ignore it (plan and bitsKey unchanged, one Plan::ignored note; "0" no note); in fast
+//     T > 0 = on with that threshold (a user override where the mode did not request it), "T:M" also sets the top-M floor,
+//     "1:M" = static top-M, "0" = off, "" = nothing; a malformed value = the plan without it plus one note; not applicable
+//     (dense) = off;
+//  S7 f16 decode activations (WHIRL_Q8DEC=0: prec_dec) keep moe_skip_thr 0 (the precise decode experts never see id -1);
+//  S8 precise / balance plans do not depend on the moeskip inputs of the target at all;
+//  S9 parseMoeSkip.
+static void testMoeSkipPlan() {
+    using Item = nu::Item;
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals = {}) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    auto st = [](const nu::Plan& p) -> const nu::ItemState& { return p.items[static_cast<std::size_t>(Item::moeskip)]; };
+    // S1
+    NCHECK((nu::fast_only_items & nu::bit(Item::moeskip)) != 0 && (nu::balance_items & nu::bit(Item::moeskip)) == 0, "S1 fast-only");
+    NCHECK((nu::implemented_items & nu::bit(Item::moeskip)) != 0 && nu::itemFromName("moeskip") == Item::moeskip, "S1 implemented");
+    NCHECK((nu::fast_optin_items & nu::bit(Item::moeskip)) != 0 && (nu::fast_optin_items & ~nu::fast_only_items) == 0, "S1 opt-in set");
+    NCHECK(!nu::moeskip_fast_default_r9700 && !nu::moeskip_fast_default_8060s,
+           "S1 shipped: the per-card fast default rule is off on both cards until G5 / G6 (flip it with this pin)");
+    NCHECK(nu::moeskip_default_thr == 0.05f && nu::moeskip_default_min == 1u, "S1 default threshold 0.05 / top 1 (estimate until the G5 sweep)");
+    const nu::Target r97 = target(card("r9700"), "moe", false), r97d = target(card("r9700"), "swift", false);
+    const nu::Target s8 = target(card("8060s"), "moe", false), s8d = target(card("8060s"), "swift", false);
+    NCHECK(r97.k_moe_skip && s8.k_moe_skip && !r97.moeskip_default && !s8.moeskip_default, "S1 target fakes");
+    // S2
+    for (const CardFake& c : k_cards)
+        for (const char* model : {"swift", "moe"}) {
+            const nu::Plan p = pl(target(c, model, false), "fast");
+            NCHECK(!st(p).requested && !p.on(Item::moeskip) && p.flags.moe_skip_thr == 0.f && p.flags.moe_skip_min == 1u &&
+                       nu::logLine(p).find("moeskip") == std::string::npos && nu::propsJson(p, "f16").find("moeskip") == std::string::npos,
+                   "S2 {} {}: plain fast does not request moeskip", c.name, model);
+        }
+    // S3 (the rule switched on in the target, as the loader fills it when a constant is true)
+    for (const nu::Target* base : {&r97, &s8}) {
+        nu::Target on = *base;
+        on.moeskip_default = true;
+        const nu::Plan p = pl(on, "fast");
+        NCHECK(st(p).requested && p.on(Item::moeskip) && p.flags.moe_skip_thr == nu::moeskip_default_thr && p.flags.moe_skip_min == 1u &&
+                   !p.lossy_override && p.overrides.empty() && nu::modeLabel(p) == "fast",
+               "S3 {} moe plain fast: moeskip on by the default rule (not an override)", base->gfx1151 ? "8060s" : "r9700");
+        NCHECK(nu::logLine(p).find("fast runs as balance") == std::string::npos, "S3 moeskip is a fast item that applies");
+        for (const char* mode : {"precise", "balance"}) {
+            const nu::Plan a = pl(on, mode), b = pl(*base, mode);
+            NCHECK(!a.on(Item::moeskip) && a.flags.moe_skip_thr == 0.f && a.bitsKey() == b.bitsKey() && nu::logLine(a) == nu::logLine(b),
+                   "S3 {}: the fast default rule does not reach it", mode);
+        }
+        const nu::Plan pc = pl(on, "fast:kvq4");
+        NCHECK(!st(pc).requested && pc.flags.moe_skip_thr == 0.f, "S3 an explicit fast list is taken as written");
+    }
+    for (const nu::Target* base : {&r97d, &s8d}) {
+        nu::Target dn = *base;
+        dn.moeskip_default = true;
+        const nu::Plan pd = pl(dn, "fast"), p0 = pl(*base, "fast");
+        NCHECK(!st(pd).requested && nu::logLine(pd) == nu::logLine(p0) && pd.bitsKey() == p0.bitsKey(), "S3 dense model: not requested, plan unchanged");
+    }
+    // S4
+    for (const nu::Target* t : {&r97, &s8})
+        for (const char* spec : {"fast:moeskip", "fast:all", "fast:kvq4,relaxacc,moeskip"}) {
+            const nu::Plan p = pl(*t, spec);
+            NCHECK(p.on(Item::moeskip) && p.flags.moe_skip_thr == nu::moeskip_default_thr && p.flags.moe_skip_min == 1u &&
+                       st(p).note.find("renormalized weight") != std::string::npos && st(p).note.find("[tau 0.050, top 1 kept]") != std::string::npos,
+                   "S4 {}: on (note '{}')", spec, st(p).note);
+        }
+    // S5
+    {
+        nu::Target q4m = r97;
+        q4m.moe_mxfp4 = false;
+        nu::Target nok = r97;
+        nok.k_moe_skip = false;
+        const struct {
+            const nu::Target* t;
+            const char* why;
+        } cases[] = {{&r97d, "dense model"}, {&s8d, "dense model"}, {&q4m, "experts are not MXFP4"}, {&nok, "no moe_topk_skip"}};
+        for (const auto& c : cases) {
+            const nu::Plan p = pl(*c.t, "fast:moeskip");
+            NCHECK(!p.on(Item::moeskip) && p.flags.moe_skip_thr == 0.f && st(p).note.find(c.why) != std::string::npos, "S5 skipped: '{}' (note '{}')", c.why,
+                   st(p).note);
+        }
+    }
+    // S6
+    for (const char* mode : {"precise", "balance"})
+        for (const nu::Target* t : {&r97, &s8}) {
+            const nu::Plan base = pl(*t, mode);
+            for (const char* v : {"0.05", "1:6", "abc"}) {
+                const nu::Plan one = pl(*t, mode, {{"MOESKIP", v}});
+                NCHECK(!one.on(Item::moeskip) && one.flags.moe_skip_thr == 0.f && one.bitsKey() == base.bitsKey() && nu::logLine(one) == nu::logLine(base) &&
+                           !one.lossy_override && one.overrides.empty(),
+                       "S6 {}: WHIRL_MOESKIP={} ignored", mode, v);
+                NCHECK(one.ignored.size() == 1 && one.ignored[0] == std::format("WHIRL_MOESKIP={} ignored: moeskip is a fast-only item ({} never takes it)", v, mode),
+                       "S6 {}: one refusal note for {} (got {})", mode, v, one.ignored.empty() ? std::string("<none>") : one.ignored[0]);
+            }
+            const nu::Plan zero = pl(*t, mode, {{"MOESKIP", "0"}});
+            NCHECK(zero.ignored.empty() && zero.bitsKey() == base.bitsKey(), "S6 {}: WHIRL_MOESKIP=0 no note", mode);
+        }
+    for (const nu::Target* t : {&r97, &s8}) {
+        const nu::Plan p1 = pl(*t, "fast", {{"MOESKIP", "0.08"}});
+        NCHECK(p1.on(Item::moeskip) && p1.flags.moe_skip_thr == 0.08f && p1.flags.moe_skip_min == 1u && nu::modeLabel(p1) == "fast+overrides" &&
+                   nu::logLine(p1).find("WHIRL_MOESKIP=0.08: moeskip on (lossy, user-requested)") != std::string::npos &&
+                   st(p1).note.find("[tau 0.080, top 1 kept]") != std::string::npos,
+               "S6 fast: WHIRL_MOESKIP=0.08 on (override; note '{}')", st(p1).note);
+        const nu::Plan p2 = pl(*t, "fast", {{"MOESKIP", "0.03:2"}});
+        NCHECK(p2.on(Item::moeskip) && p2.flags.moe_skip_thr == 0.03f && p2.flags.moe_skip_min == 2u && st(p2).note.find("[tau 0.030, top 2 kept]") != std::string::npos,
+               "S6 fast: WHIRL_MOESKIP=0.03:2 (note '{}')", st(p2).note);
+        const nu::Plan p3 = pl(*t, "fast", {{"MOESKIP", "1:6"}});
+        NCHECK(p3.on(Item::moeskip) && p3.flags.moe_skip_thr == 1.f && p3.flags.moe_skip_min == 6u && st(p3).note.find("[static top 6]") != std::string::npos,
+               "S6 fast: WHIRL_MOESKIP=1:6 = static top 6 (note '{}')", st(p3).note);
+        const nu::Plan p4 = pl(*t, "fast:moeskip", {{"MOESKIP", "0.08"}});
+        NCHECK(p4.on(Item::moeskip) && p4.flags.moe_skip_thr == 0.08f && !p4.lossy_override && p4.overrides.empty(),
+               "S6 fast:moeskip + WHIRL_MOESKIP=0.08: the mode's item retuned, not an override");
+        const nu::Plan p0 = pl(*t, "fast:moeskip", {{"MOESKIP", "0"}});
+        NCHECK(!p0.on(Item::moeskip) && p0.flags.moe_skip_thr == 0.f && !p0.lossy_override && st(p0).note == "off by WHIRL_MOESKIP=0",
+               "S6 fast:moeskip + WHIRL_MOESKIP=0 off");
+        const nu::Plan pe = pl(*t, "fast", {{"MOESKIP", ""}});
+        NCHECK(pe.bitsKey() == pl(*t, "fast").bitsKey() && pe.overrides.empty() && pe.ignored.empty(), "S6 empty value: nothing");
+        for (const char* bad : {"abc", "1.5", "-0.1", "0.05:0", "0.05:65", "0.05:x", "0.05:2.5", "nan", "0x1", "0.05:", ":2", "inf"}) {
+            const nu::Plan pb = pl(*t, "fast", {{"MOESKIP", bad}}), ref = pl(*t, "fast");
+            NCHECK(pb.bitsKey() == ref.bitsKey() && pb.overrides == ref.overrides && pb.ignored.size() == 1 &&
+                       pb.ignored[0].rfind(std::string("WHIRL_MOESKIP=") + bad + " ignored: not T or T:M", 0) == 0,
+                   "S6 fast: malformed WHIRL_MOESKIP={} -> the plan without it and one note (got {})", bad, pb.ignored.empty() ? std::string("<none>") : pb.ignored[0]);
+        }
+        const nu::Plan pd = pl(t->gfx1151 ? s8d : r97d, "fast", {{"MOESKIP", "0.05"}});
+        NCHECK(!pd.on(Item::moeskip) && pd.flags.moe_skip_thr == 0.f, "S6 dense: not applicable, off");
+    }
+    // S7
+    for (const nu::Target* t : {&r97, &s8}) {
+        const nu::Plan p = pl(*t, "fast:moeskip", {{"Q8DEC", "0"}});
+        NCHECK(p.flags.prec_dec && p.flags.moe_skip_thr == 0.f, "S7 f16 decode activations: moe_skip_thr 0");
+    }
+    // S8
+    for (const CardFake& c : k_cards)
+        for (const char* model : {"swift", "moe"})
+            for (const char* mode : {"precise", "balance"}) {
+                nu::Target a = target(c, model, false), b = a;
+                b.k_moe_skip = !a.k_moe_skip;
+                b.moeskip_default = true;
+                const nu::Plan pa = pl(a, mode), pb = pl(b, mode);
+                NCHECK(pa.bitsKey() == pb.bitsKey() && nu::logLine(pa) == nu::logLine(pb) && pa.flags.moe_skip_thr == 0.f && pa.flags.moe_skip_min == 1u,
+                       "S8 {} {} {}: precise / balance independent of the moeskip target inputs", c.name, model, mode);
+            }
+    // S9
+    {
+        const auto a = nu::parseMoeSkip("0.05"), b = nu::parseMoeSkip("0.08:2"), c = nu::parseMoeSkip("1:6"), z = nu::parseMoeSkip("0"),
+                   o = nu::parseMoeSkip("1"), m64 = nu::parseMoeSkip("0.5:64");
+        NCHECK(a && a->thr == 0.05f && !a->min_keep && b && b->thr == 0.08f && b->min_keep == 2u && c && c->thr == 1.f && c->min_keep == 6u && z &&
+                   z->thr == 0.f && o && o->thr == 1.f && m64 && m64->min_keep == 64u,
+               "S9 parseMoeSkip valid values");
+        for (const char* bad : {"", "abc", "1.5", "-0.1", "0.05:0", "0.05:65", "0.05:x", "0.05:2.5", "nan", "0x1", "0.05:", ":2", "inf", " 0.05", "0.05 "})
+            NCHECK(!nu::parseMoeSkip(bad), "S9 parseMoeSkip('{}') rejects", bad);
+    }
+}
+
 void testNumericsPlan(int& pass, int& fail) {
     testPlanTable();
     testApplyFrontEqualsPlan();  // arch025-N2b (replaces testUnwiredCallerUnchanged: no caller passes Target::gdn_strix now)
@@ -951,6 +1134,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)
     testFastOnlyRefusal();  // bug-fastonly: refusal notes, fast unchanged
+    testMoeSkipPlan();  // v0252-f5 (fails before the port: moeskip not implemented, not opt-in, no WHIRL_MOESKIP, no flags)
     pass += g_p;
     fail += g_f;
 }

@@ -227,6 +227,7 @@ void testVision(Ctx& c);  // "vision": encoder kernels (own code object) vs CPU
 void testMoe(Ctx& c);
 void testMoeMx(Ctx& c);
 void testMoeF(Ctx& c);  // "moef": precise MoE decode experts moe_gu_f_* / moe_down_f_*
+void testMoeSkip(Ctx& c);  // "moeskip" (v0252-f5, fast): the moeskip entry points vs moe_topk / the shipped kernels / the host reference
 // v0251-a11port (called by testMoeMx, family "moemx"): fused router moe_router_fused_i* == moe_logits_f32 + moe_topk
 // (bitwise) and vs CPU, presence rows (gfx1151 object + host table; absent elsewhere) (test_moe_router.cpp)
 void testMoeRouter(Ctx& c);

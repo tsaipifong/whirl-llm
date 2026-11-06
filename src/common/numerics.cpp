@@ -220,6 +220,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOEP_COMB", &S::moep_comb},
         {"MOE_RFUSE", &S::moe_rfuse},
         {"ATTN_KGVAR", &S::attn_kgvar},
+        {"MOESKIP", &S::moeskip},  // v0252-f5
     }};
     return t;
 }
@@ -558,6 +559,9 @@ std::optional<std::uint32_t> parseKgVar(std::string_view s) {
     if (v == 0 || v == 1 || v == 3) return v;
     return std::nullopt;
 }
+
+// v0252-f5 test-first stub (the port parses "T" / "T:M"): every value is rejected
+std::optional<MoeSkipValue> parseMoeSkip(std::string_view) { return std::nullopt; }
 
 // loader.cpp:537-540 and :730 before arch025-N2b (envFlag = flagOr)
 void loaderFlags(const Request& r, Flags& F) {

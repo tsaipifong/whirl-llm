@@ -523,6 +523,7 @@ static void testFingerprintCoversBitsKey() {
         t.fast_kv_q8h = s8060;
         t.strix_profile = t.k_gdn_sx = s8060;
         t.gdn_strix_shape = true;
+        t.k_moe_skip = true;  // v0252-f5: both code objects have the moeskip entry points (WHIRL_MOESKIP changes bitsKey in fast)
         return t;
     };
     std::vector<std::string> names;

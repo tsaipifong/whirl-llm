@@ -13,7 +13,9 @@
 //    the same items (fp8 + moefp8 back in MoE balance; MOE-BAL 2026-10-13 had made them fast-only).
 //  - fast: balance plus aggressive gated items (4-bit KV, relaxed speculative acceptance, ...).
 //    Implemented: kvq4 (4-bit KV where the code object has it: Radeon 8060S; elsewhere fast keeps
-//    f16 KV until there are q4 kernels) and relaxacc. The others are listed as skipped.
+//    f16 KV until there are q4 kernels) and relaxacc; opt-in (fast_optin_items: an explicit list, "all", WHIRL_MOESKIP or
+//    the per-card fast default rule, Target::moeskip_default): moeskip (MoE: routed slots whose renormalized router weight is
+//    below a threshold dropped, kept weights renormalized; v0252-f5 from feat027). The others are listed as skipped.
 // KV format: fixed per mode and model type (chooseKv), never switched by what fits: a format that
 // does not fit shrinks the context (when not given) or refuses. WHIRL_KV is a debug override.
 // Items not applicable to the device or model are listed as skipped, never an error.
@@ -49,7 +51,8 @@ enum class Item : std::uint8_t {
     kvq4,     // 4-bit KV (gfx1151: q4 = int4 + f16 scale / 32, Hadamard-rotated q/k; dense and MoE)
     relaxacc, // relaxed / typical speculative acceptance (whirl/relax_accept.h; changes greedy output)
     headq,    // low-bit output head in the main decode
-    moeskip,  // skip low-weight MoE experts
+    moeskip,  // skip low-weight MoE experts (v0252-f5: renormalized top-K weight < Flags::moe_skip_thr dropped, top
+              // Flags::moe_skip_min kept, kept weights renormalized; fast-only, opt-in; new kernel entry points only)
     a8,       // int8 activations for Q4_K / Q5_K / Q6_K prefill (W4A8)
     a4,       // W4A4 prefill
     n_items
@@ -67,7 +70,30 @@ inline constexpr std::uint32_t fast_only_items =
 // (MOE-BAL 2026-10-13 had moved them here). Kept as the per-model-type hook of forModel.
 inline constexpr std::uint32_t moe_fast_items = 0;
 // implemented items (the rest are "not yet implemented": skipped, the mode runs as balance)
-inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4) | bit(Item::relaxacc);
+inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::moeskip);
+// v0252-f5 (moeskip, from feat027-moeskip-r1 4b6474b; the F4 port v0252-f4 introduces the same set for moeshx: at the merge
+// the set is the union): fast items a plain --fast does not request (only an explicit list, "all", their WHIRL_ switch or
+// the per-card fast default rule below): implemented, waiting for their GPU kernel tests / task-accuracy screen (G5 / G6)
+inline constexpr std::uint32_t fast_optin_items = bit(Item::moeskip);
+// v0252-f5 (DISCOVERY v4 F5): the per-card fast default rule of moeskip - plain --fast requests it for MoE models with MXFP4
+// experts on the card whose constant is true (Target::moeskip_default, filled by the loader). Both shipped false until the
+// G5 (R9700) / G6 (8060S) screens (speed ABBA + taskacc v2 S arms >= 92 % of precise) accept a threshold; flipping one is
+// the whole switch (plus its pin test, testMoeSkipPlan S1).
+inline constexpr bool moeskip_fast_default_r9700 = false;
+inline constexpr bool moeskip_fast_default_8060s = false;
+// v0252-f5: the threshold / min-keep moeskip runs with when its WHIRL_MOESKIP value does not set them. tau 0.05 is an
+// estimate (feat027 PRIOR_ART; no Ornith router-weight distribution measured yet): the G5 sweep (0.03 / 0.05 / 0.08,
+// static k 7 / 6) replaces it.
+inline constexpr float moeskip_default_thr = 0.05f;
+inline constexpr std::uint32_t moeskip_default_min = 1;
+// WHIRL_MOESKIP = "T" or "T:M": T in [0, 1] (0 = off; 1 = static top-M, as llama.cpp's expert_used_count = M with the
+// weights renormalized over the kept slots), M a whole number in [1, 64] (the top M always kept; default
+// moeskip_default_min). std::nullopt = malformed (the plan ignores it with a note).
+struct MoeSkipValue {
+    float thr = 0.f;
+    std::optional<std::uint32_t> min_keep;
+};
+std::optional<MoeSkipValue> parseMoeSkip(std::string_view s);
 
 // ---- arch025-N2a (R-5): the per-variable overrides as Request fields (raw values, parsed in plan())
 //
@@ -89,6 +115,8 @@ struct EnvValues {
     Raw moe_fp8, moe_mxw, moe_wide, moe_rbf, moep_gu, moep_dn, moep_comb, moe_rfuse;
     // v0252-c1port (feat026-attnkg97 / -97k): attn_kgvar (WHIRL_ATTN_KGVAR, the gfx1201 f16 attn_kg variant; class B)
     Raw attn_kgvar;
+    // v0252-f5 (feat027 moeskip): WHIRL_MOESKIP=T[:M], fast-only (applyFastOnlyOverride; precise / balance ignore it)
+    Raw moeskip;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -96,7 +124,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 34;
+    static constexpr std::size_t n_fields = 35;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -181,6 +209,10 @@ struct Target {
     bool gdn_strix_shape = false;  // d_state 128, head V 128, n_k_heads > 0, n_v_heads % n_k_heads == 0, ratio <= 4
     bool k_gemm8t = false;       // the whole fragment-tiled fp8 set (Model::useTiledFp8, forward.cpp:269-277)
     bool k_gdn_v0 = false;       // gdn_step_norm_v0 present (WHIRL_GDN_V0)
+    // v0252-f5 (moeskip): the routing kernels (moe_topk_skip, moe_skip_apply, moe_route_skip, moe_combine_skip; both code
+    // objects) and the per-card fast default rule (moeskip_fast_default_r9700 / _8060s)
+    bool k_moe_skip = false;
+    bool moeskip_default = false;
 };
 
 // gdnwmma / h16 for a model without MXFP4 tensors (KG-1): dense models on the R9700 only
@@ -217,7 +249,11 @@ struct ItemState {
 // variant per NP x KV path), 0 on the gfx1151 one (no attn_kg there); WHIRL_ATTN_KGVAR = "auto" or a whole decimal 0 / 1 /
 // 3 (parseKgVar) overrides it in every mode; any other value keeps the default and Plan::ignored carries one note. Still
 // in bitsKey (C-4, conservative: the default change re-keys the gfx1201 KV tiers once).
-#define WHIRL_NUMERICS_FLAGS(X)                                  \
+// v0252-f5 (moeskip, feat027): moe_skip_thr = the threshold (Item moeskip on in fast with int8 decode activations, i.e. not
+// prec_dec; 0 = off everywhere else), moe_skip_min = the top slots always kept. ops::chooseMoe takes the skip entry points
+// of a MoE block only when every kernel of that block's path has one (else the block runs moe_topk and no slot id is -1).
+// Not in the S0b-2 dump (the launch log pins the kernels).
+#define WHIRL_NUMERICS_FLAGS(X)                                \
     X(B, use_graph, true, "use_graph")                           \
     X(B, no_fuse, false, "no_fuse")                              \
     X(U, dbg_flags, 0, "dbg_flags")                              \
@@ -268,7 +304,7 @@ struct ItemState {
     X(B, moe_rfuse, false, "")                                   \
     X(B, gv_group, true, "gv_group")                             \
     X(U, gv_nmax, 0, "gv_nmax")                                  \
-    X(B, gdn_v0, false, "")
+    X(B, gdn_v0, false, "")                                          X(F, moe_skip_thr, 0.f, "")                                      X(U, moe_skip_min, 1, "")
 
 struct Flags {
 #define WHIRL_NF_B bool

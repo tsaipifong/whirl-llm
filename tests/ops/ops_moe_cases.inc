@@ -28,8 +28,17 @@ kn::KernelTable moeTable(bool g1151) {
     k.moe_gu_f[q8] = tag("moe_gu_f_q8_0");
     k.gemm_moe[mx] = tag("gemm_moe_mxfp4");
     k.gemm_moe32[mx] = tag("gemm_moe32_mxfp4");
+    // v0252-f5 moeskip entry points: both code objects (routing, prefill grouping / combine, generic MXFP4 decode twins)
+    k.moe_topk_skip = tag("moe_topk_skip");
+    k.moe_skip_apply = tag("moe_skip_apply");
+    k.moe_route_skip = tag("moe_route_skip");
+    k.moe_combine_skip = tag("moe_combine_skip");
+    k.moe_gu_skip_mx = tag("moe_gu_skip_mx");
+    k.moe_down_skip_mx = tag("moe_down_skip_mx");
     if (g1151) {
         k.moe_tiles = tag("moe_tiles");
+        k.moe_tiles_skip = tag("moe_tiles_skip");  // v0252-f5: gfx1151 only
+        k.moe_combine4_skip = tag("moe_combine4_skip");
         k.gemm_moegu[mx] = tag("gemm_moegu_mxfp4");
         k.gemm_moe32r[mx] = tag("gemm_moe32r_mxfp4");
         k.moe_router_fused_i16 = tag("moe_router_fused_i16");  // v0251-a11port: gfx1151 code object only
@@ -49,6 +58,8 @@ kn::KernelTable moeTable(bool g1151) {
         k.gemm8r_moe32h = tag("gemm8r_moe32h");
         k.moe_gather_fp8 = tag("moe_gather_fp8");
         k.silu_mul_x8h = tag("silu_mul_x8h");
+        k.moe_gu_skip_mxw = tag("moe_gu_skip_mxw");  // v0252-f5: gfx1201 only (whole-block decode experts)
+        k.moe_down_skip_mxw = tag("moe_down_skip_mxw");
     }
     return k;
 }
@@ -120,6 +131,167 @@ void testOpsMoeRouter(ops::MoeProblem p, const kn::KernelTable& k97, const kn::K
         const std::string got = nameOf(ops::chooseMoe(q, bal, k8, k8.silu_mul_x8h).router);
         CHECK_DETAIL(got == s.want, "router shape E " + std::to_string(s.E) + " R " + std::to_string(s.R) + " K " + std::to_string(s.K) +
                                         ": got " + got + ", want " + s.want);
+    }
+}
+
+// v0252-f5 (F5 moeskip, from feat027-moeskip-r1 4b6474b; DISCOVERY v4 rule 3.0-1: new entry points only): ops::chooseMoe's
+// moeskip choice (MoePlan::skip). A block skips only when the flag is on (moe_skip_thr > 0, never with prec_dec) and EVERY
+// kernel of its path has a skip entry point: the routing (moe_topk_skip, or moe_skip_apply after the fused router), the
+// decode experts (the whole-block or the generic MXFP4 twins, swapped into gu / down with the same grids), the prefill
+// grouping / combine (moe_route_skip, moe_tiles_skip on the 64-token list paths, moe_combine_skip / moe_combine4_skip; never
+// the fused or f16 combines). Otherwise the block keeps the plan it had (moe_topk; no id is ever -1). Tables: the gfx1201
+// object (whole-block twins) and the gfx1151 one (no whole-block kernels, generic twins, moe_tiles_skip, moe_combine4_skip,
+// the moep default). Fails before the port (chooseMoe never sets skip).
+void testOpsMoeSkip(ops::MoeProblem p) {
+    p.rcnt_buf = true;
+    p.cnt_buf = true;
+    const kn::KernelTable k97 = moeTable(false);
+    kn::KernelTable k8 = moeTable(true);
+    k8.moe_gu_mxw = k8.moe_down_mxw = nullptr;  // the real gfx1151 object has no whole-block MXFP4 decode experts
+    k8.moep_gu[kn::kMoepDefault.gu] = tag("gemm_moepgu_def");
+    k8.moep_dn[kn::kMoepDefault.dn] = tag("gemm_moepdn_def");
+    k8.moep_dc[kn::kMoepDefault.dn] = tag("gemm_moepdc_def");
+    k8.moep_dh[kn::kMoepDefault.dn] = tag("gemm_moepdh_def");
+    k8.moep_dhc[kn::kMoepDefault.dn] = tag("gemm_moepdhc_def");
+    k8.moep_da[kn::kMoepDefault.dn] = tag("gemm_moepda_def");
+    k8.moe_combine4 = tag("moe_combine4");
+    k8.moe_combine4h = tag("moe_combine4h");
+    CHECK(k97.moe_gu_skip_mxw != nullptr && k8.moe_gu_skip_mxw == nullptr && k8.moe_tiles_skip != nullptr && k97.moe_tiles_skip == nullptr);
+    ops::MoeFlags fast;  // R9700 fast: int8 decode, fp8 prefill, whole-block decode experts
+    fast.moe_fp8 = true;
+    fast.moep_comb_ok = ops::moepCombFor(false, true);
+    fast.moe_skip_thr = 0.05f;
+    ops::MoeFlags noskip = fast;
+    noskip.moe_skip_thr = 0.f;
+    CHECK(ops::MoeFlags{}.moe_skip_thr == 0.f && ops::MoeFlags{}.moe_skip_min == 1u && !ops::MoePlan{}.skip);
+    auto same = [](const ops::MoePlan& a, const ops::MoePlan& b) {
+        return a.small == b.small && a.small_q8 == b.small_q8 && a.bits == b.bits && a.gu_split == b.gu_split && a.gu_up == b.gu_up &&
+               a.gu_grid.x == b.gu_grid.x && a.gu_grid.y == b.gu_grid.y && a.down_grid.x == b.down_grid.x && a.down_grid.y == b.down_grid.y &&
+               a.router == b.router && a.kind == b.kind && a.bn == b.bn && a.max_tiles == b.max_tiles && a.fgu == b.fgu && a.fdn == b.fdn &&
+               a.g_gate == b.g_gate && a.g_up == b.g_up && a.g_down == b.g_down && a.gu_pgrid.x == b.gu_pgrid.x && a.dn_pgrid.x == b.dn_pgrid.x &&
+               a.max_tiles64 == b.max_tiles64 && a.gu_bn == b.gu_bn && a.comb_fused == b.comb_fused && a.comb4 == b.comb4 && a.ydh == b.ydh &&
+               a.comb_atomic == b.comb_atomic && a.comb_grid.x == b.comb_grid.x && a.comb_grid.y == b.comb_grid.y && a.rbf == b.rbf;
+    };
+    // ---- R9700: decode (n = 1), MTP verify rows (2..16) and the wide verify (17..32): the whole-block twins, same grids
+    ops::MoeFlags wide = fast;
+    wide.small_max = 32;
+    for (std::uint32_t n = 1; n <= 32; ++n) {
+        p.n = n;
+        const ops::MoeFlags& f = n <= 16 ? fast : wide;
+        ops::MoeFlags f0 = f;
+        f0.moe_skip_thr = 0.f;
+        const ops::MoePlan a = ops::chooseMoe(p, f, k97, k97.silu_mul_x8h), b = ops::chooseMoe(p, f0, k97, k97.silu_mul_x8h);
+        CHECK_DETAIL(a.skip && a.small_q8 && nameOf(a.gu) == "moe_gu_skip_mxw" && nameOf(a.down) == "moe_down_skip_mxw" && a.router == nullptr &&
+                         !b.skip && nameOf(b.gu) == "moe_gu_mxw" && same(a, b),
+                     "R9700 decode n=" + std::to_string(n) + ": " + nameOf(a.gu) + " / " + nameOf(a.down));
+    }
+    // WHIRL_MOE_MXW=0: the generic MXFP4 twins
+    p.n = 1;
+    {
+        ops::MoeFlags g = fast;
+        g.moe_mxw = false;
+        const ops::MoePlan a = ops::chooseMoe(p, g, k97, k97.silu_mul_x8h);
+        CHECK(a.skip && nameOf(a.gu) == "moe_gu_skip_mx" && nameOf(a.down) == "moe_down_skip_mx");
+    }
+    // the flag off (balance / precise / fast without the item): exactly the old plan, decode and prefill, both tables
+    for (const std::uint32_t n : {1u, 2u, 16u, 512u, 4096u})
+        for (const kn::KernelTable* k : {&k97, static_cast<const kn::KernelTable*>(&k8)}) {
+            p.n = n;
+            ops::MoeFlags pre;
+            pre.prec_dec = true;
+            pre.moe_skip_thr = 0.05f;  // never with prec_dec (precise, f16 decode activations): the precise experts never see -1
+            const ops::MoePlan a = ops::chooseMoe(p, noskip, *k, k->silu_mul_x8h), c = ops::chooseMoe(p, pre, *k, k->silu_mul_x8h);
+            ops::MoeFlags pre0 = pre;
+            pre0.moe_skip_thr = 0.f;
+            CHECK_DETAIL(!a.skip && !c.skip && same(c, ops::chooseMoe(p, pre0, *k, k->silu_mul_x8h)), "flag off / prec_dec n=" + std::to_string(n));
+        }
+    // gate / up of different types (two launches): no twin for that path -> no skip, the old plan
+    {
+        ops::MoeProblem q = p;
+        q.n = 2;
+        q.up_ty = GgmlType::q8_0;
+        const ops::MoePlan a = ops::chooseMoe(q, fast, k97, k97.silu_mul_x8h);
+        CHECK(!a.skip && a.gu_split && nameOf(a.gu) == "moe_gu_mxw" && same(a, ops::chooseMoe(q, noskip, k97, k97.silu_mul_x8h)));
+        q.n = 4096;
+        CHECK(!ops::chooseMoe(q, fast, k97, k97.silu_mul_x8h).skip);  // not MXFP4 experts: never (the item needs MXFP4 experts)
+    }
+    // ---- R9700 prefill: fp8 (512 rows: 32-token tiles, 4096: 64), gemmr (WHIRL_MOE_FP8=0), generic (WHIRL_MOE_RBF=0)
+    for (const std::uint32_t n : {512u, 4096u}) {
+        p.n = n;
+        const ops::MoePlan a = ops::chooseMoe(p, fast, k97, k97.silu_mul_x8h), b = ops::chooseMoe(p, noskip, k97, k97.silu_mul_x8h);
+        CHECK_DETAIL(a.skip && a.kind == ops::MoePrefillKind::fp8 && !a.comb4 && same(a, b), "R9700 prefill fp8 n=" + std::to_string(n));
+        ops::MoeFlags g = fast;
+        g.moe_fp8 = false;
+        CHECK_DETAIL(ops::chooseMoe(p, g, k97, k97.silu_mul_x8h).skip && ops::chooseMoe(p, g, k97, k97.silu_mul_x8h).kind == ops::MoePrefillKind::gemmr,
+                     "R9700 prefill gemmr n=" + std::to_string(n));
+        g.moe_rbf = false;
+        CHECK_DETAIL(ops::chooseMoe(p, g, k97, k97.silu_mul_x8h).skip && ops::chooseMoe(p, g, k97, k97.silu_mul_x8h).kind == ops::MoePrefillKind::generic,
+                     "R9700 prefill generic n=" + std::to_string(n));
+    }
+    // ---- 8060S: decode with the fused router (+ moe_skip_apply) and without it (moe_topk_skip); generic MXFP4 twins
+    ops::MoeFlags f8 = fast;
+    f8.moe_fp8 = false;
+    f8.moe_rfuse = true;
+    ops::setMoep(f8, static_cast<std::uint32_t>(kn::kMoepDefault.gu) + 1, static_cast<std::uint32_t>(kn::kMoepDefault.dn) + 1, kn::kMoepDefault.comb);
+    ops::MoeFlags f80 = f8;
+    f80.moe_skip_thr = 0.f;
+    for (const std::uint32_t n : {1u, 2u, 16u}) {
+        p.n = n;
+        const ops::MoePlan a = ops::chooseMoe(p, f8, k8, k8.silu_mul_x8h), b = ops::chooseMoe(p, f80, k8, k8.silu_mul_x8h);
+        CHECK_DETAIL(a.skip && nameOf(a.router) == "moe_router_fused_i16" && nameOf(a.gu) == "moe_gu_skip_mx" && nameOf(a.down) == "moe_down_skip_mx" &&
+                         !b.skip && nameOf(b.gu) == "moe_gu_mxfp4" && same(a, b),
+                     "8060S decode n=" + std::to_string(n) + ": " + nameOf(a.gu));
+        ops::MoeFlags nr = f8;
+        nr.moe_rfuse = false;
+        const ops::MoePlan c = ops::chooseMoe(p, nr, k8, k8.silu_mul_x8h);
+        CHECK_DETAIL(c.skip && c.router == nullptr && nameOf(c.gu) == "moe_gu_skip_mx", "8060S decode, two-kernel router n=" + std::to_string(n));
+    }
+    // ---- 8060S prefill: fused_gu (< 1024 rows), moep with the default moe_combine4, COMB 5 (atomic) yes, COMB 2 / 3 / 4 no
+    p.n = 512;
+    {
+        const ops::MoePlan a = ops::chooseMoe(p, f8, k8, k8.silu_mul_x8h);
+        CHECK(a.skip && a.kind == ops::MoePrefillKind::fused_gu && !a.comb4 && same(a, ops::chooseMoe(p, f80, k8, k8.silu_mul_x8h)));
+    }
+    p.n = 4096;
+    {
+        const ops::MoePlan a = ops::chooseMoe(p, f8, k8, k8.silu_mul_x8h);
+        CHECK(a.skip && a.kind == ops::MoePrefillKind::moep && a.comb4 && !a.comb_fused && same(a, ops::chooseMoe(p, f80, k8, k8.silu_mul_x8h)));
+        for (const std::uint32_t cm : {2u, 3u, 4u, 5u}) {
+            ops::MoeFlags g = f8;
+            g.moep_comb = cm;
+            ops::MoeFlags g0 = g;
+            g0.moe_skip_thr = 0.f;
+            const ops::MoePlan c = ops::chooseMoe(p, g, k8, k8.silu_mul_x8h), c0 = ops::chooseMoe(p, g0, k8, k8.silu_mul_x8h);
+            CHECK_DETAIL(c.skip == (cm == 5) && same(c, c0), "8060S moep COMB " + std::to_string(cm) + ": skip " + (c.skip ? "yes" : "no"));
+        }
+    }
+    // ---- a missing entry point of the path: no skip, the old plan
+    {
+        p.n = 1;
+        kn::KernelTable m = k97;
+        m.moe_down_skip_mxw = nullptr;
+        CHECK(!ops::chooseMoe(p, fast, m, m.silu_mul_x8h).skip && nameOf(ops::chooseMoe(p, fast, m, m.silu_mul_x8h).gu) == "moe_gu_mxw");
+        m = k97;
+        m.moe_topk_skip = nullptr;
+        CHECK(!ops::chooseMoe(p, fast, m, m.silu_mul_x8h).skip);
+        m = k8;
+        m.moe_skip_apply = nullptr;  // the fused router without the apply pass
+        CHECK(!ops::chooseMoe(p, f8, m, m.silu_mul_x8h).skip);
+        p.n = 4096;
+        m = k97;
+        m.moe_route_skip = nullptr;
+        CHECK(!ops::chooseMoe(p, fast, m, m.silu_mul_x8h).skip);
+        m = k97;
+        m.moe_combine_skip = nullptr;
+        CHECK(!ops::chooseMoe(p, fast, m, m.silu_mul_x8h).skip);
+        m = k8;
+        m.moe_combine4_skip = nullptr;  // moep's moe_combine4
+        CHECK(!ops::chooseMoe(p, f8, m, m.silu_mul_x8h).skip);
+        m = k8;
+        m.moe_tiles_skip = nullptr;
+        CHECK(!ops::chooseMoe(p, f8, m, m.silu_mul_x8h).skip);
+        p.n = 512;
+        CHECK(!ops::chooseMoe(p, f8, m, m.silu_mul_x8h).skip);  // fused_gu's 64-token list
     }
 }
 
@@ -384,6 +556,7 @@ void testOpsMoe() {
         }
     }
     testOpsMoeRouter(p, k97, k8);
+    testOpsMoeSkip(p);  // v0252-f5
 }
 
 }  // namespace
