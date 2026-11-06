@@ -23,10 +23,7 @@
 
 namespace whirl::server {
 
-std::size_t PrefillPhase::chunkLen(const Slot& sl) const {
-    const std::size_t cur = sl.reuse + sl.pf_off;
-    const std::vector<std::uint32_t> imgs = ps_.imgSplits(sl.job->tokens);
-    const std::size_t N = sl.job->tokens.size();
+std::size_t PrefillPhase::execRows(const Slot& sl) const {
     // With the decode floor on, any decoding slot keeps forwards at one chunk, also
     // an unprotected one of the same burst: next to a long prompt a 2048-row forward
     // doubled its stall (96k: 1.2 -> 3.3 s, ~1.5 tok/s) for ~4% faster prefill.
@@ -35,13 +32,37 @@ std::size_t PrefillPhase::chunkLen(const Slot& sl) const {
     if (exec > prefill_chunk && fl_.floor.on())
         for (const Slot& o : slots_)
             if (&o != &sl && o.phase == Phase::decode) exec = prefill_chunk;
-    // a shared-prefix checkpoint / the TAIL-CK tail checkpoint is kept there: no forward crosses it
-    const std::array<std::size_t, 2> stops = {sl.lcp_ck, sl.tail_ck};
-    return sched::execLen(N, sl.sys_split, sl.pf_split, imgs, cur, exec, stops, m_.maxBatch());
+    return exec;
 }
 
-// v0252-n10 test-first stub: the 0.2.5.1 forward (commit 2 takes the tail checkpoint inside the forward)
-PrefillPhase::SoloFwd PrefillPhase::soloLen(const Slot& sl) const { return {chunkLen(sl), 0}; }
+std::size_t PrefillPhase::chunkLen(const Slot& sl) const {
+    const std::size_t cur = sl.reuse + sl.pf_off;
+    const std::vector<std::uint32_t> imgs = ps_.imgSplits(sl.job->tokens);
+    const std::size_t N = sl.job->tokens.size();
+    // a shared-prefix checkpoint / the TAIL-CK tail checkpoint is kept there: no forward crosses it
+    const std::array<std::size_t, 2> stops = {sl.lcp_ck, sl.tail_ck};
+    return sched::execLen(N, sl.sys_split, sl.pf_split, imgs, cur, execRows(sl), stops, m_.maxBatch());
+}
+
+// v0252-n10 (gfx1201: EngineOptions::tail_ck_in_forward): a solo forward that holds the TAIL-CK point runs whole and
+// writes the checkpoint inside (sched::tailInside; the model's state capture), instead of ending at the tail point.
+// The same bits: the trunk by whole-chunk grouping (docs/guide/en/kv-and-caching.md section 7), the DeltaNet state and
+// the MTP rows split at the tail row exactly as before (ServerModel::setStateCapture; progress/v0252-n10.DESIGN.md).
+// chunkLen's forward when: the option is off; the checkpoints are pinned host memory (WHIRL_CKPT_HOST: the capture
+// writes VRAM); DFlash2 drafts (the drafter's capture rows per forward stay as they were); a tier restore may still write
+// the slot's checkpoints (saveCkpt cuts it first); the tail point is not inside the forward; or the model cannot capture
+// there. Segmented forwards (prefillGroup with more than one slot) keep chunkLen too.
+PrefillPhase::SoloFwd PrefillPhase::soloLen(const Slot& sl) const {
+    const SoloFwd old{chunkLen(sl), 0};
+    const std::size_t cur = sl.reuse + sl.pf_off;
+    if (!opt_.tail_ck_in_forward || opt_.ckpt_host || opt_.use_dflash || sl.restore != nullptr || sl.tail_ck <= cur) return old;
+    const std::vector<std::uint32_t> imgs = ps_.imgSplits(sl.job->tokens);
+    const std::array<std::size_t, 1> other = {sl.lcp_ck};
+    const sched::TailForward t =
+        sched::tailInside(sl.job->tokens.size(), sl.sys_split, sl.pf_split, imgs, cur, execRows(sl), other, sl.tail_ck, m_.maxBatch());
+    if (t.cap == 0 || !m_.stateCaptureOk(static_cast<std::uint32_t>(t.len), static_cast<std::uint32_t>(t.cap))) return old;
+    return {t.len, t.cap};
+}
 
 void PrefillPhase::maybeSplitCkpt(Slot& sl, DevPtr hid_row) {
     const std::size_t cur = sl.reuse + sl.pf_off;
@@ -69,9 +90,13 @@ void PrefillPhase::maybeSplitCkpt(Slot& sl, DevPtr hid_row) {
 std::size_t PrefillPhase::prefillStep(Slot& sl) {
     Job& job = *sl.job;
     const std::span<const std::uint32_t> toks = std::span<const std::uint32_t>(job.tokens).subspan(sl.reuse);
-    const std::size_t n = chunkLen(sl);
+    const SoloFwd f = soloLen(sl);
+    const std::size_t n = f.len;
     if (!sc_.ensurePages(sl, sl.reuse + sl.pf_off + n)) throw KvPoolFull();
     m_.selectSeq(sl.id);
+    const std::size_t pos0 = sl.reuse + sl.pf_off;
+    // v0252-n10: the tail checkpoint's buffers, written by this forward after its first f.cap rows
+    const std::size_t ck = f.cap > 0 ? sc_.beginTailCapture(sl, sl.tail_ck, static_cast<std::uint32_t>(f.cap)) : 0;
     if (opt_.use_mtp) {
         m_.prefillMtpChunk(toks, sl.reuse, sl.pf_off, n, sl.ck_hid);
     } else {
@@ -81,6 +106,14 @@ std::size_t PrefillPhase::prefillStep(Slot& sl) {
     sl.pf_off += n;
     bst_.prefill_tok += n;
     prefill_tok_cum_ += n;
+    if (f.cap > 0) {
+        // the MTP hidden row of the checkpoint: hn row cap - 1, the row a forward ending at the tail point leaves last
+        sc_.commitTailCapture(sl, ck, sl.tail_ck,
+                              opt_.use_mtp ? std::optional<DevPtr>(m_.hn() + static_cast<std::uint64_t>(f.cap - 1) * m_.cfg().n_embd * 4)
+                                           : std::nullopt);
+        logI("req {} | slot {} | tail checkpoint @{} written inside the {}-row forward [{}, {})", sl.reqId(), sl.id, sl.tail_ck, n, pos0,
+             pos0 + n);
+    }
     maybeSplitCkpt(sl, m_.hn() + static_cast<std::uint64_t>(n - 1) * m_.cfg().n_embd * 4);
     if (sl.pf_off == toks.size()) finishPrefill(sl);
     return n;
@@ -91,17 +124,16 @@ std::size_t PrefillPhase::prefillStep(Slot& sl) {
 std::size_t PrefillPhase::prefillGroup(Slot& first, std::size_t row_budget) {
     const std::size_t n0 = chunkLen(first);
     const std::size_t small_max = max_small_batch;
-    auto solo = [&] {
+    // the rows the solo forward ran (v0252-n10: more than n0 when it holds the tail checkpoint; n0 when it failed)
+    auto solo = [&]() -> std::size_t {
         try {
-            prefillStep(first);
+            return prefillStep(first);
         } catch (const std::exception& ex) {
             failSlot(first, ex.what());
         }
-    };
-    if (!opt_.seg_prefill || n0 <= small_max || !m_.canSegment()) {
-        solo();
         return n0;
-    }
+    };
+    if (!opt_.seg_prefill || n0 <= small_max || !m_.canSegment()) return solo();
     const std::size_t cap = std::min<std::size_t>(m_.maxBatch(), std::max(row_budget, n0));
     // the other prefilling slots, oldest first
     std::vector<Slot*> cand;
@@ -125,10 +157,7 @@ std::size_t PrefillPhase::prefillGroup(Slot& first, std::size_t row_budget) {
         grp.push_back(sl);
         total += n;
     }
-    if (grp.size() == 1) {
-        solo();
-        return n0;
-    }
+    if (grp.size() == 1) return solo();
     // pool pages for every chunk of the group (a slot that cannot get them fails alone)
     {
         std::vector<Slot*> kept;

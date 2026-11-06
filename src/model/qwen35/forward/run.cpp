@@ -10,7 +10,13 @@ namespace whirl::qwen35 {
 
 void Context::forward(std::span<const u32> tokens, u32 pos0) {
     const u32 n = static_cast<u32>(tokens.size());
+    // v0252-n10: an armed TAIL-CK state capture (setStateCapture) belongs to this forward only: cleared on every exit
+    struct CapReset {
+        u32& row;
+        ~CapReset() { row = 0; }
+    } cap_reset{ck_cap_row};
     if (n == 0 || n > max_batch) throw ModelError("BatchTooLarge");
+    if (ck_cap_row > 0 && !stateCaptureOk(n, ck_cap_row)) throw ModelError("BadStateCapture");
     xq_src = 0;
     x16_src = 0;
     if (pos0 + n > max_ctx) throw ModelError("ContextTooLong");

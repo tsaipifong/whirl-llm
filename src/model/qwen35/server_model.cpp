@@ -78,6 +78,11 @@ public:
         m_.prefillMtpChunk(tokens, pos0, off, n, prev_hidden);
     }
     void prefillSegs(std::span<const PSeg> segs, bool with_mtp) override { m_.prefillSegs(segs, with_mtp); }
+    // v0252-n10: the TAIL-CK state capture inside a prefill forward (qwen35::Context, forward/gdn.cpp)
+    bool stateCaptureOk(std::uint32_t n, std::uint32_t row) const override { return m_.stateCaptureOk(n, row); }
+    void setStateCapture(std::uint32_t row, std::span<const DevPtr> conv, std::span<const DevPtr> ssm) override {
+        m_.setStateCapture(row, conv, ssm);
+    }
     void segLogitsToFront(std::uint32_t k) override { m_.segLogitsToFront(k); }
     std::uint32_t argmax() override { return m_.argmax(); }
 

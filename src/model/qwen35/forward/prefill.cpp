@@ -31,8 +31,17 @@ void Context::prefillWithMtp(std::span<const u32> tokens) {
 // to the same row inside a larger batch. Exact acceptance never showed the
 // difference; relaxacc (fast) keeps drafts, so the text depended on it (FIX-FS).
 // The final chunk's last hidden stays in mtp_h for the first decode draft.
+// v0252-n10: with a TAIL-CK state capture armed for this chunk's forward (setStateCapture, row cap) the MTP rows are
+// split at cap exactly as a forward ending at cap and the next one starting there run them (the batch [1, cap), the
+// row pairing hidden cap - 1 with token cap on its own through mtp_h, the batch (cap, n)): same rows per MTP batch, so
+// the MTP KV - and with relaxacc the text - stays as it was; only the trunk runs as one forward.
 void Context::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t off, std::size_t n, std::optional<DevPtr> prev_hidden) {
     const u64 E = cfg.n_embd;
+    const u32 cap = ck_cap_row;  // (forward() clears it; cleared here too on every exit)
+    struct CapReset {
+        u32& row;
+        ~CapReset() { row = 0; }
+    } cap_reset{ck_cap_row};
     if (off == 0 && prev_hidden) hip::copyAsync(mtp_h, *prev_hidden, E * 4, stream);
     // mtp_h: the previous chunk's last hidden (off > 0) or the checkpoint's (resume)
     if (off > 0 || prev_hidden) (void)mtpForward(mtp_h, tokens.subspan(off, 1), pos0 + static_cast<u32>(off), false);
@@ -45,7 +54,14 @@ void Context::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t
         throw;
     }
     keep_hidden = false;
-    if (n > 1) (void)mtpForward(hn, tokens.subspan(off + 1, n - 1), p + 1, false);
+    if (cap > 0 && cap < n) {
+        if (cap > 1) (void)mtpForward(hn, tokens.subspan(off + 1, cap - 1), p + 1, false);
+        hip::copyAsync(mtp_h, hn + static_cast<u64>(cap - 1) * E * 4, E * 4, stream);
+        (void)mtpForward(mtp_h, tokens.subspan(off + cap, 1), p + cap, false);
+        if (n > cap + 1) (void)mtpForward(hn + static_cast<u64>(cap) * E * 4, tokens.subspan(off + cap + 1, n - cap - 1), p + cap + 1, false);
+    } else if (n > 1) {
+        (void)mtpForward(hn, tokens.subspan(off + 1, n - 1), p + 1, false);
+    }
     hip::copyAsync(mtp_h, hn + (n - 1) * E * 4, E * 4, stream);
 }
 
