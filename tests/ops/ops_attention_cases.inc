@@ -8,6 +8,7 @@
 #include "ops_fakes.h"
 
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 
@@ -208,7 +209,10 @@ bool kgShapesMatch(const ops::AttnPrefillPlan& pl) {
 void testAttnKgAuto();
 
 void testAttnKgVariant() {
-    const kn::KernelTable kv = kgTable(true), k0 = kgTable(false);
+    // v0252-c1asan: a KernelTable is large and under ASan every local gets its own stack slot; main -> testAttnKgVariant ->
+    // testAttnKgAuto -> kgTable -> attnTable overflowed the 1 MB main stack of whirl-ops-tests. The tables are built once, in
+    // static storage (the mutated copy on the heap), like llama.cpp's test-backend-ops keeps its test cases on the heap.
+    static const kn::KernelTable kv = kgTable(true), k0 = kgTable(false);
     // (1) the selector alone: var 1 -> attn_kgv<np>, var 3 -> attn_kgk<np>, np 6 / 4 / 2 only
     for (const std::uint32_t np : {6u, 4u, 2u}) {
         const std::string s = std::to_string(np);
@@ -281,7 +285,8 @@ void testAttnKgVariant() {
             CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg" + s && !pl.steps[0].from_copy && kgShapesMatch(pl));
         }
         // (6) q4 KV on the gfx1201 set (no attn_kg*_q4: FC-1c attn_kgs over dequantized ranges): no variant, every var
-        kn::KernelTable kq4 = kv;
+        const auto kq4p = std::make_unique<kn::KernelTable>(kv);  // heap, see the note at the top of the function
+        kn::KernelTable& kq4 = *kq4p;
         kq4.attn_kg6 = kq4.attn_kg4 = kq4.attn_kg2 = nullptr;
         kq4.kv_dq_rows = nullptr;
         p.dq_rows = 8192;
@@ -310,7 +315,7 @@ void testAttnKgVariant() {
     }
     // (8) the 8060S set (no attn_kg; attn_prefill_wmma / pwf / pws): WHIRL_ATTN_KGVAR changes nothing, f16 and q8 KV
     {
-        const kn::KernelTable k8 = attnTable(true, true, true, false);
+        static const kn::KernelTable k8 = attnTable(true, true, true, false);
         ops::AttnPrefillProblem p;
         p.n = 512;
         p.head_dim = 256;
@@ -356,7 +361,7 @@ void testAttnKgAuto() {
             for (const std::uint32_t var : {0u, 1u, 3u, 2u}) CHECK(ops::attnKgVarFor(var, np, path) == var);  // explicit: as given
         }
     // (2) chooseAttnPrefill with auto: the kernel per model shape and KV path
-    const kn::KernelTable kv = kgTable(true);
+    static const kn::KernelTable kv = kgTable(true);  // static: see testAttnKgVariant
     struct Want {
         std::uint32_t heads, kv, np;
         const char *f16, *q8p;
@@ -416,7 +421,7 @@ void testAttnKgAuto() {
     }
     // (3) the 8060S set: auto changes nothing (no attn_kg there; numerics also keeps 0 on gfx1151)
     {
-        const kn::KernelTable k8 = attnTable(true, true, true, false);
+        static const kn::KernelTable k8 = attnTable(true, true, true, false);
         ops::AttnPrefillProblem p;
         p.n = 512;
         p.head_dim = 256;
