@@ -455,6 +455,18 @@ void loadMoe(MoeKernels& k, const Loader& L) {
     }
     k.moe_combine4 = L.opt("moe_combine4");
     k.moe_combine4h = L.opt("moe_combine4h");
+    // v0252-f5 moeskip (fast; all optional): routing / grouping / combine twins (both code objects), the generic MXFP4 decode
+    // twins (both), the whole-block twins (gfx1201), the 64-token list and float4 combine twins (gfx1151)
+    k.moe_topk_skip = L.opt("moe_topk_skip");
+    k.moe_skip_apply = L.opt("moe_skip_apply");
+    k.moe_route_skip = L.opt("moe_route_skip");
+    k.moe_combine_skip = L.opt("moe_combine_skip");
+    k.moe_gu_skip_mx = L.opt("moe_gu_skip_mxfp4");
+    k.moe_down_skip_mx = L.opt("moe_down_skip_mxfp4");
+    k.moe_gu_skip_mxw = L.opt("moe_gu_skip_mxfp4w");
+    k.moe_down_skip_mxw = L.opt("moe_down_skip_mxfp4w");
+    k.moe_tiles_skip = L.opt("moe_tiles_skip");
+    k.moe_combine4_skip = L.opt("moe_combine4_skip");
     for (QType t : {QType::q4_k, QType::q5_k, QType::q6_k, QType::q8_0, QType::iq4_xs, QType::iq4_nl, QType::q3_k, QType::iq3_s,
                     QType::mxfp4}) {
         k.moe_gu_f[ti(t)] = L.opt(std::string("moe_gu_f_") + sfx(t));

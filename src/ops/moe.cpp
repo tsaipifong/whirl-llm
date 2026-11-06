@@ -52,6 +52,37 @@ bool moepOk(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k
     return p.gate_ty == GgmlType::mxfp4 && p.up_ty == GgmlType::mxfp4 && p.down_ty == GgmlType::mxfp4 && p.gate_rb == p.up_rb && p.tiles64_buf &&
            kernels::kMoepGu[f.moep_gu].bn >= 64 && kernels::kMoepDn[f.moep_dn].bn >= 32;
 }
+// v0252-f5 (moeskip, feat027-moeskip-r1 4b6474b as NEW entry points; DISCOVERY v4 rule 3.0-1): the block drops slots only
+// when the flag is on (fast; never with prec_dec, whose precise decode experts have no -1 twin), the experts are MXFP4 (the
+// decode twins are MXFP4 only; the item needs MXFP4 experts) and EVERY kernel of the chosen path has its skip entry point:
+// routing (moe_topk_skip, or moe_skip_apply after the fused router), decode gate + up / down (the whole-block twins of
+// moe_gu_mxfp4w / moe_down_mxfp4w, or the generic MXFP4 twins; gate and up in one launch), prefill grouping / combine
+// (moe_route_skip; moe_tiles_skip for the 64-token lists of fused_gu / moep; moe_combine_skip / moe_combine4_skip; the fused
+// down + combine and the f16-output combines have none, so those plans keep moe_topk). All or nothing: a partial set would
+// hand id -1 to a kernel without the contract (the feat027-moeskip-r1 moe_f.hip out-of-bounds read).
+bool skipOk(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, const MoePlan& pl, Function* gu, Function* down) {
+    if (f.moe_skip_thr <= 0.f || f.prec_dec) return false;
+    if (p.gate_ty != GgmlType::mxfp4 || p.up_ty != GgmlType::mxfp4 || p.down_ty != GgmlType::mxfp4) return false;
+    if (pl.router != nullptr ? k.moe_skip_apply == nullptr : k.moe_topk_skip == nullptr) return false;
+    if (pl.small) {
+        if (!pl.small_q8 || pl.gu_split) return false;
+        const std::size_t mx = ti(GgmlType::mxfp4);
+        if (pl.gu == k.moe_gu_mxw && pl.down == k.moe_down_mxw && k.moe_gu_mxw != nullptr) {
+            *gu = k.moe_gu_skip_mxw;
+            *down = k.moe_down_skip_mxw;
+        } else if (pl.gu == k.moe_gu[mx] && pl.down == k.moe_down[mx] && k.moe_gu[mx] != nullptr) {
+            *gu = k.moe_gu_skip_mx;
+            *down = k.moe_down_skip_mx;
+        } else {
+            return false;
+        }
+        return *gu != nullptr && *down != nullptr;
+    }
+    if (k.moe_route_skip == nullptr || pl.comb_fused || pl.ydh) return false;
+    if ((pl.kind == MoePrefillKind::fused_gu || pl.kind == MoePrefillKind::moep) && k.moe_tiles_skip == nullptr) return false;
+    if (pl.comb_atomic) return true;  // the down GEMM adds w * y over the tiles' (kept) positions; moe_combine4 K = 0 adds the shared expert
+    return pl.comb4 ? k.moe_combine4_skip != nullptr : k.moe_combine_skip != nullptr;
+}
 // v0251-a7pol (B26-43): the moep flags only from kMoepMinTokensPerExpert tokens per expert (moepWide, moe.h); below it
 // the shipped 0.2.5 plan (no moep GEMMs, moe_combine). The one place the threshold applies.
 MoeFlags moepFloor(const MoeProblem& p, const MoeFlags& f) {
@@ -99,6 +130,12 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
         }
         pl.gu_grid = same ? D((2 * F + 7) / 8, n * K) : D((F + 7) / 8, n * K);
         pl.down_grid = D((E + 7) / 8, n);
+        // v0252-f5 moeskip: the same launches with the skip twins (same arguments and grids)
+        if (Function g = nullptr, d = nullptr; skipOk(p, f, k, pl, &g, &d)) {
+            pl.skip = true;
+            pl.gu = g;
+            pl.down = d;
+        }
         return pl;
     }
     // prefill: group (token, slot) pairs by expert, grouped GEMMs, combine
@@ -184,6 +221,9 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
         pl.gu_pgrid = D(max_tiles, (F + moe_bm - 1) / moe_bm);
         pl.dn_pgrid = D(max_tiles, (E + moe_bm - 1) / moe_bm);
     }
+    // v0252-f5 moeskip: the grouped GEMMs only read the tiles (kept positions), so they are unchanged; the grouping, the
+    // 64-token list and the combine take their skip twins (qwen35::Context::moeBlock)
+    if (Function g = nullptr, d = nullptr; skipOk(p, f, k, pl, &g, &d)) pl.skip = true;
     return pl;
 }
 

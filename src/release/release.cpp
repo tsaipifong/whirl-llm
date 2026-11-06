@@ -321,6 +321,11 @@ constexpr EnvDoc k_env[] = {
     {"GPU and loading", "CODE_OBJECT=FILE", "development: load the GPU kernels from this code object instead of the built-in one", GPU},
     {"GPU and loading", "MOE_FP8=0|1", "MoE expert prefill with fp8 activations (MXFP4 experts; default: on in balance / fast)", GPU},
     {"GPU and loading", "MOE_MXW=0", "generic MXFP4 MoE decode kernels instead of the whole-block ones", GPU},
+    {"GPU and loading", "MOESKIP=T[:M]",
+     "moeskip (fast, MoE with MXFP4 experts): drop routed experts whose renormalized weight is below T (the top M always kept, default 1; "
+     "T = 1: exactly the top M), kept weights renormalized; 0 = off (default: off, opt-in with T or --fast=...,moeskip until its GPU screen "
+     "passes; lossy; ignored in precise / balance)",
+     GPU},
     {"GPU and loading", "EMBD_HOST=0", "keep the token embedding table in VRAM (default: pinned host memory, declared as Shared Usage)", S},
     {"GPU and loading", "TUNE_COLD=1", "autotune: evict the cache before each timing", C | B | T},
     {"GPU and loading", "TUNE_MASK=BITS", "autotune: mask of the candidate GEMM configurations", C | B | T},

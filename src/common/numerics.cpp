@@ -124,7 +124,9 @@ Request parseMode(std::string_view spec, std::string source) {
         return r;
     }
     if (trim(items).empty()) {
-        r.items = r.mode == Mode::balance ? balance_items : (balance_items | fast_only_items);
+        // v0252-f5: a plain --fast leaves out the opt-in items (fast_optin_items: moeskip; plan() adds them by the per-card
+        // fast default rule, Target::moeskip_default)
+        r.items = r.mode == Mode::balance ? balance_items : (balance_items | (fast_only_items & ~fast_optin_items));
     } else {
         r.items = parseItems(items);
         r.custom = true;
@@ -485,6 +487,33 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
                 std::format(" [k {}, alpha {:.2f}, eps {:.2f}, delta {:.2f}]", k, F.relax_alpha, F.relax_eps, F.relax_delta);
         }
     }
+    // v0252-f5 (feat027 moeskip): WHIRL_MOESKIP=T[:M] is fast-only (precise / balance: plan untouched, one note for any value
+    // but "0"); in fast T > 0 = on (a user override where the mode did not request it), "0" = off, a malformed value = one
+    // note and nothing else. moe_skip_thr / moe_skip_min: fast + the item on + int8 decode activations (not prec_dec: the
+    // precise decode experts never see id -1), from the value or the defaults (moeskip_default_thr / _min); else 0 / 1.
+    std::optional<MoeSkipValue> skv;
+    if (const Raw& v = e.moeskip; v && !v->empty()) {
+        if (p.mode != Mode::fast) {
+            if (items)
+                if (std::string ign = applyFastOnlyOverride(p, Item::moeskip, "MOESKIP", *v, *v != "0", true); !ign.empty())
+                    p.ignored.push_back(std::move(ign));
+        } else if (!(skv = parseMoeSkip(*v))) {
+            if (items)
+                p.ignored.push_back(std::format("WHIRL_MOESKIP={} ignored: not T or T:M (T in [0, 1], M a whole number in [1, 64]; e.g. 0.05, 1:6)", *v));
+        } else if (items) {
+            applyOverride(p, Item::moeskip, "MOESKIP", *v, skv->thr > 0.f, t.moe && t.moe_mxfp4 && t.k_moe_skip);
+        }
+    }
+    F.moe_skip_thr = 0.f;
+    F.moe_skip_min = moeskip_default_min;
+    if (p.mode == Mode::fast && p.on(Item::moeskip) && !F.prec_dec) {
+        F.moe_skip_thr = skv && skv->thr > 0.f ? skv->thr : moeskip_default_thr;
+        F.moe_skip_min = skv && skv->min_keep ? *skv->min_keep : moeskip_default_min;
+        if (items)
+            p.items[static_cast<std::size_t>(Item::moeskip)].note +=
+                F.moe_skip_thr >= 1.f ? std::format(" [static top {}]", F.moe_skip_min)
+                                      : std::format(" [tau {:.3f}, top {} kept]", F.moe_skip_thr, F.moe_skip_min);
+    }
     // v0252-c1acc (C-3): an invalid WHIRL_ATTN_KGVAR is reported once (the default from loadFlags stays)
     if (items)
         if (const Raw& v = e.attn_kgvar; v && !parseKgVar(*v))
@@ -560,8 +589,36 @@ std::optional<std::uint32_t> parseKgVar(std::string_view s) {
     return std::nullopt;
 }
 
-// v0252-f5 test-first stub (the port parses "T" / "T:M"): every value is rejected
-std::optional<MoeSkipValue> parseMoeSkip(std::string_view) { return std::nullopt; }
+// v0252-f5: "T" or "T:M" - T a plain decimal in [0, 1] (digits with at most one '.', no sign, exponent, hex, inf or nan),
+// M a whole decimal in [1, 64]
+std::optional<MoeSkipValue> parseMoeSkip(std::string_view s) {
+    const std::size_t colon = s.find(':');
+    const std::string_view ts = s.substr(0, colon);
+    if (ts.empty() || ts.size() > 12) return std::nullopt;
+    int dots = 0, digits = 0;
+    for (const char ch : ts) {
+        if (ch == '.') ++dots;
+        else if (ch >= '0' && ch <= '9') ++digits;
+        else return std::nullopt;
+    }
+    if (dots > 1 || digits == 0) return std::nullopt;
+    const double t = std::strtod(std::string(ts).c_str(), nullptr);
+    if (!(t >= 0.0 && t <= 1.0)) return std::nullopt;
+    MoeSkipValue v;
+    v.thr = static_cast<float>(t);
+    if (colon != std::string_view::npos) {
+        const std::string_view ms = s.substr(colon + 1);
+        if (ms.empty() || ms.size() > 2) return std::nullopt;
+        std::uint32_t m = 0;
+        for (const char ch : ms) {
+            if (ch < '0' || ch > '9') return std::nullopt;
+            m = m * 10 + static_cast<std::uint32_t>(ch - '0');
+        }
+        if (m < 1 || m > 64) return std::nullopt;
+        v.min_keep = m;
+    }
+    return v;
+}
 
 // loader.cpp:537-540 and :730 before arch025-N2b (envFlag = flagOr)
 void loaderFlags(const Request& r, Flags& F) {
@@ -574,7 +631,11 @@ void loaderFlags(const Request& r, Flags& F) {
 }
 
 Plan plan(const Request& r_in, const Target& t) {
-    const Request r = forModel(r_in, t.moe);
+    Request r = forModel(r_in, t.moe);
+    // v0252-f5 (DISCOVERY v4 F5): the fast default rule - a plain --fast (no item list) requests moeskip where the loader set
+    // Target::moeskip_default (moeskip_fast_default_r9700 / _8060s), for MoE models with MXFP4 experts only (a dense model's
+    // log line stays as it was)
+    if (r.mode == Mode::fast && !r.custom && t.moeskip_default && t.moe && t.moe_mxfp4) r.items |= bit(Item::moeskip);
     Plan p;
     p.mode = r.mode;
     p.source = r.source;
@@ -643,6 +704,14 @@ Plan plan(const Request& r_in, const Target& t) {
                     break;
                 }
                 note = "drafts accepted when close to the target (greedy: top-k + p ratio; sampling: typical acceptance)";
+                break;
+            case Item::moeskip:
+                // v0252-f5 (feat027-moeskip-r1 4b6474b): the routing entry points in this code object; the per-path decode /
+                // prefill entry points are ops::chooseMoe's (a block without them runs moe_topk: no id -1 there)
+                if (!t.moe) why = "dense model";
+                else if (!t.moe_mxfp4) why = "experts are not MXFP4";
+                else if (!t.k_moe_skip) why = "no moe_topk_skip / moe_route_skip kernels in this code object";
+                else note = "routed slots with renormalized weight < tau dropped (the top ones kept), kept weights renormalized";
                 break;
             default:
                 why = "not yet implemented (balance behaviour)";
@@ -738,7 +807,7 @@ std::string logLine(const Plan& p) {
         l += std::string(" - f16/f32 prefill activations, ") + (p.q8dec ? "" : "f16 decode / verify activations, ") + "f32 DeltaNet, f16 KV";
     else l += " - enabled: " + (en.empty() ? std::string("none") : en);
     if (p.mode != Mode::precise || !sk.empty()) l += "; skipped: " + (sk.empty() ? std::string("none") : sk);
-    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc))
+    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc) && !p.on(Item::moeskip))
         l += "; no fast item applies here: fast runs as balance";
     for (const std::string& o : p.overrides) l += "; " + o;
     l += std::string("; decode: ") + (p.q8dec ? k_q8dec : k_f16dec);

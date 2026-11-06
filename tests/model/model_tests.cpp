@@ -3041,6 +3041,9 @@ nu::Target targetOf(const q::Model& m) {
     for (std::size_t ci = 0; ci < m.k.gemm8t.size(); ++ci) tiled = tiled && m.k.gemm8t[ci] != nullptr && m.k.gemm8th[ci] != nullptr;
     t.k_gemm8t = tiled && m.k.qact_fp8t != nullptr && m.k.rmsnorm_x8t != nullptr && m.k.silu_mul_x8t != nullptr &&
                  m.k.silu_mul_x8ht != nullptr && m.k.gated_norm_x8t != nullptr && m.k.gated_norm_x8ht != nullptr;
+    // v0252-f5 (moeskip): the routing entry points and the per-card fast default rule (tune.cpp numericsTarget)
+    t.k_moe_skip = m.k.moe_topk_skip != nullptr && m.k.moe_skip_apply != nullptr && m.k.moe_route_skip != nullptr && m.k.moe_combine_skip != nullptr;
+    t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     return t;
 }
 

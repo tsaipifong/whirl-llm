@@ -827,6 +827,9 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     t.gdn_strix_shape = m.cfg.d_state == 128 && m.cfg.headV() == 128 && m.cfg.n_k_heads > 0 && m.cfg.n_v_heads % m.cfg.n_k_heads == 0 &&
                         m.cfg.n_v_heads / m.cfg.n_k_heads <= 4;
     t.k_gemm8t = m.hasTiledFp8();
+    // v0252-f5 (moeskip): the routing / grouping / combine entry points (both code objects) and the per-card fast default rule
+    t.k_moe_skip = m.k.moe_topk_skip != nullptr && m.k.moe_skip_apply != nullptr && m.k.moe_route_skip != nullptr && m.k.moe_combine_skip != nullptr;
+    t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     return t;
 }
 

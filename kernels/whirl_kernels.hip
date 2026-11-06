@@ -47,6 +47,7 @@
 #include "moe_mxfp4.hip"           // MXFP4 routed experts (decode, fp8 grouped GEMM)
 #include "moe_f.hip"               // precise MoE decode experts (f32 activations)
 #include "attn_kgv.hip"            // prefill attention candidates attn_kgv / attn_kgk (v0252-c1port C1; LAST: no existing kernel moves)
+#include "moe_skip.hip"            // moeskip (fast): routing / grouping / combine / decode-expert twins (v0252-f5; after attn_kgv: LAST)
 #endif
 
 #if defined(__gfx1151__)
