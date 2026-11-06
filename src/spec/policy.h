@@ -68,15 +68,20 @@ struct DraftVocabChoice {
 DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, const std::string& dir);
 // vocabulary size of the qwen35 tokenizer the embedded subset was built for
 inline constexpr std::uint32_t draft_vocab_embedded_n_vocab = 248320;
-// the default (embedded 64k) subset is used only for dense qwen35 models with that vocabulary
-inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab) { return !moe && n_vocab == draft_vocab_embedded_n_vocab; }
+// the default (embedded 64k) subset is used for dense qwen35 models with that vocabulary, and for MoE ones where the
+// GPU family's profile row turns it on (moe_ok = device::Profile::draft64k_moe; v0252-n2: the R9700)
+inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab, bool moe_ok = false) {
+    (void)moe_ok;  // v0252-n2 test-first stub: the MoE row is not read yet
+    return !moe && n_vocab == draft_vocab_embedded_n_vocab;
+}
 // Whether the subset can be applied to this model (arch025-N10 / N6, lane 1 leg 6: the decision whirl.exe and
 // whirl-server both wrote, the shape of llama.cpp common_speculative_are_compatible: the decision here, the message and
 // what to do in each front end). none: full / first_n (nothing to apply here; first_n is applied by the caller at its
 // own time); not_fit: the embedded subset does not fit this vocabulary (by_default: draftVocabDefaultFits, explicit:
 // the 248320-token vocabulary); no_d2: it fits but the model has no 2-bit draft head; subset: build and set it.
 enum class DraftVocabGate { none, not_fit, no_d2, subset };
-DraftVocabGate draftVocabGate(const DraftVocabChoice& dv, bool moe, std::uint32_t n_vocab, bool draft_d2);
+// moe_ok: draftVocabDefaultFits' MoE row (the caller passes device::profile(arch).draft64k_moe)
+DraftVocabGate draftVocabGate(const DraftVocabChoice& dv, bool moe, std::uint32_t n_vocab, bool draft_d2, bool moe_ok = false);
 // The ids the subset must keep: every special token and every byte token (the tokenizer's specials() / byteToken(b),
 // -1 = none), in that order.
 template <class Tok>

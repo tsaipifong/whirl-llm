@@ -63,6 +63,10 @@ struct Profile {
     // ---- MTP / prefill schedule
     // a verify row costs far more (UMA): the 8060S draft-count / cost-model defaults (qwen35::mtpDefaults)
     bool mtp_costly_verify_rows;
+    // the embedded 64k MTP draft-head vocabulary subset is the default for MoE models (Ornith) on this family too
+    // (spec.policy draftVocabDefaultFits moe_ok; dense qwen35 models have it on every family). Drafts only: the
+    // verify is unchanged, so the output is the same (v0252-n2 / feat027-draft64k97 b334a52, DISCOVERY v0252 N1)
+    bool draft64k_moe;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
     // ---- vision
@@ -89,6 +93,7 @@ inline constexpr Profile k_profile_gfx1201{
     .gdn_strix = false,
     .numerics_8060s = false,
     .mtp_costly_verify_rows = false,
+    .draft64k_moe = false,
     .prefill_exec_moe = 2048,
     .prefill_fill_batch = false,
     .vision_attn_threads = 128,
@@ -115,6 +120,8 @@ inline constexpr Profile k_profile_gfx1151{
     .gdn_strix = true,
     .numerics_8060s = true,
     .mtp_costly_verify_rows = true,
+    // off since the 0.2.2 freeze (9a58324); FAST-8S-1 item 2 measured +2.5..+3.7 % chat here, not part of 0.2.5.2
+    .draft64k_moe = false,
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .vision_attn_threads = 256,
