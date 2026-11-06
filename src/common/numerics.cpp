@@ -382,12 +382,14 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     setNe0(F.gemmhq_on, e.gemmhq);
     setNe0(F.attn_kx_on, e.attn_kx);
     setNe0(F.attn_kg_on, e.attn_kg);
-    // v0252-c1port (feat026-attnkg97 / -97k): WHIRL_ATTN_KGVAR by std::strtoul; 1 = attn_kgv, 3 = attn_kgk (both designed
-    // bit-identical: class B, every mode), any other value 0 = the shipped attn_kg (var 2 attn_kgw is not ported)
-    if (e.attn_kgvar) {
-        const unsigned long v = std::strtoul(e.attn_kgvar->c_str(), nullptr, 10);
-        F.attn_kg_var = v == 1 || v == 3 ? static_cast<std::uint32_t>(v) : 0u;
-    }
+    // v0252-c1port (feat026-attnkg97 / -97k): 1 = attn_kgv, 3 = attn_kgk (both designed bit-identical: class B, every
+    // mode), 0 = the shipped attn_kg (var 2 attn_kgw is not ported). v0252-c1acc (REVIEW-v0252-c1 C-1 / C-3): the default
+    // is "auto" on the gfx1201 code object (ops::kAttnKgAuto: var 3 only on the measured NP x KV paths) and 0 on the
+    // gfx1151 one; WHIRL_ATTN_KGVAR = auto / 0 / 1 / 3 overrides it, any other value keeps the default (loadOverrides
+    // notes it once in Plan::ignored instead of silently turning the variant off)
+    F.attn_kg_var = t.gfx1151 ? 0u : kAttnKgVarAuto;
+    if (e.attn_kgvar)
+        if (const std::optional<std::uint32_t> v = parseKgVar(*e.attn_kgvar)) F.attn_kg_var = *v;
     setNe0(F.attn_dqf_on, e.attn_dqf);
     if (e.attn_seg) F.attn_seg = static_cast<std::uint32_t>(std::strtoul(e.attn_seg->c_str(), nullptr, 10)) / 256 * 256;
     setNe0(F.gdn_ba_on, e.gdn_ba);
@@ -482,6 +484,10 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
                 std::format(" [k {}, alpha {:.2f}, eps {:.2f}, delta {:.2f}]", k, F.relax_alpha, F.relax_eps, F.relax_delta);
         }
     }
+    // v0252-c1acc (C-3): an invalid WHIRL_ATTN_KGVAR is reported once (the default from loadFlags stays)
+    if (items)
+        if (const Raw& v = e.attn_kgvar; v && !parseKgVar(*v))
+            p.ignored.push_back(std::format("WHIRL_ATTN_KGVAR={} ignored: not auto, 0, 1 or 3 (the default {} stays)", *v, t.gfx1151 ? "0" : "auto"));
     if (items) {
         if (const Raw& v = e.spec_sample; v && !v->empty())
             applyOverride(p, Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
@@ -540,8 +546,18 @@ void runtimeFlags(Front front, const RuntimeValues& v, bool k_gdn_v0, Flags& F) 
 
 }  // namespace
 
-// v0252-c1acc test-first stub (interface only): no value is parsed yet
-std::optional<std::uint32_t> parseKgVar(std::string_view) { return std::nullopt; }
+// v0252-c1acc (C-3): WHIRL_ATTN_KGVAR values (numerics.h)
+std::optional<std::uint32_t> parseKgVar(std::string_view s) {
+    if (s == "auto") return kAttnKgVarAuto;
+    if (s.empty() || s.size() > 8) return std::nullopt;
+    std::uint32_t v = 0;
+    for (const char ch : s) {
+        if (ch < '0' || ch > '9') return std::nullopt;
+        v = v * 10 + static_cast<std::uint32_t>(ch - '0');
+    }
+    if (v == 0 || v == 1 || v == 3) return v;
+    return std::nullopt;
+}
 
 // loader.cpp:537-540 and :730 before arch025-N2b (envFlag = flagOr)
 void loaderFlags(const Request& r, Flags& F) {

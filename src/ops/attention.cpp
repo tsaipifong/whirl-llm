@@ -202,8 +202,12 @@ Function attnKgVariant(std::uint32_t var, const kernels::AttnKernels& k, std::ui
     }
 }
 
-// v0252-c1acc test-first stub (interface only): the auto table is not read yet (every (np, path) -> 0)
-std::uint32_t attnKgAutoVar(std::uint32_t, KgPath) { return 0; }
+// v0252-c1acc (C-1): the auto table's var for (np, path); 0 for any (np, path) not in kAttnKgAuto
+std::uint32_t attnKgAutoVar(std::uint32_t np, KgPath path) {
+    for (const KgAutoRow& r : kAttnKgAuto)
+        if (r.np == np && r.path == path) return r.var;
+    return 0;
+}
 
 // WMMA prefill attention of n queries at positions pos0 .. (keys 0 .. pos0 + n - 1), split over head ranges so
 // one launch does at most ~4096 x 128k query-key pairs x all heads. Same results as one launch.
@@ -259,7 +263,7 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
         Function kf = np == 6 ? k.attn_kgf6 : np == 4 ? k.attn_kgf4 : k.attn_kgf2;
         // v0252-c1port: the attn_kg variant of this NP on the dequantized rows (same grid / block / bits as attn_kgf)
         if (kf != nullptr)
-            if (const Function v = attnKgVariant(f.attn_kg_var, k, np)) kf = v;
+            if (const Function v = attnKgVariant(attnKgVarFor(f.attn_kg_var, np, KgPath::q8p), k, np)) kf = v;
         if (kf != nullptr) {
             AttnStep dq;
             dq.op = AttnStep::Op::dq_rows;
@@ -338,7 +342,7 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
     // v0252-c1port: f16 KV from the cache takes the attn_kg variant of this NP (same grid / block / bits); q8 / q8v
     // from the cache keep attn_kg<np>_q8 / _q8v (the variants are f16 kernels)
     if (kg != nullptr && !p.kv_q8)
-        if (const Function v = attnKgVariant(f.attn_kg_var, k, np)) kg = v;
+        if (const Function v = attnKgVariant(attnKgVarFor(f.attn_kg_var, np, KgPath::f16), k, np)) kg = v;
     for (u32 q = 0; q < parts; ++q) {
         if (kg != nullptr)
             attn(kg, D((n + 15) / 16, hp / np), D(64 * np), q * hp, false, false, 0, 0);
