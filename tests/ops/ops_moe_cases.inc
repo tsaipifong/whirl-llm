@@ -7,6 +7,7 @@
 #include "ops_fakes.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace {
@@ -145,8 +146,13 @@ void testOpsMoeRouter(ops::MoeProblem p, const kn::KernelTable& k97, const kn::K
 void testOpsMoeSkip(ops::MoeProblem p) {
     p.rcnt_buf = true;
     p.cnt_buf = true;
-    const kn::KernelTable k97 = moeTable(false);
-    kn::KernelTable k8 = moeTable(true);
+    // v0252-f5fix: a kn::KernelTable is ~140 KB; main -> testOpsMoe -> testOpsMoeSkip -> moeTable held 7 of them on the 1 MB
+    // main stack (1.12 MB of frames) and whirl-ops-tests / whirl-iso-ops-moe-tests died with 0xC00000FD before any output.
+    // Tables live in static storage (built once) or on the heap (the mutated copies), as in testAttnKgVariant (v0252-c1asan)
+    // and llama.cpp test-backend-ops (test cases in std::unique_ptr).
+    static const kn::KernelTable k97 = moeTable(false);
+    const std::unique_ptr<kn::KernelTable> k8p(new kn::KernelTable(moeTable(true)));  // direct-initialized on the heap
+    kn::KernelTable& k8 = *k8p;
     k8.moe_gu_mxw = k8.moe_down_mxw = nullptr;  // the real gfx1151 object has no whole-block MXFP4 decode experts
     k8.moep_gu[kn::kMoepDefault.gu] = tag("gemm_moepgu_def");
     k8.moep_dn[kn::kMoepDefault.dn] = tag("gemm_moepdn_def");
@@ -268,7 +274,8 @@ void testOpsMoeSkip(ops::MoeProblem p) {
     // ---- a missing entry point of the path: no skip, the old plan
     {
         p.n = 1;
-        kn::KernelTable m = k97;
+        const auto mp = std::make_unique<kn::KernelTable>(k97);  // heap, see the note at the top of the function
+        kn::KernelTable& m = *mp;
         m.moe_down_skip_mxw = nullptr;
         CHECK(!ops::chooseMoe(p, fast, m, m.silu_mul_x8h).skip && nameOf(ops::chooseMoe(p, fast, m, m.silu_mul_x8h).gu) == "moe_gu_mxw");
         m = k97;
@@ -312,7 +319,8 @@ void testOpsMoe() {
     bal.moe_fp8 = true;
     ops::MoeFlags pre;
     pre.prec_dec = true;
-    const kn::KernelTable k97 = moeTable(false), k8 = moeTable(true);
+    // v0252-f5fix: static / heap tables (a kn::KernelTable is ~140 KB; see testOpsMoeSkip)
+    static const kn::KernelTable k97 = moeTable(false), k8 = moeTable(true);
     // decode, balance: int8 experts, the MXFP4 whole-block twins, gate + up in one launch
     p.n = 1;
     auto pl = ops::chooseMoe(p, bal, k97, k97.silu_mul_x8h);
@@ -365,7 +373,8 @@ void testOpsMoe() {
     // both variants are named and in the code object; the combine choice (moe_combine / moe_combine4 / fused into the
     // down epilogue)
     {
-        kn::KernelTable km = k8;
+        const auto kmp = std::make_unique<kn::KernelTable>(k8);  // heap (v0252-f5fix)
+        kn::KernelTable& km = *kmp;
         km.moep_gu[1] = tag("gemm_moepgu_g64n128k64_mxfp4");
         km.moep_dn[2] = tag("gemm_moepdn_m128w4n128k64_mxfp4");
         km.moep_dc[2] = tag("gemm_moepdc_m128w4n128k64_mxfp4");
@@ -479,7 +488,8 @@ void testOpsMoe() {
     {
         CHECK(std::string(kn::kMoepGu[kn::kMoepDefault.gu].name) == "g64n64k64" && std::string(kn::kMoepDn[kn::kMoepDefault.dn].name) == "m128w4n128k64" &&
               kn::kMoepDefault.comb == 1u);
-        kn::KernelTable km = k8;
+        const auto kmp = std::make_unique<kn::KernelTable>(k8);  // heap (v0252-f5fix)
+        kn::KernelTable& km = *kmp;
         for (int v = 0; v < kn::kMoepGuN; ++v) km.moep_gu[v] = tag(std::string("gemm_moepgu_") + kn::kMoepGu[v].name + "_mxfp4");
         for (int v = 0; v < kn::kMoepDnN; ++v) {
             km.moep_dn[v] = tag(std::string("gemm_moepdn_") + kn::kMoepDn[v].name + "_mxfp4");

@@ -973,15 +973,31 @@ static void testKgVarFlag() {
 //  S7 f16 decode activations (WHIRL_Q8DEC=0: prec_dec) keep moe_skip_thr 0 (the precise decode experts never see id -1);
 //  S8 precise / balance plans do not depend on the moeskip inputs of the target at all;
 //  S9 parseMoeSkip.
-static void testMoeSkipPlan() {
-    using Item = nu::Item;
-    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals = {}) {
-        nu::Request r = nu::parseMode(mode, "t");
-        r.load_overrides = true;
-        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
-        return nu::plan(r, t);
-    };
-    auto st = [](const nu::Plan& p) -> const nu::ItemState& { return p.items[static_cast<std::size_t>(Item::moeskip)]; };
+// The Plan / Target values of this test live in several parts (one function each) so no frame sums over MSVC /analyze's 16 KB
+// C6262 limit (v0252-f5fix2; same class as the v0252-f5fix test-stack fix in tests/ops/ops_moe_cases.inc). The checks are unchanged.
+static nu::Plan msPlan(const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals = {}) {
+    nu::Request r = nu::parseMode(mode, "t");
+    r.load_overrides = true;
+    for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+    return nu::plan(r, t);
+}
+static const nu::ItemState& msSt(const nu::Plan& p) { return p.items[static_cast<std::size_t>(nu::Item::moeskip)]; }
+struct MsTargets {
+    nu::Target r97, r97d, s8, s8d;
+};
+static const MsTargets& msT() {
+    static const MsTargets t{target(card("r9700"), "moe", false), target(card("r9700"), "swift", false), target(card("8060s"), "moe", false),
+                             target(card("8060s"), "swift", false)};
+    return t;
+}
+static void testMoeSkipPlanS1S2() {
+    using Item [[maybe_unused]] = nu::Item;
+    [[maybe_unused]] auto pl = [](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals = {}) { return msPlan(t, mode, std::move(vals)); };
+    [[maybe_unused]] auto st = msSt;
+    [[maybe_unused]] const nu::Target& r97 = msT().r97;
+    [[maybe_unused]] const nu::Target& r97d = msT().r97d;
+    [[maybe_unused]] const nu::Target& s8 = msT().s8;
+    [[maybe_unused]] const nu::Target& s8d = msT().s8d;
     // S1
     NCHECK((nu::fast_only_items & nu::bit(Item::moeskip)) != 0 && (nu::balance_items & nu::bit(Item::moeskip)) == 0, "S1 fast-only");
     NCHECK((nu::implemented_items & nu::bit(Item::moeskip)) != 0 && nu::itemFromName("moeskip") == Item::moeskip, "S1 implemented");
@@ -989,8 +1005,6 @@ static void testMoeSkipPlan() {
     NCHECK(!nu::moeskip_fast_default_r9700 && !nu::moeskip_fast_default_8060s,
            "S1 shipped: the per-card fast default rule is off on both cards until G5 / G6 (flip it with this pin)");
     NCHECK(nu::moeskip_default_thr == 0.05f && nu::moeskip_default_min == 1u, "S1 default threshold 0.05 / top 1 (estimate until the G5 sweep)");
-    const nu::Target r97 = target(card("r9700"), "moe", false), r97d = target(card("r9700"), "swift", false);
-    const nu::Target s8 = target(card("8060s"), "moe", false), s8d = target(card("8060s"), "swift", false);
     NCHECK(r97.k_moe_skip && s8.k_moe_skip && !r97.moeskip_default && !s8.moeskip_default, "S1 target fakes");
     // S2
     for (const CardFake& c : k_cards)
@@ -1000,6 +1014,16 @@ static void testMoeSkipPlan() {
                        nu::logLine(p).find("moeskip") == std::string::npos && nu::propsJson(p, "f16").find("moeskip") == std::string::npos,
                    "S2 {} {}: plain fast does not request moeskip", c.name, model);
         }
+}
+
+static void testMoeSkipPlanS3() {
+    using Item [[maybe_unused]] = nu::Item;
+    [[maybe_unused]] auto pl = [](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals = {}) { return msPlan(t, mode, std::move(vals)); };
+    [[maybe_unused]] auto st = msSt;
+    [[maybe_unused]] const nu::Target& r97 = msT().r97;
+    [[maybe_unused]] const nu::Target& r97d = msT().r97d;
+    [[maybe_unused]] const nu::Target& s8 = msT().s8;
+    [[maybe_unused]] const nu::Target& s8d = msT().s8d;
     // S3 (the rule switched on in the target, as the loader fills it when a constant is true)
     for (const nu::Target* base : {&r97, &s8}) {
         nu::Target on = *base;
@@ -1023,6 +1047,16 @@ static void testMoeSkipPlan() {
         const nu::Plan pd = pl(dn, "fast"), p0 = pl(*base, "fast");
         NCHECK(!st(pd).requested && nu::logLine(pd) == nu::logLine(p0) && pd.bitsKey() == p0.bitsKey(), "S3 dense model: not requested, plan unchanged");
     }
+}
+
+static void testMoeSkipPlanS4S5() {
+    using Item [[maybe_unused]] = nu::Item;
+    [[maybe_unused]] auto pl = [](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals = {}) { return msPlan(t, mode, std::move(vals)); };
+    [[maybe_unused]] auto st = msSt;
+    [[maybe_unused]] const nu::Target& r97 = msT().r97;
+    [[maybe_unused]] const nu::Target& r97d = msT().r97d;
+    [[maybe_unused]] const nu::Target& s8 = msT().s8;
+    [[maybe_unused]] const nu::Target& s8d = msT().s8d;
     // S4
     for (const nu::Target* t : {&r97, &s8})
         for (const char* spec : {"fast:moeskip", "fast:all", "fast:kvq4,relaxacc,moeskip"}) {
@@ -1047,6 +1081,16 @@ static void testMoeSkipPlan() {
                    st(p).note);
         }
     }
+}
+
+static void testMoeSkipPlanS6() {
+    using Item [[maybe_unused]] = nu::Item;
+    [[maybe_unused]] auto pl = [](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals = {}) { return msPlan(t, mode, std::move(vals)); };
+    [[maybe_unused]] auto st = msSt;
+    [[maybe_unused]] const nu::Target& r97 = msT().r97;
+    [[maybe_unused]] const nu::Target& r97d = msT().r97d;
+    [[maybe_unused]] const nu::Target& s8 = msT().s8;
+    [[maybe_unused]] const nu::Target& s8d = msT().s8d;
     // S6
     for (const char* mode : {"precise", "balance"})
         for (const nu::Target* t : {&r97, &s8}) {
@@ -1091,6 +1135,16 @@ static void testMoeSkipPlan() {
         const nu::Plan pd = pl(t->gfx1151 ? s8d : r97d, "fast", {{"MOESKIP", "0.05"}});
         NCHECK(!pd.on(Item::moeskip) && pd.flags.moe_skip_thr == 0.f, "S6 dense: not applicable, off");
     }
+}
+
+static void testMoeSkipPlanS7S9() {
+    using Item [[maybe_unused]] = nu::Item;
+    [[maybe_unused]] auto pl = [](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals = {}) { return msPlan(t, mode, std::move(vals)); };
+    [[maybe_unused]] auto st = msSt;
+    [[maybe_unused]] const nu::Target& r97 = msT().r97;
+    [[maybe_unused]] const nu::Target& r97d = msT().r97d;
+    [[maybe_unused]] const nu::Target& s8 = msT().s8;
+    [[maybe_unused]] const nu::Target& s8d = msT().s8d;
     // S7
     for (const nu::Target* t : {&r97, &s8}) {
         const nu::Plan p = pl(*t, "fast:moeskip", {{"Q8DEC", "0"}});
@@ -1117,6 +1171,14 @@ static void testMoeSkipPlan() {
         for (const char* bad : {"", "abc", "1.5", "-0.1", "0.05:0", "0.05:65", "0.05:x", "0.05:2.5", "nan", "0x1", "0.05:", ":2", "inf", " 0.05", "0.05 "})
             NCHECK(!nu::parseMoeSkip(bad), "S9 parseMoeSkip('{}') rejects", bad);
     }
+}
+
+static void testMoeSkipPlan() {
+    testMoeSkipPlanS1S2();
+    testMoeSkipPlanS3();
+    testMoeSkipPlanS4S5();
+    testMoeSkipPlanS6();
+    testMoeSkipPlanS7S9();
 }
 
 void testNumericsPlan(int& pass, int& fail) {
