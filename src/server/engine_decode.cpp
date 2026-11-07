@@ -91,6 +91,7 @@ struct SpecCycle::Cycle {
     std::array<std::size_t, qwen35::max_drafts + 1> n_step{};
     std::uint32_t rows = 0;  // the verify's rows
     std::uint32_t rk = 0;
+    bool rank1p = false;  // v0252-f1: the verify's argmax kernel ranked the greedy relaxacc drafts (no topk_rows)
 };
 
 // relaxacc (fast) applies to MTP drafts only: one rule for every site below (FR-DFL P2-3)
@@ -375,6 +376,13 @@ void SpecCycle::enqueueVerify(Cycle& cy) {
         // its KV cache stays complete for later drafting cycles
         m_.mtpBatchStepEx(std::span<const MSeg>(cy.msegs.data(), cy.A), 0, false);
     }
+    // relaxacc one-pass check (v0252-f1, DISCOVERY F1): greedy relaxacc slots with MTP drafts get their drafts' full-row
+    // ranks from the verify's argmax kernel (sampleRows then launches no topk_rows for them); a model without the
+    // kernel keeps topk_rows
+    std::uint32_t rmask = 0;
+    for (std::size_t k = 0; k < cy.A && k < 32; ++k)
+        if (cy.act[k]->greedy && relaxes(cy, k) && cy.nd_of[k] > 0) rmask |= 1u << k;
+    cy.rank1p = rmask != 0 && m_.setRelaxRank(sb_.relaxDev(), rmask, max_rows);
     if (cy.p && cy.p->events) m_.profileStart(1, cy.pa);
     cy.rows = m_.verifyBatchEnqueue(std::span<const VSeg>(cy.vsegs.data(), cy.A));
     if (cy.p) m_.profileStop();
@@ -388,7 +396,7 @@ void SpecCycle::sampleRows(Cycle& cy) {
         if (sl.greedy) {
             if (relaxes(cy, k) && cy.nd_of[k] > 0) {
                 any_relax = true;
-                sb_.launchTopk(cy.row_of[k], cy.nd_of[k], cy.rk, 1.0f, sb_.relaxDev(), max_rows, cy.row_of[k]);
+                if (!cy.rank1p) sb_.launchTopk(cy.row_of[k], cy.nd_of[k], cy.rk, 1.0f, sb_.relaxDev(), max_rows, cy.row_of[k]);
             }
             continue;
         }
@@ -402,7 +410,8 @@ void SpecCycle::sampleRows(Cycle& cy) {
         cy.p->enq_ms[cy.pa] += std::chrono::duration<double, std::milli>(t_enq - cy.tc0).count();
     }
     if (any_sampling) ops_.download(sb_.sampHost().data(), sb_.sampDev(), SampleBuffers::sampBytes());
-    if (any_relax) ops_.download(sb_.relaxHost().data(), sb_.relaxDev(), sb_.relaxHost().size());
+    if (any_relax)
+        ops_.download(sb_.relaxHost().data(), sb_.relaxDev(), cy.rank1p ? static_cast<std::size_t>(max_rows) * 12 : sb_.relaxHost().size());
 }
 
 void SpecCycle::trainCycle(Cycle& cy) {
@@ -499,7 +508,7 @@ void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& a
     const sampling::Drafts drafts{std::span<const std::uint32_t>(dr.data(), dr.size()), nd_dev, row0};
     const sampling::RepeatGuard repeats = [&](std::uint32_t a) { return relaxRepeats(sl, dr, a); };
     const sampling::Accepted ac =
-        sl.greedy ? acceptor.greedy(ctl + qwen35::ctl_rows, drafts, relaxes(cy, k), sampling::RelaxRows{sb_.relaxHost().data(), max_rows, cy.rk},
+        sl.greedy ? acceptor.greedy(ctl + qwen35::ctl_rows, drafts, relaxes(cy, k), sampling::RelaxRows{sb_.relaxHost().data(), max_rows, cy.rk, cy.rank1p},
                                     repeats, sl.relaxed, sl.relax_gap)
                   : acceptor.sample(sb_, sl.sm, drafts, relaxes(cy, k), sl.n_gen, repeats, sl.relaxed);
     std::uint32_t acc = ac.acc;

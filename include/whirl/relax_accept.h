@@ -78,8 +78,8 @@ inline bool acceptGreedy(const Params& p, std::span<const std::int32_t> ids, std
 // equals acceptGreedy on the row's exact top-K (K >= p.topk(), ties to the lower ids); acceptGreedy on topk_rows' set
 // differs only when topk_rows filled its K-th place from tied values by atomic order (DISCOVERY F1 "K-th rank tie overflow").
 inline bool acceptRank(const Params& p, std::int32_t rank, float ld, float m) {
-    (void)p, (void)rank, (void)ld, (void)m;
-    return false;  // v0252-f1 test-first stub (the port gives the rule)
+    if (rank < 0 || static_cast<std::uint32_t>(rank) >= p.topk()) return false;
+    return std::exp(static_cast<double>(ld) - static_cast<double>(m)) >= static_cast<double>(p.alpha);
 }
 
 // Repetition guard: true when hist followed by tail ends in an n-gram (n = 6) that already occurs
