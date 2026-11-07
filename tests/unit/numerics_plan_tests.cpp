@@ -755,6 +755,108 @@ void testFastOnlyRefusal() {
     }
 }
 
+// v0252-f2 (DISCOVERY v4 row F2): fast MoE relaxed acceptance by a named arm. RA-1 the arm table and the pre-screen
+// defaults; RA-2 fast MoE takes the arm (8060S always, R9700 only with F1's one-pass check); RA-3 the env still
+// overrides it; RA-4 precise / balance and dense fast plans are unchanged by any arm (bitsKey, log line, overrides,
+// ignored, relax_drafts); RA-5 the draft-count default. Fails before the port (stub: no arm is known).
+void testRelaxMoeArms() {
+    auto planOf = [](const char* mode, const nu::Target& t, std::vector<std::pair<const char*, const char*>> vals, bool lo = true) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = lo;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    const nu::ItemState& (*item)(const nu::Plan&) = [](const nu::Plan& p) -> const nu::ItemState& {
+        return p.items[static_cast<std::size_t>(nu::Item::relaxacc)];
+    };
+    // RA-1
+    struct Want {
+        const char* name;
+        bool on;
+        std::uint32_t k;
+        float alpha;
+        std::uint32_t drafts;
+    };
+    const Want k_want[] = {{"off", false, 4, 0.1f, 0}, {"k4a10", true, 4, 0.1f, 0}, {"k6a05", true, 6, 0.05f, 0}, {"k4a10d2", true, 4, 0.1f, 2}};
+    NCHECK(nu::relax_moe_arms.size() == std::size(k_want), "RA-1 arm count {}", nu::relax_moe_arms.size());
+    for (const Want& w : k_want) {
+        const nu::RelaxArm* a = nu::relaxArm(w.name);
+        NCHECK(a != nullptr, "RA-1 arm {} unknown", w.name);
+        if (a == nullptr) continue;
+        NCHECK(a->name == w.name && a->on == w.on && a->k == w.k && a->alpha == w.alpha && a->drafts == w.drafts, "RA-1 arm {} values", w.name);
+    }
+    NCHECK(nu::relaxArm("") == nullptr && nu::relaxArm("k4") == nullptr, "RA-1 unknown names");
+    // pre-screen pin: both GPUs ship "off" until G3a / G4a (re-pin here when the screen picks an arm)
+    NCHECK(nu::relaxMoeDefaultName(true) == "off" && nu::relaxMoeDefaultName(true) == nu::relax_moe_default_8060s, "RA-1 8060S default");
+    NCHECK(nu::relaxMoeDefaultName(false) == "off" && nu::relaxMoeDefaultName(false) == nu::relax_moe_default_r9700, "RA-1 R9700 default");
+    for (const std::string_view n : {nu::relax_moe_default_8060s, nu::relax_moe_default_r9700})
+        NCHECK(nu::relaxArm(n) != nullptr, "RA-1 default {} is not an arm", n);
+
+    for (const CardFake& c : k_cards) {
+        const bool g51 = c.prof.numerics_8060s;
+        for (const bool rank : {false, true}) {
+            nu::Target t0 = target(c, "moe", false);
+            t0.k_relax_rank = rank;
+            const nu::Plan base = planOf("fast", t0, {});
+            // today's behaviour with no arm: MoE fast skips relaxacc
+            NCHECK(!base.on(nu::Item::relaxacc) && !base.flags.relax_on && base.relax_drafts == 0, "RA-2 {} base", c.name);
+            for (const Want& w : k_want) {
+                nu::Target t = t0;
+                t.relax_moe_arm = w.name;
+                const std::string cell = std::format("{} rank {} arm {}", c.name, rank, w.name);
+                const nu::Plan p = planOf("fast", t, {});
+                const bool takes = w.on && (g51 || rank);
+                // RA-2
+                NCHECK(p.on(nu::Item::relaxacc) == takes && p.flags.relax_on == takes, "RA-2 {}: on {}", cell, p.flags.relax_on);
+                if (takes) {
+                    NCHECK(p.flags.relax_k == w.k && p.flags.relax_alpha == w.alpha && p.relax_drafts == w.drafts, "RA-2 {}: k {} alpha {} drafts {}",
+                           cell, p.flags.relax_k, p.flags.relax_alpha, p.relax_drafts);
+                    NCHECK(item(p).note.starts_with(std::format("MoE arm {}: ", w.name)), "RA-2 {}: note '{}'", cell, item(p).note);
+                    NCHECK(item(p).note.find(std::format("[k {}, alpha {:.2f}", w.k, w.alpha)) != std::string::npos, "RA-2 {}: params note", cell);
+                    // flags do not depend on load_overrides (only the notes do)
+                    NCHECK(planOf("fast", t, {}, false).flags == p.flags, "RA-2 {}: flags differ without load_overrides", cell);
+                } else if (w.on) {
+                    NCHECK(p.relax_drafts == 0 && item(p).note.find("one-pass relaxacc check (F1)") != std::string::npos, "RA-2 {}: R9700 without F1 '{}'",
+                           cell, item(p).note);
+                } else {
+                    NCHECK(p.bitsKey() == base.bitsKey() && nu::logLine(p) == nu::logLine(base) && p.relax_drafts == 0, "RA-2 {}: off arm changed the plan", cell);
+                }
+                // RA-3: the env over the arm
+                const nu::Plan pk = planOf("fast", t, {{"RELAX_K", "3"}, {"RELAX_ALPHA", "0.2"}});
+                if (takes) NCHECK(pk.flags.relax_k == 3 && pk.flags.relax_alpha == 0.2f, "RA-3 {}: env K / ALPHA", cell);
+                const nu::Plan p0 = planOf("fast", t, {{"RELAX", "0"}});
+                NCHECK(!p0.flags.relax_on && !p0.on(nu::Item::relaxacc) && p0.relax_drafts == 0, "RA-3 {}: RELAX=0 turns it off", cell);
+                const nu::Plan p1 = planOf("fast", t, {{"RELAX", "1"}});
+                NCHECK(p1.flags.relax_on && p1.on(nu::Item::relaxacc), "RA-3 {}: RELAX=1 forces it", cell);
+                const Want& base_w = w.on ? w : k_want[1];  // forced with no arm: today's k 4 / alpha 0.1, no drafts
+                NCHECK(p1.flags.relax_k == base_w.k && p1.flags.relax_alpha == base_w.alpha && p1.relax_drafts == (w.on ? w.drafts : 0u),
+                       "RA-3 {}: forced k {} alpha {} drafts {}", cell, p1.flags.relax_k, p1.flags.relax_alpha, p1.relax_drafts);
+                // RA-5
+                NCHECK(nu::mtpDraftsDefault(1, p) == (takes && w.drafts > 0 ? w.drafts : 1u), "RA-5 {}: drafts default", cell);
+                NCHECK(nu::mtpDraftsDefault(1, p0) == 1u, "RA-5 {}: RELAX=0 keeps the device default", cell);
+                // RA-4: precise / balance (with and without WHIRL_RELAX=1) and dense fast never see the arm
+                for (const char* mode : {"precise", "balance"})
+                    for (const bool force : {false, true}) {
+                        std::vector<std::pair<const char*, const char*>> env;
+                        if (force) env = {{"RELAX", "1"}, {"RELAX_K", "6"}};
+                        const nu::Plan a = planOf(mode, t, env), b = planOf(mode, t0, env);
+                        NCHECK(a.bitsKey() == b.bitsKey() && nu::logLine(a) == nu::logLine(b) && a.overrides == b.overrides && a.ignored == b.ignored &&
+                                   a.relax_drafts == 0 && !a.flags.relax_on && nu::propsJson(a, "f16") == nu::propsJson(b, "f16"),
+                               "RA-4 {} {} force {}: the arm changed the plan", cell, mode, force);
+                    }
+                nu::Target td = target(c, "swift", false), td0 = td;
+                td.relax_moe_arm = w.name;
+                td.k_relax_rank = rank;
+                for (const char* mode : {"precise", "balance", "fast"}) {
+                    const nu::Plan a = planOf(mode, td, {}), b = planOf(mode, td0, {});
+                    NCHECK(a.bitsKey() == b.bitsKey() && nu::logLine(a) == nu::logLine(b) && a.relax_drafts == 0, "RA-4 {} swift {}: the arm changed a dense plan",
+                           cell, mode);
+                }
+            }
+        }
+    }
+}
+
 }  // namespace
 
 // v0251-a7port: the Radeon 8060S MoE prefill default (kernels::kMoepDefault = g64n64k64 + m128w4n128k64 + moe_combine4,
@@ -899,6 +1001,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)
     testFastOnlyRefusal();  // bug-fastonly: refusal notes, fast unchanged
+    testRelaxMoeArms();  // v0252-f2 (fails before the port: no arm is known)
     pass += g_p;
     fail += g_f;
 }

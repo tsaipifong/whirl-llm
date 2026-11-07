@@ -642,6 +642,10 @@ void setQ8dec(Plan& p, bool q8, const std::string& env) {
     }
 }
 
+// v0252-f2 (test-first stub; the port fills these in)
+const RelaxArm* relaxArm(std::string_view) { return nullptr; }
+std::string_view relaxMoeDefaultName(bool) { return {}; }
+
 void skipItem(Plan& p, Item it, const std::string& why) {
     ItemState& s = p.items[static_cast<std::size_t>(it)];
     if (!s.enabled) return;
