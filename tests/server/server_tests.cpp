@@ -2931,6 +2931,8 @@ void testMtpStepJoinRows() {
     CHECK_EQ(g_log.count("BatchTooLarge"), 0u);
     CHECK(srv.model().maxStepRows() <= qwen35::max_small_batch);       // no MTP step over the model's rows
     CHECK_EQ(srv.model().splitCycles(), srv.model().overCycles());     // split only the cycles that need it
+    // (fix commit) every split cycle is logged once: the evidence a GPU run of the fixed server shows
+    CHECK_EQ(g_log.count("MTP step r = 0 split into"), static_cast<std::size_t>(srv.model().splitCycles()));
     CHECK_EQ(srv.model().poison(), 0u);
     CHECK_EQ(srv.model().hidMismatch(), 0u);
     const auto h = srv.get("/health");
