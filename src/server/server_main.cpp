@@ -728,7 +728,8 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     // (MTP_DRAFTS / MTP_PMIN / MTP_NMIN: the readers shared with the CLI's mtpOpts, config.settings, arch025-N15 rest)
     const std::optional<std::uint32_t> drafts_env = settings::mtpDrafts(def.drafts, qwen35::max_drafts);
     const std::optional<std::uint32_t> drafts_user = qwen35::mtpDraftsGiven(opt.mtp_drafts, drafts_env);  // (module spec.policy, arch025-lane1 leg 10)
-    const std::uint32_t& drafts = b.drafts = drafts_user.value_or(def.drafts);
+    // v0252-f2: a fast MoE relaxacc arm may ask for its own draft count (numerics::mtpDraftsDefault; 0 drafts = def)
+    const std::uint32_t& drafts = b.drafts = drafts_user.value_or(whirl::numerics::mtpDraftsDefault(def.drafts, model.num_plan));
     float& p_min = b.p_min = settings::mtpPmin(def.p_min);
     const std::uint32_t& n_min = b.n_min = settings::mtpNmin(0, settingsWarn);
     const auto& adapt_env = b.adapt_env = settings::envGet("MTP_ADAPT");

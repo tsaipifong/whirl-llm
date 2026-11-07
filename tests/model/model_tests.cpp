@@ -3039,6 +3039,7 @@ nu::Target targetOf(const q::Model& m) {
     for (std::size_t ci = 0; ci < m.k.gemm8t.size(); ++ci) tiled = tiled && m.k.gemm8t[ci] != nullptr && m.k.gemm8th[ci] != nullptr;
     t.k_gemm8t = tiled && m.k.qact_fp8t != nullptr && m.k.rmsnorm_x8t != nullptr && m.k.silu_mul_x8t != nullptr &&
                  m.k.silu_mul_x8ht != nullptr && m.k.gated_norm_x8t != nullptr && m.k.gated_norm_x8ht != nullptr;
+    t.relax_moe_arm = nu::relaxMoeDefaultName(t.gfx1151);  // v0252-f2 (tune.cpp numericsTarget)
     return t;
 }
 
