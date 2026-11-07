@@ -241,7 +241,9 @@ public:
 
 private:
     // Model::load's prefill / decode buffers (Scratch) and the sizing self-check (src/model/qwen35/scratch.cpp)
-    void allocScratch(std::uint32_t fd_splits_);
+    // v0252-f4 (R-C3): moe_shx = the load planned moeshx (numerics Flags::moe_shx): the MoE decode expert buffers get the
+    // shared expert's slot (max_verify_rows x (K + 1) pairs, moeDecodePairs); false = the 0.2.5.1 sizes
+    void allocScratch(std::uint32_t fd_splits_, bool moe_shx = false);
     Mat requantQ4k(const Mat& w);
     std::vector<Mat*> tuneMats(Layer& L);
 };

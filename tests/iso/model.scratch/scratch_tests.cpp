@@ -62,6 +62,31 @@ void testMoeAddsExpertBuffers() {
     ISO_CHECK(q::bufferBytes(c, 128, 17408, 0, 64) > d + 128ull * 256 * 4);  // at least moe_logits
 }
 
+
+// v0252-f4 (moeshx, DISCOVERY R-C3): the MoE decode expert buffers hold max_verify_rows x K pairs (precise, balance, the
+// 8060S, fast without moeshx: the 0.2.5.1 sizes) and max_verify_rows x (K + 1) only when the load planned moeshx;
+// bufferBytes (the pre-load estimate every caller uses) stays the K form, moeShxExtraBytes is the slot's bytes
+// (moe_g + moe_u f32, moe_xq int8, moe_xd one f32 per 32). Fails before the port (stubs: no extra slot).
+void testMoeShxSlots() {
+    q::Config c = dense();
+    ISO_CHECK(q::moeDecodePairs(c, false) == 0 && q::moeDecodePairs(c, true) == 0 && q::moeShxExtraBytes(c) == 0);  // dense: none
+    c.moe = true;
+    c.n_expert = 256;
+    c.n_expert_used = 8;
+    c.n_ff_exp = 512;
+    c.n_embd = 2048;
+    ISO_CHECK(q::moeDecodePairs(c, false) == 32ull * 8);  // the 0.2.5.1 size (max_verify_rows x K)
+    ISO_CHECK(q::moeDecodePairs(c, true) == 32ull * 9);   // + the shared expert's slot
+    ISO_CHECK(q::max_verify_rows == 32);
+    ISO_CHECK(q::moeShxExtraBytes(c) == 32ull * 512 * 4 * 2 + 32ull * 512 + 32ull * 512 / 32 * 4);  // 146 KiB on Ornith
+    ISO_CHECK(q::moeShxExtraBytes(c) == 146ull * 1024);
+    // the estimate is the K form: the four buffers' bytes from moeDecodePairs(c, false), unchanged by the slot
+    q::Config d = c;
+    d.n_ff_exp = 1024;  // doubles F: the decode-pair buffers grow by exactly their K-form bytes at F 512
+    const u64 kform = q::moeDecodePairs(c, false) * 512 * (4 * 2 + 1) + q::moeDecodePairs(c, false) * 512 / 32 * 4;
+    ISO_CHECK(q::bufferBytes(d, 128, 17408, 0, 64) - q::bufferBytes(c, 128, 17408, 0, 64) >= kform);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -69,6 +94,7 @@ int main(int argc, char** argv) {
                     {{"fd_splits_term", testFdSplitsTerm},
                      {"max_elems_and_ffs_terms", testMaxElemsAndFfsTerms},
                      {"dq_ptab_term", testDqPtabTerm},
-                     {"moe_adds_expert_buffers", testMoeAddsExpertBuffers}},
+                     {"moe_adds_expert_buffers", testMoeAddsExpertBuffers},
+                     {"moe_shx_slots", testMoeShxSlots}},
                     argc, argv);
 }

@@ -93,7 +93,7 @@ std::optional<bool> requiredKernelAbsentOk(const std::string& arch, const std::s
         // expert decode with int8-dot / fp8 prefill experts: the WMMA int8 / fp8 family gfx1151 lacks)
         {"gfx1151", {"fp8 ", "moe gemmr_moe", "moemx gemmr_moe", "moef gemmr_moe", "moef moe_gu_f_f32", "moef moe_gu_f_f16",
                      "gdn gdn_conv_l2 replay", "gdn gdn_step_norm replay", "gdn gdn_step_norm == gdn_step_norm_v0",
-                     "moemx moe_gu_mxfp4w", "moemx gemm8_moe"}},
+                     "moemx moe_gu_mxfp4w", "moemx gemm8_moe", "moemx moe_gus_mxfp4w"}},
     };
     for (const auto& [a, keys] : lists) {
         if (arch.rfind(a, 0) != 0) continue;

@@ -64,6 +64,9 @@ MoeFlags moepFloor(const MoeProblem& p, const MoeFlags& f) {
 }
 }  // namespace
 
+// v0252-f4 test-first STUB (the port replaces it): never compatible
+bool moeShxShape(const MoeProblem&, const MoeShared&) { return false; }
+
 u32 moeTile(u32 n, u32 K, u32 R) { return n * K < 48 * R ? 32 : moe_bn; }
 
 MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeKernels& k, Function silu_mul_x8h) {

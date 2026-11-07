@@ -7,7 +7,9 @@
 // Bit classes: precise decode experts take f32 activations, a token's result independent of its batch
 // (moe_f32_row, the precise class: precise rows up to max_verify_rows always get it); balance / fast decode
 // experts take int8 activations (moe_q8_row, every row its own one-token decode); the prefill grouped GEMMs are
-// bit-identical within a numerics class (moe_f16_gemm: fused / gemmr / generic; moe_fp8_gemm).
+// bit-identical within a numerics class (moe_f16_gemm: fused / gemmr / generic; moe_fp8_gemm). moe_q8_shx (fast,
+// moeshx, v0252-f4 from feat028 7ef2cae): the routed slots as moe_q8_row, the shared expert summed inside the routed
+// launch (slot K; only the f32 summation order differs from moe_q8_row + the separate shared chain).
 
 #pragma once
 
@@ -25,18 +27,24 @@ using hip::Function;
 
 // moe_lossy_gemm (feat026-moep): the f16-activation grouped GEMMs with f16 expert outputs (balance item f16
 // intermediates) or an atomic scatter combine (fast candidate); never precise; acceptance = task accuracy
-enum class MoeBits : std::uint8_t { moe_f32_row, moe_q8_row, moe_f16_gemm, moe_fp8_gemm, moe_lossy_gemm };
+enum class MoeBits : std::uint8_t { moe_f32_row, moe_q8_row, moe_f16_gemm, moe_fp8_gemm, moe_lossy_gemm, moe_q8_shx };
 
 struct MoeProblem {
     std::uint32_t n = 0;                  // token rows
     std::uint32_t E = 0, K = 0, F = 0, R = 0;  // n_embd, experts per token, expert FFN width, experts
     GgmlType gate_ty = GgmlType::f32, up_ty = GgmlType::f32, down_ty = GgmlType::f32;
     std::uint64_t gate_rb = 0, up_rb = 0;
+    std::uint64_t down_rb = 0;            // v0252-f4: the experts' down row bytes (moeshx shape check)
     std::uint32_t gate_ncols = 0, down_ncols = 0;
     bool refs = false;                    // all three expert tensors carry MXFP4 load-time row exponents
     bool sx_buf = false, tiles64_buf = false;  // the fp8 scale buffer / the 64-token tile list exist
     bool cnt_buf = false;                 // feat026-moep: the fused-combine counters (n * ceil(E / kMoepMinBm) ints) exist
     bool rcnt_buf = false;                // v0251-a11port: the fused router's block counter (Scratch::moe_rcnt) exists
+    // v0252-f4 (moeshx): the shared expert can be slot K (moeShxShape of this block) and the (token, slot) pairs the
+    // decode expert buffers moe_g / moe_u / moe_xq / moe_xd hold (Scratch::moe_pairs: max_verify_rows x (K + 1) when the
+    // load planned moeshx, else max_verify_rows x K; 0 = unknown: never moeshx)
+    bool shx_ok = false;
+    std::uint32_t buf_slots = 0;
 };
 struct MoeFlags {
     bool prec_dec = false;
@@ -60,6 +68,8 @@ struct MoeFlags {
     // v0251-a11port (feat026-router, numerics::Flags::moe_rfuse: the gfx1151 MoE default, WHIRL_MOE_RFUSE=0 off): router
     // logits + top-k + shared gate in one launch (bit-identical to moe_logits_f32 + moe_topk) when the kernel exists
     bool moe_rfuse = false;
+    // v0252-f4 (moeshx, numerics::Flags::moe_shx: fast only): the shared expert as slot K of the int8 decode experts
+    bool moe_shx = false;
 };
 // v0251-a7pol: precise -> bitwise, balance -> f16, fast -> atomic (owner mode standard 2026-10-26)
 inline MoeFlags::MoepComb moepCombFor(bool precise, bool fast) {
@@ -93,6 +103,9 @@ struct MoePlan {
     bool gu_split = false;
     Function gu = nullptr, gu_up = nullptr, down = nullptr;
     Dim3 gu_grid{}, down_grid{};
+    // v0252-f4 (moeshx): gu = moe_gus_mxfp4w over n x (K + 1) pairs (gu_grid.y), down = moe_downs_mxfp4w (+ residual, shared
+    // weight sg[t]); the shared chain (gemvq gate / up, silu_mul_q8, gemvq down) is not launched; SwiGLU over n x (K + 1) x F
+    bool shx = false;
     // router logits for small batches: moe_logits_f32 in pieces of max_small_batch rows
     Dim3 logits_grid{};
     // v0251-a11port: the fused router (moe_router_fused_i16 / _i24, grid logits_grid) instead of moe_logits_f32 + moe_topk;
@@ -117,6 +130,17 @@ struct MoePlan {
                                      // moe_combine4 with K = 0; no combine launch after
     Dim3 comb_grid{};
 };
+// v0252-f4 (moeshx): a MoE block's shared expert (types, [rows][cols] and row bytes of gate / up / down; the shared gate
+// vector sh_gate, weight sg[t] = sigmoid(sh_gate . h))
+struct MoeShared {
+    GgmlType gate_ty = GgmlType::f32, up_ty = GgmlType::f32, down_ty = GgmlType::f32;
+    std::uint32_t gate_rows = 0, gate_cols = 0, up_rows = 0, up_cols = 0, down_rows = 0, down_cols = 0;
+    std::uint64_t gate_rb = 0, up_rb = 0, down_rb = 0;
+    bool gate_vec = false;
+};
+// true when the shared expert can be slot K of the MXFP4 routed decode experts: MXFP4 like the experts, gate / up [F][E]
+// and down [E][F] with the experts' row bytes, a shared gate vector, F and E multiples of 256 (whole MXFP4 superblocks)
+bool moeShxShape(const MoeProblem& p, const MoeShared& s);
 // silu_mul_x8h: the fp8 path's activation kernel (MiscKernels; null: no fp8 path). v0251-a7pol: the moep flags apply only
 // when moepWide(n, K, R) (else as moep_gu = moep_dn = -1, moep_comb = 0); COMB 3 / 4 need moep_comb_ok >= f16, COMB 5 atomic
 MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, Function silu_mul_x8h);

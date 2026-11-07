@@ -26,6 +26,10 @@ using u32 = std::uint32_t;
 
 }  // namespace
 
+// v0252-f4 test-first STUBS (the port replaces them): the K form only
+u64 moeDecodePairs(const Config& cfg, bool) { return cfg.moe ? static_cast<u64>(max_verify_rows) * cfg.n_expert_used : 0; }
+u64 moeShxExtraBytes(const Config&) { return 0; }
+
 u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits) {
     // mirrors the buffer allocations of Model::load below (keep in step)
     const u64 f4 = 4;

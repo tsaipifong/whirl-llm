@@ -76,6 +76,7 @@ constexpr std::array<S::Entry, S::n_names> k_names{{
     {"FDQ8S_MIN", &S::fdq8s_min},
     {"GEMV_K", &S::gemv_k},
     {"ATTN_KGVAR", &S::attn_kgvar},
+    {"MOESHX", &S::moeshx},
 }};
 // every field is in the table (a field added without an entry would never be read)
 static_assert(sizeof(EnvSnapshot) == S::n_names * sizeof(S::Value));

@@ -83,6 +83,11 @@ nu::Target target(const CardFake& c, std::string_view model, bool kv_explicit) {
     t.gdn_strix_shape = true;
     t.k_gemm8t = c.k_gemm8t;
     t.k_gdn_v0 = c.k_gdn_v0;
+    // v0252-f4 (moeshx): the gfx1201 code object has moe_gus_mxfp4w / moe_downs_mxfp4w; Ornith's shared expert has the
+    // experts' MXFP4 shape (E 2048, F 512). The fast default rule stays as shipped (moeshx_fast_default_r9700) here.
+    t.k_moe_shx = !t.gfx1151;
+    t.moe_shx_shape = t.moe;
+    t.moeshx_default = !t.gfx1151 && nu::moeshx_fast_default_r9700;
     return t;
 }
 
@@ -689,6 +694,7 @@ void testFastOnlyOverrides() {
         {"MOEP_GU", 'B'},  {"MOEP_DN", 'B'},   {"MOEP_COMB", 'L'},
         {"MOE_RFUSE", 'B'},  // v0251-a11port: fused router, bit-identical to moe_logits_f32 + moe_topk (kt moemx, golden)
         {"ATTN_KGVAR", 'B'},  // v0252-c1port: attn_kgv / attn_kgk, designed bit-identical to attn_kg (kt attn, golden)
+        {"MOESHX", 'F'},      // v0252-f4: moeshx, fast-only (applyFastOnlyOverride; f32 summation order of the MoE decode)
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -936,6 +942,137 @@ static void testKgVarFlag() {
             }
 }
 
+
+// v0252-f4 (F4 moeshx, feat028-moefast97-r1 7ef2cae; DISCOVERY v4 F4 / N11 / R-C3): the shared expert as slot K of the
+// int8 MXFP4 decode / verify experts. Selector side of the plan:
+//  M1 the item: fast-only, implemented, opt-in (fast_optin_items), never a balance item; the shipped default pin;
+//  M2 shipped state (moeshx_fast_default_r9700 = false): a plain --fast never requests it on either card or model, its
+//     log line / /props / flags are as before (no "moeshx"), moe_shx = 0 everywhere;
+//  M3 the fast default rule (Target::moeshx_default, what flipping the constant does): plain fast on the R9700 with an
+//     MXFP4 MoE model requests and enables it; a dense model is not requested (log line unchanged); precise, balance
+//     and an explicit fast list ignore the rule; the 8060S target never has the rule;
+//  M4 explicit requests (fast:moeshx, fast:all) on the R9700 MoE target: enabled, flags.moe_shx = 1, note;
+//  M5 skip reasons (dense, experts not MXFP4, no kernels: gfx1151, shape);
+//  M6 WHIRL_MOESHX: ignored in precise / balance (plan and bitsKey unchanged, one Plan::ignored note), in fast 1 = on
+//     (user override, +overrides), 0 = off, "" = nothing, not applicable = stays off;
+//  M7 f16 decode activations (WHIRL_Q8DEC=0) keep the int8-only path off: moe_shx = 0;
+//  M8 precise / balance plans (bitsKey, log line) do not depend on the moeshx inputs of the target at all.
+static void testMoeShxPlan() {
+    using Item = nu::Item;
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals = {}) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    auto st = [](const nu::Plan& p) -> const nu::ItemState& { return p.items[static_cast<std::size_t>(Item::moeshx)]; };
+    // M1
+    NCHECK((nu::fast_only_items & nu::bit(Item::moeshx)) != 0 && (nu::balance_items & nu::bit(Item::moeshx)) == 0, "M1 fast-only");
+    NCHECK((nu::implemented_items & nu::bit(Item::moeshx)) != 0 && std::string(nu::itemName(Item::moeshx)) == "moeshx" &&
+               nu::itemFromName("moeshx") == Item::moeshx,
+           "M1 implemented, named");
+    NCHECK(nu::fast_optin_items == nu::bit(Item::moeshx), "M1 opt-in set");
+    NCHECK(!nu::moeshx_fast_default_r9700, "M1 shipped: the R9700 fast default rule is off until G3a (flip it with this pin)");
+    const nu::Target r97 = target(card("r9700"), "moe", false), r97d = target(card("r9700"), "swift", false);
+    const nu::Target s8 = target(card("8060s"), "moe", false);
+    NCHECK(r97.k_moe_shx && r97.moe_shx_shape && !s8.k_moe_shx && !s8.moeshx_default, "M1 target fakes");
+    // M2
+    for (const CardFake& c : k_cards)
+        for (const char* model : {"swift", "moe"}) {
+            const nu::Plan p = pl(target(c, model, false), "fast");
+            NCHECK(!st(p).requested && !p.on(Item::moeshx) && !p.flags.moe_shx && nu::logLine(p).find("moeshx") == std::string::npos &&
+                       nu::propsJson(p, "f16").find("moeshx") == std::string::npos,
+                   "M2 {} {}: plain fast does not request moeshx", c.name, model);
+        }
+    // M3 (the rule switched on in the target, as the loader fills it when the constant is true)
+    {
+        nu::Target on = r97;
+        on.moeshx_default = true;
+        const nu::Plan p = pl(on, "fast");
+        NCHECK(st(p).requested && p.on(Item::moeshx) && p.flags.moe_shx && !p.lossy_override && p.overrides.empty(),
+               "M3 R9700 moe plain fast: moeshx on by the default rule (not an override)");
+        NCHECK(nu::modeLabel(p) == "fast", "M3 label");
+        nu::Target dn = r97d;
+        dn.moeshx_default = true;
+        const nu::Plan pd = pl(dn, "fast");
+        NCHECK(!st(pd).requested && nu::logLine(pd) == nu::logLine(pl(r97d, "fast")) && pd.bitsKey() == pl(r97d, "fast").bitsKey(),
+               "M3 dense model: not requested, plan unchanged");
+        for (const char* mode : {"precise", "balance"}) {
+            const nu::Plan a = pl(on, mode), b = pl(r97, mode);
+            NCHECK(!a.on(Item::moeshx) && !a.flags.moe_shx && a.bitsKey() == b.bitsKey() && nu::logLine(a) == nu::logLine(b),
+                   "M3 {}: the fast default rule does not reach it", mode);
+        }
+        const nu::Plan pc = pl(on, "fast:kvq4");
+        NCHECK(!st(pc).requested && !pc.flags.moe_shx, "M3 an explicit fast list is taken as written");
+    }
+    // M4
+    for (const char* spec : {"fast:moeshx", "fast:all", "fast:kvq4,relaxacc,moeshx"}) {
+        const nu::Plan p = pl(r97, spec);
+        NCHECK(p.on(Item::moeshx) && p.flags.moe_shx && st(p).note.find("shared expert as slot K") != std::string::npos, "M4 {}: on", spec);
+    }
+    NCHECK(nu::logLine(pl(r97, "fast:moeshx")).find("fast runs as balance") == std::string::npos, "M4 moeshx alone is a fast item that applies");
+    // M5
+    {
+        nu::Target q4m = r97;
+        q4m.moe_mxfp4 = false;
+        nu::Target shape = r97;
+        shape.moe_shx_shape = false;
+        nu::Target nok = r97;
+        nok.k_moe_shx = false;
+        const struct {
+            const nu::Target* t;
+            const char* why;
+        } cases[] = {{&r97d, "dense model"}, {&q4m, "experts are not MXFP4"}, {&s8, "gfx1151"}, {&nok, "no moe_gus / moe_downs kernels"}, {&shape, "shape"}};
+        for (const auto& c : cases) {
+            const nu::Plan p = pl(*c.t, "fast:moeshx");
+            NCHECK(!p.on(Item::moeshx) && !p.flags.moe_shx && st(p).note.find(c.why) != std::string::npos, "M5 skipped: '{}' (note '{}')", c.why,
+                   st(p).note);
+        }
+    }
+    // M6
+    for (const char* mode : {"precise", "balance"})
+        for (const nu::Target* t : {&r97, &s8}) {
+            const nu::Plan base = pl(*t, mode), one = pl(*t, mode, {{"MOESHX", "1"}}), zero = pl(*t, mode, {{"MOESHX", "0"}});
+            NCHECK(!one.on(Item::moeshx) && !one.flags.moe_shx && one.bitsKey() == base.bitsKey() && nu::logLine(one) == nu::logLine(base) &&
+                       !one.lossy_override,
+                   "M6 {}: WHIRL_MOESHX=1 ignored", mode);
+            NCHECK(one.ignored.size() == 1 && one.ignored[0] == std::format("WHIRL_MOESHX=1 ignored: moeshx is a fast-only item ({} never takes it)", mode),
+                   "M6 {}: one refusal note", mode);
+            NCHECK(zero.ignored.empty() && zero.bitsKey() == base.bitsKey(), "M6 {}: WHIRL_MOESHX=0 no note", mode);
+        }
+    {
+        const nu::Plan p1 = pl(r97, "fast", {{"MOESHX", "1"}});
+        NCHECK(p1.on(Item::moeshx) && p1.flags.moe_shx && nu::modeLabel(p1) == "fast+overrides" &&
+                   nu::logLine(p1).find("WHIRL_MOESHX=1: moeshx on (lossy, user-requested)") != std::string::npos,
+               "M6 fast: WHIRL_MOESHX=1 on (override)");
+        const nu::Plan p0 = pl(r97, "fast:moeshx", {{"MOESHX", "0"}});
+        NCHECK(!p0.on(Item::moeshx) && !p0.flags.moe_shx && !p0.lossy_override, "M6 fast:moeshx + WHIRL_MOESHX=0 off");
+        const nu::Plan pe = pl(r97, "fast", {{"MOESHX", ""}});
+        NCHECK(pe.bitsKey() == pl(r97, "fast").bitsKey() && pe.overrides.empty(), "M6 empty value: nothing");
+        const nu::Plan p8 = pl(s8, "fast", {{"MOESHX", "1"}});
+        NCHECK(!p8.on(Item::moeshx) && !p8.flags.moe_shx, "M6 8060S: WHIRL_MOESHX=1 not applicable, off");
+        const nu::Plan pdn = pl(r97d, "fast", {{"MOESHX", "1"}});
+        NCHECK(!pdn.flags.moe_shx, "M6 dense: off");
+    }
+    // M7
+    {
+        const nu::Plan p = pl(r97, "fast:moeshx", {{"Q8DEC", "0"}});
+        NCHECK(p.flags.prec_dec && !p.flags.moe_shx, "M7 f16 decode activations: moe_shx off");
+    }
+    // M8
+    for (const CardFake& c : k_cards)
+        for (const char* model : {"swift", "moe"})
+            for (const char* mode : {"precise", "balance"}) {
+                nu::Target a = target(c, model, false), b = a;
+                b.k_moe_shx = !a.k_moe_shx;
+                b.moe_shx_shape = !a.moe_shx_shape;
+                b.moeshx_default = true;
+                const nu::Plan pa = pl(a, mode), pb = pl(b, mode);
+                NCHECK(pa.bitsKey() == pb.bitsKey() && nu::logLine(pa) == nu::logLine(pb) && !pa.flags.moe_shx,
+                       "M8 {} {} {}: precise / balance independent of the moeshx target inputs", c.name, model, mode);
+            }
+}
+
 void testNumericsPlan(int& pass, int& fail) {
     testPlanTable();
     testApplyFrontEqualsPlan();  // arch025-N2b (replaces testUnwiredCallerUnchanged: no caller passes Target::gdn_strix now)
@@ -951,6 +1088,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)
     testFastOnlyRefusal();  // bug-fastonly: refusal notes, fast unchanged
+    testMoeShxPlan();  // v0252-f4 (fails before the port: no moeshx rule, override or flag)
     pass += g_p;
     fail += g_f;
 }

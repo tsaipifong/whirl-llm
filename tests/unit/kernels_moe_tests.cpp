@@ -15,6 +15,7 @@
 #include "../test_check.h"
 #include "../test_env.h"
 #include "whirl/kernels_abi.h"
+#include "whirl/moe_shx_ref.h"  // v0252-f4 moeshx host reference
 
 #include "../../kernels/moep_map.h"
 
@@ -186,6 +187,111 @@ void testMoepSchedule() {
         }
 }
 
+
+// v0252-f4 (F4 moeshx, from feat028 7ef2cae testMoeShx part 2): the host numerics reference of moe_gus_mxfp4w /
+// moe_downs_mxfp4w (include/whirl/moe_shx_ref.h, the kernels' f32 order) against a double-precision oracle. Fast tolerance
+// (q8_1-class activations): per output |y - oracle| <= kShxTol x scale, scale = |x0| + sum |terms|; the moeshx form vs the
+// balance form (shared expert summed separately): only the f32 order differs -> |fused - separate| <= 1e-5 x scale, and
+// the fused RMS error is no larger than the balance one (+1 %). moeskip ids (-1) are dropped. Mutant: the shared weight
+// ignored must fail the tolerance (the test sees a missing shared expert). Shapes: E 256 F 256 K 4 of 8 and Ornith's
+// E 2048 F 512 K 8 (of 16 here).
+constexpr double kShxTol = 1e-2;
+whirl::moeshx_ref::Problem shxProblem(int E, int F, int K, int R, int n, unsigned seed, bool skips) {
+    namespace mr = whirl::moeshx_ref;
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::uniform_int_distribution<int> byte(0, 255), ex(119, 124);
+    mr::Problem p;
+    p.s = mr::Shapes{E, F, K, R};
+    p.n = n;
+    auto rows = [&](int nrows, int ncols) {
+        const std::uint64_t rb = mr::mxRowBytes(ncols);
+        std::vector<std::uint8_t> v(static_cast<std::size_t>(nrows) * rb);
+        for (int r = 0; r < nrows; ++r)
+            for (std::uint64_t sb = 0; sb < rb / 136; ++sb) {
+                std::uint8_t* b = v.data() + static_cast<std::size_t>(r) * rb + sb * 136;
+                for (int i = 0; i < 8; ++i) b[i] = static_cast<std::uint8_t>(ex(rng));
+                for (int i = 8; i < 136; ++i) b[i] = static_cast<std::uint8_t>(byte(rng));
+            }
+        return v;
+    };
+    p.gate = rows(R * F, E);
+    p.up = rows(R * F, E);
+    p.down = rows(R * E, F);
+    p.sg = rows(F, E);
+    p.su = rows(F, E);
+    p.sd = rows(E, F);
+    p.h.resize(static_cast<std::size_t>(n) * E);
+    for (float& v : p.h) v = nd(rng);
+    p.x0.resize(p.h.size());
+    for (float& v : p.x0) v = 0.1f * nd(rng);
+    p.ids.resize(static_cast<std::size_t>(n) * K);
+    p.w.resize(p.ids.size());
+    p.shw.resize(static_cast<std::size_t>(n));
+    std::uniform_real_distribution<float> uw(0.05f, 1.f), us(0.1f, 0.9f);
+    for (int t = 0; t < n; ++t) {
+        std::vector<int> perm(static_cast<std::size_t>(R));
+        for (int i = 0; i < R; ++i) perm[static_cast<std::size_t>(i)] = i;
+        std::shuffle(perm.begin(), perm.end(), rng);
+        float sum = 0;
+        for (int k = 0; k < K; ++k) {
+            p.ids[static_cast<std::size_t>(t) * K + k] = perm[static_cast<std::size_t>(k)];
+            sum += p.w[static_cast<std::size_t>(t) * K + k] = uw(rng);
+        }
+        for (int k = 0; k < K; ++k) p.w[static_cast<std::size_t>(t) * K + k] /= sum;
+        if (skips && K > 2) {  // moeskip: the last two slots dropped (id -1, weight 0), kept ones renormalized
+            p.ids[static_cast<std::size_t>(t) * K + K - 1] = -1;
+            p.ids[static_cast<std::size_t>(t) * K + K - 2] = -1;
+            float kept = 0;
+            for (int k = 0; k < K - 2; ++k) kept += p.w[static_cast<std::size_t>(t) * K + k];
+            for (int k = 0; k < K; ++k)
+                p.w[static_cast<std::size_t>(t) * K + k] = k < K - 2 ? p.w[static_cast<std::size_t>(t) * K + k] / kept : 0.f;
+        }
+        p.shw[static_cast<std::size_t>(t)] = us(rng);
+    }
+    return p;
+}
+struct ShxErr {
+    double max_rel = 0, rms = 0;  // max |y - ref| / scale, RMS of (y - ref) / scale
+};
+ShxErr shxErr(const std::vector<float>& y, const std::vector<double>& ref, const std::vector<double>& sc) {
+    ShxErr e;
+    for (std::size_t i = 0; i < y.size(); ++i) {
+        const double r = std::fabs(static_cast<double>(y[i]) - ref[i]) / sc[i];
+        e.max_rel = std::max(e.max_rel, r);
+        e.rms += r * r;
+    }
+    e.rms = std::sqrt(e.rms / static_cast<double>(y.size()));
+    return e;
+}
+void testMoeShxNumerics() {
+    namespace mr = whirl::moeshx_ref;
+    struct Case {
+        int E, F, K, R, n;
+        bool skips;
+    };
+    for (const Case cs : {Case{256, 256, 4, 8, 3, false}, Case{256, 256, 4, 8, 3, true}, Case{2048, 512, 8, 16, 2, false},
+                          Case{2048, 512, 8, 16, 1, true}}) {
+        const mr::Problem p = shxProblem(cs.E, cs.F, cs.K, cs.R, cs.n, 1234u + static_cast<unsigned>(cs.E + cs.K + cs.n + (cs.skips ? 7 : 0)), cs.skips);
+        std::vector<double> sc;
+        const std::vector<double> ref = mr::oracle(p, &sc);
+        const std::vector<float> fused = mr::q8Forward(p, false), sep = mr::q8Forward(p, true);
+        const ShxErr ef = shxErr(fused, ref, sc), es = shxErr(sep, ref, sc);
+        double fs = 0;
+        for (std::size_t i = 0; i < fused.size(); ++i) fs = std::max(fs, std::fabs(static_cast<double>(fused[i]) - sep[i]) / sc[i]);
+        const std::string tag = " E " + std::to_string(cs.E) + " F " + std::to_string(cs.F) + " K " + std::to_string(cs.K) + " n " +
+                                std::to_string(cs.n) + (cs.skips ? " (moeskip)" : "");
+        std::printf("  moeshx%s: fused vs oracle max %.3e rms %.3e; balance form max %.3e rms %.3e; fused vs balance %.3e\n", tag.c_str(),
+                    ef.max_rel, ef.rms, es.max_rel, es.rms, fs);
+        check(ef.max_rel <= kShxTol, "moeshx fused within the fast tolerance" + tag);
+        check(fs <= 1e-5, "moeshx fused == balance form within f32 order" + tag);
+        check(ef.rms <= es.rms * 1.01 + 1e-7, "moeshx fused RMS <= balance RMS" + tag);
+        mr::Problem m = p;
+        for (float& v : m.shw) v = 0.f;
+        check(shxErr(mr::q8Forward(m, false), ref, sc).max_rel > kShxTol, "moeshx mutant (shared weight ignored) fails" + tag);
+    }
+}
+
 }  // namespace
 
 // tests/unit/unit_tests.cpp ORDER lists all modules
@@ -193,6 +299,7 @@ const whirl::test::Suite& unitSuite_kernels_moe() {
     static const whirl::test::Suite s{"kernels.moe",
                                       {
                                           {"testMoepSchedule", [] { testMoepSchedule(); }},
+                                          {"testMoeShxNumerics", [] { testMoeShxNumerics(); }},  // v0252-f4
                                       },
                                       nullptr};
     return s;

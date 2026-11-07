@@ -22,6 +22,11 @@ struct Config;  // whirl/model_types.h
 // Prefill / decode buffers of Model::load for prefill batch B (moved from include/whirl/model.h, arch025-lane2 N9 S2c).
 // fd_splits: attention split-K partials (resolveFdSplits: 64, 256 with q4 KV, WHIRL_FD_SPLITS).
 std::uint64_t bufferBytes(const Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint64_t max_elems, std::uint32_t fd_splits = 64);
+// v0252-f4 (moeshx, DISCOVERY R-C3): the (token, slot) pairs the MoE decode expert buffers (moe_g / moe_u / moe_xq /
+// moe_xd) hold: max_verify_rows x K, or max_verify_rows x (K + 1) when the load planned moeshx (shx; fast on gfx1201 only);
+// 0 for a dense model. bufferBytes counts the K form; moeShxExtraBytes = what the extra slot adds (Ornith: 32 x 512 x 9 B + 2 KiB = 146 KiB)
+std::uint64_t moeDecodePairs(const Config& cfg, bool shx);
+std::uint64_t moeShxExtraBytes(const Config& cfg);
 
 struct Scratch {
     DevPtr x = 0, h = 0, qf = 0, kv_k = 0, kv_v = 0, attn_out = 0, qkv = 0, conv_out = 0, z = 0, beta = 0, alpha = 0, ba_buf = 0,
@@ -60,6 +65,8 @@ struct Scratch {
     // safe). Not an allocation of its own: bytes 8..11 of the zeroed 16-byte moe_ntiles (moe_route writes bytes 0..3
     // only), so no buffer size or estimate changes on either card
     DevPtr moe_rcnt = 0;
+    // v0252-f4 (moeshx, R-C3): moeDecodePairs of this load (ops::MoeProblem::buf_slots)
+    std::uint32_t moe_pairs = 0;
 };
 
 }  // namespace whirl::qwen35

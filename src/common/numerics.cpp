@@ -33,6 +33,7 @@ constexpr std::array<ItemInfo, n_items> k_items = {{
     {"moeskip", "skip low-weight MoE experts"},
     {"a8", "int8 activations for K-quant prefill (W4A8)"},
     {"a4", "int4 activations for prefill (W4A4)"},
+    {"moeshx", "MoE decode: shared expert inside the routed int8 expert launches (R9700; opt-in)"},
 }};
 
 constexpr const char* k_q8dec = "q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)";
@@ -124,7 +125,9 @@ Request parseMode(std::string_view spec, std::string source) {
         return r;
     }
     if (trim(items).empty()) {
-        r.items = r.mode == Mode::balance ? balance_items : (balance_items | fast_only_items);
+        // v0252-f4: a plain --fast leaves out the opt-in items (fast_optin_items: moeshx; plan() adds them by the per-card
+        // fast default rule, Target::moeshx_default)
+        r.items = r.mode == Mode::balance ? balance_items : (balance_items | (fast_only_items & ~fast_optin_items));
     } else {
         r.items = parseItems(items);
         r.custom = true;
@@ -220,6 +223,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOEP_COMB", &S::moep_comb},
         {"MOE_RFUSE", &S::moe_rfuse},
         {"ATTN_KGVAR", &S::attn_kgvar},
+        {"MOESHX", &S::moeshx},  // v0252-f4
     }};
     return t;
 }

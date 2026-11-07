@@ -35,6 +35,8 @@ std::vector<std::uint64_t> recordedSizes();
 namespace whirl::qwen35 {
 struct ModelTestAccess {
     static void allocScratch(Model& m, std::uint32_t fd_splits) { m.allocScratch(fd_splits); }
+    static void allocScratch(Model& m, std::uint32_t fd_splits, bool moe_shx) { m.allocScratch(fd_splits, moe_shx); }  // v0252-f4
+    static std::uint32_t moePairs(const Model& m) { return m.scratch().moe_pairs; }
 };
 }  // namespace whirl::qwen35
 
@@ -186,6 +188,55 @@ void testAllocScratchFdSplits() {
     }
 }
 
+
+// v0252-f4 (moeshx, DISCOVERY R-C3): Model::allocScratch on a small MoE config through the HIP double's allocation recorder.
+// moe_shx = false (precise, balance, the 8060S, fast without moeshx): the four decode expert buffers have the 0.2.5.1 sizes
+// (max_verify_rows x K pairs); moe_shx = true: exactly those four grow to max_verify_rows x (K + 1) pairs, every other
+// allocation is the same in size and order, the total grows by moeShxExtraBytes, Scratch::moe_pairs records the pairs,
+// and the sizing self-check stays quiet (its estimate counts the slot). Fails before the port (moe_shx ignored).
+void testAllocScratchMoeShx() {
+    const std::uint64_t R = q::max_verify_rows, K = 2, F = 256, f4 = 4;
+    std::vector<std::uint64_t> sizes[2];
+    std::uint64_t pairs[2] = {0, 0};
+    std::string notes[2];
+    for (const bool shx : {false, true}) {
+        auto m = std::make_unique<q::Model>();
+        q::Config& c = m->cfg;
+        c.n_embd = 256, c.n_head = 4, c.n_head_kv = 2, c.head_dim = 16, c.n_ff = 512, c.n_vocab = 100;
+        c.d_conv = 4, c.d_state = 8, c.n_k_heads = 2, c.n_v_heads = 2, c.d_inner = 32;
+        c.moe = true, c.n_expert = 8, c.n_expert_used = static_cast<std::uint32_t>(K), c.n_ff_exp = static_cast<std::uint32_t>(F);
+        m->max_batch = 32;
+        whirl::hip::isofake::recordAllocs(true);
+        q::ModelTestAccess::allocScratch(*m, 64, shx);
+        whirl::hip::isofake::recordAllocs(false);
+        sizes[shx] = whirl::hip::isofake::recordedSizes();
+        pairs[shx] = q::ModelTestAccess::moePairs(*m);
+        notes[shx] = m->load_note;
+        ISO_CHECK(q::moeShxExtraBytes(c) == R * F * (f4 * 2 + 1) + R * F / 32 * 4);
+    }
+    ISO_CHECK(pairs[0] == R * K && pairs[1] == R * (K + 1));
+    ISO_CHECK(sizes[0].size() == sizes[1].size());
+    const std::uint64_t want0[4] = {R * K * F * f4, R * K * F * f4, R * K * F + 256, (R * K * F / 32 + 8) * 4};
+    const std::uint64_t want1[4] = {R * (K + 1) * F * f4, R * (K + 1) * F * f4, R * (K + 1) * F + 256, (R * (K + 1) * F / 32 + 8) * 4};
+    std::vector<std::size_t> diff;
+    std::uint64_t t0 = 0, t1 = 0;
+    for (std::size_t i = 0; i < sizes[0].size() && i < sizes[1].size(); ++i) {
+        t0 += sizes[0][i];
+        t1 += sizes[1][i];
+        if (sizes[0][i] != sizes[1][i]) diff.push_back(i);
+    }
+    ISO_CHECK(diff.size() == 4);
+    bool four = diff.size() == 4;
+    for (std::size_t j = 0; four && j < 4; ++j) four = sizes[0][diff[j]] == want0[j] && sizes[1][diff[j]] == want1[j] && diff[j] == diff[0] + j;
+    ISO_CHECK(four);
+    {
+        q::Config c;
+        c.moe = true, c.n_expert_used = static_cast<std::uint32_t>(K), c.n_ff_exp = static_cast<std::uint32_t>(F);
+        ISO_CHECK(t1 - t0 == q::moeShxExtraBytes(c));
+    }
+    ISO_CHECK(notes[0].find("VRAM estimate") == std::string::npos && notes[1].find("VRAM estimate") == std::string::npos);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -194,6 +245,7 @@ int main(int argc, char** argv) {
                      {"embedded_draft_vocab", testEmbeddedDraftVocab},
                      {"empty_model", testEmptyModel},
                      {"load_refuses_before_device", testLoadRefusesBeforeTheDevice},
-                     {"alloc_scratch_fd_splits", testAllocScratchFdSplits}},
+                     {"alloc_scratch_fd_splits", testAllocScratchFdSplits},
+                     {"alloc_scratch_moe_shx", testAllocScratchMoeShx}},
                     argc, argv);
 }

@@ -35,6 +35,8 @@ kn::KernelTable moeTable(bool g1151) {
         k.moe_router_fused_i16 = tag("moe_router_fused_i16");  // v0251-a11port: gfx1151 code object only
         k.moe_router_fused_i24 = tag("moe_router_fused_i24");
     } else {
+        k.moe_gus_mxw = tag("moe_gus_mxw");  // v0252-f4 moeshx: gfx1201 code object only
+        k.moe_downs_mxw = tag("moe_downs_mxw");
         k.gemmr_moegu = tag("gemmr_moegu");
         k.gemmr_moegu32 = tag("gemmr_moegu32");
         k.gemmr_moedn = tag("gemmr_moedn");
@@ -121,6 +123,133 @@ void testOpsMoeRouter(ops::MoeProblem p, const kn::KernelTable& k97, const kn::K
         CHECK_DETAIL(got == s.want, "router shape E " + std::to_string(s.E) + " R " + std::to_string(s.R) + " K " + std::to_string(s.K) +
                                         ": got " + got + ", want " + s.want);
     }
+}
+
+// v0252-f4 (F4 moeshx, feat028-moefast97-r1 7ef2cae): the shared expert as slot K of the int8 MXFP4 decode experts.
+// ops::moeShxShape (the shape rule) and ops::chooseMoe's moeshx choice: fast flag + int8 decode + whole-block MXFP4 kernels +
+// gate / up one launch + shape ok + both kernels + n x (K + 1) <= the pairs the decode buffers hold (Scratch::moe_pairs:
+// max_verify_rows x (K + 1) only when the load planned moeshx, R-C3). Balance / precise flags give exactly the old plans.
+// Fails before the port (moeShxShape stub false, chooseMoe never sets shx).
+void testOpsMoeShx() {
+    ops::MoeProblem p;  // Ornith: E 2048, 8 of 256 experts, F 512, MXFP4 (rows of 2048 / 256 * 136 and 512 / 256 * 136 bytes)
+    p.E = 2048;
+    p.K = 8;
+    p.F = 512;
+    p.R = 256;
+    p.gate_ty = p.up_ty = p.down_ty = GgmlType::mxfp4;
+    p.gate_rb = p.up_rb = 2048 / 256 * 136;
+    p.down_rb = 512 / 256 * 136;
+    p.gate_ncols = 2048;
+    p.down_ncols = 512;
+    p.refs = p.sx_buf = p.tiles64_buf = true;
+    p.buf_slots = 32 * 9;  // max_verify_rows x (K + 1): the load planned moeshx
+    ops::MoeShared sh;
+    sh.gate_ty = sh.up_ty = sh.down_ty = GgmlType::mxfp4;
+    sh.gate_rows = sh.up_rows = 512;
+    sh.gate_cols = sh.up_cols = 2048;
+    sh.down_rows = 2048;
+    sh.down_cols = 512;
+    sh.gate_rb = sh.up_rb = p.gate_rb;
+    sh.down_rb = p.down_rb;
+    sh.gate_vec = true;
+    // shape rule
+    CHECK(ops::moeShxShape(p, sh));
+    {
+        ops::MoeShared b = sh;
+        b.gate_vec = false;
+        CHECK(!ops::moeShxShape(p, b));
+        b = sh;
+        b.down_ty = GgmlType::q8_0;
+        CHECK(!ops::moeShxShape(p, b));
+        b = sh;
+        b.gate_rows = 1024;  // a wider shared FFN (not the experts' F)
+        CHECK(!ops::moeShxShape(p, b));
+        b = sh;
+        b.down_rb = 0;
+        CHECK(!ops::moeShxShape(p, b));
+        ops::MoeProblem q = p;
+        q.up_ty = GgmlType::q8_0;
+        CHECK(!ops::moeShxShape(q, sh));
+        q = p;
+        q.F = 384;  // not whole superblocks
+        CHECK(!ops::moeShxShape(q, sh));
+    }
+    p.shx_ok = ops::moeShxShape(p, sh);
+    const kn::KernelTable k97 = moeTable(false), k8 = moeTable(true);
+    CHECK(k97.moe_gus_mxw != nullptr && k8.moe_gus_mxw == nullptr);  // the fakes: gfx1201 only
+    ops::MoeFlags fast;
+    fast.moe_fp8 = true;
+    fast.moe_shx = true;
+    ops::MoeFlags bal = fast;
+    bal.moe_shx = false;
+    ops::MoeFlags pre;
+    pre.prec_dec = true;
+    pre.moe_shx = true;  // the flag alone never reaches the precise class
+    // decode n = 1, fast: moe_gus / moe_downs, grid.y = n x (K + 1), the moe_q8_shx class
+    p.n = 1;
+    auto pl = ops::chooseMoe(p, fast, k97, k97.silu_mul_x8h);
+    CHECK(pl.small && pl.small_q8 && pl.shx && pl.bits == ops::MoeBits::moe_q8_shx);
+    CHECK(nameOf(pl.gu) == "moe_gus_mxw" && nameOf(pl.down) == "moe_downs_mxw" && pl.gu_up == nullptr && !pl.gu_split);
+    CHECK(pl.gu_grid.x == (2 * 512 + 7) / 8 && pl.gu_grid.y == 9 && pl.down_grid.x == 256 && pl.down_grid.y == 1);
+    // balance (flag off): exactly the old plan
+    const auto pb = ops::chooseMoe(p, bal, k97, k97.silu_mul_x8h);
+    CHECK(!pb.shx && pb.bits == ops::MoeBits::moe_q8_row && nameOf(pb.gu) == "moe_gu_mxw" && nameOf(pb.down) == "moe_down_mxw" && pb.gu_grid.y == 8);
+    {
+        ops::MoeProblem q = p;  // the old buffers and no shape: balance is the same plan either way
+        q.shx_ok = false;
+        q.buf_slots = 0;
+        const auto pq = ops::chooseMoe(q, bal, k97, k97.silu_mul_x8h);
+        CHECK(pq.gu == pb.gu && pq.down == pb.down && pq.gu_grid.x == pb.gu_grid.x && pq.gu_grid.y == pb.gu_grid.y && pq.bits == pb.bits);
+    }
+    // precise: the f32 class, no moeshx
+    pl = ops::chooseMoe(p, pre, k97, k97.silu_mul_x8h);
+    CHECK(!pl.shx && pl.bits == ops::MoeBits::moe_f32_row && nameOf(pl.gu) == "moe_gu_f_mxfp4");
+    // MTP verify rows: n = 2 and 16 take it
+    for (const std::uint32_t n : {2u, 16u}) {
+        p.n = n;
+        pl = ops::chooseMoe(p, fast, k97, k97.silu_mul_x8h);
+        CHECK(pl.shx && pl.gu_grid.y == n * 9 && pl.down_grid.y == n);
+    }
+    // wide verify (small_max raised to max_verify_rows): every width 1..32 takes moeshx (buffers hold 32 x 9 pairs), so a
+    // token's MoE class does not depend on the verify width (llama.cpp: batch-size independent fusion checks)
+    ops::MoeFlags wide = fast;
+    wide.small_max = 32;
+    for (std::uint32_t n = 1; n <= 32; ++n) {
+        p.n = n;
+        pl = ops::chooseMoe(p, wide, k97, k97.silu_mul_x8h);
+        CHECK(pl.small_q8 && pl.shx && pl.bits == ops::MoeBits::moe_q8_shx && pl.gu_grid.y == n * 9 && pl.down_grid.y == n);
+    }
+    // the overflow guard: buffers of the K form (a load that did not plan moeshx: 32 x 8 pairs) refuse 29 rows
+    {
+        ops::MoeProblem q = p;
+        q.buf_slots = 32 * 8;
+        q.n = 29;
+        CHECK(!ops::chooseMoe(q, wide, k97, k97.silu_mul_x8h).shx);
+        q.n = 28;
+        CHECK(ops::chooseMoe(q, wide, k97, k97.silu_mul_x8h).shx);
+    }
+    // no kernels (gfx1151 table), generic MXFP4 kernels (WHIRL_MOE_MXW=0), shape not ok, mixed gate / up types, unsized buffers
+    p.n = 1;
+    CHECK(!ops::chooseMoe(p, fast, k8, k8.silu_mul_x8h).shx);
+    ops::MoeFlags nomxw = fast;
+    nomxw.moe_mxw = false;
+    CHECK(!ops::chooseMoe(p, nomxw, k97, k97.silu_mul_x8h).shx);
+    {
+        ops::MoeProblem q = p;
+        q.shx_ok = false;
+        CHECK(!ops::chooseMoe(q, fast, k97, k97.silu_mul_x8h).shx);
+        q = p;
+        q.up_ty = GgmlType::q8_0;
+        const auto ps = ops::chooseMoe(q, fast, k97, k97.silu_mul_x8h);
+        CHECK(ps.gu_split && !ps.shx);
+        q = p;
+        q.buf_slots = 0;  // a caller that did not size the buffers
+        CHECK(!ops::chooseMoe(q, fast, k97, k97.silu_mul_x8h).shx);
+    }
+    // prefill: never (the grouped GEMMs keep the shared expert on the dense path)
+    p.n = 4096;
+    pl = ops::chooseMoe(p, fast, k97, k97.silu_mul_x8h);
+    CHECK(!pl.small && !pl.shx && pl.kind == ops::MoePrefillKind::fp8);
 }
 
 void testOpsMoe() {
@@ -384,6 +513,7 @@ void testOpsMoe() {
         }
     }
     testOpsMoeRouter(p, k97, k8);
+    testOpsMoeShx();  // v0252-f4
 }
 
 }  // namespace

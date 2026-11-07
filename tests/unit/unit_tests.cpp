@@ -72,6 +72,7 @@ const OrderRow kOrder[] = {
     {"kernels.gemm", "testMxInject"},  // v0251-a3port (feat026-fdq: between testKvEstimateCaps and testKernelFetchBounds)
     {"kernels.gemm", "testKernelFetchBounds"},
     {"kernels.moe", "testMoepSchedule"},  // v0251-a7port
+    {"kernels.moe", "testMoeShxNumerics"},  // v0252-f4
     {"model.core", "testValueScope"},
     {"hip.runtime", "testLaunchDigest"},
     {"hip.runtime", "testLaunchDigestLayout"},

@@ -234,6 +234,8 @@ void testMoeRouter(Ctx& c);
 void gemmrChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& down, int R, int K);
 // 8060S grouped expert GEMMs (test_moe_gu.cpp), called by testMoe / testMoeMx
 void moeGuChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& down, int R, int K);
+// v0252-f4 moeshx (feat028): moe_gus_mxfp4w / moe_downs_mxfp4w (test_moe_shx.cpp, gfx1201), called by testMoeMx
+void moeShxChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& down, int R, int K);
 // feat026-moep: the multi-fragment 8060S expert GEMM variants vs the shipped path (test_moep.cpp); v0251-a7port: the
 // default kernels (kernels::kMoepDefault) must be in the gfx1151 object and the host table, absent elsewhere
 void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& down, int R, int K);

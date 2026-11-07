@@ -429,6 +429,8 @@ void loadMoe(MoeKernels& k, const Loader& L) {
         k.gemm_moe32r[i] = L.opt("gemm_moe32r_mxfp4");
         k.gemm_moegu[i] = L.opt("gemm_moegu_mxfp4");
         k.moe_gu_mxw = L.opt("moe_gu_mxfp4w");
+        k.moe_gus_mxw = L.opt("moe_gus_mxfp4w");  // v0252-f4 moeshx (gfx1201 only)
+        k.moe_downs_mxw = L.opt("moe_downs_mxfp4w");
         k.moe_down_mxw = L.opt("moe_down_mxfp4w");
         k.gemm8_moe = L.opt("gemm8_moe");
         k.gemm8_moe32 = L.opt("gemm8_moe32");

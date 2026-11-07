@@ -523,6 +523,8 @@ static void testFingerprintCoversBitsKey() {
         t.fast_kv_q8h = s8060;
         t.strix_profile = t.k_gdn_sx = s8060;
         t.gdn_strix_shape = true;
+        t.k_moe_shx = !s8060;  // v0252-f4 moeshx: the gfx1201 kernels and the MXFP4 shared-expert shape
+        t.moe_shx_shape = moe;
         return t;
     };
     std::vector<std::string> names;

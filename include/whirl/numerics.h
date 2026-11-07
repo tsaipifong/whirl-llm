@@ -13,7 +13,9 @@
 //    the same items (fp8 + moefp8 back in MoE balance; MOE-BAL 2026-10-13 had made them fast-only).
 //  - fast: balance plus aggressive gated items (4-bit KV, relaxed speculative acceptance, ...).
 //    Implemented: kvq4 (4-bit KV where the code object has it: Radeon 8060S; elsewhere fast keeps
-//    f16 KV until there are q4 kernels) and relaxacc. The others are listed as skipped.
+//    f16 KV until there are q4 kernels) and relaxacc; opt-in (fast_optin_items: an explicit list, "all", WHIRL_MOESHX=1
+//    or the per-card fast default rule, Target::moeshx_default): moeshx (MoE decode: the shared expert folded into the
+//    routed int8 expert launches, R9700; feat028, v0252-f4). The others are listed as skipped.
 // KV format: fixed per mode and model type (chooseKv), never switched by what fits: a format that
 // does not fit shrinks the context (when not given) or refuses. WHIRL_KV is a debug override.
 // Items not applicable to the device or model are listed as skipped, never an error.
@@ -52,6 +54,7 @@ enum class Item : std::uint8_t {
     moeskip,  // skip low-weight MoE experts
     a8,       // int8 activations for Q4_K / Q5_K / Q6_K prefill (W4A8)
     a4,       // W4A4 prefill
+    moeshx,   // MoE decode / verify: the shared expert as slot K of the int8 routed expert launches (feat028, v0252-f4; R9700)
     n_items
 };
 inline constexpr std::size_t n_items = static_cast<std::size_t>(Item::n_items);
@@ -61,13 +64,21 @@ std::optional<Item> itemFromName(std::string_view s);
 inline constexpr std::uint32_t bit(Item it) { return 1u << static_cast<unsigned>(it); }
 inline constexpr std::uint32_t balance_items = bit(Item::fp8) | bit(Item::moefp8) | bit(Item::gdnwmma) | bit(Item::h16) | bit(Item::kvq8) | bit(Item::specsample);
 inline constexpr std::uint32_t fast_only_items =
-    bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::headq) | bit(Item::moeskip) | bit(Item::a8) | bit(Item::a4);
+    bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::headq) | bit(Item::moeskip) | bit(Item::a8) | bit(Item::a4) | bit(Item::moeshx);
+// v0252-f4 (feat028-moefast97-r1 7ef2cae): fast items a plain --fast does not request (only an explicit list, "all", their
+// WHIRL_ switch or the per-card fast default rule below): implemented, waiting for their GPU kernel tests / task-accuracy
+// screen (G3a)
+inline constexpr std::uint32_t fast_optin_items = bit(Item::moeshx);
+// v0252-f4 (DISCOVERY v4 N11, the fast default rule): plain --fast on the gfx1201 code object (R9700) requests moeshx for
+// MoE models with MXFP4 experts when this is true (Target::moeshx_default, filled by the loader; never on gfx1151). Shipped
+// false until the G3a screen (kt, golden, ABBA speed, T1 S) accepts it; flipping it is the whole switch (plus its pin test).
+inline constexpr bool moeshx_fast_default_r9700 = false;
 // MoE models: balance items that only the fast mode enables (an explicit item list still enables
 // them). Empty since MODES-MXFP4 (owner 2026-10-16): MoE balance has fp8 + moefp8 again
 // (MOE-BAL 2026-10-13 had moved them here). Kept as the per-model-type hook of forModel.
 inline constexpr std::uint32_t moe_fast_items = 0;
 // implemented items (the rest are "not yet implemented": skipped, the mode runs as balance)
-inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4) | bit(Item::relaxacc);
+inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::moeshx);
 
 // ---- arch025-N2a (R-5): the per-variable overrides as Request fields (raw values, parsed in plan())
 //
@@ -89,6 +100,8 @@ struct EnvValues {
     Raw moe_fp8, moe_mxw, moe_wide, moe_rbf, moep_gu, moep_dn, moep_comb, moe_rfuse;
     // v0252-c1port (feat026-attnkg97 / -97k): attn_kgvar (WHIRL_ATTN_KGVAR, the gfx1201 f16 attn_kg variant; class B)
     Raw attn_kgvar;
+    // v0252-f4 (feat028 moeshx): WHIRL_MOESHX=0|1, fast-only (applyFastOnlyOverride; precise / balance ignore it)
+    Raw moeshx;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -96,7 +109,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 34;
+    static constexpr std::size_t n_fields = 35;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -181,6 +194,10 @@ struct Target {
     bool gdn_strix_shape = false;  // d_state 128, head V 128, n_k_heads > 0, n_v_heads % n_k_heads == 0, ratio <= 4
     bool k_gemm8t = false;       // the whole fragment-tiled fp8 set (Model::useTiledFp8, forward.cpp:269-277)
     bool k_gdn_v0 = false;       // gdn_step_norm_v0 present (WHIRL_GDN_V0)
+    // v0252-f4 (feat028 moeshx): the kernels, the shared-expert shape, and the per-card fast default rule
+    bool k_moe_shx = false;       // moe_gus_mxfp4w / moe_downs_mxfp4w present (gfx1201 code object)
+    bool moe_shx_shape = false;   // every MoE layer's shared expert is MXFP4 of the experts' shape with a shared gate
+    bool moeshx_default = false;  // plain --fast requests moeshx (gfx1201: moeshx_fast_default_r9700; gfx1151: never)
 };
 
 // gdnwmma / h16 for a model without MXFP4 tensors (KG-1): dense models on the R9700 only
@@ -217,6 +234,9 @@ struct ItemState {
 // variant per NP x KV path), 0 on the gfx1151 one (no attn_kg there); WHIRL_ATTN_KGVAR = "auto" or a whole decimal 0 / 1 /
 // 3 (parseKgVar) overrides it in every mode; any other value keeps the default and Plan::ignored carries one note. Still
 // in bitsKey (C-4, conservative: the default change re-keys the gfx1201 KV tiers once).
+// v0252-f4 (feat028 moeshx): moe_shx = fast and the item moeshx on and int8 decode (not prec_dec); the MoE decode / verify
+// experts run the shared expert as slot K (ops::chooseMoe moe_q8_shx) and Model::load sizes the decode expert buffers for
+// K + 1 slots only then (R-C3). Not in the S0b-2 dump (the launch log pins the kernels).
 #define WHIRL_NUMERICS_FLAGS(X)                                  \
     X(B, use_graph, true, "use_graph")                           \
     X(B, no_fuse, false, "no_fuse")                              \
@@ -268,7 +288,8 @@ struct ItemState {
     X(B, moe_rfuse, false, "")                                   \
     X(B, gv_group, true, "gv_group")                             \
     X(U, gv_nmax, 0, "gv_nmax")                                  \
-    X(B, gdn_v0, false, "")
+    X(B, gdn_v0, false, "")                                      \
+    X(B, moe_shx, false, "")
 
 struct Flags {
 #define WHIRL_NF_B bool

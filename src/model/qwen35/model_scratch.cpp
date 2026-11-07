@@ -21,7 +21,7 @@ using u32 = std::uint32_t;
 
 }  // namespace
 
-void Model::allocScratch(u32 fd_splits_) {
+void Model::allocScratch(u32 fd_splits_, [[maybe_unused]] bool moe_shx) {  // v0252-f4 test-first: moe_shx not used yet
     Model& m = *this;
     const Config& cfg = m.cfg;
     const u64 f4 = 4;
