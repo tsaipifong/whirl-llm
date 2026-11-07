@@ -82,6 +82,9 @@ struct MockConfig {
     // with these row bytes, in kvArrays() order K, V, extra...: none = f16-shaped (K, V), two = q8h / q4-shaped (K, V,
     // K scales, V scales). The mock never reads them; the engine copies, spills and restores them like the real ones.
     std::vector<std::uint32_t> kv_extra_rows;
+    // v0252-f1: the model supports the relaxacc one-pass check (setRelaxRank; the verify writes each MTP draft's full-row
+    // rank / row max / logit like argmax_rank_rows_to); false = the engine keeps topkRows (as a model without the kernel)
+    bool relax_rank = false;
 };
 
 class MockModel final : public server::ServerModel {
@@ -133,6 +136,7 @@ public:
     void setDraftCutoff(float, std::uint32_t) override {}
     void mtpBatchStepEx(std::span<const server::MSeg> segs, std::uint32_t r, bool draft) override;
     std::uint32_t verifyBatchEnqueue(std::span<const server::VSeg> segs) override;
+    bool setRelaxRank(server::DevPtr stats, std::uint32_t seg_mask, std::uint32_t stride) override;
     void readCtl(std::span<std::int32_t> dst) override;
     void mtpEnqueue(server::DevPtr hidden, std::span<const std::uint32_t> tokens, std::uint32_t pos0) override;
     void topkRows(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, server::DevPtr ids,
@@ -167,6 +171,10 @@ public:
     std::uint32_t maxPrefillRows() const { return max_pf_rows_.load(); }
     // arch025-mutgap: most draft rows of one verify segment so far (the per-slot draft count the engine asked for)
     std::uint32_t maxSegDrafts() const { return max_seg_nd_.load(); }
+    // v0252-f1: topkRows calls, verifies that wrote one-pass rank rows, rank rows written
+    std::uint64_t topkCalls() const { return topk_calls_.load(); }
+    std::uint64_t rankVerifies() const { return rank_verifies_.load(); }
+    std::uint64_t rankRows() const { return rank_rows_.load(); }
 
 private:
     void prefillRows(std::size_t n);
@@ -216,6 +224,9 @@ private:
     std::vector<std::map<std::uint32_t, State>> dfl_ctx_;
     std::uint64_t dfl_bad_ = 0, dfl_stale_ = 0, dfl_blocks_ = 0, dfl_holes_ = 0;
 
+    server::DevPtr rr_stats_ = 0;  // v0252-f1: the pending one-pass request (one-shot)
+    std::uint32_t rr_mask_ = 0, rr_stride_ = 0;
+    std::atomic<std::uint64_t> topk_calls_{0}, rank_verifies_{0}, rank_rows_{0};
     device::Backend& ops_;
     const Tokenizer& tok_;
     MockConfig mc_;

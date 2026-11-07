@@ -64,6 +64,8 @@ int main(int argc, char** argv) {
         {"acceptor_fixed", testAcceptorFixed},
         {"acceptor_rules", testAcceptorRules},
         {"acceptor_random", testAcceptorRandom},
+        {"acceptor_rank_layout", testAcceptorRankLayout},       // v0252-f1
+        {"acceptor_rank_tie_overflow", testAcceptorRankTieOverflow},  // v0252-f1
     };
     std::set<std::string> only;
     for (int i = 1; i < argc; ++i) {

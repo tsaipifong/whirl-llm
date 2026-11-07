@@ -382,6 +382,26 @@ void Context::argmaxRows(u32 n, std::span<u32> out) {
     for (u32 r = 0; r < n; ++r) out[r] = static_cast<u32>(buf[r]);
 }
 
+// relaxacc one-pass check (v0252-f1): see the header. Test-first stubs (the port gives the bodies).
+bool Context::setRelaxRank(DevPtr stats, u32 seg_mask, u32 stride) {
+    (void)stats, (void)seg_mask, (void)stride;
+    return false;
+}
+
+Context::RelaxRank Context::takeRelaxRank() { return {}; }
+
+RowIdx Context::relaxRankSrc(std::span<const VSeg> segs, u32 mask) {
+    (void)segs, (void)mask;
+    RowIdx src;
+    for (i32& v : src.v) v = -1;
+    return src;
+}
+
+bool Context::relaxRankEnqueue(const RelaxRank& rr, u32 n, DevPtr out, const RowIdx& dst, const RowIdx& src) {
+    (void)rr, (void)n, (void)out, (void)dst, (void)src;
+    return false;
+}
+
 void Context::argmaxRowsEnqueue(u32 n) {
     hip::launch(k.argmax_rows, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), ctlSlot(ctl_rows));
 }

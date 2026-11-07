@@ -2564,6 +2564,76 @@ void testRelaxMtpRunnerUp() {
     }
 }
 
+// v0252-f1 (relaxacc one-pass check, DISCOVERY F1): with a model that supports it (MockConfig::relax_rank, like the real
+// model with argmax_rank_rows_to), greedy relaxacc requests never call topkRows: the verify itself writes each MTP draft's
+// full-row rank / row max / logit and the acceptor reads that layout. The mock's rows have no tie at the K-th place, so
+// the text equals the topk_rows path's. Concurrent slots: every slot's rows are found (mask bit = the slot's verify
+// segment; a slot outside the mask reads rank INT32_MAX and keeps no relaxed draft). Sampled requests keep topkRows.
+void testRelaxOnePass() {
+    const auto p = makePrompt(300, 931);
+    constexpr std::uint32_t G = 200;
+    std::string text[2];
+    std::uint64_t topk[2] = {0, 0}, rankv[2] = {0, 0};
+    for (int one : {0, 1}) {
+        ServerSetup su = baseSetup();
+        su.mc.mtp_miss_runner_up = true;
+        su.mc.draft_miss = 0.4;
+        su.mc.relax_rank = one == 1;
+        su.eo.ngram = false;
+        su.eo.relax.on = true;
+        TestServer srv(su);
+        g_log.clear();
+        auto r = srv.post("/v1/completions", completionBody(p, G));
+        CHECK_EQ(r.status, 200);
+        text[one] = completionText(r);
+        for (int i = 0; i < 500 && g_log.count("relaxacc: ") < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK_EQ(g_log.count("relaxacc: "), 1u);
+        CHECK_EQ(g_log.count("relaxacc: 0 of"), 0u);  // the relaxed rule kept runner-up drafts on both paths
+        topk[one] = srv.model().topkCalls();
+        rankv[one] = srv.model().rankVerifies();
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+    CHECK_EQ(text[0], text[1]);
+    CHECK(topk[0] > 0 && rankv[0] == 0);   // the model without the one-pass kernel: topk_rows, as v0.2.5.1
+    CHECK(topk[1] == 0 && rankv[1] > 0);   // one pass: no topk_rows launch for greedy relaxacc
+    // several greedy slots in one verify batch
+    {
+        ServerSetup su = baseSetup();
+        su.mc.mtp_miss_runner_up = true;
+        su.mc.draft_miss = 0.4;
+        su.mc.relax_rank = true;
+        su.mc.cycle_us = 2000;  // slow cycles: the requests share verify batches
+        su.eo.ngram = false;
+        su.eo.relax.on = true;
+        TestServer srv(su);
+        g_log.clear();
+        std::vector<std::thread> th;
+        std::vector<int> st(3, 0);
+        for (int i = 0; i < 3; ++i)
+            th.emplace_back([&, i] { st[i] = srv.post("/v1/completions", completionBody(makePrompt(200 + 50 * i, 960 + i), 150)).status; });
+        for (auto& t : th) t.join();
+        for (int i = 0; i < 3; ++i) CHECK_EQ(st[i], 200);
+        for (int i = 0; i < 500 && g_log.count("relaxacc: ") < 3; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK_EQ(g_log.count("relaxacc: "), 3u);
+        CHECK_EQ(g_log.count("relaxacc: 0 of"), 0u);  // every slot found its rows
+        CHECK(srv.model().topkCalls() == 0 && srv.model().rankVerifies() > 0);
+        CHECK(srv.model().maxSegDrafts() > 0);
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+    // a sampled request (temperature > 0: typical acceptance) still prepares its rows with topkRows
+    {
+        ServerSetup su = baseSetup();
+        su.mc.relax_rank = true;
+        su.eo.ngram = false;
+        su.eo.relax.on = true;
+        TestServer srv(su);
+        const std::string body = std::format("{{\"prompt\":{},\"max_tokens\":40,\"temperature\":0.8,\"seed\":3,\"ignore_eos\":true}}", idsJson(p));
+        auto r = srv.post("/v1/completions", body);
+        CHECK_EQ(r.status, 200);
+        CHECK(srv.model().topkCalls() > 0 && srv.model().rankVerifies() == 0);
+    }
+}
+
 // arch025-mutgap2 (mutant e2-verify-rows): a verify of more rows than the DFlash2 capture holds. The capture keeps the
 // last dfl_cap_rows rows of the verify batch; with two slots decoding a full block each (2 x 8 rows) against a capture of
 // 12 rows, the first slot's kept rows lie before the capture (a gap, counted, the run restarts), the second slot's rows are
@@ -9535,6 +9605,8 @@ int main(int argc, char** argv) {
         {"acceptor_fixed", testAcceptorFixed},
         {"acceptor_rules", testAcceptorRules},
         {"acceptor_random", testAcceptorRandom},
+        {"acceptor_rank_layout", testAcceptorRankLayout},       // v0252-f1
+        {"acceptor_rank_tie_overflow", testAcceptorRankTieOverflow},  // v0252-f1
         {"chat_tokens", testChatTokens},
         {"chat_tokens_cli", testChatTokensCli},  // arch025-N15c
         {"endpoints", testEndpoints},
@@ -9597,6 +9669,7 @@ int main(int argc, char** argv) {
         {"dflash_greedy", testDFlashGreedy},
         {"dflash_relax_exact", testDFlashRelaxExact},
         {"relax_mtp_runner_up", testRelaxMtpRunnerUp},  // arch025-mutgap2
+        {"relax_one_pass", testRelaxOnePass},  // v0252-f1
         {"dflash_short_capture", testDFlashShortCapture},
         {"dflash_ngram", testDFlashNgram},
         {"dflash_rollback", testDFlashRollback},

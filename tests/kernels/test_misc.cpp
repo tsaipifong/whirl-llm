@@ -187,6 +187,112 @@ void testMisc(Ctx& c) {
         rt.mismatches = bad;
         rt.pass = bad == 0;
         c.rep.add(rt);
+        // v0252-f1 relaxacc one-pass check: argmax_rank_rows_to = argmax_rows_to + per draft row the draft's rank in the
+        // WHOLE row (entries with a greater logit, or an equal logit and a lower id), the row max and the draft's logit
+        {
+            const hip::Function f = c.fnOpt("argmax_rank_rows_to");
+            Result pr;
+            pr.kind = Kind::invariant;
+            pr.n = 1;
+            pr.name = "argmax_rank_rows_to in the code object and the host table (v0252-f1)";
+            pr.pass = f != nullptr && c.k.argmax_rank_rows_to == f;
+            if (!pr.pass) pr.note = f == nullptr ? "missing from the code object" : "not in MiscKernels (loadMisc)";
+            pr.mismatches = pr.pass ? 0 : 1;
+            c.rep.add(pr);
+            if (pr.pass) {
+                const int R = 8, stride = 16;
+                std::vector<float> y = c.randn(static_cast<std::size_t>(R) * n, 3.f);
+                auto Y = [&](int r, int i) -> float& { return y[static_cast<std::size_t>(r) * n + i]; };
+                std::vector<int> dr(R, -1);
+                // row 0: the draft is the argmax; row 1: the 3rd largest
+                dr[0] = firstMax(&Y(0, 0), n);
+                {
+                    std::vector<int> o(n);
+                    std::iota(o.begin(), o.end(), 0);
+                    std::partial_sort(o.begin(), o.begin() + 3, o.end(), [&](int a, int b) { return Y(1, a) != Y(1, b) ? Y(1, a) > Y(1, b) : a < b; });
+                    dr[1] = o[2];
+                }
+                // row 2: a tied maximum (ids 100 / 9000): argmax 100, draft 9000 ranks 1
+                Y(2, 100) = 50.f, Y(2, 9000) = 50.f, dr[2] = 9000;
+                // row 3: the K-th tie overflow class: max at 500, ids 100 200 300 700 900 tied at 30 -> draft 700 ranks 4
+                Y(3, 500) = 40.f;
+                for (int i : {900, 100, 700, 300, 200}) Y(3, i) = 30.f;
+                dr[3] = 700;
+                // row 4: a draft id out of the row (no rank); row 5: no draft (src -1)
+                dr[4] = n + 5;
+                // row 6: the draft is the last element, tied with the maximum at a lower id
+                Y(6, 77) = 60.f, Y(6, n - 1) = 60.f, dr[6] = n - 1;
+                // row 7: +0.0 draft between -0.0 neighbours (equal as floats: the lower id is ahead)
+                Y(7, 5000) = -0.0f, Y(7, 5001) = 0.0f, Y(7, 5002) = -0.0f, dr[7] = 5001;
+                std::vector<int> want_tok(R), want_rank(R);
+                std::vector<float> want_m(R), want_ld(R);
+                for (int r = 0; r < R; ++r) {
+                    const float* row = &Y(r, 0);
+                    want_tok[r] = firstMax(row, n);
+                    want_m[r] = row[want_tok[r]];
+                    const int d = dr[r];
+                    if (d < 0 || d >= n) {
+                        want_rank[r] = std::numeric_limits<int>::max();
+                        want_ld[r] = -std::numeric_limits<float>::infinity();
+                        continue;
+                    }
+                    int k = 0;
+                    for (int i = 0; i < n; ++i) k += (row[i] > row[d] || (row[i] == row[d] && i < d)) ? 1 : 0;
+                    want_rank[r] = k;
+                    want_ld[r] = row[d];
+                }
+                Buf dy(y), ctl(64 * 4), st(static_cast<std::size_t>(3 * stride) * 4);
+                std::vector<int> ctl0(64, -7);
+                for (int r = 0; r < R; ++r) ctl0[static_cast<std::size_t>(40 + r)] = dr[r];
+                wk::RowIdx d2, s2;
+                for (int r = 0; r < 32; ++r) d2.v[r] = -1, s2.v[r] = -1;
+                for (int r = 0; r < R; ++r) d2.v[r] = 10 + r, s2.v[r] = dr[r] >= 0 ? 40 + r : -1;
+                std::vector<int> first;
+                std::size_t diff_launch = 0;
+                std::vector<int> g_tok(R), g_rank(R), g_mb(R), g_ldb(R);
+                for (int it = 0; it < 20; ++it) {
+                    ctl.up(ctl0);
+                    st.fill(0x55);
+                    hip::launch(c.k.argmax_rank_rows_to, {static_cast<unsigned>(R), 1, 1}, {1024, 1, 1}, 0, c.s, dy.p(), n, ctl.p(), d2, s2, st.p(), stride);
+                    c.sync();
+                    const auto o = ctl.down<int>(64);
+                    const auto sv = st.down<int>(static_cast<std::size_t>(3 * stride));
+                    std::vector<int> all(o.begin(), o.end());
+                    all.insert(all.end(), sv.begin(), sv.end());
+                    if (it == 0) {
+                        first = all;
+                        for (int r = 0; r < R; ++r) {
+                            g_tok[r] = o[static_cast<std::size_t>(10 + r)];
+                            g_rank[r] = sv[static_cast<std::size_t>(r)];
+                            g_mb[r] = sv[static_cast<std::size_t>(stride + r)];
+                            g_ldb[r] = sv[static_cast<std::size_t>(2 * stride + r)];
+                        }
+                    } else if (all != first) {
+                        ++diff_launch;
+                    }
+                }
+                c.rep.add(cmpExact("argmax_rank_rows_to tokens == argmax_rows_to (first maximum wins)", g_tok, want_tok));
+                std::vector<int> got_all, want_all;
+                for (int r = 0; r < R; ++r) {
+                    int mb, lb;
+                    std::memcpy(&mb, &want_m[r], 4);
+                    std::memcpy(&lb, &want_ld[r], 4);
+                    got_all.insert(got_all.end(), {g_rank[r], g_mb[r], g_ldb[r]});
+                    want_all.insert(want_all.end(), {want_rank[r], mb, lb});
+                }
+                c.rep.add(cmpExact("argmax_rank_rows_to rank / max / l_d vs CPU (ties: lower id first; no draft: INT_MAX, -inf)", got_all, want_all));
+                std::vector<int> gt, wt;
+                for (int r : {2, 3, 6, 7}) gt.push_back(g_rank[r]), wt.push_back(want_rank[r]);
+                c.rep.add(cmpExact("argmax_rank_rows_to tie rows (tied max, K-th tie overflow class, +-0) ranks", gt, wt));
+                Result rl;
+                rl.kind = Kind::invariant;
+                rl.name = "argmax_rank_rows_to launches equal (20 launches: tokens, ranks, max, l_d bitwise)";
+                rl.n = 19;
+                rl.mismatches = diff_launch;
+                rl.pass = diff_launch == 0;
+                c.rep.add(rl);
+            }
+        }
         // argmax_prob
         Buf tok(4), prob(4);
         hip::launch(c.k.argmax_prob, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dx.p(), n, tok.p(), prob.p());

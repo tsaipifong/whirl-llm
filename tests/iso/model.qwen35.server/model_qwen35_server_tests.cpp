@@ -74,6 +74,15 @@ void testDraftCutoffAndSample() {
     ISO_CHECK(w.m->draft_samp.size() == 2);
 }
 
+// v0252-f1: the relaxacc one-pass request reaches the model (one-shot; refused without the kernel)
+void testRelaxRank() {
+    World w;
+    ISO_CHECK(!w.b->setRelaxRank(0x4000, 0x3, 32));  // the unloaded model has no argmax_rank_rows_to
+    w.m->k.argmax_rank_rows_to = reinterpret_cast<whirl::hip::Function>(0x20);
+    ISO_CHECK(w.b->setRelaxRank(0x4000, 0x3, 32));
+    ISO_CHECK(w.m->rr_stats == 0x4000 && w.m->rr_mask == 0x3 && w.m->rr_stride == 32);
+}
+
 void testCaptureAndDflash() {
     World w;
     w.m->cap_n = 4;
@@ -122,6 +131,7 @@ int main(int argc, char** argv) {
                      {"capture_and_dflash", testCaptureAndDflash},
                      {"vision", testVision},
                      {"profile_names", testProfileNames},
-                     {"topk_launch", testTopkLaunch}},
+                     {"topk_launch", testTopkLaunch},
+                     {"relax_rank", testRelaxRank}},
                     argc, argv);
 }

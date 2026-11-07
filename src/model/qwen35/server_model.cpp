@@ -89,6 +89,9 @@ public:
         m_.mtpBatchStepEx(segs, r, draft);
     }
     std::uint32_t verifyBatchEnqueue(std::span<const VSeg> segs) override { return m_.verifyBatchEnqueue(segs); }
+    bool setRelaxRank(DevPtr stats, std::uint32_t seg_mask, std::uint32_t stride) override {
+        return m_.setRelaxRank(stats, seg_mask, stride);
+    }
     void readCtl(std::span<std::int32_t> dst) override { m_.readCtl(dst); }
     bool draftSampleOk() const override { return m_.draftSampleOk(); }
     void setDraftSample(std::uint32_t s, const spec::DraftSample& ds) override {

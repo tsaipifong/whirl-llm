@@ -87,7 +87,7 @@ struct FakeRows final : sampling::RowSource {
     std::uint8_t* inCands() override { return marks.data(); }
 };
 
-acase::Result runNewIn(const acase::Case& c, acase::Inputs& in) {
+acase::Result runNewIn(const acase::Case& c, acase::Inputs& in, bool rank_layout = false) {
     acase::Result res;
     FakeRows src;
     src.rows = &in.rows;
@@ -115,9 +115,13 @@ acase::Result runNewIn(const acase::Case& c, acase::Inputs& in) {
         for (std::uint32_t r = 0; r <= a; ++r) tail[r + 1] = in.dr[r];
         return relax::extendsRepeat(std::span<const std::uint32_t>(in.hist), std::span<const std::uint32_t>(tail.data(), a + 2));
     };
+    // v0252-f1: the one-pass layout (argmax_rank_rows_to) from the CPU oracle, on the drafts as resolved
+    const std::vector<std::uint8_t> rank_host = acase::rankHost(c, in);
+    const sampling::RelaxRows rrows = rank_layout ? sampling::RelaxRows{rank_host.data(), acase::max_rows_t, in.rp.topk(), true}
+                                                  : sampling::RelaxRows{in.relax_host.data(), acase::max_rows_t, in.rp.topk()};
     const sampling::Accepted ac =
         c.greedy ? acceptor.greedy(in.ctl.data() + qwen35::ctl_rows, d, c.relax,
-                                   sampling::RelaxRows{in.relax_host.data(), acase::max_rows_t, in.rp.topk()}, repeats, relaxed, gap)
+                                   rrows, repeats, relaxed, gap)
                  : acceptor.sample(src, sm, d, c.relax, c.n_gen, repeats, relaxed);
     res.acc = ac.acc;
     res.chosen = ac.chosen;
@@ -134,7 +138,13 @@ acase::Result runNewIn(const acase::Case& c, acase::Inputs& in) {
     }
     return res;
 }
-acase::Result runNew(const acase::Case& c) { return acase::runResolved(c, runNewIn); }
+// a lambda, not the function: a pointer to runNewIn(c, in, bool = false) loses the default argument (C2198)
+acase::Result runNew(const acase::Case& c) {
+    return acase::runResolved(c, [](const acase::Case& x, acase::Inputs& in) { return runNewIn(x, in, false); });
+}
+acase::Result runNewRank(const acase::Case& c) {
+    return acase::runResolved(c, [](const acase::Case& x, acase::Inputs& in) { return runNewIn(x, in, true); });
+}
 
 struct AcceptExpect {
     const char* name;
@@ -287,4 +297,77 @@ void testAcceptorRandom() {
     }
     CHECK_EQ(same, n);
     CHECK(accepted > 1000);
+}
+
+// v0252-f1 (relaxacc one-pass check): the acceptor on the rank layout of argmax_rank_rows_to (the full-row rank of the draft,
+// computed here by the CPU oracle acase::rankHost) gives the same accept count, chosen token, relaxed counter and relax_gap bits
+// as on the exact top-K layout, on every fixed greedy case and on 4000 random greedy cases (logits on a 1/1000 grid: many ties,
+// incl. ties at the K-th place)
+void testAcceptorRankLayout() {
+    std::uint32_t n = 0, same = 0, relaxed = 0, ties_k = 0;
+    auto one = [&](const acase::Case& c) {
+        const acase::Result a = runNew(c), b = runNewRank(c);
+        const bool ok = a.acc == b.acc && a.chosen == b.chosen && a.relaxed == b.relaxed && a.gap_bits == b.gap_bits;
+        if (!ok)
+            std::fprintf(stderr, "  rank layout case %s: acc %u/%u chosen %u/%u relaxed %u/%u\n", c.name, a.acc, b.acc, a.chosen, b.chosen,
+                         a.relaxed, b.relaxed);
+        same += ok;
+        relaxed += b.relaxed;
+        ++n;
+        // count rows whose K-th and (K+1)-th logits tie (the overflow class; here the top-K layout is exact, so equal)
+        const acase::Inputs in = acase::makeInputs(c);
+        for (std::uint32_t r = 0; r < c.nd; ++r) {
+            const std::vector<float>& L = in.rows[c.row0 + r];
+            const std::vector<std::uint32_t> o = acase::order(L);
+            const std::uint32_t k = in.rp.topk();
+            if (k < o.size() && L[o[k - 1]] == L[o[k]]) ++ties_k;
+        }
+    };
+    for (const acase::Case& c : acase::cases())
+        if (c.greedy) one(c);
+    std::uint32_t g = 0xF1A0u;
+    std::vector<std::string> drafts;
+    drafts.reserve(4000);
+    for (int it = 0; it < 4000; ++it) {
+        acase::Case c{};
+        c.name = "random_rank";
+        c.greedy = true;
+        c.relax = acase::lcg(g) % 4 != 0;
+        c.seed = acase::lcg(g);
+        c.n_gen = acase::lcg(g) % 1000;
+        c.nd = acase::lcg(g) % 5;
+        c.row0 = acase::lcg(g) % (acase::max_rows_t - c.nd);
+        c.V = 32 + acase::lcg(g) % 64;
+        c.lseed = acase::lcg(g);
+        const float spreads[8] = {0.2f, 0.3f, 0.5f, 1.0f, 1.5f, 2.0f, 4.0f, 6.0f};  // 2001 grid values for <= 96 tokens: K-th ties occur
+        c.spread = spreads[acase::lcg(g) % 8];
+        std::string ds;
+        const char kinds[6] = {'0', '1', '2', '3', 'x', 't'};
+        for (std::uint32_t r = 0; r < c.nd; ++r) ds += kinds[acase::lcg(g) % 6];
+        drafts.push_back(ds);
+        c.drafts = drafts.back().c_str();
+        c.rep_hist = c.nd >= 2 && acase::lcg(g) % 4 == 0;
+        one(c);
+    }
+    CHECK_EQ(same, n);
+    CHECK(relaxed > 500);  // the relaxed rule really kept drafts on the rank layout
+    CHECK(ties_k > 100);   // the random rows really tie at the K-th place
+}
+
+// v0252-f1: the one intended output change. topk_rows fills a tied K-th place by atomic order (feat027-relaxdet), so its
+// set can hold a tied id that is not among the lowest ids; acceptGreedy on that set then keeps a draft whose full-row
+// rank is K (rank inside the set K - 1). The rank layout keeps it only when its full-row rank < K.
+void testAcceptorRankTieOverflow() {
+    whirl::relax::Params p;
+    p.on = true;
+    p.k = 4;
+    p.alpha = 0.1f;
+    // row: id 2 = 1.0 (max), ids 5, 7, 9, 11 = 0.5 (tied); K = 4 -> exact set {2, 5, 7, 9}; draft 11 has full-row rank 4
+    const std::int32_t exact_ids[4] = {2, 5, 7, 9}, atomic_ids[4] = {2, 11, 7, 9};
+    const float vals[4] = {1.0f, 0.5f, 0.5f, 0.5f};
+    CHECK(!whirl::relax::acceptGreedy(p, exact_ids, vals, 1.0f, 11));  // exact top-K: 11 is not a candidate
+    CHECK(whirl::relax::acceptGreedy(p, atomic_ids, vals, 1.0f, 11));  // atomic-order set: 11 ranks 3 inside it -> kept
+    CHECK(!whirl::relax::acceptRank(p, 4, 0.5f, 1.0f));                // one pass: full-row rank 4 -> rejected
+    CHECK(whirl::relax::acceptRank(p, 3, 0.5f, 1.0f));                 // draft 9 (rank 3): kept, as on the exact set
+    CHECK(whirl::relax::acceptGreedy(p, exact_ids, vals, 1.0f, 9));
 }

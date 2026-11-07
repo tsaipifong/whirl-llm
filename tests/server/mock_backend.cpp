@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <malloc.h>
 #include <numeric>
 #include <stdexcept>
@@ -459,7 +460,22 @@ void MockModel::mtpBatchStepEx(std::span<const server::MSeg> segs, std::uint32_t
     }
 }
 
+bool MockModel::setRelaxRank(server::DevPtr stats, std::uint32_t seg_mask, std::uint32_t stride) {
+    if (!mc_.relax_rank || stats == 0 || seg_mask == 0) return false;
+    rr_stats_ = stats;
+    rr_mask_ = seg_mask;
+    rr_stride_ = stride;
+    return true;
+}
+
 std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) {
+    // v0252-f1: take the one-pass request (one-shot, as Context::takeRelaxRank)
+    const server::DevPtr rr_stats = rr_stats_;
+    const std::uint32_t rr_mask = rr_mask_, rr_stride = rr_stride_;
+    rr_stats_ = 0;
+    rr_mask_ = 0;
+    std::uint32_t seg_k = 0;
+    bool rank_any = false;
     std::uint32_t row = 0;
     cap_.clear();
     spinUs(mc_.cycle_us);
@@ -507,9 +523,33 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
             writeH(s, st.h);
             s.pend.clear();
         }
+        // v0252-f1: argmax_rank_rows_to's rows for this segment (CPU oracle). Like the kernel, every row of the verify is
+        // written: rows that verify an MTP draft of a segment in the mask get the draft's rank (entries with a greater logit
+        // or an equal logit and a lower id), the row max and the draft's logit; every other row rank INT32_MAX, l_d -inf
+        if (rr_stats != 0) {
+            const std::uint32_t V = cfg_.n_vocab;
+            const bool on = ((rr_mask >> seg_k) & 1u) != 0 && sg.drafts.empty();
+            for (std::uint32_t i = 0; i < toks.size(); ++i) {
+                const float* x = at<const float>(logits_) + static_cast<std::uint64_t>(row + i) * V;
+                const std::uint32_t d = on && i < sg.nd ? toks[i + 1] : V;
+                float m = -INFINITY;
+                std::int32_t n = 0;
+                for (std::uint32_t j = 0; j < V; ++j) {
+                    m = x[j] > m ? x[j] : m;
+                    if (d < V) n += (x[j] > x[d] || (x[j] == x[d] && j < d)) ? 1 : 0;
+                }
+                at<std::int32_t>(rr_stats)[row + i] = d < V ? n : std::numeric_limits<std::int32_t>::max();
+                at<float>(rr_stats)[rr_stride + row + i] = m;
+                at<float>(rr_stats)[2 * static_cast<std::uint64_t>(rr_stride) + row + i] = d < V ? x[d] : -INFINITY;
+                if (d < V) rank_rows_ += 1;
+            }
+            rank_any = true;
+        }
+        seg_k += 1;
         snap += sg.nd;
         row += static_cast<std::uint32_t>(toks.size());
     }
+    if (rank_any) rank_verifies_ += 1;
     return row;
 }
 
@@ -522,6 +562,7 @@ void MockModel::mtpEnqueue(server::DevPtr, std::span<const std::uint32_t>, std::
 
 void MockModel::topkRows(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, server::DevPtr ids,
                          server::DevPtr vals, server::DevPtr stats) {
+    topk_calls_ += 1;
     const std::uint32_t V = cfg_.n_vocab;
     std::vector<std::uint32_t> idx(V);
     for (std::uint32_t r = 0; r < rows; ++r) {

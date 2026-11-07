@@ -118,6 +118,9 @@
 //  tokens / picks:
 //   argmax(x, n, int* out, int* ids, int* pos, int advance)
 //   argmax_rows(x, n, out); argmax_rows_to(x, n, out, RowIdx dst)
+//   argmax_rank_rows_to(x, n, int* out, RowIdx dst, RowIdx src, int* stats, int stride)  (optional; v0252-f1 relaxacc
+//            one-pass check) argmax_rows_to + per row with src.v[b] >= 0 the rank / max / logit of draft out[src.v[b]]:
+//            stats[b] rank (INT_MAX: no draft), ((float*)stats)[stride + b] max, ((float*)stats)[2 * stride + b] l_d
 //   argmax_prob(x, n, int* out_tok, float* out_prob)
 //   draft_pick(x, n, int* tok, float* prob, int* ctl, int r, int n_min, float p_min, const int* map)
 //   draft_pick_rows(x, n, int* ctl_all, RowIdx area, int r, int n_min, float p_min, const int* map)
@@ -710,6 +713,7 @@ struct MiscKernels {
     F rmsnorm_x8h16{}, rmsnorm_x8h16t{};
     F rmsnorm_x8t{}, silu_mul_x8t{}, silu_mul_x8ht{}, gated_norm_x8t{}, gated_norm_x8ht{};
     F topk_rows{};
+    F argmax_rank_rows_to{};  // optional (v0252-f1 relaxacc one-pass check; null: relaxacc greedy keeps topk_rows)
 };
 
 struct KernelTable : MatmulKernels, AttnKernels, MoeKernels, DeltaNetKernels, MiscKernels {

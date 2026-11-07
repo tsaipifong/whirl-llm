@@ -121,10 +121,67 @@ void testDraftHeadProblem() {
     ISO_CHECK(p.head_rows == 1000 && p.draft_rows == 300 && p.draft_vocab == 400 && !p.d2 && !p.map);
 }
 
+// v0252-f1 (relaxacc one-pass check): the per-row draft source of argmax_rank_rows_to, the one-shot request and its launch
+void testRelaxRank() {
+    auto c = std::make_unique<MtpProbe>();
+    const std::uint32_t lit[2] = {5, 6};
+    std::vector<q::VSeg> segs(3);
+    segs[0].seq = 2, segs[0].nd = 3;                                         // MTP drafts: rows 0..3
+    segs[1].seq = 0, segs[1].nd = 2, segs[1].drafts = std::span(lit, 2);    // n-gram (host) drafts: rows 4..6
+    segs[2].seq = 1, segs[2].nd = 2;                                         // MTP drafts: rows 7..9
+    const auto all = q::Context::relaxRankSrc(segs, 0x7);
+    const int cw = static_cast<int>(q::ctl_words), cd = static_cast<int>(q::ctl_drafts);
+    const int want[10] = {2 * cw + cd, 2 * cw + cd + 1, 2 * cw + cd + 2, -1, -1, -1, -1, cw + cd, cw + cd + 1, -1};
+    bool ok = true;
+    for (int r = 0; r < 10; ++r) ok = ok && all.v[r] == want[r];
+    for (int r = 10; r < 32; ++r) ok = ok && all.v[r] == -1;  // rows past the batch
+    ISO_CHECK(ok);
+    const auto first = q::Context::relaxRankSrc(segs, 0x1);  // segment 2 not in the mask
+    ISO_CHECK(first.v[0] == 2 * cw + cd && first.v[2] == 2 * cw + cd + 2 && first.v[7] == -1 && first.v[8] == -1);
+    const auto none = q::Context::relaxRankSrc(segs, 0x2);  // only the n-gram segment: no row
+    bool n0 = true;
+    for (int r = 0; r < 32; ++r) n0 = n0 && none.v[r] == -1;
+    ISO_CHECK(n0);
+    // the request: refused without the kernel, without a buffer or without a segment; one-shot
+    ISO_CHECK(!c->setRelaxRank(0x5000, 1, 32));  // no argmax_rank_rows_to in the table
+    ISO_CHECK(c->takeRelaxRank().stats == 0);
+    c->k.argmax_rank_rows_to = fn(0x30);
+    c->k.argmax_rows_to = fn(0x31);
+    ISO_CHECK(!c->setRelaxRank(0, 1, 32) && !c->setRelaxRank(0x5000, 0, 32));
+    ISO_CHECK(c->setRelaxRank(0x5000, 0x5, 32));
+    const q::Context::RelaxRank rr = c->takeRelaxRank();
+    ISO_CHECK(rr.stats == 0x5000 && rr.mask == 0x5 && rr.stride == 32);
+    ISO_CHECK(c->takeRelaxRank().stats == 0);  // taken: cleared
+    // a verify that throws still consumes the request (no stale request for the next verify)
+    ISO_CHECK(c->setRelaxRank(0x5000, 1, 32));
+    ISO_CHECK(codeOf([&] { (void)c->verifyBatchEnqueue({}); }) == "BadBatch");
+    ISO_CHECK(c->takeRelaxRank().stats == 0);
+    ISO_CHECK(c->setRelaxRank(0x5000, 1, 32));
+    c->max_ctx = 4;
+    ISO_CHECK(codeOf([&] { c->verifyEnqueueEx(1, 4, std::nullopt, 2); }) == "ContextTooLong");
+    ISO_CHECK(c->takeRelaxRank().stats == 0);
+    // the launch: only with a request and a draft row; one block of 1024 per verify row
+    c->cfg.n_vocab = 1000;
+    q::RowIdx dst, src;
+    for (int r = 0; r < 32; ++r) dst.v[r] = r, src.v[r] = -1;
+    fake::recordLaunches(true);
+    ISO_CHECK(!c->relaxRankEnqueue({}, 4, 0x100, dst, src));
+    ISO_CHECK(!c->relaxRankEnqueue(rr, 4, 0x100, dst, src));  // no draft row
+    src.v[2] = 7;
+    ISO_CHECK(!c->relaxRankEnqueue({}, 4, 0x100, dst, src));  // no request
+    ISO_CHECK(!c->relaxRankEnqueue(rr, 2, 0x100, dst, src));  // the draft row is past n
+    ISO_CHECK(c->relaxRankEnqueue(rr, 4, 0x100, dst, src));
+    const auto l = fake::recordedLaunches();
+    fake::recordLaunches(false);
+    ISO_CHECK(l.size() == 1);
+    if (l.size() == 1) ISO_CHECK(l[0].f == fn(0x30) && l[0].grid.x == 4 && l[0].block.x == 1024);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     return iso::run("forward.mtp_verify",
-                    {{"ctl_slot", testCtlSlot}, {"refusals", testRefusals}, {"commit_seq", testCommitSeq}, {"draft_head_problem", testDraftHeadProblem}},
+                    {{"ctl_slot", testCtlSlot}, {"refusals", testRefusals}, {"commit_seq", testCommitSeq}, {"draft_head_problem", testDraftHeadProblem},
+                     {"relax_rank", testRelaxRank}},
                     argc, argv);
 }
