@@ -488,6 +488,14 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
                 std::format(" [k {}, alpha {:.2f}, eps {:.2f}, delta {:.2f}]", k, F.relax_alpha, F.relax_eps, F.relax_delta);
         }
     }
+    // v0252-f4 (feat028 moeshx r1): WHIRL_MOESHX is fast-only (precise / balance: plan untouched, one note); in fast 1 = on
+    // (a user override where it applies), 0 = off. moe_shx = fast + the item on + int8 decode activations (not prec_dec)
+    if (items)
+        if (const Raw& v = e.moeshx; v && !v->empty())
+            if (std::string ign = applyFastOnlyOverride(p, Item::moeshx, "MOESHX", *v, *v != "0", t.moe && t.moe_mxfp4 && t.k_moe_shx && t.moe_shx_shape);
+                !ign.empty())
+                p.ignored.push_back(std::move(ign));
+    F.moe_shx = p.mode == Mode::fast && p.on(Item::moeshx) && !F.prec_dec;
     // v0252-c1acc (C-3): an invalid WHIRL_ATTN_KGVAR is reported once (the default from loadFlags stays)
     if (items)
         if (const Raw& v = e.attn_kgvar; v && !parseKgVar(*v))
@@ -574,7 +582,11 @@ void loaderFlags(const Request& r, Flags& F) {
 }
 
 Plan plan(const Request& r_in, const Target& t) {
-    const Request r = forModel(r_in, t.moe);
+    Request r = forModel(r_in, t.moe);
+    // v0252-f4 (DISCOVERY v4 N11): the fast default rule - a plain --fast (no item list) requests moeshx where the loader set
+    // Target::moeshx_default (gfx1201 with moeshx_fast_default_r9700; never gfx1151), for MoE models with MXFP4 experts only
+    // (a dense model's log line stays as it was)
+    if (r.mode == Mode::fast && !r.custom && t.moeshx_default && t.moe && t.moe_mxfp4) r.items |= bit(Item::moeshx);
     Plan p;
     p.mode = r.mode;
     p.source = r.source;
@@ -643,6 +655,14 @@ Plan plan(const Request& r_in, const Target& t) {
                     break;
                 }
                 note = "drafts accepted when close to the target (greedy: top-k + p ratio; sampling: typical acceptance)";
+                break;
+            case Item::moeshx:
+                // v0252-f4 (feat028 7ef2cae): int8 decode only (Flags::moe_shx also needs !prec_dec, loadOverrides)
+                if (!t.moe) why = "dense model";
+                else if (!t.moe_mxfp4) why = "experts are not MXFP4";
+                else if (!t.k_moe_shx) why = t.gfx1151 ? "no moe_gus / moe_downs kernels on this GPU (gfx1151)" : "no moe_gus / moe_downs kernels in this code object";
+                else if (!t.moe_shx_shape) why = "shared expert not MXFP4 of the experts' shape";
+                else note = "shared expert as slot K of the int8 decode / verify expert launches (other f32 order)";
                 break;
             default:
                 why = "not yet implemented (balance behaviour)";
@@ -738,7 +758,7 @@ std::string logLine(const Plan& p) {
         l += std::string(" - f16/f32 prefill activations, ") + (p.q8dec ? "" : "f16 decode / verify activations, ") + "f32 DeltaNet, f16 KV";
     else l += " - enabled: " + (en.empty() ? std::string("none") : en);
     if (p.mode != Mode::precise || !sk.empty()) l += "; skipped: " + (sk.empty() ? std::string("none") : sk);
-    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc))
+    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc) && !p.on(Item::moeshx))
         l += "; no fast item applies here: fast runs as balance";
     for (const std::string& o : p.overrides) l += "; " + o;
     l += std::string("; decode: ") + (p.q8dec ? k_q8dec : k_f16dec);

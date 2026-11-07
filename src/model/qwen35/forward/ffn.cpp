@@ -83,6 +83,7 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
     mp.down_ty = mo.down.ty;
     mp.gate_rb = mo.gate.row_bytes;
     mp.up_rb = mo.up.row_bytes;
+    mp.down_rb = mo.down.row_bytes;
     mp.gate_ncols = mo.gate.ncols;
     mp.down_ncols = mo.down.ncols;
     mp.refs = mo.gate.ref != 0 && mo.up.ref != 0 && mo.down.ref != 0;
@@ -90,6 +91,10 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
     mp.tiles64_buf = moe_tiles64 != 0;
     mp.cnt_buf = moe_cnt != 0;
     mp.rcnt_buf = moe_rcnt != 0;
+    // v0252-f4 (moeshx): the shared expert as slot K when the plan turned it on and this block's shared expert fits; the pairs
+    // the decode expert buffers hold (Scratch::moe_pairs, sized by Model::load for the plan: R-C3)
+    mp.shx_ok = nf().moe_shx && ops::moeShxShape(mp, moeSharedOf(sg, su, sd, mo.sh_gate));
+    mp.buf_slots = moe_pairs;
     ops::MoeFlags mf;
     mf.prec_dec = nf().prec_dec;
     mf.small_max = small_max;
@@ -105,6 +110,7 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
     // outside fast; this keeps chooseMoe from taking them on prec_dec alone)
     mf.moep_comb_ok = ops::moepCombFor(num_plan.mode == numerics::Mode::precise, num_plan.mode == numerics::Mode::fast);
     mf.moe_rfuse = nf().moe_rfuse;
+    mf.moe_shx = nf().moe_shx;  // v0252-f4
     const ops::MoePlan pl = ops::chooseMoe(mp, mf, k, k.silu_mul_x8h);
     const bool small = pl.small;
     // precise decode: f32-activation experts (moe_gu_f / moe_down_f) and the shared expert on
@@ -167,6 +173,25 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
         hip::launch(pl.down, pl.down_grid, D(256), 0, stream, mo.down.ptr, mo.down.row_bytes, I(E), moe_g, moe_ids, moe_w, moe_sg, ysh, x, I(F),
                     I(K));
         if (prof) prof->matmul_bytes += mo.down.row_bytes * E * n * K;
+        xq_src = 0;
+        x16_src = 0;
+        mark(OpClass::matmul);
+        return;
+    }
+    if (pl.shx) {
+        // v0252-f4 moeshx (fast, feat028 7ef2cae): the shared expert is slot K of n x (K + 1) pairs - gate + up of the routed
+        // experts and the shared expert from the int8 h that rmsnormQ8 left in xq (one launch), SwiGLU -> int8, down over all
+        // K + 1 slots (shared weight sg[t]) + residual. No separate shared chain, no moe_ysh.
+        const u32 S = K + 1;
+        hip::launch(pl.gu, pl.gu_grid, D(256), 0, stream, mo.gate.ptr, mo.up.ptr, sg.ptr, su.ptr, mo.gate.row_bytes, I(F), I(2 * F), xq, xd,
+                    moe_ids, moe_g, moe_u, I(E), I(K), gate);
+        if (prof) prof->matmul_bytes += (mo.gate.row_bytes + mo.up.row_bytes) * F * n * S;
+        mark(OpClass::matmul);
+        hip::launch(k.silu_mul_q8, D(n * S * F / 256), D(256), 0, stream, moe_g, moe_u, moe_xq, moe_xd, I(n * S * F));
+        mark(OpClass::misc);
+        hip::launch(pl.down, pl.down_grid, D(256), 0, stream, mo.down.ptr, sd.ptr, mo.down.row_bytes, I(E), moe_xq, moe_xd, moe_ids, moe_w, moe_sg,
+                    x, I(F), I(K), gate);
+        if (prof) prof->matmul_bytes += mo.down.row_bytes * E * n * S;
         xq_src = 0;
         x16_src = 0;
         mark(OpClass::matmul);

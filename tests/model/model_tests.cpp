@@ -3041,6 +3041,18 @@ nu::Target targetOf(const q::Model& m) {
     for (std::size_t ci = 0; ci < m.k.gemm8t.size(); ++ci) tiled = tiled && m.k.gemm8t[ci] != nullptr && m.k.gemm8th[ci] != nullptr;
     t.k_gemm8t = tiled && m.k.qact_fp8t != nullptr && m.k.rmsnorm_x8t != nullptr && m.k.silu_mul_x8t != nullptr &&
                  m.k.silu_mul_x8ht != nullptr && m.k.gated_norm_x8t != nullptr && m.k.gated_norm_x8ht != nullptr;
+    // v0252-f4 (moeshx): the kernels, the shared-expert shape of every MoE layer, the per-card fast default rule
+    t.k_moe_shx = m.k.moe_gus_mxw != nullptr && m.k.moe_downs_mxw != nullptr;
+    {
+        bool any = false, all = true;
+        for (const q::Layer& L : m.layers) {
+            if (!L.moe) continue;
+            any = true;
+            all = all && whirl::ops::moeShxShape(q::moeProblemOf(*L.moe, m.cfg), q::moeSharedOf(L.ffn_gate, L.ffn_up, L.ffn_down, L.moe->sh_gate));
+        }
+        t.moe_shx_shape = any && all;
+    }
+    t.moeshx_default = !t.gfx1151 && nu::moeshx_fast_default_r9700;
     return t;
 }
 

@@ -54,6 +54,16 @@ bool moepOk(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k
 }
 // v0251-a7pol (B26-43): the moep flags only from kMoepMinTokensPerExpert tokens per expert (moepWide, moe.h); below it
 // the shipped 0.2.5 plan (no moep GEMMs, moe_combine). The one place the threshold applies.
+// v0252-f4 (moeshx, feat028 7ef2cae / r1): the shared expert as slot K of the int8 MXFP4 decode experts - the int8 decode
+// path with the whole-block MXFP4 kernels and gate + up in one launch, the shared expert compatible (shx_ok), both kernels
+// present, and the n x (K + 1) pairs inside the decode buffers (buf_slots: max_verify_rows x (K + 1) when the load planned
+// moeshx, so every decode / verify width takes it - batch-size independent, as llama.cpp's shared-expert fusion check;
+// the bound stays as the overflow guard for buffers of the K form)
+bool shxOk(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, const MoePlan& pl) {
+    return f.moe_shx && pl.small_q8 && !pl.gu_split && f.moe_mxw && p.shx_ok && p.gate_ty == GgmlType::mxfp4 && p.up_ty == GgmlType::mxfp4 &&
+           p.down_ty == GgmlType::mxfp4 && p.gate_rb == p.up_rb && k.moe_gus_mxw != nullptr && k.moe_downs_mxw != nullptr &&
+           static_cast<u64>(p.n) * (p.K + 1) <= static_cast<u64>(p.buf_slots);
+}
 MoeFlags moepFloor(const MoeProblem& p, const MoeFlags& f) {
     MoeFlags g = f;
     if (!moepWide(p.n, p.K, p.R)) {
@@ -64,8 +74,14 @@ MoeFlags moepFloor(const MoeProblem& p, const MoeFlags& f) {
 }
 }  // namespace
 
-// v0252-f4 test-first STUB (the port replaces it): never compatible
-bool moeShxShape(const MoeProblem&, const MoeShared&) { return false; }
+// v0252-f4 (moeshx, feat028 7ef2cae): MXFP4 shared expert of the experts' shapes and row bytes, a shared gate vector, whole
+// MXFP4 superblocks (the activation pass runs n x (K + 1) x F / 256 blocks)
+bool moeShxShape(const MoeProblem& p, const MoeShared& s) {
+    const GgmlType mx = GgmlType::mxfp4;
+    return s.gate_vec && p.gate_ty == mx && p.up_ty == mx && p.down_ty == mx && s.gate_ty == mx && s.up_ty == mx && s.down_ty == mx &&
+           s.gate_rows == p.F && s.up_rows == p.F && s.gate_cols == p.E && s.up_cols == p.E && s.down_rows == p.E && s.down_cols == p.F &&
+           s.gate_rb == p.gate_rb && s.up_rb == p.up_rb && s.down_rb == p.down_rb && p.down_rb != 0 && p.F % 256 == 0 && p.E % 256 == 0;
+}
 
 u32 moeTile(u32 n, u32 K, u32 R) { return n * K < 48 * R ? 32 : moe_bn; }
 
@@ -102,6 +118,14 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
         }
         pl.gu_grid = same ? D((2 * F + 7) / 8, n * K) : D((F + 7) / 8, n * K);
         pl.down_grid = D((E + 7) / 8, n);
+        if (shxOk(p, f, k, pl)) {
+            // v0252-f4 moeshx: n x (K + 1) gate / up pairs (slot K = the shared expert), down over the K + 1 slots
+            pl.shx = true;
+            pl.bits = MoeBits::moe_q8_shx;
+            pl.gu = k.moe_gus_mxw;
+            pl.down = k.moe_downs_mxw;
+            pl.gu_grid = D((2 * F + 7) / 8, n * (K + 1));
+        }
         return pl;
     }
     // prefill: group (token, slot) pairs by expert, grouped GEMMs, combine

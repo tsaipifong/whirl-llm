@@ -21,7 +21,7 @@ using u32 = std::uint32_t;
 
 }  // namespace
 
-void Model::allocScratch(u32 fd_splits_, [[maybe_unused]] bool moe_shx) {  // v0252-f4 test-first: moe_shx not used yet
+void Model::allocScratch(u32 fd_splits_, bool moe_shx) {
     Model& m = *this;
     const Config& cfg = m.cfg;
     const u64 f4 = 4;
@@ -108,11 +108,14 @@ void Model::allocScratch(u32 fd_splits_, [[maybe_unused]] bool moe_shx) {  // v0
         m.moe_w = m.allocZero(B * Kx * f4);
         m.moe_sg = m.allocZero(B * f4);
         // verify batches up to max_verify_rows rows run on the decode experts (precise, and the
-        // balance / fast wide verify)
-        m.moe_g = m.alloc(max_verify_rows * Kx * F * f4);
-        m.moe_u = m.alloc(max_verify_rows * Kx * F * f4);
-        m.moe_xq = m.alloc(max_verify_rows * Kx * F + 256);
-        m.moe_xd = m.alloc((max_verify_rows * Kx * F / 32 + 8) * 4);
+        // balance / fast wide verify). v0252-f4 (moeshx, R-C3): K + 1 slots per row only when the load planned moeshx (fast,
+        // gfx1201), so every verify width takes the fused path; otherwise the 0.2.5.1 sizes (max_verify_rows x K)
+        const u64 P = moeDecodePairs(cfg, moe_shx);
+        m.moe_pairs = static_cast<u32>(P);
+        m.moe_g = m.alloc(P * F * f4);
+        m.moe_u = m.alloc(P * F * f4);
+        m.moe_xq = m.alloc(P * F + 256);
+        m.moe_xd = m.alloc((P * F / 32 + 8) * 4);
         m.moe_ysh = m.allocZero(B * E * f4);
         m.moe_perm = m.alloc(B * Kx * 4);
         m.moe_inv = m.alloc(B * Kx * 4);
@@ -129,7 +132,10 @@ void Model::allocScratch(u32 fd_splits_, [[maybe_unused]] bool moe_shx) {  // v0
     }
     // sizing self-check: the pre-load estimate (bufferBytes, the server's auto-shrink) must cover what was just
     // allocated; a shortfall means an allocation was added without updating the estimate
-    if (const u64 used = m.alloc_total - buffers_from, est = bufferBytes(cfg, m.max_batch, ffs, max_elems, m.fd_splits); used > est)
+    // (v0252-f4: + the moeshx slot when planned; the pre-load estimates stay the K form, 146 KiB on Ornith inside their margin)
+    if (const u64 used = m.alloc_total - buffers_from,
+        est = bufferBytes(cfg, m.max_batch, ffs, max_elems, m.fd_splits) + (moe_shx ? moeShxExtraBytes(cfg) : 0);
+        used > est)
         m.load_note += "warning: the VRAM estimate for the prefill buffers (" + std::to_string(est >> 20) + " MiB) is below what was allocated (" +
                        std::to_string(used >> 20) + " MiB); please report\n";
 }

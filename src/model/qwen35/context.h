@@ -145,6 +145,43 @@ inline std::int32_t draftWindowArg(std::uint32_t w, std::uint32_t min_ctx) {
     return static_cast<std::int32_t>(lo | hi << 16);
 }
 
+// v0252-f4 (moeshx, feat028 7ef2cae): a MoE block's expert shapes for ops::chooseMoe / ops::moeShxShape (n = 0, no buffers;
+// the caller sets them) and its shared expert (the layer's ffn_gate / ffn_up / ffn_down and the shared gate vector)
+inline ops::MoeProblem moeProblemOf(const MoeW& mo, const Config& c) {
+    ops::MoeProblem mp;
+    mp.E = c.n_embd;
+    mp.K = c.n_expert_used;
+    mp.F = c.n_ff_exp;
+    mp.R = c.n_expert;
+    mp.gate_ty = mo.gate.ty;
+    mp.up_ty = mo.up.ty;
+    mp.down_ty = mo.down.ty;
+    mp.gate_rb = mo.gate.row_bytes;
+    mp.up_rb = mo.up.row_bytes;
+    mp.down_rb = mo.down.row_bytes;
+    mp.gate_ncols = mo.gate.ncols;
+    mp.down_ncols = mo.down.ncols;
+    mp.refs = mo.gate.ref != 0 && mo.up.ref != 0 && mo.down.ref != 0;
+    return mp;
+}
+inline ops::MoeShared moeSharedOf(const Mat& sg, const Mat& su, const Mat& sd, DevPtr sh_gate) {
+    ops::MoeShared s;
+    s.gate_ty = sg.ty;
+    s.up_ty = su.ty;
+    s.down_ty = sd.ty;
+    s.gate_rows = sg.nrows;
+    s.gate_cols = sg.ncols;
+    s.up_rows = su.nrows;
+    s.up_cols = su.ncols;
+    s.down_rows = sd.nrows;
+    s.down_cols = sd.ncols;
+    s.gate_rb = sg.row_bytes;
+    s.up_rb = su.row_bytes;
+    s.down_rb = sd.row_bytes;
+    s.gate_vec = sh_gate != 0 && sg.ptr != 0 && su.ptr != 0 && sd.ptr != 0;
+    return s;
+}
+
 // Context derives from Weights (tok_embd, embd_host, output, output_norm, layers, mtp, type_bytes, mx_fold_lossy;
 // src/model/qwen35/weights.h, bound by WeightLoader in Model::load / loadDrafter, arch025-M1), KvPool and SeqTable
 // (src/model/qwen35/kv.h, arch025-M2), and from Scratch and TuneTable (src/model/qwen35/scratch.h / tune_table.h,

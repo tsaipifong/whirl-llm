@@ -827,6 +827,18 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     t.gdn_strix_shape = m.cfg.d_state == 128 && m.cfg.headV() == 128 && m.cfg.n_k_heads > 0 && m.cfg.n_v_heads % m.cfg.n_k_heads == 0 &&
                         m.cfg.n_v_heads / m.cfg.n_k_heads <= 4;
     t.k_gemm8t = m.hasTiledFp8();
+    // v0252-f4 (moeshx): the kernels, the shared-expert shape of every MoE layer, the per-card fast default rule
+    t.k_moe_shx = m.k.moe_gus_mxw != nullptr && m.k.moe_downs_mxw != nullptr;
+    {
+        bool any = false, all = true;
+        for (const Layer& L : m.layers) {
+            if (!L.moe) continue;
+            any = true;
+            all = all && ops::moeShxShape(moeProblemOf(*L.moe, m.cfg), moeSharedOf(L.ffn_gate, L.ffn_up, L.ffn_down, L.moe->sh_gate));
+        }
+        t.moe_shx_shape = any && all;
+    }
+    t.moeshx_default = !t.gfx1151 && nu::moeshx_fast_default_r9700;
     return t;
 }
 

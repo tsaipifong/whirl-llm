@@ -290,7 +290,20 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
 
     // the prefill / decode buffers (qwen35::Scratch) and the sizing self-check: Model::allocScratch
     // (src/model/qwen35/scratch.cpp, arch025-M3; the block moved verbatim, same allocation order)
-    m.allocScratch(fdSplitsOf(m.kv_fmt, env));
+    // v0252-f4 (moeshx, DISCOVERY R-C3): the MoE decode expert buffers get the shared expert's slot only when this load's
+    // numerics plan turns moeshx on (fast, the gfx1201 kernels, the shared-expert shape, int8 decode): the same plan
+    // loadOrTune makes (same request, target and snapshot; the layers and the MTP block are loaded by now). Precise, balance,
+    // the 8060S and fast without moeshx keep the 0.2.5.1 sizes. A plan that throws here (a WHIRL_RELAX_* value std::stoul /
+    // std::stof rejects) leaves the K form; loadOrTune reports that error.
+    bool moe_shx = false;
+    if (cfg.moe) {
+        try {
+            moe_shx = numerics::plan(numericsRequest(m, env), numericsTarget(m)).flags.moe_shx;
+        } catch (...) {
+            moe_shx = false;
+        }
+    }
+    m.allocScratch(fdSplitsOf(m.kv_fmt, env), moe_shx);
     // KV pool for max_ctx tokens, one sequence with an identity page table (the
     // server loads with max_ctx 0 and allocates its shared pool later). The format chosen above
     // must fit next to what the CLI still allocates (MTP snapshot sets for 8 drafts, the 2-bit

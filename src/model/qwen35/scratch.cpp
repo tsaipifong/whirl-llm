@@ -26,9 +26,17 @@ using u32 = std::uint32_t;
 
 }  // namespace
 
-// v0252-f4 test-first STUBS (the port replaces them): the K form only
-u64 moeDecodePairs(const Config& cfg, bool) { return cfg.moe ? static_cast<u64>(max_verify_rows) * cfg.n_expert_used : 0; }
-u64 moeShxExtraBytes(const Config&) { return 0; }
+// v0252-f4 (moeshx, DISCOVERY R-C3): the decode expert buffers' (token, slot) pairs; the slot's bytes = the four buffers at
+// K + 1 minus at K (same expressions as Model::allocScratch)
+u64 moeDecodePairs(const Config& cfg, bool shx) {
+    return cfg.moe ? static_cast<u64>(max_verify_rows) * (static_cast<u64>(cfg.n_expert_used) + (shx ? 1 : 0)) : 0;
+}
+u64 moeShxExtraBytes(const Config& cfg) {
+    if (!cfg.moe) return 0;
+    const u64 F = cfg.n_ff_exp;
+    auto four = [F](u64 P) { return P * F * 4 * 2 + (P * F + 256) + (P * F / 32 + 8) * 4; };  // moe_g + moe_u, moe_xq, moe_xd
+    return four(moeDecodePairs(cfg, true)) - four(moeDecodePairs(cfg, false));
+}
 
 u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits) {
     // mirrors the buffer allocations of Model::load below (keep in step)
