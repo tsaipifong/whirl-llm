@@ -3075,6 +3075,62 @@ std::map<std::string, std::string> dumpKv(const std::string& d) {
 
 }  // namespace n2a
 
+// v0252-f2def: the shipped fast MoE relaxacc default as the loader builds it (q::numericsTarget, tune.cpp): the arm is
+// relax_moe_default_r9700 = k4a10d2 on gfx1201 and relax_moe_default_8060s = k6a05 on gfx1151; k_relax_rank = F1's
+// one-pass check (KernelTable::argmax_rank_rows_to) is in the code object AND the device profile enables it
+// (v0252-f2def2: device::Profile::relax_rank_check, gfx1201 only; the gfx1151 object has the kernel too, but F1 was never
+// measured there, ADR-0015), so the 8060S keeps topk_rows and its arm k6a05 (which needs no F1); the
+// test's n2a::targetOf copy agrees; Ornith fast then plans the arm (2 MTP drafts on the R9700), precise / balance and a
+// dense model do not; the user's draft count (--mtp-drafts / WHIRL_MTP_DRAFTS) still wins over the arm's (source pin
+// on the two callers). Fails before f2def: both defaults "off" and numericsTarget never set k_relax_rank.
+void testRelaxDefaultTarget() {
+    namespace nu = whirl::numerics;
+    static int fake = 0;
+    for (const hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151}) {
+        const bool g51 = a == hip::Arch::gfx1151;
+        const std::string_view want = g51 ? "k6a05" : "k4a10d2";
+        for (const bool rank : {false, true}) {
+            auto m = envtab::makeModel(3);  // MoE MXFP4 (Ornith-like), host-only
+            m->arch = a;
+            m->k.argmax_rank_rows_to = rank ? static_cast<void*>(&fake) : nullptr;
+            const std::string cell = std::format("f2def {} rank {}", g51 ? "gfx1151" : "gfx1201", rank);
+            nu::Target t = q::numericsTarget(*m);
+            check(t.relax_moe_arm == want, std::format("{}: numericsTarget arm '{}' (want {})", cell, t.relax_moe_arm, want));
+            const bool want_rank = rank && !g51;  // v0252-f2def2: F1 on the R9700 only (device profile relax_rank_check)
+            check(t.k_relax_rank == want_rank, std::format("{}: numericsTarget k_relax_rank {} (want {})", cell, t.k_relax_rank, want_rank));
+            const nu::Target tc = n2a::targetOf(*m);
+            check(tc.relax_moe_arm == t.relax_moe_arm && tc.k_relax_rank == t.k_relax_rank, cell + ": n2a::targetOf differs from numericsTarget");
+            t.mtp = true;  // (the host-only Model has no MTP block; the GPU load of Ornith does)
+            const bool takes = g51 || rank;
+            const nu::Plan pf = nu::plan(nu::forModel(nu::parseMode("fast", "test"), true), t);
+            check(pf.flags.relax_on == takes, std::format("{}: Ornith fast relaxacc on {} (want {})", cell, pf.flags.relax_on, takes));
+            if (takes) {
+                check(pf.flags.relax_k == (g51 ? 6u : 4u) && pf.flags.relax_alpha == (g51 ? 0.05f : 0.1f) && pf.relax_drafts == (g51 ? 0u : 2u),
+                      std::format("{}: k {} alpha {} drafts {}", cell, pf.flags.relax_k, pf.flags.relax_alpha, pf.relax_drafts));
+                check(nu::mtpDraftsDefault(1, pf) == (g51 ? 1u : 2u), cell + ": MTP draft default");
+            }
+            for (const char* mode : {"precise", "balance"}) {
+                nu::Target t0 = t;
+                t0.relax_moe_arm = {};
+                const nu::Plan a1 = nu::plan(nu::forModel(nu::parseMode(mode, "test"), true), t);
+                const nu::Plan a0 = nu::plan(nu::forModel(nu::parseMode(mode, "test"), true), t0);
+                check(a1.bitsKey() == a0.bitsKey() && nu::logLine(a1) == nu::logLine(a0) && !a1.flags.relax_on && a1.relax_drafts == 0,
+                      cell + ": " + mode + " changed by the shipped arm");
+            }
+        }
+    }
+#ifdef WHIRL_SOURCE_DIR
+    // the user's draft count wins over the arm's (server and CLI)
+    for (const auto& [rel, needle] : {std::pair<const char*, const char*>{"src/server/server_main.cpp", "drafts_user.value_or(whirl::numerics::mtpDraftsDefault("},
+                                      std::pair<const char*, const char*>{"src/cli/decode.cpp", "dv.value_or(whirl::numerics::mtpDraftsDefault("}}) {
+        std::ifstream in(std::filesystem::path(WHIRL_SOURCE_DIR) / rel, std::ios::binary);
+        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        check(src.find(needle) != std::string::npos, std::string("f2def: ") + rel + ": the user's MTP draft count no longer wins over the arm");
+    }
+#endif
+    std::printf("  f2def: shipped relaxacc arms gfx1201 k4a10d2 / gfx1151 k6a05\n");
+}
+
 void testPlanVsLoadOrTune() {
     namespace fs = std::filesystem;
     namespace nu = whirl::numerics;
@@ -5029,6 +5085,7 @@ int main(int argc, char** argv) {
     testFdqEnv();  // v0251-a3port
     testTuneCacheKey();  // v0251-a3key
     testPlanVsLoadOrTune();  // arch025-N2a
+    testRelaxDefaultTarget();  // v0252-f2def
     testLoadFlagsWithoutTune();  // arch025-N2b-r2
     testFloatGemvDispatch();
     testGemvkDefault();  // v0251-a6port

@@ -523,6 +523,9 @@ static void testFingerprintCoversBitsKey() {
         t.fast_kv_q8h = s8060;
         t.strix_profile = t.k_gdn_sx = s8060;
         t.gdn_strix_shape = true;
+        // v0252-f2 / f2def: the loader's fast MoE relaxacc arm and F1's one-pass check (R9700 code object)
+        t.relax_moe_arm = nu::relaxMoeDefaultName(s8060);
+        t.k_relax_rank = !s8060;
         return t;
     };
     std::vector<std::string> names;

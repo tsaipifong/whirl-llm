@@ -787,9 +787,12 @@ void testRelaxMoeArms() {
         NCHECK(a->name == w.name && a->on == w.on && a->k == w.k && a->alpha == w.alpha && a->drafts == w.drafts, "RA-1 arm {} values", w.name);
     }
     NCHECK(nu::relaxArm("") == nullptr && nu::relaxArm("k4") == nullptr, "RA-1 unknown names");
-    // pre-screen pin: both GPUs ship "off" until G3a / G4a (re-pin here when the screen picks an arm)
-    NCHECK(nu::relaxMoeDefaultName(true) == "off" && nu::relaxMoeDefaultName(true) == nu::relax_moe_default_8060s, "RA-1 8060S default");
-    NCHECK(nu::relaxMoeDefaultName(false) == "off" && nu::relaxMoeDefaultName(false) == nu::relax_moe_default_r9700, "RA-1 R9700 default");
+    // v0252-f2def: the shipped arms (8060S G4a / T1 q7 job 96: k6a05 R 0.9851, +9.1 % chat; R9700 G3a / T1 btl
+    // gpu-confirm: k4a10d2 R 0.9915, +17.9 % chat). Re-pin here when a later screen picks another arm.
+    NCHECK(nu::relaxMoeDefaultName(true) == "k6a05" && nu::relaxMoeDefaultName(true) == nu::relax_moe_default_8060s, "RA-1 8060S default '{}'",
+           nu::relaxMoeDefaultName(true));
+    NCHECK(nu::relaxMoeDefaultName(false) == "k4a10d2" && nu::relaxMoeDefaultName(false) == nu::relax_moe_default_r9700, "RA-1 R9700 default '{}'",
+           nu::relaxMoeDefaultName(false));
     for (const std::string_view n : {nu::relax_moe_default_8060s, nu::relax_moe_default_r9700})
         NCHECK(nu::relaxArm(n) != nullptr, "RA-1 default {} is not an arm", n);
 
@@ -853,6 +856,49 @@ void testRelaxMoeArms() {
                     NCHECK(a.bitsKey() == b.bitsKey() && nu::logLine(a) == nu::logLine(b) && a.relax_drafts == 0, "RA-4 {} swift {}: the arm changed a dense plan",
                            cell, mode);
                 }
+            }
+        }
+    }
+    // RA-6 (v0252-f2def): the shipped default as the loader builds it (relax_moe_arm = relaxMoeDefaultName(gfx1151),
+    // k_relax_rank = F1's argmax_rank_rows_to is in the code object): Ornith (MoE) fast takes k4a10d2 on the R9700
+    // (2 MTP drafts) and k6a05 on the 8060S (the device's draft count); without F1 the R9700 still skips it; precise /
+    // balance and every Swift (dense) mode equal the plan with no arm; WHIRL_RELAX=0 turns it off and keeps the
+    // device's draft count. Fails while both defaults are "off".
+    for (const CardFake& c : k_cards) {
+        const bool g51 = c.prof.numerics_8060s;
+        const Want& w = g51 ? k_want[2] : k_want[3];
+        for (const bool rank : {false, true}) {
+            nu::Target t = target(c, "moe", false), tn = t;
+            t.relax_moe_arm = nu::relaxMoeDefaultName(g51);
+            t.k_relax_rank = tn.k_relax_rank = rank;
+            const std::string cell = std::format("RA-6 {} rank {}", c.name, rank);
+            const bool takes = g51 || rank;
+            const nu::Plan p = planOf("fast", t, {});
+            NCHECK(p.on(nu::Item::relaxacc) == takes && p.flags.relax_on == takes, "{}: Ornith fast relaxacc on {} (want {})", cell, p.flags.relax_on, takes);
+            if (takes) {
+                NCHECK(p.flags.relax_k == w.k && p.flags.relax_alpha == w.alpha && p.relax_drafts == w.drafts, "{}: arm {} k {} alpha {} drafts {}", cell,
+                       w.name, p.flags.relax_k, p.flags.relax_alpha, p.relax_drafts);
+                NCHECK(item(p).note.starts_with(std::format("MoE arm {}: ", w.name)), "{}: note '{}'", cell, item(p).note);
+                NCHECK(nu::logLine(p).find("relaxacc") != std::string::npos, "{}: log line has no relaxacc: {}", cell, nu::logLine(p));
+            } else {
+                NCHECK(item(p).note.find("one-pass relaxacc check (F1)") != std::string::npos, "{}: R9700 without F1 '{}'", cell, item(p).note);
+            }
+            NCHECK(nu::mtpDraftsDefault(1, p) == (takes && w.drafts > 0 ? w.drafts : 1u), "{}: drafts default {}", cell, nu::mtpDraftsDefault(1, p));
+            const nu::Plan p0 = planOf("fast", t, {{"RELAX", "0"}}), p0n = planOf("fast", tn, {{"RELAX", "0"}});
+            NCHECK(!p0.flags.relax_on && nu::mtpDraftsDefault(1, p0) == 1u && p0.bitsKey() == p0n.bitsKey(), "{}: WHIRL_RELAX=0", cell);
+            for (const char* mode : {"precise", "balance"}) {
+                const nu::Plan a = planOf(mode, t, {}), b = planOf(mode, tn, {});
+                NCHECK(a.bitsKey() == b.bitsKey() && nu::logLine(a) == nu::logLine(b) && a.overrides == b.overrides && a.ignored == b.ignored &&
+                           a.relax_drafts == 0 && !a.flags.relax_on && nu::propsJson(a, "f16") == nu::propsJson(b, "f16"),
+                       "{} Ornith {}: the shipped arm changed the plan", cell, mode);
+            }
+            nu::Target td = target(c, "swift", false), td0 = td;
+            td.relax_moe_arm = nu::relaxMoeDefaultName(g51);
+            td.k_relax_rank = td0.k_relax_rank = rank;
+            for (const char* mode : {"precise", "balance", "fast"}) {
+                const nu::Plan a = planOf(mode, td, {}), b = planOf(mode, td0, {});
+                NCHECK(a.bitsKey() == b.bitsKey() && nu::logLine(a) == nu::logLine(b) && a.relax_drafts == 0 && nu::propsJson(a, "f16") == nu::propsJson(b, "f16"),
+                       "{} Swift {}: the shipped arm changed a dense plan", cell, mode);
             }
         }
     }
