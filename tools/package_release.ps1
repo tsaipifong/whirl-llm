@@ -8,7 +8,8 @@
 # PROVENANCE.md, README.md, the user documentation under docs\ (same layout as the
 # repository, so the README's relative links work offline) and a README_FIRST.txt
 # (short pointer to the READMEs) into <OutDir>\whirl-<version>-windows-x64.zip and
-# writes its SHA-256 next to it.
+# writes its SHA-256 next to it. Since 0.2.5.2 the zip is flat (every file at the zip root, docs\ with
+# its subfolders); entry names are ASCII and at most 104 bytes (PATH-256, release_check R7).
 # The version comes from project(whirl VERSION ...) in CMakeLists.txt.
 # Nothing is uploaded or published.
 #
@@ -203,7 +204,21 @@ License: Apache-2.0 (LICENSE, NOTICE, THIRD_PARTY_NOTICES.md)
 # ---- zip + checksum
 $zip = Join-Path $OutDir "$name.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
-Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
+# PATH-256 P5 (0.2.5.2, PLAN B26-6; progress\pathlen256.DISCOVERY.md 2b-2): a FLAT zip - every file at the zip root, docs\
+# keeps its subfolders - so Explorer "Extract all" / Expand-Archive make one folder <zip name>\ and that folder is the
+# install folder (at most 150 UTF-8 bytes, src\platform\path_budget.h). Same layout as the llama.cpp Windows zips
+# (7z a <zip> .\build\bin\Release\*). release_check R7 checks the same rules on the zip of the release.
+Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -CompressionLevel Optimal
+# the entry rules of release_check R7 (0.2.5.2+), checked here first: flat, '/' separators (Windows PowerShell 5.1's
+# Compress-Archive wrote '\'), ASCII names, each entry <= 104 bytes (255 - install folder 150 - 1)
+$za = [IO.Compression.ZipFile]::OpenRead($zip)
+try { $entries = @($za.Entries | ForEach-Object { $_.FullName }) } finally { $za.Dispose() }
+foreach ($n in @("whirl.exe", "whirl-server.exe", "README_FIRST.txt")) { if ($entries -notcontains $n) { throw "zip: $n is not at the zip root (flat zip expected)" } }
+foreach ($n in $entries) {
+    if ($n.Contains("\")) { throw "zip entry '$n' uses '\' as separator (use PowerShell 7: pwsh -File tools\package_release.ps1)" }
+    if ($n -cmatch '[^\x20-\x7E]') { throw "zip entry '$n' is not ASCII" }
+    if ([Text.Encoding]::UTF8.GetByteCount($n) -gt 104) { throw "zip entry '$n' is $([Text.Encoding]::UTF8.GetByteCount($n)) bytes, over 104" }
+}
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
 "$hash  $name.zip" | Out-File -Encoding ascii (Join-Path $OutDir "$name.zip.sha256")
 Write-Host ("{0} ({1:N1} MiB)" -f $zip, ((Get-Item $zip).Length / 1MB))
