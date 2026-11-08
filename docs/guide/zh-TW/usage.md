@@ -79,7 +79,7 @@ K-quant 檔（混用多種 tensor 型別）會久一些。結果會快取起來�
 | `h16` | balance | FFN / DeltaNet 的 GEMM 輸出先存成 f16 再進逐元素運算 | MXFP4 模型，以及任何權重格式的 dense 模型（KG-1）；MoE 模型只限 MXFP4 | MXFP4 模型，只有 f16 權重 |
 | `kvq8` | balance | dense 模型一律用 q8h KV（不是 f16 放不下才換）；MoE 模型暫時維持 f16（MoE 的 int8 KV 待任務準確度驗證） | dense 模型 | dense 模型 |
 | `kvq4` | fast | 4-bit KV（int4，每 32 個值一個 f16 scale，q / k 先做 Hadamard 旋轉）；8060S 的 decode attention 用 `attn_dq4` 讀取（約 180 GB/s）：Ornith-1.5-35B-A3B MXFP4 decode 128k 58.5 tok/s（f16 KV 32.7）、64k 67.0（46.4）；R9700（FAST-1c）Swift-1.5 27B 在 131k 的 decode：plain 30.98 tok/s（f16 KV 25.08）、MTP 68.79（63.12），128k prefill −1.9%；對 f16 的 KL 在 fast 門檻內 | dense 與 MoE | MoE（dense 模型在 fast 維持 q8h KV：那裡 decode 較快） |
-| `relaxacc` | fast | 寬鬆推測接受（只對 MTP draft；n-gram draft 維持精確接受）。放寬接受若會讓結尾的 6-gram 與最近 4096 個 token 內重複，就不接受（重複防護）。greedy：draft 不是驗證列的 argmax 時，只要它在該列前 `WHIRL_RELAX_K` 名（預設 4）且 p(draft) >= `WHIRL_RELAX_ALPHA` × p(argmax)（預設 0.1）就保留；最後一個保留的 draft 之後那個 token 一定是目標模型自己的 argmax。temperature > 0：typical acceptance（Medusa）：在請求過濾後的分布上 p(draft) >= min(`WHIRL_RELAX_EPS` 0.09, `WHIRL_RELAX_DELTA` 0.3 × exp(−熵)) 就保留（此時不用 `specsample`）。**會改變 greedy 輸出**：fast 的 greedy 不等於 plain greedy，MTP ≠ plain；同樣的 prompt、seed、設定仍是確定的（此時 draft 數量策略改用固定的合成週期成本，不看牆鐘時間；並發請求共用 draft 數量，可能互相影響輸出）。`WHIRL_RELAX=0` 關閉；MoE 模型略過（每輪只有一個 MTP draft，量不到收益；`WHIRL_RELAX=1` 在 fast 強制開）。只屬於 fast：precise 與 balance 會忽略 `WHIRL_RELAX`（載入 log 會留一行說明） | dense MTP 模型 | dense MTP 模型 |
+| `relaxacc` | fast | 寬鬆推測接受（只對 MTP draft；n-gram draft 維持精確接受）。放寬接受若會讓結尾的 6-gram 與最近 4096 個 token 內重複，就不接受（重複防護）。greedy：draft 不是驗證列的 argmax 時，只要它在該列前 `WHIRL_RELAX_K` 名（預設 4）且 p(draft) >= `WHIRL_RELAX_ALPHA` × p(argmax)（預設 0.1）就保留；最後一個保留的 draft 之後那個 token 一定是目標模型自己的 argmax。temperature > 0：typical acceptance（Medusa）：在請求過濾後的分布上 p(draft) >= min(`WHIRL_RELAX_EPS` 0.09, `WHIRL_RELAX_DELTA` 0.3 × exp(−熵)) 就保留（此時不用 `specsample`）。**會改變 greedy 輸出**：fast 的 greedy 不等於 plain greedy，MTP ≠ plain；同樣的 prompt、seed、設定仍是確定的（此時 draft 數量策略改用固定的合成週期成本，不看牆鐘時間；並發請求共用 draft 數量，可能互相影響輸出）。`WHIRL_RELAX=0` 關閉。MoE 模型（Ornith-1.5-35B-A3B）用依任務準確度量出的每卡設定：R9700 前 4 名、alpha 0.1、每回合 2 個 MTP draft（需要一趟檢查 kernel，沒有就略過），Radeon 8060S 前 6 名、alpha 0.05、1 個 draft；`WHIRL_RELAX_K`／`WHIRL_RELAX_ALPHA`／`WHIRL_MTP_DRAFTS`／`--mtp-drafts` 仍可覆蓋。只屬於 fast：precise 與 balance 會忽略 `WHIRL_RELAX`（載入 log 會留一行說明） | dense MTP 模型 | dense MTP 模型 |
 | `headq`、`moeskip`、`a8`、`a4` | fast | 低位元輸出頭、略過 MoE 專家、W4A8 / W4A4 prefill | 尚未實作 | 尚未實作 |
 | `q8dec` | balance、fast | decode / verify GEMV 的 activation 用 int8（每 32 個值一個 f32 scale，同 llama.cpp 的 q8_1；balance 與 fast 一律包含） | 開 | 開 |
 
@@ -89,7 +89,7 @@ balance 與 fast 依模型類型開了什麼（R9700；Radeon 8060S 沒有 fp8 W
 |---|---|---|
 | precise | 全程 f16 / f32，f16 KV | 全程 f16 / f32，f16 KV |
 | balance | `fp8`（只限 MXFP4 檔）、`gdnwmma`、`h16`、`kvq8`（q8h KV）、`specsample`、`q8dec` | `fp8`、`moefp8`、`gdnwmma`、`h16`、`specsample`、`q8dec`，f16 KV |
-| fast | balance + `kvq4`（q4 KV）+ `relaxacc` | balance + `kvq4`（q4 KV）；`relaxacc` 略過 |
+| fast | balance + `kvq4`（q4 KV）+ `relaxacc` | balance + `kvq4`（q4 KV）+ `relaxacc`（R9700：前 4 名／alpha 0.1、2 個 MTP draft；8060S：前 6 名／alpha 0.05） |
 
 balance 是以允許使用的項目定義（fp8 與 moefp8 activation、int8 decode activation、f16 中間結果、int8 KV），不是以逐位元貼近 precise 定義。MoE balance 從 MOE-BAL（2026-10-13）到 MODES-MXFP4（2026-10-16）不開 `fp8` / `moefp8`，現已放回：R9700 上 Ornith-1.5-35B-A3B MXFP4 的 balance prefill 在 2k +40%、8k +35%、32k +26%（13.0k / 13.0k / 9.6k tok/s，decode 不變）。`--balance=gdnwmma,h16,specsample`（明確列出的項目照用）可得到先前的 MoE balance。
 
@@ -401,7 +401,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | 變數 | 說明 |
 |---|---|
 | `WHIRL_MTP=0` | 一般 decode，不用 MTP 草稿 |
-| `WHIRL_MTP_DRAFTS=N` | 每回合固定的 MTP 草稿數，1～10（預設：成本模型，dense 最多 8、MoE 1） |
+| `WHIRL_MTP_DRAFTS=N` | 每回合固定的 MTP 草稿數，1～10（預設：成本模型，dense 最多 8、MoE 1；MoE fast 在 R9700 為 2） |
 | `WHIRL_MTP_ADAPT=auto\|N` | 草稿數由成本模型決定，或取 ceil(最近接受數 + N) |
 | `WHIRL_MTP_PMIN=P` | 草稿機率低於 P 時結束這串草稿（在 `WHIRL_MTP_NMIN` 個草稿之後才生效） |
 | `WHIRL_MTP_NMIN=N` | `WHIRL_MTP_PMIN` 生效前一定會產生的草稿數 |

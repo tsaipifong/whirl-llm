@@ -328,7 +328,7 @@ constexpr EnvDoc k_env[] = {
     {"Thinking", "THINK=0|1", "thinking off / on (default on; = --no-think / --think)", C | B},
 
     {"Speculative decoding (output always equals plain greedy)", "MTP=0", "plain decoding, no MTP drafts", C | B | S},
-    {"Speculative decoding (output always equals plain greedy)", "MTP_DRAFTS=N", "fixed MTP drafts per cycle, 1..10 (default: cost model, up to 8 dense / 1 MoE)", C | B | S},
+    {"Speculative decoding (output always equals plain greedy)", "MTP_DRAFTS=N", "fixed MTP drafts per cycle, 1..10 (default: cost model, up to 8 dense / 1 MoE; MoE fast on the R9700: 2)", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "MTP_ADAPT=auto|N", "draft count from the cost model, or ceil(recent accepted + N)", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "MTP_PMIN=P", "end a draft chain at a draft with probability below P (after MTP_NMIN drafts)", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "MTP_NMIN=N", "drafts always made before MTP_PMIN applies", C | B | S},

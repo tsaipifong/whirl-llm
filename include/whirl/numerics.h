@@ -207,9 +207,11 @@ inline constexpr std::array<RelaxArm, 4> relax_moe_arms{{
     {"k6a05", true, 6, 0.05f, 0},
     {"k4a10d2", true, 4, 0.1f, 2},
 }};
-// Shipped defaults: "off" until G3a (R9700) / G4a (8060S) decide (DISCOVERY v4 §5.5; ADR-0011 fast acceptance).
-inline constexpr std::string_view relax_moe_default_8060s = "off";
-inline constexpr std::string_view relax_moe_default_r9700 = "off";
+// Shipped defaults (v0252-f2def; DISCOVERY v4 §5.5; ADR-0011 fast acceptance = task accuracy >= 92 % of precise):
+// 8060S k6a05 (G4a +9.1 % chat; T1 task accuracy R 0.9851, q7 job 96); R9700 k4a10d2 (G3a +17.9 % chat; T1 R 0.9915 on
+// the fixed build, KB v0252-btl:gpu-confirm-r9700; needs F1's one-pass check, Target::k_relax_rank).
+inline constexpr std::string_view relax_moe_default_8060s = "k6a05";
+inline constexpr std::string_view relax_moe_default_r9700 = "k4a10d2";
 // nullptr for an unknown name ("" included)
 const RelaxArm* relaxArm(std::string_view name);
 // The default arm name for the code object (Target::gfx1151): relax_moe_default_8060s / _r9700.

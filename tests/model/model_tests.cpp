@@ -3052,6 +3052,7 @@ nu::Target targetOf(const q::Model& m) {
     t.k_gemm8t = tiled && m.k.qact_fp8t != nullptr && m.k.rmsnorm_x8t != nullptr && m.k.silu_mul_x8t != nullptr &&
                  m.k.silu_mul_x8ht != nullptr && m.k.gated_norm_x8t != nullptr && m.k.gated_norm_x8ht != nullptr;
     t.relax_moe_arm = nu::relaxMoeDefaultName(t.gfx1151);  // v0252-f2 (tune.cpp numericsTarget)
+    t.k_relax_rank = m.k.argmax_rank_rows_to != nullptr;   // v0252-f2def (tune.cpp numericsTarget)
     return t;
 }
 
