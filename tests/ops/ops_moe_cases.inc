@@ -56,8 +56,8 @@ kn::KernelTable moeTable(bool g1151) {
 // v0251-a11port (feat026-router): the fused router choice (ops::MoePlan::router), qwen35::Context::moeBlock's launch
 // decision, as the screened host condition (feat026-router-p25 f06b245 forward/ffn.cpp): flag on, a small batch of one
 // piece (n <= max_small_batch), R <= 256, K <= 32, E % 4 == 0, ceil(E / 128) = 16 (i16) or 24 (i24), the counter
-// buffer, and the kernel in the code object (only the gfx1151 one has it). Everything else: null = moe_logits_f32 +
-// moe_topk, the 0.2.5 path. Fails before the port (chooseMoe never sets router).
+// buffer, and the kernel in the code object (gfx1151 since 0.2.5.1, gfx1201 since v0252-c5port). Everything else: null =
+// moe_logits_f32 + moe_topk, the 0.2.5 path. Fails before the a11 port (chooseMoe never sets router).
 void testOpsMoeRouter(ops::MoeProblem p, const kn::KernelTable& k97, const kn::KernelTable& k8) {
     p.rcnt_buf = true;
     ops::MoeFlags bal, pre;
@@ -95,9 +95,37 @@ void testOpsMoeRouter(ops::MoeProblem p, const kn::KernelTable& k97, const kn::K
     // prefill: never
     p.n = 4096;
     CHECK(ops::chooseMoe(p, bal, k8, k8.silu_mul_x8h).router == nullptr && ops::chooseMoe(p, pre, k8, k8.silu_mul_x8h).router == nullptr);
-    // the R9700 table has no fused router: the two-kernel path even with the flag on
+    // the 0.2.5.1 R9700 table has no fused router: the two-kernel path even with the flag on
     p.n = 2;
     CHECK(ops::chooseMoe(p, bal, k97, k97.silu_mul_x8h).router == nullptr && ops::chooseMoe(p, pre, k97, k97.silu_mul_x8h).router == nullptr);
+    // v0252-c5port: the gfx1201 table with the fused router (kernels/moe_router.hip in the gfx1201 code object) takes it
+    // on the same pieces as the 8060S (the selection does not depend on the card), and the rest of its plan is the
+    // 0.2.5.1 R9700 plan; with the flag off it is the 0.2.5.1 plan exactly
+    {
+        kn::KernelTable k97r = k97;
+        k97r.moe_router_fused_i16 = tag("moe_router_fused_i16");
+        k97r.moe_router_fused_i24 = tag("moe_router_fused_i24");
+        for (const std::uint32_t n : {1u, 2u, 4u, 5u, 16u}) {
+            p.n = n;
+            for (const ops::MoeFlags* f : {&bal, &pre}) {
+                const ops::MoePlan a = ops::chooseMoe(p, *f, k97, k97.silu_mul_x8h), b = ops::chooseMoe(p, *f, k97r, k97r.silu_mul_x8h);
+                CHECK_DETAIL(nameOf(b.router) == "moe_router_fused_i16", "r9700 router n " + std::to_string(n) + ": " + nameOf(b.router));
+                CHECK(a.small == b.small && a.small_q8 == b.small_q8 && a.gu == b.gu && a.gu_up == b.gu_up && a.down == b.down &&
+                      a.bits == b.bits && a.logits_grid.x == b.logits_grid.x && a.gu_grid.x == b.gu_grid.x && a.gu_grid.y == b.gu_grid.y);
+                ops::MoeFlags off = *f;
+                off.moe_rfuse = false;
+                const ops::MoePlan c0 = ops::chooseMoe(p, off, k97r, k97r.silu_mul_x8h);
+                CHECK(c0.router == nullptr && c0.small == a.small && c0.gu == a.gu && c0.down == a.down);
+            }
+        }
+        p.n = 17;
+        ops::MoeFlags wide = bal;
+        wide.small_max = 32;
+        CHECK(ops::chooseMoe(p, wide, k97r, k97r.silu_mul_x8h).router == nullptr);  // more than one piece: two kernels
+        p.n = 4096;
+        CHECK(ops::chooseMoe(p, bal, k97r, k97r.silu_mul_x8h).router == nullptr);  // prefill: never
+        p.n = 2;
+    }
     // no counter buffer: the two-kernel path
     {
         ops::MoeProblem q = p;

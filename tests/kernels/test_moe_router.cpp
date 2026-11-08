@@ -1,15 +1,16 @@
 // whirl-kernel-test, family "moemx" (v0251-a11port; feat026-router-p25 f06b245 tests/kernels/test_moe_router.cpp, family
 // "router" there): moe_router_fused_i16 / _i24 (router logits + top-k + shared gate in one launch; kernels/gfx1151/
-// moe_router.hip, gfx1151 code object only, the 8060S default) against the two-kernel path moe_logits_f32 + moe_topk,
+// moe_router.hip, the 8060S default; v0252-c5port: kernels/moe_router.hip, the R9700 default) against the two-kernel
+// path moe_logits_f32 + moe_topk of the same code object,
 // bitwise (logits, ids, weights, shared gate), and
 // against the CPU (logits vs f64 GEMV; ids == stable top-k of the same logits, ties -> lower index; weights / gate vs
 // f64). Cases: the Ornith router (blk.0, or synthetic R 256 x E 2048) at n = 1..5 / 8 / 16; exact ties (duplicated
 // router rows, all-zero rows, an all-zero input); a large-magnitude row set (weights underflow to 0, NaN-free); E 2000
 // (partial last lane iteration) and E 3072 (i24); R 128 (padded lanes); K 1 / 32; no shared gate; skip = 1 (logits
 // untouched, top-k still runs on the buffer, as the separate moe_topk launch); the block counter returns to 0.
-// v0251-a11port: first two presence rows (both entries in the gfx1151 code object and in the host table; absent from any
-// other object and its table, so the R9700 can never select them); no skip lines (a missing kernel on gfx1151 is the
-// presence FAIL, the synthetic router is used silently when no MoE model is given).
+// v0251-a11port: first two presence rows; v0252-c5port: both entries in EVERY code object (gfx1151 and gfx1201) and in
+// its host table (before the port the gfx1201 rows fail and the bitwise rows do not run there); no skip lines (a missing
+// kernel is the presence FAIL, the synthetic router is used silently when no MoE model is given).
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
@@ -102,9 +103,10 @@ void runCase(Ctx& c, const RouterCase& rc, const std::vector<float>& W, const st
 }  // namespace
 
 void testMoeRouter(Ctx& c) {
-    // presence (v0251-a11port): the 8060S default must be exported by the gfx1151 object and loaded by kernels_abi.cpp loadMoe
+    // presence (v0251-a11port gfx1151, v0252-c5port gfx1201): the default of both cards must be exported by every code
+    // object and loaded by kernels_abi.cpp loadMoe
     {
-        const bool g1151 = c.mod.arch() == hip::Arch::gfx1151;
+        const std::string arch = c.mod.arch() == hip::Arch::gfx1151 ? "gfx1151" : "gfx1201";
         const std::string names[2] = {"moe_router_fused_i16", "moe_router_fused_i24"};
         const hip::Function host[2] = {c.k.moe_router_fused_i16, c.k.moe_router_fused_i24};
         for (int i = 0; i < 2; ++i) {
@@ -112,14 +114,9 @@ void testMoeRouter(Ctx& c) {
             Result r;
             r.kind = Kind::invariant;
             r.n = 1;
-            if (g1151) {
-                r.name = names[i] + " (gfx1151 default) in the gfx1151 code object and loaded into the host table";
-                r.pass = f != nullptr && host[i] == f;
-                if (!r.pass) r.note = f == nullptr ? "missing from the code object" : "not in MoeKernels (loadMoe)";
-            } else {
-                r.name = names[i] + " absent from this non-gfx1151 code object and from the host table";
-                r.pass = f == nullptr && host[i] == nullptr;
-            }
+            r.name = names[i] + " (default on both cards) in the " + arch + " code object and loaded into the host table";
+            r.pass = f != nullptr && host[i] == f;
+            if (!r.pass) r.note = f == nullptr ? "missing from the code object" : "not in MoeKernels (loadMoe)";
             r.mismatches = r.pass ? 0 : 1;
             c.rep.add(r);
         }
