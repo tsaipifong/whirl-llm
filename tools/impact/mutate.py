@@ -20,6 +20,8 @@ one commit's diff of that file, e.g. re-introduce a fixed bug).
 A test command that outlives its timeout (default 1800 s, optional per-row "timeout_s" in mutations.json) is killed with its
 whole process tree (by PID) and recorded as CAUGHT(timeout): a hang is a detection, like PIT's TIMED_OUT / Stryker's TimedOut,
 and the run goes on with the next mutation (arch025-t915).
+A command that exits 125 means its BUILD failed (git bisect run's "cannot test"): it runs once more, and 125 again is the
+verdict BUILD-FAIL (never CAUGHT; exit 4), like cargo-mutants' "unviable" (v0252-tool3, PLAN 9.57).
 A mutation that the tests do not catch is a SURVIVOR: a test gap, reported, never hidden.
 """
 from __future__ import annotations
@@ -52,6 +54,18 @@ def run_keys(m):
 
 TIMEOUT_RC = 124  # the rc of a command that outlived its timeout (as GNU timeout)
 DEFAULT_TIMEOUT_S = 1800
+# v0252-tool3 (PLAN 9.57): a --cmd exits 125 when its BUILD failed (git bisect run's "cannot test"; cargo-mutants calls such a
+# mutant "unviable"). Such a run is repeated once (a lost link, LNK1104 class); 125 again = verdict BUILD-FAIL: the tests never
+# ran, so it is never CAUGHT, and main() exits 4. ornkv chain3 (2026-11-08) counted a whirl-tests.exe link failure as CAUGHT.
+BUILD_FAIL_RC = 125
+
+
+def sh_build_retry(cmd, timeout=DEFAULT_TIMEOUT_S):
+    rc, out, sec = sh(cmd, timeout)
+    if rc == BUILD_FAIL_RC:
+        rc2, out2, sec2 = sh(cmd, timeout)
+        rc, out, sec = rc2, out + f"[build failed (exit {BUILD_FAIL_RC}); ran once more]\n" + out2, sec + sec2
+    return rc, out, sec
 
 
 def kill_tree(pid):
@@ -135,7 +149,7 @@ def main():
         print("mutate: the files to mutate have uncommitted changes; commit or stash them first")
         return 2
     for k in sorted({k for m in muts for k in run_keys(m)}):
-        rc, out, sec = sh(cmds[k])
+        rc, out, sec = sh_build_retry(cmds[k])
         print(f"baseline {k}: exit {rc} ({sec:.0f} s)")
         if rc != 0:
             print("\n".join(out.splitlines()[-8:]))
@@ -146,10 +160,11 @@ def main():
         path, orig = apply(m)
         try:
             listed, ipaths = impact_lists(m["expect_test"])
-            rc, out, sec, timed_out = 0, "", 0.0, False
+            rc, out, sec, timed_out, build_fail = 0, "", 0.0, False, False
             for k in run_keys(m):
-                krc, kout, ksec = sh(cmds[k], m.get("timeout_s", DEFAULT_TIMEOUT_S))
+                krc, kout, ksec = sh_build_retry(cmds[k], m.get("timeout_s", DEFAULT_TIMEOUT_S))
                 timed_out = timed_out or (krc == TIMEOUT_RC and "TIMEOUT: killed" in kout)
+                build_fail = build_fail or krc == BUILD_FAIL_RC
                 out += f"[{k}] exit {krc}\n" + kout
                 sec += ksec
                 rc = rc or krc
@@ -157,7 +172,7 @@ def main():
             open(path, "wb").write(orig)
         caught = rc != 0
         fails = [l.strip() for l in out.splitlines() if "FAIL" in l or "failed" in l][:3]
-        verdict = ("CAUGHT(timeout)" if timed_out else "CAUGHT") if caught else "SURVIVED"
+        verdict = "BUILD-FAIL" if build_fail else ("CAUGHT(timeout)" if timed_out else "CAUGHT") if caught else "SURVIVED"
         print(f"{verdict:15} {m['id']} ({m['module']}): exit {rc} in {sec:.0f} s; impact map lists {m['expect_test']}: "
               f"{'yes' if listed else 'NO'} [{ipaths}]")
         for l in fails:
@@ -172,8 +187,14 @@ def main():
             for r in rows:
                 f.write("\t".join(x.replace("\t", " ") for x in r) + "\n")
     s = sum(1 for r in rows if r[4] == "SURVIVED")
+    bf = [r[1] for r in rows if r[4] == "BUILD-FAIL"]
     nl = sum(1 for r in rows if r[6] != "listed")
-    print(f"mutate: {len(rows) - s}/{len(rows)} caught, {s} survived; impact map missed the expected test in {nl}")
+    print(f"mutate: {len(rows) - s - len(bf)}/{len(rows)} caught, {s} survived, {len(bf)} could not be built; "
+          f"impact map missed the expected test in {nl}")
+    if bf:
+        print(f"mutate: BUILD-FAIL {', '.join(bf)}: the build failed twice, the tests never ran (not caught); fix the build "
+              "and re-run them with --only")
+        return 4
     return 1 if s or nl else 0
 
 
