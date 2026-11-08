@@ -499,8 +499,9 @@ void testLoadRules() {
     NCHECK(fl({{"ATTN_SEG", "1000"}}).flags.attn_seg == 768 && fl({{"ATTN_SEG", "x"}}).flags.attn_seg == 0, "ATTN_SEG /256*256");
     NCHECK(fl({{"MOE_WIDE", ""}}).flags.moe_wide && !fl({{"MOE_MXW", "0"}}).flags.moe_mxw && !fl({{"MOE_RBF", "0"}}).flags.moe_rbf,
            "loader flags: envFlag (\"\" is on)");
-    // v0251-a11port (feat026-router, was loader.cpp envFlag("MOE_RFUSE", false); t = the R9700 card, where the default is
-    // off): the loader's envFlag rule, "0" = off, any other value (also "") = on; a plain value, no A/B switch note
+    // v0251-a11port (feat026-router, was loader.cpp envFlag("MOE_RFUSE", false); t = the dense model on the R9700 card,
+    // where the default is off): the loader's envFlag rule, "0" = off, any other value (also "") = on; a plain value, no
+    // A/B switch note
     NCHECK(!fl({}).flags.moe_rfuse && fl({{"MOE_RFUSE", "1"}}).flags.moe_rfuse && fl({{"MOE_RFUSE", ""}}).flags.moe_rfuse &&
                !fl({{"MOE_RFUSE", "0"}}).flags.moe_rfuse && !fl({{"MOE_RFUSE", "1"}}, "precise").lossy_override,
            "MOE_RFUSE: envFlag rule (moe_rfuse)");
@@ -1005,9 +1006,10 @@ static void testMoepCombMode() {
 }
 
 // v0251-a11port (feat026-router): the fused MoE router is the Radeon 8060S default (Target::gfx1151) for MoE models in
-// every mode (bit-identical); off on the R9700 and on dense models; WHIRL_MOE_RFUSE=0 gives the 0.2.5 path everywhere,
-// "1" turns the flag on anywhere (the R9700 code object has no kernel: ops::chooseMoe keeps the two-kernel path). Not
-// labelled +overrides (no A/B switch: it is the default), FO-3 / FO-4 below. Fails before the port (no default).
+// every mode (bit-identical); v0252-c5port: the R9700 default too (its code object has the kernel since then), so on for
+// MoE models on both cards and off on dense models; the 8060S rows are the 0.2.5.1 ones (per-card selector check below).
+// WHIRL_MOE_RFUSE=0 gives the 0.2.5 path everywhere, "1" turns the flag on anywhere. Not labelled +overrides (no A/B
+// switch: it is the default), FO-3 / FO-4 below. The R9700 MoE rows fail before the C5 port (the 0.2.5.1 default).
 static void testRfuseDefault() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -1019,9 +1021,13 @@ static void testRfuseDefault() {
         for (const CardFake& c : k_cards)
             for (const char* model : {"swift", "moe"}) {
                 const nu::Target t = target(c, model, false);
-                const bool on = std::string_view(c.name) == "8060s" && std::string_view(model) == "moe";
+                const bool on = std::string_view(model) == "moe";
                 const nu::Plan p = pl(t, mode, {});
                 NCHECK(p.flags.moe_rfuse == on, "moe_rfuse default {} {} {}: {} (want {})", c.name, model, mode, p.flags.moe_rfuse, on);
+                // per-card selector check (v0252-c5port, DISCOVERY 2e C5): the 8060S rows equal the 0.2.5.1 rule
+                // (Target::gfx1151 && Target::moe), so the gfx1151 plan does not move with the R9700 default
+                if (std::string_view(c.name) == "8060s")
+                    NCHECK(p.flags.moe_rfuse == (t.gfx1151 && t.moe), "moe_rfuse 8060s {} {}: the 0.2.5.1 default moved", model, mode);
                 const nu::Plan off = pl(t, mode, {{"MOE_RFUSE", "0"}});
                 NCHECK(!off.flags.moe_rfuse, "moe_rfuse {} {} {}: WHIRL_MOE_RFUSE=0 = the 0.2.5 path", c.name, model, mode);
                 const nu::Plan one = pl(t, mode, {{"MOE_RFUSE", "1"}});

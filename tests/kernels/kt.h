@@ -228,7 +228,7 @@ void testMoe(Ctx& c);
 void testMoeMx(Ctx& c);
 void testMoeF(Ctx& c);  // "moef": precise MoE decode experts moe_gu_f_* / moe_down_f_*
 // v0251-a11port (called by testMoeMx, family "moemx"): fused router moe_router_fused_i* == moe_logits_f32 + moe_topk
-// (bitwise) and vs CPU, presence rows (gfx1151 object + host table; absent elsewhere) (test_moe_router.cpp)
+// (bitwise) and vs CPU, presence rows (every code object + host table; v0252-c5port adds gfx1201) (test_moe_router.cpp)
 void testMoeRouter(Ctx& c);
 // gfx1201 precise MoE prefill gemmr_moe* == gemm_moe + moe_act_f16 (test_moe_gu.cpp), called by testMoeMx
 void gemmrChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& down, int R, int K);

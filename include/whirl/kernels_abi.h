@@ -150,7 +150,8 @@
 //   moe_logits_f32(W, x, out, R, C, n, skip)
 //   moe_topk(logits, ld, h, shw, ids, w, sg, R, K, E)
 //   moe_router_fused_i16 / _i24(W, x, logits, R, C, n, skip, shw, ids, w, sg, K, E, unsigned* cnt)
-//       (feat026-router; gfx1151 code object only, v0251-a11port: the 8060S default) moe_logits_f32 + moe_topk in one
+//       (feat026-router; both code objects: v0251-a11port the 8060S default, v0252-c5port the R9700 default)
+//       moe_logits_f32 + moe_topk in one
 //       launch, bit-identical (grid ceil(R/8), block 256; n <= 16, R <= 256, K <= 32, ceil(C/128) = 16 / 24, E == C;
 //       cnt: one zeroed u32, reset by the kernel)
 //   moe_route(ids, n_pairs, R, bn, perm, inv, Int4* tiles, n_tiles)
@@ -675,7 +676,7 @@ struct MoeKernels {
     PerType<F> moe_gu_f{}, moe_down_f{};
     PerType<F> moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{}, gemm_moe32r{}, gemm_moegu{};
     F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{}, moe_tiles{};
-    F moe_router_fused_i16{}, moe_router_fused_i24{};  // optional, gfx1151 only: fused router (feat026-router, v0251-a11port)
+    F moe_router_fused_i16{}, moe_router_fused_i24{};  // optional: fused router (feat026-router; gfx1151 v0251-a11port, gfx1201 v0252-c5port)
     // MXFP4 routed experts (optional): whole-block decode experts, MXFP4 x fp8
     // grouped expert GEMM (token tile 64 / 32, f32 / f16 output), fp8 gather.
     F moe_gu_mxw{}, moe_down_mxw{};
