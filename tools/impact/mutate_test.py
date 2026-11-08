@@ -7,6 +7,7 @@ A test command that outlives its timeout must become a recorded verdict CAUGHT(t
 by PID (a grandchild too), and the next mutant still runs.
 """
 import io
+import re
 import json
 import os
 import subprocess
@@ -135,6 +136,63 @@ try:
     expect("main: hung mutant's grandchild killed", wait_gone(c2), f"pid {c2} alive")
 except Exception as e:
     expect("main: grandchild pid file", False, repr(e))
+
+# 4. v0252-tool3 (PLAN 9.57): a command that exits 125 (= its BUILD failed, git bisect's "cannot test") is run once more;
+# 125 again = verdict BUILD-FAIL (never CAUGHT) and main() exits 4; a build that fails once and then builds is judged on its
+# test. Evidence: ornkv chain3 recorded ornkv-moe-f16 CAUGHT on a whirl-tests.exe LINK failure.
+repo2 = os.path.join(tmp, "repo2")
+os.makedirs(os.path.join(repo2, "src"))
+for n in ("b.txt", "f.txt", "t.txt"):
+    open(os.path.join(repo2, "src", n), "w", newline="\n").write("good\n")
+g2 = lambda *a: subprocess.run(["git", "-C", repo2, *a], capture_output=True, text=True)
+g2("init", "-q")
+g2("-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+g2("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x")
+cnt = os.path.join(tmp, "flaky.count")
+chk2 = os.path.join(tmp, "chk2.py")
+open(chk2, "w").write(NL.join([
+    "import os, sys",
+    f"W = {os.path.join(repo2, 'src')!r}",
+    "r = lambda n: open(os.path.join(W, n)).read()",
+    "if 'broken' in r('b.txt'):",
+    "    print('FAILED: [code=4294967295] whirl-tests.exe (stub link failure)'); sys.exit(125)",
+    "if 'flaky' in r('f.txt'):",
+    f"    c = {cnt!r}",
+    "    n = int(open(c).read()) if os.path.exists(c) else 0",
+    "    open(c, 'w').write(str(n + 1))",
+    "    if n == 0:",
+    "        sys.exit(125)",
+    "    print('FAIL testFlaky'); sys.exit(1)",
+    "sys.exit(1 if 'bad' in r('t.txt') else 0)"]) + NL)
+spec2 = os.path.join(tmp, "spec2.json")
+json.dump({"mutations": [
+    {"id": "m-build", "module": "x", "kind": "replace", "file": "src/b.txt", "find": "good", "replace": "broken", "what": "w",
+     "run": "k", "expect_test": "e:t"},
+    {"id": "m-flaky", "module": "x", "kind": "replace", "file": "src/f.txt", "find": "good", "replace": "flaky", "what": "w",
+     "run": "k", "expect_test": "e:t"},
+    {"id": "m-bad", "module": "x", "kind": "replace", "file": "src/t.txt", "find": "good", "replace": "bad", "what": "w",
+     "run": "k", "expect_test": "e:t"}]}, open(spec2, "w"))
+tsv2 = os.path.join(tmp, "out2.tsv")
+mutate.ROOT = repo2
+sys.argv = ["mutate.py", "--cmd", f'k="{py}" "{chk2}"', "--spec", spec2, "--tsv", tsv2]
+buf = io.StringIO()
+try:
+    with contextlib.redirect_stdout(buf):
+        mrc = mutate.main()
+    merr = None
+except BaseException as e:
+    mrc, merr = None, repr(e)
+text = buf.getvalue()
+rows = {l.split("\t")[1]: l.split("\t")[4] for l in open(tsv2).read().splitlines()[1:]} if os.path.exists(tsv2) else {}
+expect("build: no exception", merr is None, merr)
+expect("build: a build failure is BUILD-FAIL in the TSV, never CAUGHT", rows.get("m-build") == "BUILD-FAIL", rows)
+expect("build: BUILD-FAIL line printed", "BUILD-FAIL" in text and "m-build" in text.split("BUILD-FAIL", 1)[-1][:60], text[-500:])
+expect("build: a build that fails once is retried and then judged (m-flaky CAUGHT)",
+       rows.get("m-flaky") == "CAUGHT" and os.path.exists(cnt) and open(cnt).read() == "2", (rows, open(cnt).read() if os.path.exists(cnt) else None))
+expect("build: a test failure stays CAUGHT", rows.get("m-bad") == "CAUGHT", rows)
+expect("build: main exits 4 when a mutant could not be built", mrc == 4, (mrc, text[-300:]))
+expect("build: the summary counts it apart from caught", re.search(r"2/3 caught.*1 could not be built", text) is not None, text[-300:])
+expect("build: sources restored", all(open(os.path.join(repo2, "src", n)).read() == "good\n" for n in ("b.txt", "f.txt", "t.txt")))
 
 print(f"mutate test: {ok}/{ok + bad} ok")
 sys.exit(1 if bad else 0)
