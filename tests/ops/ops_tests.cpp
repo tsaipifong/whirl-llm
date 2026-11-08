@@ -232,6 +232,7 @@ int main() {
     testOpsGemm();
     testOpsGemmFq();  // v0251-a3port
     testAttnDecode();
+    testDq4Partition();  // v0252-n2 (feat027-dq4r9700 764af36)
     testAttnPrefill();
     testAttnKgVariant();  // v0252-c1port (fails before the port: the stub has no variant, chooseAttnPrefill never asks)
     testOpsMoe();

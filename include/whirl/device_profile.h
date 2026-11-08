@@ -63,6 +63,10 @@ struct Profile {
     // ---- MTP / prefill schedule
     // a verify row costs far more (UMA): the 8060S draft-count / cost-model defaults (qwen35::mtpDefaults)
     bool mtp_costly_verify_rows;
+    // the embedded 64k MTP draft-head vocabulary subset is the default for MoE models (Ornith) on this family too
+    // (spec.policy draftVocabDefaultFits moe_ok; dense qwen35 models have it on every family). Drafts only: the
+    // verify is unchanged, so the output is the same (v0252-n2 / feat027-draft64k97 b334a52, DISCOVERY v0252 N1)
+    bool draft64k_moe;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
     // v0252-n10: whirl-server writes the TAIL-CK checkpoint inside the solo prefill forward that contains the tail point
@@ -84,13 +88,20 @@ inline constexpr Profile k_profile_gfx1201{
     .gemms_tie_larger_bm = false,
     .fdq_default = 0,
     .fdq_big = 0,
-    .attn_dq4_dynamic_splits = false,
+    // v0252-n2: FAST-8S-1 item 1 on the R9700 (same shared attn_dq4 / combine kernels; the dq4 rows are one query per
+    // group here too, so the split rule gives the 256 grid's partitions: bitwise the same output). Measured R9700 Ornith
+    // fast chat +9.68 % (v0252-n2 Part S, KB v0252-n2:s-speed-r9700-ornith)
+    .attn_dq4_dynamic_splits = true,
     .tune_fast = false,
     .tune_cache_suffix = "",
     .tune_time_hint = "2 minutes (a few seconds for MXFP4 models)",
     .gdn_strix = false,
     .numerics_8060s = false,
     .mtp_costly_verify_rows = false,
+    // v0252-n2 (N1): Ornith on the R9700, measured chat +2.89 % precise / +3.39 % balance / +3.85 % fast (v0252-n2
+    // Part S, KB v0252-n2:s-speed-r9700-ornith; research draft_vocab 2026-10-26-draft64k-per-arch.md; feat027-draft64k97
+    // b334a52); drafts only, output unchanged
+    .draft64k_moe = true,
     .prefill_exec_moe = 2048,
     .prefill_fill_batch = false,
     .tail_ck_in_forward = true,  // v0252-n10 (R9700 precise pp 2k: one forward instead of 1024 + 1034)
@@ -118,6 +129,8 @@ inline constexpr Profile k_profile_gfx1151{
     .gdn_strix = true,
     .numerics_8060s = true,
     .mtp_costly_verify_rows = true,
+    // off since the 0.2.2 freeze (9a58324); FAST-8S-1 item 2 measured +2.5..+3.7 % chat here, not part of 0.2.5.2
+    .draft64k_moe = false,
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = false,  // v0252-n10: 0.2.5.2 does not touch the Radeon 8060S (the 0.2.5.1 forward end stays)

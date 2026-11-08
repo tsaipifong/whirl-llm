@@ -9,7 +9,7 @@
 
 namespace cli {
 
-// WHIRL_DRAFT_VOCAB: unset = the embedded 64k subset on dense qwen35 models with the 248320-token
+// WHIRL_DRAFT_VOCAB: unset = the embedded 64k subset on dense qwen35 models (MoE: device profile draft64k_moe) with the 248320-token
 // vocabulary; 64k = embedded; 48k / <file> = a frequency subset file; N = the first N draft-head rows
 // (old experiment); off = full head. Special and byte tokens are always added.
 void applyDraftVocab(q::Model& model, const Tokenizer& tok) {
@@ -20,7 +20,9 @@ void applyDraftVocab(q::Model& model, const Tokenizer& tok) {
         return;
     }
     // the decision and the subset are spec.policy's (shared with whirl-server, arch025-N10 leg 6); the messages are the CLI's
-    const q::DraftVocabGate gate = q::draftVocabGate(dv, model.cfg.moe, model.cfg.n_vocab, model.draft_d2.has_value());
+    // (MoE: the GPU family's profile row decides the default, v0252-n2)
+    const q::DraftVocabGate gate =
+        q::draftVocabGate(dv, model.cfg.moe, model.cfg.n_vocab, model.draft_d2.has_value(), whirl::device::profile(model.arch).draft64k_moe);
     if (gate == q::DraftVocabGate::none) return;
     if (gate == q::DraftVocabGate::not_fit) {
         if (!dv.by_default) std::fprintf(stderr, "WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a 248320-token vocabulary\n");

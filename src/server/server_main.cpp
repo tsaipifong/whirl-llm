@@ -187,11 +187,13 @@ void settingsWarn(const std::string& msg) { logW("{}", msg); }
 // always added); outputs are unchanged, only the acceptance can drop.
 void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::DraftVocabChoice& dv) {
     // the decision and the subset are spec.policy's (shared with the CLI, arch025-N10 leg 6); the messages are the server's
-    switch (qwen35::draftVocabGate(dv, model.cfg.moe, model.cfg.n_vocab, model.draft_d2.has_value())) {
+    // (MoE: the GPU family's profile row decides the default, v0252-n2)
+    switch (qwen35::draftVocabGate(dv, model.cfg.moe, model.cfg.n_vocab, model.draft_d2.has_value(), whirl::device::profile(model.arch).draft64k_moe)) {
         case qwen35::DraftVocabGate::none: return;
         case qwen35::DraftVocabGate::not_fit:
             if (dv.by_default)
-                logI("draft head: full vocabulary (the embedded 64k subset is for dense qwen35 models with a {}-token vocabulary)",
+                logI("draft head: full vocabulary (the embedded 64k subset is for qwen35 models with a {}-token vocabulary: dense ones, and "
+                     "MoE ones on the R9700)",
                      qwen35::draft_vocab_embedded_n_vocab);
             else
                 logW("WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a {}-token vocabulary (model: {})",

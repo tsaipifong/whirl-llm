@@ -381,7 +381,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_MOE_WIDE=1` | MoE 模型（balance / fast）：verify 可到 32 列（預設 16），第 17–32 列和 1-token decode 一樣走 int8 decode 專家 kernel。輸出相同；Ornith-1.5-35B-A3B 四人時約慢 2%（每列各讀自己的專家），所以預設關 |
 | `WHIRL_VRAM_LIMIT_MB=N` | 模擬只有 N MiB VRAM 的 GPU（例如在 R9700 上設 `16384` 模擬 16 GB 的 RX 9070 XT）：可用／總 VRAM、WDDM budget 與本行程的配置都以 N 為上限，載入、KV 池大小與自動縮小 prefill batch／checkpoint 數都會跟那張卡一樣。預設關閉 |
 | `WHIRL_UMA_CHECK=0` | Radeon 8060S：略過「模型、緩衝區與 KV 快取是否放得進 Armoury Crate／BIOS 設定的 GPU 記憶體（專用 carve-out）」的檢查，以及讓 KV 快取留在其中的上限。不受支援：carve-out 以外的記憶體較慢，carve-out 太小時 GPU 執行階段會出現 hipError 719 |
-| `WHIRL_DQ4_DYN=0` | Radeon 8060S、q4 KV（fast、MoE）：注意力改用固定的 split 格子，而不是只啟動有 key 的 split（預設開啟；兩種輸出相同） |
+| `WHIRL_DQ4_DYN=0` | Radeon 8060S 與 R9700、q4 KV（fast）：注意力改用固定的 split 格子，而不是只啟動有 key 的 split（預設開啟；兩種輸出相同） |
 | `WHIRL_FAKE_DEDICATED_GB=N` | 測試用：假裝 Radeon 8060S 只有 N GiB 專用 GPU 記憶體（例如 `0.5`），不必改 BIOS 就能看到拒絕訊息或縮小後的 KV 快取。預設關閉 |
 | `WHIRL_EMBD_HOST=0` | token embedding 表放在 VRAM（預設放 pinned 主記憶體；server 會把它的大小併入 pinned 宣告，讓 Shared Usage 監控扣除） |
 | `WHIRL_TUNE_COLD=1` | 自動調校：每次計時前先清快取 *（診斷）* |
@@ -409,7 +409,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_MTP_Q4=0` | 保留 MTP 區塊的 Q6_K / Q8_0 矩陣（預設：改用 Q4_K 副本，只用於草稿） |
 | `WHIRL_DRAFT_HEAD=q4` | 草擬頭改用 Q4_K，不用 2-bit |
 | `WHIRL_MTP_FULLHEAD=1` | 草稿使用完整的輸出頭 |
-| `WHIRL_DRAFT_VOCAB=off\|64k\|48k\|檔案\|N` | MTP 草擬頭只涵蓋依頻率挑出的詞彙子集。預設：內嵌在執行檔中的 64k 子集，只用於有 2-bit 草擬頭、詞表 248,320 的 dense qwen35 模型（輸出不變）。`off` = 完整草擬頭；`48k` = exe 旁的 `draft_vocab\subset_48k.bin`；檔案 = uint32 little-endian token id；N = 前 N 列 |
+| `WHIRL_DRAFT_VOCAB=off\|64k\|48k\|檔案\|N` | MTP 草擬頭只涵蓋依頻率挑出的詞彙子集。預設：內嵌在執行檔中的 64k 子集，用於有 2-bit 草擬頭、詞表 248,320 的 dense qwen35 模型（R9700 上 MoE 模型也用）（輸出不變）。`off` = 完整草擬頭；`48k` = exe 旁的 `draft_vocab\subset_48k.bin`；檔案 = uint32 little-endian token id；N = 前 N 列 |
 | `WHIRL_NGRAM=0` | 不用 n-gram（prompt lookup）草稿 |
 | `WHIRL_NGRAM_MIN=N` | n-gram 草稿的最短比對後綴（預設 3） |
 | `WHIRL_NGRAM_MAX=N` | 每回合最多的 n-gram 草稿數（預設 15） |

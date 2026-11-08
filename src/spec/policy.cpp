@@ -141,11 +141,11 @@ DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, c
     return c;
 }
 
-DraftVocabGate draftVocabGate(const DraftVocabChoice& dv, bool moe, std::uint32_t n_vocab, bool draft_d2) {
+DraftVocabGate draftVocabGate(const DraftVocabChoice& dv, bool moe, std::uint32_t n_vocab, bool draft_d2, bool moe_ok) {
     using K = DraftVocabChoice::Kind;
     if (dv.kind != K::embedded_64k && dv.kind != K::file) return DraftVocabGate::none;
     if (dv.kind == K::embedded_64k) {
-        const bool fits = dv.by_default ? draftVocabDefaultFits(moe, n_vocab) : n_vocab == draft_vocab_embedded_n_vocab;
+        const bool fits = dv.by_default ? draftVocabDefaultFits(moe, n_vocab, moe_ok) : n_vocab == draft_vocab_embedded_n_vocab;
         if (!fits) return DraftVocabGate::not_fit;
         if (!draft_d2) return DraftVocabGate::no_d2;
     }

@@ -288,6 +288,39 @@ void testDraftVocabGate() {
     ISO_CHECK(bad == 0);
 }
 
+// v0252-n2 (DISCOVERY v0252 N1): the MoE row of the default. moe_ok (device::Profile::draft64k_moe) opens the embedded
+// 64k subset for a MoE model with the 248320-token vocabulary; without it (the 8060S row, and every caller that does not
+// pass it) the decision is the old one; dense models and explicit settings do not read it.
+void testDraftVocabMoeRow() {
+    using K = DraftVocabChoice::Kind;
+    const std::uint32_t nv = draft_vocab_embedded_n_vocab;
+    ISO_CHECK(draftVocabDefaultFits(true, nv, true));
+    ISO_CHECK(!draftVocabDefaultFits(true, nv, false) && !draftVocabDefaultFits(true, nv));
+    ISO_CHECK(!draftVocabDefaultFits(true, 151936, true));
+    ISO_CHECK(draftVocabDefaultFits(false, nv, true) && draftVocabDefaultFits(false, nv, false));
+    ISO_CHECK(!draftVocabDefaultFits(false, 151936, true));
+    const DraftVocabChoice def = draftVocabChoice(std::nullopt, "");
+    ISO_CHECK(def.kind == K::embedded_64k && def.by_default);
+    // the default on a MoE model: subset with the row, not_fit without it (the 0.2.5.1 decision), no_d2 without the 2-bit head
+    ISO_CHECK(draftVocabGate(def, true, nv, true, true) == DraftVocabGate::subset);
+    ISO_CHECK(draftVocabGate(def, true, nv, true, false) == DraftVocabGate::not_fit);
+    ISO_CHECK(draftVocabGate(def, true, nv, true) == DraftVocabGate::not_fit);
+    ISO_CHECK(draftVocabGate(def, true, nv, false, true) == DraftVocabGate::no_d2);
+    ISO_CHECK(draftVocabGate(def, true, 151936, true, true) == DraftVocabGate::not_fit);
+    // dense: the row changes nothing
+    for (const bool ok : {false, true}) {
+        ISO_CHECK(draftVocabGate(def, false, nv, true, ok) == DraftVocabGate::subset);
+        ISO_CHECK(draftVocabGate(def, false, 151936, true, ok) == DraftVocabGate::not_fit);
+    }
+    // explicit settings: the row changes nothing (64k needs only the vocabulary; off = none)
+    const DraftVocabChoice e64 = draftVocabChoice(std::string("64k"), "");
+    const DraftVocabChoice off = draftVocabChoice(std::string("off"), "");
+    for (const bool ok : {false, true}) {
+        ISO_CHECK(draftVocabGate(e64, true, nv, true, ok) == DraftVocabGate::subset);
+        ISO_CHECK(draftVocabGate(off, true, nv, true, ok) == DraftVocabGate::none);
+    }
+}
+
 // the required ids (specials + byte tokens), the ids and the label (the part both old texts wrote alike)
 struct FakeTok {
     std::vector<int> sp{-1, 7, 3, 7};
@@ -435,7 +468,7 @@ int main(int argc, char** argv) {
                     {{"draft_vocab", testDraftVocab}, {"exe_directory", testExeDirectory}, {"exe_directory_files", testExeDirectoryFiles},
                      {"exe_directory_plain_long", testExeDirectoryPlainLong},
                      {"mtp_defaults", testMtpDefaults}, {"ngram", testNgram},
-                     {"batch_drafts", testBatchDrafts}, {"draft_vocab_gate", testDraftVocabGate}, {"draft_vocab_subset", testDraftVocabSubset}, {"mtp_auto_mode", testMtpAutoMode},
+                     {"batch_drafts", testBatchDrafts}, {"draft_vocab_gate", testDraftVocabGate}, {"draft_vocab_moe_row", testDraftVocabMoeRow}, {"draft_vocab_subset", testDraftVocabSubset}, {"mtp_auto_mode", testMtpAutoMode},
                      {"dflash_rules", testDflashRules}, {"ngram_shown", testNgramShown}, {"mtp_drafts_given", testMtpDraftsGiven}},
                     argc, argv);
 }
