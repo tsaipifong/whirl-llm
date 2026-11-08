@@ -57,7 +57,7 @@ struct MoeFlags {
         f16,      // + 3 / 4: f16 expert outputs (balance item f16 intermediates)
         atomic,   // + 5: atomic scatter, f32 order varies run to run (fast only)
     } moep_comb_ok = MoepComb::bitwise;
-    // v0251-a11port (feat026-router, numerics::Flags::moe_rfuse: the gfx1151 MoE default, WHIRL_MOE_RFUSE=0 off): router
+    // v0251-a11port / v0252-c5port (feat026-router, numerics::Flags::moe_rfuse: the MoE default, WHIRL_MOE_RFUSE=0 off): router
     // logits + top-k + shared gate in one launch (bit-identical to moe_logits_f32 + moe_topk) when the kernel exists
     bool moe_rfuse = false;
 };

@@ -46,6 +46,7 @@
 #include "gemv_h.hip"              // precise decode / verify matmul (f16 activations)
 #include "moe_mxfp4.hip"           // MXFP4 routed experts (decode, fp8 grouped GEMM)
 #include "moe_f.hip"               // precise MoE decode experts (f32 activations)
+#include "moe_router.hip"          // fused router logits + top-k (v0252-c5port: the R9700 default; last: no kernel moves)
 #endif
 
 #if defined(__gfx1151__)

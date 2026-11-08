@@ -408,7 +408,8 @@ void loadMoe(MoeKernels& k, const Loader& L) {
         k.gemm_moegu[ti(t)] = L.opt("gemm_moegu_" + s);
     }
     k.moe_tiles = L.opt("moe_tiles");
-    // feat026-router (gfx1151 code object only; v0251-a11port: the 8060S default, numerics::Flags::moe_rfuse)
+    // feat026-router (both code objects: v0251-a11port the 8060S default, v0252-c5port the R9700 default;
+    // numerics::Flags::moe_rfuse)
     k.moe_router_fused_i16 = L.opt("moe_router_fused_i16");
     k.moe_router_fused_i24 = L.opt("moe_router_fused_i24");
     {

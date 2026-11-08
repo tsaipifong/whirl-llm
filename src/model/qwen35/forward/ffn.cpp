@@ -117,7 +117,7 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
         rmsnorm(x, post_norm, h, E, n, E, E);
     // router logits (f32 activations for small batches, also in precise mode)
     // v0251-a11port (feat026-router): the fused router (logits + top-k + shared gate in one launch, bit-identical to
-    // moe_logits_f32 + moe_topk; kernels/gfx1151/moe_router.hip) when ops::chooseMoe picked it
+    // moe_logits_f32 + moe_topk; kernels/moe_router.hip, kernels/gfx1151/moe_router.hip) when ops::chooseMoe picked it
     if (pl.router != nullptr) {
         hip::launch(pl.router, pl.logits_grid, D(256), 0, stream, mo.router.ptr, h, moe_logits, I(R), I(E), I(n), gate,
                     mo.sh_gate, moe_ids, moe_w, moe_sg, I(K), I(E), moe_rcnt);
