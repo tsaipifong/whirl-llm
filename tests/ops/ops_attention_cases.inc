@@ -375,9 +375,9 @@ void testAttnPrefill() {
 // v0252-c1port (C1, feat026-attnkg97 / -97k; DISCOVERY v4 C3-1): the f16 attn_kg variant selector. ops::attnKgVariant is
 // exhaustive (np 6 / 4 / 2 written out, any other np -> nullptr: never the kernel of another NP, whose grid / block would
 // not match), and chooseAttnPrefill takes the variant only on the plain f16 path and on Q8P (kv_dq_rows + the f16
-// attn_kgf), with the shipped kernel's grid / block; q8 / q8v without the scratch, FC-1c (attn_kgs), q4 and the 8060S
-// set keep their kernels. Fails before the port (test-first stub: attnKgVariant returns nullptr, chooseAttnPrefill
-// never asks it).
+// attn_kgf), with the shipped kernel's grid / block; q8 / q8v without the scratch, multi-range FC-1c (attn_kgs) and the
+// 8060S set keep their kernels (v0252-fasta: one-range FC-1c, the q4 fast path, takes var 3 = attn_kgk, case 6). Fails
+// before the port (test-first stub: attnKgVariant returns nullptr, chooseAttnPrefill never asks it).
 kn::KernelTable kgTable(bool variants) {
     kn::KernelTable k = attnTable(false, false, false, true);
     for (const char* np : {"6", "4", "2"}) {
@@ -558,8 +558,8 @@ void testAttnKgVariant() {
 // v0252-c1acc (REVIEW-v0252-c1 C-1 / C-3): attn_kg_var "auto" (ops::kAttnKgVarAuto, the gfx1201 default) = the explicit
 // table ops::kAttnKgAuto: var 3 only on NP 4 plain f16 (Ornith precise / balance) and NP 6 Q8P (Swift balance), var 0 on
 // every other (NP, KV path): Swift precise f16 (NP 6, unproven: AO-1 confound), NP 4 Q8P (not measured), NP 2 and any
-// other np. Explicit 0 / 1 / 3 bypass the table; the 8060S set and FC-1c / q4 are unchanged. Fails before c1acc (the
-// test-first stub attnKgAutoVar returns 0 for every row).
+// other np. Explicit 0 / 1 / 3 bypass the table; the 8060S set and multi-range FC-1c are unchanged (v0252-fasta: the
+// dqr1 rows, testAttnFastQ4Kgk). Fails before c1acc (the test-first stub attnKgAutoVar returns 0 for every row).
 void testAttnKgAuto() {
     CHECK(ops::kAttnKgVarAuto == 255);  // == numerics::kAttnKgVarAuto (static_assert in src/model/qwen35/forward/attn.cpp)
     // (1) the table: exactly the measured rows (C1: two; v0252-fasta: dqr1 for NP 4 and NP 6, M0-A); every other (np, path) -> 0

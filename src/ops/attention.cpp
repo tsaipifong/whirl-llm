@@ -328,6 +328,19 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
             }
         if (ks != nullptr) {
             const u32 seg = p.dq_rows / 256 * 256;
+            // v0252-fasta (KgPath::dqr1): every key in one range -> the same dequant step and launches with attn_kgk<nps>
+            // on the copy instead of attn_kgs (M0-A: bit-identical on q4 dq rows, kgk / kgs 0.77 (NP 4) / 0.87 (NP 6) at
+            // 128k). Only var 3: attn_kgv was not run on q4 rows. More than one range keeps attn_kgs (no state carry in kgk).
+            const Function kk = attnKgVarFor(f.attn_kg_var, nps, KgPath::dqr1) == 3 ? attnKgVariant(3, k, nps) : nullptr;
+            if (kk != nullptr && rows <= seg) {
+                dqRange(0, rows);
+                u32 sp = headParts(rows);
+                while (sp > 1 && (n_head / sp) % nps != 0) sp += 1;
+                if (n_head % sp != 0 || (n_head / sp) % nps != 0) sp = 1;
+                const u32 shp = n_head / sp;
+                for (u32 q = 0; q < sp; ++q) attn(kk, D((n + 15) / 16, shp / nps), D(64 * nps), q * shp, true, false, 0, 0);
+                return pl;
+            }
             for (u32 r0 = 0; r0 < rows; r0 += seg) {
                 const u32 r1 = std::min(rows, r0 + seg), nr = r1 - r0;
                 dqRange(r0, nr);
