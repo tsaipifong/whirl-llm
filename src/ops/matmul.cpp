@@ -269,13 +269,13 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
     return p;
 }
 
-// v0252-c3port test-first stub: never the f32-input twin (the 0.2.5.1 path); the port commit gives the rule
+// v0252-c3port (feat026-moedec-p25 0ae5530 forward/dispatch.cpp, as a pure rule): the plan's gemvh kernel of this type
+// -> its f32-input twin; anything else (off, another kind, a grid-capped gemvh, no twin) -> null = the 0.2.5.1 path
 Function gemvhF32(const GemmPlan& p, GgmlType ty, bool enabled, const GemmFlags& f, const kernels::MatmulKernels& k) {
-    (void)p;
-    (void)ty;
-    (void)enabled;
-    (void)f;
-    (void)k;
+    if (!enabled || p.kind != GemmKind::gemvh || p.f == nullptr || f.gemvh_cap != 0) return nullptr;
+    const std::size_t t = ti(ty);
+    if (p.f == k.gemvh[t]) return k.gemvhf[t];
+    if (p.f == k.gemvh2[t]) return k.gemvhf2[t];
     return nullptr;
 }
 

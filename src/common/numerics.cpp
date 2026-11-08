@@ -362,6 +362,11 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     // the loader's envFlag rule ("0" = off = the 0.2.5 path, any other value on). ops::chooseMoe still needs the kernel
     // in the code object (the gfx1201 one has none) and the shape.
     F.moe_rfuse = flagOr(e.moe_rfuse, t.gfx1151 && t.moe);
+    // v0252-c3port (feat026-moedec-p25 0ae5530: WHIRL_MOE_FUSE / WHIRL_GEMVH_F32, the envFlag rule): the fused precise MoE
+    // decode launch and gemvh on f32 input, default off on every card / model / mode (bitwise switches, class B; only the
+    // gfx1201 code object has the kernels: ops::chooseMoeFuse / ops::gemvhF32 keep the old path elsewhere)
+    F.moe_fuse = flagOr(e.moe_fuse, false);
+    F.gemvh_f32 = flagOr(e.gemvh_f32, false);
     // tune.cpp:852-861
     if (e.fp8) F.fp8_prefill = *e.fp8 != "0";
     if (e.fp8 && *e.fp8 == "0") F.moe_fp8 = false;

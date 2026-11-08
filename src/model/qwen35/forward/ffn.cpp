@@ -142,6 +142,72 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
         hip::download(moe_dump->data() + old, moe_ids, static_cast<std::size_t>(n) * K * 4);
     }
     const DevPtr ysh = mo.sh_gate != 0 ? moe_ysh : 0;
+    if (small && nf().prec_dec && nf().moe_fuse) {
+        // v0252-c3port (feat026-moedec-p25 0ae5530 moeFusedPrecise, research-moedec L1 + L3; WHIRL_MOE_FUSE, default off;
+        // gfx1201 only: the gfx1151 table has no moe_gus*_f, so chooseMoeFuse never takes it there): the precise decode
+        // MoE tail as
+        //   moe_gus*_f_mxfp4 (routed gate/up + SwiGLU -> moe_g; shared gate/up gemvh tiles + SwiGLU -> x16 f16, beside
+        //   the routed blocks) -> gemmF16(sd, x16) -> pl.down
+        // instead of moe_gu_f, f32_to_f16, gemvh x2, silu_mul, f32_to_f16, gemvh, silu_mul, moe_down_f (8 launches -> 3,
+        // the shared expert off the critical path). Bitwise the same: every block runs the replaced kernels' code
+        // (kernels/moe_fused.hip, kt moefuse). Taken only where the chain below would run exactly the replaced kernels.
+        ops::MoeFuseProblem fp;
+        fp.n = n;
+        fp.C = E;
+        fp.F = F;
+        fp.K = K;
+        fp.gate_ty = mo.gate.ty;
+        fp.up_ty = mo.up.ty;
+        fp.gate_rb = mo.gate.row_bytes;
+        fp.up_rb = mo.up.row_bytes;
+        fp.shared = ysh != 0;
+        if (fp.shared) {
+            // the chain below: matmulGroup -> (precise: never the grouped int8 GEMV) matmul -> f32_to_f16 + gemmF16 (gemvh,
+            // one block per 16 rows) for sg / su, matmul -> f32_to_f16 + gemmF16 for sd (the same gemmF16 runs below)
+            const bool grouped = nf().gv_group && k.gv_grp && n <= gvMax() && !nf().float_gemv &&
+                                 ops::preciseAllows(ops::BitClass::q8_row, nf().prec_dec, n, gvMax());
+            const ops::GemmFlags gf = gemmFlags();
+            auto f16Path = [&](const Mat& w) { return ops::chooseMatmulPath(matShape(w), n, matmulFlags(), k) == ops::MatmulPath::gemm_f16; };
+            auto gemvhPath = [&](const Mat& w) {
+                if (!f16Path(w)) return false;
+                const ops::GemmPlan gp = ops::chooseGemmF16(matShape(w), n, w.tune[tuneBucket(n)], gf, k);
+                return gp.kind == ops::GemmKind::gemvh && gf.gemvh_cap == 0 && gp.f == (n <= 16 ? k.gemvh[ti(w.ty)] : k.gemvh2[ti(w.ty)]);
+            };
+            fp.shared_gemvh = !grouped && gemvhPath(sg) && gemvhPath(su) && f16Path(sd) && sg.ptr != output.ptr && su.ptr != output.ptr &&
+                              sg.nrows == cfg.n_ff;  // x16 / ffn_g are sized by n_ff
+            fp.sg_ty = sg.ty;
+            fp.su_ty = su.ty;
+            fp.sg_rb = sg.row_bytes;
+            fp.su_rb = su.row_bytes;
+            fp.sg_nrows = sg.nrows;
+            fp.su_nrows = su.nrows;
+            fp.sg_ncols = sg.ncols;
+            fp.su_ncols = su.ncols;
+        }
+        const ops::MoeFusePlan fz = ops::chooseMoeFuse(fp, true, pl, k);
+        if (fz.use) {
+            hip::launch(fz.f, fz.grid, D(256), 0, stream, mo.gate.ptr, mo.up.ptr, mo.gate.row_bytes, I(F), I(fz.nrb), h, moe_ids, moe_g, I(E), I(K),
+                        fp.shared ? sg.ptr : DevPtr{0}, fp.shared ? su.ptr : DevPtr{0}, fp.shared ? sg.row_bytes : u64{0}, I(fp.shared ? sg.nrows : 0),
+                        I(fz.nsb), x16, I(n));
+            if (prof)
+                prof->matmul_bytes += (mo.gate.row_bytes + mo.up.row_bytes) * F * n * K + (fp.shared ? (sg.row_bytes * sg.nrows + su.row_bytes * su.nrows) : 0);
+            xq_src = 0;
+            x16_src = 0;  // x16 now holds the shared expert's f16 activations (not a registered copy of any f32 buffer)
+            mark(OpClass::matmul);
+            if (fp.shared) {
+                gemmF16(sd, x16, ysh, n, 0);
+                if (prof) prof->matmul_bytes += sd.row_bytes * sd.nrows;
+                mark(OpClass::matmul);
+            }
+            hip::launch(pl.down, pl.down_grid, D(256), 0, stream, mo.down.ptr, mo.down.row_bytes, I(E), moe_g, moe_ids, moe_w, moe_sg, ysh, x, I(F),
+                        I(K));
+            if (prof) prof->matmul_bytes += mo.down.row_bytes * E * n * K;
+            xq_src = 0;
+            x16_src = 0;
+            mark(OpClass::matmul);
+            return;
+        }
+    }
     if (small && nf().prec_dec) {
         // precise decode experts: f32 h (no int8 / f16 rounding), f32 accumulation, every
         // pair on its own waves (a token's result does not depend on the batch)
