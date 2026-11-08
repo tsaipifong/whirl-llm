@@ -35,6 +35,15 @@ void Context::prefillWithMtp(std::span<const u32> tokens) {
 // split at cap exactly as a forward ending at cap and the next one starting there run them (the batch [1, cap), the
 // row pairing hidden cap - 1 with token cap on its own through mtp_h, the batch (cap, n)): same rows per MTP batch, so
 // the MTP KV - and with relaxacc the text - stays as it was; only the trunk runs as one forward.
+// v0252-mtpkv0 (PLAN V1-51): the MTP row at position 0. Every MTP attention row reads the MTP KV from position 0
+// (attn.cpp, the draft window's sink in attn_dq4.h), but no hidden precedes token 0, so a cold prompt (position 0, no
+// checkpoint hidden) ran rows 1.. only and row 0 kept whatever the KV page held: the server's pool recycles pages
+// (copy on write, page_pool.cpp), so the drafts - and with relaxacc the fast-mode text - depended on earlier requests.
+// As llama.cpp (common/speculative.cpp: pending_h starts as zeros) and ik_llama.cpp (speculative.cpp: the previous
+// hidden of a fresh prompt is zeros) the row pairs a ZERO hidden with token 0 (progress\v0252-mtpkv0.PRIOR_ART.md). It
+// runs on its own before the forward, as the boundary row: row 0 comes only from this cold path (a resume reads it
+// from the cached prefix), so cold and resumed MTP KV stay the same bits. The zero row is written into mtp_h, which
+// the chunk's last hidden replaces at the end.
 void Context::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t off, std::size_t n, std::optional<DevPtr> prev_hidden) {
     const u64 E = cfg.n_embd;
     const u32 cap = ck_cap_row;  // (forward() clears it; cleared here too on every exit)
@@ -44,7 +53,12 @@ void Context::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t
     } cap_reset{ck_cap_row};
     if (off == 0 && prev_hidden) hip::copyAsync(mtp_h, *prev_hidden, E * 4, stream);
     // mtp_h: the previous chunk's last hidden (off > 0) or the checkpoint's (resume)
-    if (off > 0 || prev_hidden) (void)mtpForward(mtp_h, tokens.subspan(off, 1), pos0 + static_cast<u32>(off), false);
+    if (off > 0 || prev_hidden) {
+        (void)mtpForward(mtp_h, tokens.subspan(off, 1), pos0 + static_cast<u32>(off), false);
+    } else if (pos0 == 0 && n > 0) {  // (n == 0: forward() refuses the chunk, as before)
+        hip::memset(mtp_h, 0, static_cast<std::size_t>(E) * 4);  // the MTP row 0: a zero hidden with token 0
+        (void)mtpForward(mtp_h, tokens.subspan(0, 1), 0, false);
+    }
     const u32 p = pos0 + static_cast<u32>(off);
     keep_hidden = true;
     try {
@@ -86,13 +100,18 @@ void Context::prefillSegs(std::span<const PSeg> segs, bool with_mtp) {
     }
     if (total > max_batch) throw ModelError("BatchTooLarge");
     // boundary MTP rows, one row each as in prefillMtpChunk (solo order): a cached
-    // prefix's last hidden (off 0) or the previous chunk's (in mtp_h) with tokens[off]
+    // prefix's last hidden (off 0) or the previous chunk's (in mtp_h) with tokens[off];
+    // a cold sequence's MTP row 0: a zero hidden with token 0 (v0252-mtpkv0, see prefillMtpChunk)
     if (with_mtp)
         for (const PSeg& sg : segs)
             if (sg.off > 0 || sg.prev_hidden) {
                 selectSeq(sg.seq);
                 if (sg.off == 0) hip::copyAsync(mtp_h, *sg.prev_hidden, E * 4, stream);
                 (void)mtpForward(mtp_h, sg.tokens.subspan(sg.off, 1), sg.pos0 + static_cast<u32>(sg.off), false);
+            } else if (sg.pos0 == 0) {
+                selectSeq(sg.seq);
+                hip::memset(mtp_h, 0, static_cast<std::size_t>(E) * 4);
+                (void)mtpForward(mtp_h, sg.tokens.subspan(0, 1), 0, false);
             }
     const std::size_t cap = host_ids.size() / 2;
     for (std::size_t kk = 0; kk < segs.size(); ++kk) {
