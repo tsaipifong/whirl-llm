@@ -181,7 +181,39 @@ struct Target {
     bool gdn_strix_shape = false;  // d_state 128, head V 128, n_k_heads > 0, n_v_heads % n_k_heads == 0, ratio <= 4
     bool k_gemm8t = false;       // the whole fragment-tiled fp8 set (Model::useTiledFp8, forward.cpp:269-277)
     bool k_gdn_v0 = false;       // gdn_step_norm_v0 present (WHIRL_GDN_V0)
+    // ---- v0252-f2 (DISCOVERY v4 row F2): fast MoE relaxed acceptance. relax_moe_arm = the name of the RelaxArm fast
+    // takes on a MoE model by default (the loader fills relaxMoeDefaultName(gfx1151); "" = off, every hand-built
+    // Target); k_relax_rank = the code object has the one-pass relaxacc check (F1, argmax_rank_rows_to): the R9700
+    // takes the arm only with it (today's topk_rows check costs ~5.5-12 % of an R9700 Ornith cycle [est]).
+    std::string_view relax_moe_arm{};
+    bool k_relax_rank = false;
 };
+
+// ---- v0252-f2: the fast MoE relaxacc arms (the G3a / G4a screen arms) and the shipped default per GPU.
+// drafts = the fixed MTP drafts per cycle with this arm (0 = the device's default, spec::mtpDefaults: 1 on MoE).
+// The screen runs an arm without a build: k4a10 = WHIRL_RELAX=1; k6a05 = + WHIRL_RELAX_K=6 WHIRL_RELAX_ALPHA=0.05;
+// k4a10d2 = WHIRL_RELAX=1 WHIRL_MTP_DRAFTS=2. Landing the screen's pick = changing the name below (and its pin in
+// tests/unit numerics_plan_tests testRelaxMoeArms), not the rule.
+struct RelaxArm {
+    std::string_view name;
+    bool on;
+    std::uint32_t k;
+    float alpha;
+    std::uint32_t drafts;
+};
+inline constexpr std::array<RelaxArm, 4> relax_moe_arms{{
+    {"off", false, 4, 0.1f, 0},
+    {"k4a10", true, 4, 0.1f, 0},
+    {"k6a05", true, 6, 0.05f, 0},
+    {"k4a10d2", true, 4, 0.1f, 2},
+}};
+// Shipped defaults: "off" until G3a (R9700) / G4a (8060S) decide (DISCOVERY v4 §5.5; ADR-0011 fast acceptance).
+inline constexpr std::string_view relax_moe_default_8060s = "off";
+inline constexpr std::string_view relax_moe_default_r9700 = "off";
+// nullptr for an unknown name ("" included)
+const RelaxArm* relaxArm(std::string_view name);
+// The default arm name for the code object (Target::gfx1151): relax_moe_default_8060s / _r9700.
+std::string_view relaxMoeDefaultName(bool gfx1151);
 
 // gdnwmma / h16 for a model without MXFP4 tensors (KG-1): dense models on the R9700 only
 // (MoE non-MXFP4 models and the Radeon 8060S keep the f32 paths).
@@ -317,7 +349,16 @@ struct Plan {
     // enabled state, q8dec and every Flags field (flagTable order). Descriptions (notes, overrides, source) are not in
     // it. Not used by the tier fingerprint yet (freeze, plan O6).
     std::string bitsKey() const;
+    // v0252-f2: the MTP draft count the fast MoE relaxacc arm asks for (0 = the device default). Spec policy, like
+    // WHIRL_MTP_DRAFTS: not a Flags field, not in bitsKey (the KV bits of committed tokens do not depend on it).
+    std::uint32_t relax_drafts = 0;
 };
+
+// v0252-f2: the default MTP draft count of a run: the arm's (Plan::relax_drafts) while relaxacc is on, else `def`
+// (spec::mtpDefaults). The user's WHIRL_MTP_DRAFTS / --mtp-drafts still win over this (the callers apply them after).
+inline std::uint32_t mtpDraftsDefault(std::uint32_t def, const Plan& p) {
+    return p.flags.relax_on && p.relax_drafts > 0 ? p.relax_drafts : def;
+}
 
 // Capability table: requested items -> enabled / skipped with the reason. arch025-N2a: also every execution flag
 // (Plan::flags), from the Request's per-variable overrides (r.env, and r.runtime for r.front), with the rules of

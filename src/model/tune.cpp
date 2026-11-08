@@ -827,6 +827,9 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     t.gdn_strix_shape = m.cfg.d_state == 128 && m.cfg.headV() == 128 && m.cfg.n_k_heads > 0 && m.cfg.n_v_heads % m.cfg.n_k_heads == 0 &&
                         m.cfg.n_v_heads / m.cfg.n_k_heads <= 4;
     t.k_gemm8t = m.hasTiledFp8();
+    // v0252-f2: the fast MoE relaxacc arm this GPU ships (numerics::relax_moe_default_*); k_relax_rank (F1's one-pass
+    // check, KernelTable::argmax_rank_rows_to) is set here once v0252-f1 is merged: until then the R9700 skips the arm
+    t.relax_moe_arm = whirl::numerics::relaxMoeDefaultName(t.gfx1151);
     return t;
 }
 

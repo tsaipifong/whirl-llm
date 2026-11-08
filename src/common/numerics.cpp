@@ -472,8 +472,16 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     F.relax_eps = dflt.relax_eps;
     F.relax_delta = dflt.relax_delta;
     // (items == false: the item table is the mode's; relaxacc there is what loadOrTune sees when no WHIRL_RELAX is set)
+    p.relax_drafts = 0;
     if (p.mode == Mode::fast && p.on(Item::relaxacc)) {
         F.relax_on = true;
+        // v0252-f2: on a MoE model the arm (default or forced by WHIRL_RELAX=1) gives the base k / alpha / drafts; the
+        // WHIRL_RELAX_* values below still override them. No arm: the Flags defaults (dense, and MoE forced as before).
+        if (const RelaxArm* arm = t.moe ? relaxArm(t.relax_moe_arm) : nullptr; arm != nullptr && arm->on) {
+            F.relax_k = arm->k;
+            F.relax_alpha = arm->alpha;
+            p.relax_drafts = arm->drafts;
+        }
         if (const Raw& v = e.relax_k; v && !v->empty()) F.relax_k = static_cast<std::uint32_t>(std::stoul(*v));
         if (const Raw& v = e.relax_alpha; v && !v->empty()) F.relax_alpha = std::stof(*v);
         if (const Raw& v = e.relax_eps; v && !v->empty()) F.relax_eps = std::stof(*v);
@@ -633,9 +641,18 @@ Plan plan(const Request& r_in, const Target& t) {
                     break;
                 }
                 if (t.moe) {
+                    // v0252-f2: the fast MoE arm (Target::relax_moe_arm, the loader's relaxMoeDefaultName). No arm / "off":
                     // FAST-2 (8060S): MoE runs one MTP draft per cycle there; relaxed acceptance moved
                     // Ornith 1.75 -> 1.85 tok/cycle with no decode gain (short +2%, 32k -12%, n=1)
-                    why = "MoE: one MTP draft per cycle, no measured gain (WHIRL_RELAX=1 forces it)";
+                    const RelaxArm* arm = relaxArm(t.relax_moe_arm);
+                    if (arm == nullptr || !arm->on) why = "MoE: one MTP draft per cycle, no measured gain (WHIRL_RELAX=1 forces it)";
+                    // R9700: today's topk_rows check is ~5.5-12 % of an Ornith cycle [est, DISCOVERY v4 A1]; 8060S 1.6-2.9 % [meas]
+                    else if (!t.gfx1151 && !t.k_relax_rank)
+                        why = std::format("MoE arm {}: needs the one-pass relaxacc check (F1) on this GPU (WHIRL_RELAX=1 forces it)", arm->name);
+                    else
+                        note = std::format("MoE arm {}: drafts accepted when close to the target (greedy: top-k + p ratio; sampling: "
+                                           "typical acceptance){}",
+                                           arm->name, arm->drafts > 0 ? std::format(", {} MTP drafts per cycle", arm->drafts) : std::string());
                     break;
                 }
                 note = "drafts accepted when close to the target (greedy: top-k + p ratio; sampling: typical acceptance)";
@@ -667,6 +684,14 @@ void setQ8dec(Plan& p, bool q8, const std::string& env) {
         p.overrides.push_back(std::format("WHIRL_Q8DEC={}: q8dec off (f16 decode activations)", env));
     }
 }
+
+// v0252-f2
+const RelaxArm* relaxArm(std::string_view name) {
+    for (const RelaxArm& a : relax_moe_arms)
+        if (a.name == name) return &a;
+    return nullptr;
+}
+std::string_view relaxMoeDefaultName(bool gfx1151) { return gfx1151 ? relax_moe_default_8060s : relax_moe_default_r9700; }
 
 void skipItem(Plan& p, Item it, const std::string& why) {
     ItemState& s = p.items[static_cast<std::size_t>(it)];

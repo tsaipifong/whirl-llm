@@ -451,7 +451,7 @@ ChatOpts mtpOpts(const q::Model& model, ChatOpts base, u32* drafts_out) {
     // the run settings shared with whirl-server (config.settings, arch025-N15 rest): each read at its old place
     namespace st = whirl::settings;
     const std::optional<u32> dv = st::mtpDrafts(def.drafts, q::max_drafts);
-    const u32 drafts = dv.value_or(def.drafts);
+    const u32 drafts = dv.value_or(whirl::numerics::mtpDraftsDefault(def.drafts, model.num_plan));  // v0252-f2 (the server's rule)
     base.trace_tps = envU32("TRACE_TPS").value_or(0);
     base.mtp_p_min = def.p_min;
     base.mtp_adapt = def.adapt;
