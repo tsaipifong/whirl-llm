@@ -258,6 +258,9 @@ public:
     std::uint32_t draft_vocab = 0;  // WHIRL_DRAFT_VOCAB=N: the first N rows only (old experiment)
     float draft_p_min = 0;
     std::uint32_t draft_n_min = 0;
+    // relaxacc one-pass check of the next verify (setRelaxRank / takeRelaxRank, v0252-f1)
+    DevPtr rr_stats = 0;
+    std::uint32_t rr_mask = 0, rr_stride = 0;
     // speculative sampling of MTP drafts (numerics item specsample, server): per sequence; a
     // sequence with on = true gets draft_sample_rows after draft_pick_rows (q per draft step in
     // draft_qbuf: [seq][max_drafts][spec::q_words] i32)
@@ -367,6 +370,25 @@ public:
     void verifyEnqueueEx(std::uint32_t next, std::uint32_t n_draft, std::optional<std::span<const std::uint32_t>> host_drafts,
                          std::uint32_t pos0);
     std::uint32_t verifyBatchEnqueue(std::span<const VSeg> segs);
+    // relaxacc one-pass check (v0252-f1, fast mode only; DISCOVERY F1): the NEXT verify (verifyBatchEnqueue / verifyEnqueueEx)
+    // picks its rows with argmax_rank_rows_to instead of argmax_rows(_to): the same argmax tokens plus, for every row of
+    // a segment in seg_mask (bit k = segs[k]; verifyEnqueueEx: bit 0) that verifies an MTP draft from the control area,
+    // [stride] int32 rank of that draft in the whole row (entries ahead of it, ties to the lower id), [stride] float row
+    // max, [stride] float the draft's logit at stats (row index = verify row; whirl/relax_accept.h acceptRank). One-shot:
+    // the verify takes and clears it (also when it throws). false: no such kernel (the caller keeps topk_rows).
+    bool setRelaxRank(DevPtr stats, std::uint32_t seg_mask, std::uint32_t stride);
+    struct RelaxRank {
+        DevPtr stats = 0;
+        std::uint32_t mask = 0, stride = 0;
+    };
+    RelaxRank takeRelaxRank();
+    // the draft source of every verify row: segs[k] in mask with control-area drafts -> rows 0 .. nd - 1 read the
+    // sequence's draft word seq * ctl_words + ctl_drafts + r; every other row (the bonus row, n-gram / host drafts,
+    // segments not in mask, rows past the batch) -1
+    static RowIdx relaxRankSrc(std::span<const VSeg> segs, std::uint32_t mask);
+    // launches argmax_rank_rows_to over n rows (argmax into out[dst.v[b]], drafts out[src.v[b]]) when rr is set and some
+    // row has a draft; false = nothing launched (the caller launches its plain argmax)
+    bool relaxRankEnqueue(const RelaxRank& rr, std::uint32_t n, DevPtr out, const RowIdx& dst, const RowIdx& src);
     void mtpBatchStepEx(std::span<const MSeg> segs, std::uint32_t r, bool draft);
     void readCtl(std::span<std::int32_t> dst);
     struct Cycle {

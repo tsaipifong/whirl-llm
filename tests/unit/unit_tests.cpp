@@ -56,6 +56,7 @@ const OrderRow kOrder[] = {
 #endif
     {"release", "testSharedHelpersN6"},
     {"accept_policy", "testRelaxAccept"},
+    {"accept_policy", "testRelaxRank"},  // v0252-f1
     {"json", "testJson"},
     {"tokenizer", "testUnicode"},
     {"gguf", "testGguf"},

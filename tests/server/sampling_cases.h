@@ -143,6 +143,31 @@ inline Inputs makeInputs(const Case& c) {
     return in;
 }
 
+// v0252-f1: the one-pass layout argmax_rank_rows_to writes (CPU oracle of the kernel), for the rows of case c that verify a
+// draft: [max_rows_t] int32 rank of the draft in the WHOLE row (entries with a greater logit, or an equal logit and a lower
+// id), [max_rows_t] float row max, [max_rows_t] float the draft's logit; other rows: rank INT32_MAX, l_d -inf (as the kernel)
+inline std::vector<std::uint8_t> rankHost(const Case& c, const Inputs& in) {
+    std::vector<std::uint8_t> h(static_cast<std::size_t>(max_rows_t) * 12, 0);
+    auto* rk = reinterpret_cast<std::int32_t*>(h.data());
+    auto* f = reinterpret_cast<float*>(h.data());
+    for (std::uint32_t gr = 0; gr < in.rows.size() && gr < max_rows_t; ++gr) {
+        const std::vector<float>& L = in.rows[gr];
+        float m = -INFINITY;
+        for (float l : L) m = l > m ? l : m;
+        rk[gr] = std::numeric_limits<std::int32_t>::max();
+        f[max_rows_t + gr] = m;
+        f[2 * max_rows_t + gr] = -INFINITY;
+        if (gr < c.row0 || gr >= c.row0 + c.nd) continue;
+        const std::uint32_t d = in.dr[gr - c.row0];
+        if (d >= L.size()) continue;
+        std::int32_t n = 0;
+        for (std::uint32_t i = 0; i < L.size(); ++i) n += (L[i] > L[d] || (L[i] == L[d] && i < d)) ? 1 : 0;
+        rk[gr] = n;
+        f[2 * max_rows_t + gr] = L[d];
+    }
+    return h;
+}
+
 struct Result {
     std::uint32_t acc = 0, chosen = 0, relaxed = 0;
     std::uint64_t gap_bits = 0;

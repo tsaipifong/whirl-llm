@@ -44,6 +44,17 @@ Accepted Acceptor::greedy(const std::int32_t* argmax, const Drafts& d, bool rela
         if (!relax) break;
         // relaxacc: verify row acc (conditioned on drafts 0..acc-1) keeps a near-argmax draft
         const std::size_t gr = row0 + acc;
+        if (rr.rank) {
+            // v0252-f1 one-pass layout (argmax_rank_rows_to): rank [max_rows] i32, max [max_rows] f32, l_d [max_rows] f32
+            const auto* rnk = reinterpret_cast<const std::int32_t*>(rr.host);
+            const auto* f = reinterpret_cast<const float*>(rr.host);
+            const float m = f[rr.max_rows + gr], ld = f[2 * static_cast<std::size_t>(rr.max_rows) + gr];
+            if (!relax::acceptRank(relax_, rnk[gr], ld, m) || repeats(acc)) break;
+            relax_gap += static_cast<double>(m - ld);
+            ++acc;
+            relaxed += 1;
+            continue;
+        }
         const auto* rids = reinterpret_cast<const std::int32_t*>(rr.host) + gr * rk;
         const auto* rvals = reinterpret_cast<const float*>(rr.host + static_cast<std::size_t>(rr.max_rows) * rk * 4) + gr * rk;
         const auto* rst = reinterpret_cast<const float*>(rr.host + static_cast<std::size_t>(rr.max_rows) * rk * 8);

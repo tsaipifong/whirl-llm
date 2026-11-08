@@ -186,6 +186,8 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
                 model.mtpEnqueue(model.scratch().h, {}, model.draftSlot(dri - 1), p + dri, dri);
             }
         }
+        // relaxacc one-pass check (v0252-f1): the verify's argmax kernel ranks the MTP drafts (no topk_rows launch)
+        const bool rx_rank = rx.on && nd_host > 0 && ng_n == 0 && model.setRelaxRank(rx_dev, 1u, q::max_small_batch);
         if (ng_n > 0)
             model.verifyEnqueueEx(next, nd_host, std::span<const u32>(ngd.data(), ng_n), p);
         else
@@ -194,9 +196,10 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
         if (rx.on && nd_host > 0 && ng_n == 0) {
             const hip::DevPtr ids = rx_dev, vals = rx_dev + static_cast<u64>(q::max_small_batch) * rk * 4,
                          stats = rx_dev + static_cast<u64>(q::max_small_batch) * rk * 8;
-            hip::launch(rx_topk, hip::Dim3{nd_host, 1, 1}, hip::Dim3{1024, 1, 1}, 0, model.stream, model.scratch().logits,
-                        static_cast<std::int32_t>(model.cfg.n_vocab), static_cast<std::int32_t>(rk), 1.0f, ids, vals, stats);
-            hip::downloadAsync(rx_host.data(), rx_dev, rx_host.size(), model.stream);
+            if (!rx_rank)
+                hip::launch(rx_topk, hip::Dim3{nd_host, 1, 1}, hip::Dim3{1024, 1, 1}, 0, model.stream, model.scratch().logits,
+                            static_cast<std::int32_t>(model.cfg.n_vocab), static_cast<std::int32_t>(rk), 1.0f, ids, vals, stats);
+            hip::downloadAsync(rx_host.data(), rx_dev, rx_rank ? static_cast<std::size_t>(q::max_small_batch) * 12 : rx_host.size(), model.stream);
         }
         const double c1 = nowMs();
         std::array<u32, q::max_small_batch> dr{}, outv{};
@@ -227,7 +230,7 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
         };
         const u32 acc = acceptor
                             .greedy(reinterpret_cast<const std::int32_t*>(outv.data()), sampling::Drafts{drs, nd, 0}, relax_k,
-                                    sampling::RelaxRows{rx_host.data(), q::max_small_batch, rk}, repeats, relaxed, relax_gap)
+                                    sampling::RelaxRows{rx_host.data(), q::max_small_batch, rk, rx_rank}, repeats, relaxed, relax_gap)
                             .acc;
         accepted += acc;
         if (opt.ngram_debug) {

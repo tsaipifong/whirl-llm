@@ -41,10 +41,13 @@ struct Drafts {
 
 // relaxacc greedy: the device top-k of every verify row, as the engine downloads it: ids
 // [max_rows * k] int32, logits [max_rows * k] float, then (max, sum) [max_rows * 2] float.
+// rank (v0252-f1, the one-pass check of argmax_rank_rows_to): instead [max_rows] int32 rank of the row's draft,
+// [max_rows] float row max, [max_rows] float the draft's logit (whirl/relax_accept.h acceptRank); k unused.
 struct RelaxRows {
     const std::uint8_t* host = nullptr;
     std::uint32_t max_rows = 0;
     std::uint32_t k = 0;
+    bool rank = false;
 };
 
 struct Accepted {

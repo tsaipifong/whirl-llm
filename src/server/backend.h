@@ -94,6 +94,10 @@ public:
     virtual void setDraftCutoff(float p_min, std::uint32_t n_min) = 0;
     virtual void mtpBatchStepEx(std::span<const MSeg> segs, std::uint32_t r, bool draft) = 0;
     virtual std::uint32_t verifyBatchEnqueue(std::span<const VSeg> segs) = 0;
+    // relaxacc one-pass check (v0252-f1, fast): the next verifyBatchEnqueue also writes, for the segments in seg_mask (bit k =
+    // segs[k]) with MTP drafts, [stride] int32 draft rank, [stride] float row max, [stride] float draft logit at stats (row =
+    // verify row; sampling::RelaxRows rank layout). One-shot. false: not supported (the engine keeps topkRows).
+    virtual bool setRelaxRank(DevPtr stats, std::uint32_t seg_mask, std::uint32_t stride) { (void)stats, (void)seg_mask, (void)stride; return false; }
     virtual void readCtl(std::span<std::int32_t> dst) = 0;
     // speculative sampling of MTP drafts (numerics item specsample): per sequence, set before the
     // draft steps of a cycle. Race coupling (whirl/spec_sample.h): the device draws draft r as

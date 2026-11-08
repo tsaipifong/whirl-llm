@@ -141,6 +141,7 @@ void Context::commitSeq(u32 s) {
 
 // Batched verify over sequences (see the header).
 u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
+    const RelaxRank rr = takeRelaxRank();  // v0252-f1: one-shot, consumed even when this verify throws
     if (segs.empty() || segs.size() > gdn_max_seg) throw ModelError("BadBatch");
     // several sequences need the segment-aware fused DeltaNet kernels
     const bool unfused = !fusedDecode();
@@ -223,7 +224,9 @@ u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
     // the kept rows of the previous verify are in the state now
     if (gdn_replay)
         for (const VSeg& sg : segs) seqs[sg.seq].npend = 0;
-    hip::launch(k.argmax_rows_to, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), out_tok, dst);
+    // relaxacc one-pass check (v0252-f1): the argmax kernel also ranks the MTP drafts of the requested segments
+    if (!relaxRankEnqueue(rr, n, out_tok, dst, relaxRankSrc(segs, rr.mask)))
+        hip::launch(k.argmax_rows_to, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), out_tok, dst);
     return n;
 }
 
@@ -382,11 +385,56 @@ void Context::argmaxRows(u32 n, std::span<u32> out) {
     for (u32 r = 0; r < n; ++r) out[r] = static_cast<u32>(buf[r]);
 }
 
+// relaxacc one-pass check (v0252-f1): see the header.
+bool Context::setRelaxRank(DevPtr stats, u32 seg_mask, u32 stride) {
+    if (stats == 0 || seg_mask == 0 || !k.argmax_rank_rows_to) return false;
+    rr_stats = stats;
+    rr_mask = seg_mask;
+    rr_stride = stride;
+    return true;
+}
+
+Context::RelaxRank Context::takeRelaxRank() {
+    const RelaxRank rr{rr_stats, rr_mask, rr_stride};
+    rr_stats = 0;
+    rr_mask = 0;
+    rr_stride = 0;
+    return rr;
+}
+
+RowIdx Context::relaxRankSrc(std::span<const VSeg> segs, u32 mask) {
+    RowIdx src;
+    for (i32& v : src.v) v = -1;
+    constexpr u32 cap = sizeof(src.v) / sizeof(src.v[0]);
+    u32 n = 0;
+    for (std::size_t kk = 0; kk < segs.size(); ++kk) {
+        const VSeg& sg = segs[kk];
+        const bool on = kk < 32 && ((mask >> kk) & 1u) != 0 && sg.drafts.empty();
+        for (u32 r = 0; r < sg.nd + 1; ++r) {
+            if (n >= cap) return src;
+            if (on && r < sg.nd) src.v[n] = static_cast<i32>(sg.seq * ctl_words + ctl_drafts + r);
+            n += 1;
+        }
+    }
+    return src;
+}
+
+bool Context::relaxRankEnqueue(const RelaxRank& rr, u32 n, DevPtr out, const RowIdx& dst, const RowIdx& src) {
+    if (rr.stats == 0 || rr.mask == 0 || !k.argmax_rank_rows_to) return false;
+    constexpr u32 cap = sizeof(src.v) / sizeof(src.v[0]);
+    bool any = false;
+    for (u32 b = 0; b < n && b < cap; ++b) any = any || src.v[b] >= 0;
+    if (!any) return false;
+    hip::launch(k.argmax_rank_rows_to, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), out, dst, src, rr.stats, I(rr.stride));
+    return true;
+}
+
 void Context::argmaxRowsEnqueue(u32 n) {
     hip::launch(k.argmax_rows, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), ctlSlot(ctl_rows));
 }
 
 void Context::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<const u32>> host_drafts, u32 pos0) {
+    const RelaxRank rr = takeRelaxRank();  // v0252-f1: one-shot, consumed even when this verify throws
     const u32 n = n_draft + 1;
     if (pos0 + n > max_ctx) throw ModelError("ContextTooLong");
     ensureSnapshots(n_draft);
@@ -413,7 +461,13 @@ void Context::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<con
         setTokensDev(ids, one, draftSlot(0), n_draft, pos0);
     }
     run(n);
-    argmaxRowsEnqueue(n);
+    // relaxacc one-pass check (v0252-f1): rows 0 .. n_draft - 1 rank the control-area drafts (MTP; host drafts: none)
+    RowIdx dst, src;
+    for (u32 r = 0; r < sizeof(dst.v) / sizeof(dst.v[0]); ++r) {
+        dst.v[r] = static_cast<i32>(ctl_rows + r);
+        src.v[r] = !host_drafts && (rr.mask & 1u) != 0 && r < n_draft ? static_cast<i32>(ctl_drafts + r) : -1;
+    }
+    if (!relaxRankEnqueue(rr, n, ctlSlot(0), dst, src)) argmaxRowsEnqueue(n);
 }
 
 Context::Cycle Context::readCycle(std::span<u32> out, std::span<u32> drafts) {
