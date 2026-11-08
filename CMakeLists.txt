@@ -219,6 +219,14 @@ if(WHIRL_WITH_HIP)
   add_dependencies(whirl-hiprt-tests whirl-fake-dep whirl-fake-hiprt whirl-fake-hiprt-drop whirl-fake-hiprt-dep)
 endif()
 
+# PATH-256 P5 (PLAN B26-6, progress/pathlen256.DISCOVERY.md 2d-3): a marker amdhip64_7.dll (writes a file when loaded,
+# exports no HIP function) for tools/gates/pkg_pathlen_check.py (step cpu_pkg_pathlen): the install-folder refusal of
+# whirl.exe / whirl-server.exe comes before the AMD runtime is loaded. Its own folder, never next to the build's exes.
+# MODULE: no import library. Test only, not shipped.
+add_library(whirl-test-marker-hiprt MODULE tests/package/marker_hiprt.cpp)
+set_target_properties(whirl-test-marker-hiprt PROPERTIES OUTPUT_NAME amdhip64_7 PREFIX ""
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/pkg_marker" RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/pkg_marker")
+
 if(WHIRL_LLAMACPP_SRC)
   add_subdirectory(tests/template_oracle)
 endif()
