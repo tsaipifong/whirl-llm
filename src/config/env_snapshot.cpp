@@ -62,6 +62,8 @@ constexpr std::array<S::Entry, S::n_names> k_names{{
     {"MOEP_DN", &S::moep_dn},
     {"MOEP_COMB", &S::moep_comb},
     {"MOE_RFUSE", &S::moe_rfuse},
+    {"MOE_FUSE", &S::moe_fuse},    // v0252-c3port (feat026-moedec)
+    {"GEMVH_F32", &S::gemvh_f32},  // v0252-c3port (feat026-moedec)
     {"GEMV_R", &S::gemv_r},
     {"GEMV_W", &S::gemv_w},
     {"GEMV_WH", &S::gemv_wh},

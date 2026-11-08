@@ -219,6 +219,8 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOEP_DN", &S::moep_dn},
         {"MOEP_COMB", &S::moep_comb},
         {"MOE_RFUSE", &S::moe_rfuse},
+        {"MOE_FUSE", &S::moe_fuse},    // v0252-c3port (feat026-moedec)
+        {"GEMVH_F32", &S::gemvh_f32},  // v0252-c3port (feat026-moedec)
     }};
     return t;
 }

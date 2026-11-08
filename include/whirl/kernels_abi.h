@@ -44,6 +44,8 @@
 //   gemmh_f16 / gemmhh_f16(const f16* W, const f16* X, float* Y, ncols,
 //            nrows, n_tok, accumulate)
 //   dequant_f16_<T>(W, rb, f16* out, ncols, nrows); f32_to_f16(x, y, n)
+//   gemvhf_<T> / gemvhf2_<T>(W, rb, const float* X, float* Y, ncols, nrows, n_tok, accumulate)  (v0252-c3port, gfx1201
+//            only, no f16 entry): gemvh_<T> / gemvh2_<T> with X rounded to f16 in the kernel as f32_to_f16 does
 //   qact_fp8 / qact_fp8t(const float* x, u8* q, float* sx, int ncols)
 //   gemm8_c<i>, gemm8h_c<i>, gemm8t_c<i>, gemm8th_c<i>(W, rb, const u8* wref,
 //            const u8* X8, const float* sx, float* Y, ncols, nrows, n_tok, acc)
@@ -146,6 +148,10 @@
 //       (feat026-router; gfx1151 code object only, v0251-a11port: the 8060S default) moe_logits_f32 + moe_topk in one
 //       launch, bit-identical (grid ceil(R/8), block 256; n <= 16, R <= 256, K <= 32, ceil(C/128) = 16 / 24, E == C;
 //       cnt: one zeroed u32, reset by the kernel)
+//   moe_gus_f_mxfp4 / moe_gus2_f_mxfp4(W1, W2, rb, ff, nrb, const float* h, ids, float* act, C, K, SG, SU, s_rb, sff,
+//            nsb, f16* xs, n_tok)  (v0252-c3port, gfx1201 only; grid nsb + nrb * n_tok * K, block 256: blocks [0, nsb)
+//            the shared expert -> xs = f16(silu(g) * u) [n_tok][sff], the rest routed pairs -> act = silu(g) * u
+//            [pair][ff]; bit-identical to moe_gu_f_mxfp4 + silu_mul and f32_to_f16 + gemvh x2 + silu_mul + f32_to_f16)
 //   moe_route(ids, n_pairs, R, bn, perm, inv, Int4* tiles, n_tiles)
 //   moe_gather_f16(x, perm, f16* xg, C, K); moe_act_f16(g, u, f16* a, n)
 //   moe_combine(x, ysh, sg, yd, inv, w, C, K)
@@ -606,6 +612,10 @@ struct MatmulKernels {
     PerType<F> gemv4{}, gemv8{};  // gemv_<T>_4 / _8 (f32 / f16 only): n = 2..16 bitwise == gemv1 per token
     // gemvh_<T> / gemvh2_<T>: precise decode / verify matmul, f16 x, n <= 16 / 32, bitwise == gemm_c* (gfx1201)
     PerType<F> gemvh{}, gemvh2{};
+    // v0252-c3port (feat026-moedec L1; optional, gfx1201 code object only): gemvhf_<T> / gemvhf2_<T> = gemvh_<T> /
+    // gemvh2_<T> on f32 x, each element rounded to f16 in the B load exactly as f32_to_f16 does (no conversion launch);
+    // no f16 entry (f16 weights keep f32_to_f16 + gemvh). Chosen by ops::gemvhF32 (WHIRL_GEMVH_F32)
+    PerType<F> gemvhf{}, gemvhf2{};
     Nt gemvq_nt{}, gemvq_nt_g{};
     std::array<Nt, 2> gemvq_mr{}, gemvq_mr_g{};      // [R/2 - 1][nt - 2][type], R = 2, 4
     std::array<Nt, kNGemvw> gemvw{}, gemvw_g{};      // [v][nt - 2][type], v = 1..8
@@ -665,6 +675,10 @@ struct MoeKernels {
     PerType<F> moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{}, gemm_moe32r{}, gemm_moegu{};
     F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{}, moe_tiles{};
     F moe_router_fused_i16{}, moe_router_fused_i24{};  // optional, gfx1151 only: fused router (feat026-router, v0251-a11port)
+    // v0252-c3port (feat026-moedec L1 + L3; optional, gfx1201 code object only): moe_gus_f_mxfp4 (n <= 16) /
+    // moe_gus2_f_mxfp4 (n <= 32), the precise MXFP4 decode routed + shared expert gate/up + SwiGLU in one launch
+    // (kernels/moe_fused.hip; host plan ops::chooseMoeFuse, WHIRL_MOE_FUSE)
+    F moe_gus_f{}, moe_gus2_f{};
     // MXFP4 routed experts (optional): whole-block decode experts, MXFP4 x fp8
     // grouped expert GEMM (token tile 64 / 32, f32 / f16 output), fp8 gather.
     F moe_gu_mxw{}, moe_down_mxw{};

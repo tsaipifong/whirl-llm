@@ -269,4 +269,14 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
     return p;
 }
 
+// v0252-c3port test-first stub: never the f32-input twin (the 0.2.5.1 path); the port commit gives the rule
+Function gemvhF32(const GemmPlan& p, GgmlType ty, bool enabled, const GemmFlags& f, const kernels::MatmulKernels& k) {
+    (void)p;
+    (void)ty;
+    (void)enabled;
+    (void)f;
+    (void)k;
+    return nullptr;
+}
+
 }  // namespace whirl::ops

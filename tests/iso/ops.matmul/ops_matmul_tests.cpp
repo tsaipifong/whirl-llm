@@ -16,6 +16,7 @@ int main(int argc, char** argv) {
                      {"gemv_k", testGemvK},  // v0251-a6port (feat026-ggemv), the order of whirl-ops-tests
                      {"gemv_wide", testGemvWide},
                      {"gemm", testOpsGemm},
-                     {"gemmfq", testOpsGemmFq}},
+                     {"gemmfq", testOpsGemmFq},
+                     {"gemvhf32", testGemvhF32}},  // v0252-c3port
                     argc, argv);
 }

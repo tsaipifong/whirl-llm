@@ -225,6 +225,9 @@ void testVision(Ctx& c);  // "vision": encoder kernels (own code object) vs CPU
 void testMoe(Ctx& c);
 void testMoeMx(Ctx& c);
 void testMoeF(Ctx& c);  // "moef": precise MoE decode experts moe_gu_f_* / moe_down_f_*
+// v0252-c3port "moefuse" (test_moe_fused.cpp): gfx1201 fused precise MoE decode moe_gus*_f_mxfp4 == moe_gu_f + silu_mul and
+// f32_to_f16 + gemvh x2 + silu_mul + f32_to_f16, gemvhf_<T> == f32_to_f16 + gemvh_<T> (bitwise); presence rows per arch
+void testMoeFused(Ctx& c);
 // v0251-a11port (called by testMoeMx, family "moemx"): fused router moe_router_fused_i* == moe_logits_f32 + moe_topk
 // (bitwise) and vs CPU, presence rows (gfx1151 object + host table; absent elsewhere) (test_moe_router.cpp)
 void testMoeRouter(Ctx& c);

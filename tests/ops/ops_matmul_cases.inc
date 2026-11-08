@@ -451,4 +451,72 @@ void testOpsGemmFq() {
     CHECK(ops::chooseGemmF16(gate, 4096, deq2, dv, k01).kind == ops::GemmKind::gemmh);
 }
 
+// v0252-c3port (feat026-moedec-p25 0ae5530 dispatch.cpp, gfx1201 only): ops::gemvhF32, Context::matmul's gemvhf choice -
+// the f32-input twin of the plan's gemvh kernel (gemvhf_<T> for gemvh_<T>, gemvhf2_<T> for gemvh2_<T>) when enabled,
+// the plan is gemvh with one block per 16 rows (no gemvh_cap: the gfx1151 grid-capped gemvh loops over row tiles, the
+// twin does not), and the code object has the twin; else null (f32_to_f16 + the plan's kernel, the 0.2.5.1 path).
+// Per-arch selector: a table without gemvhf (gfx1151, the shipped gfx1201) always null. Fails before the port (stub).
+void testGemvhF32() {
+    auto mx = mat(GgmlType::mxfp4, 512, 2048);
+    mx.row_bytes = 2048 / 32 * 17;
+    auto q4 = mat(GgmlType::q4_k, 5120, 5120);
+    q4.row_bytes = 5120 / 256 * 144;
+    auto f16 = mat(GgmlType::f16, 4096, 5120);
+    f16.row_bytes = 5120 * 2;
+    ops::GemmFlags pre;
+    pre.prec_dec = true;
+    const kn::KernelTable k0 = gemmTable(true, true, true);  // shipped: no gemvhf
+    kn::KernelTable k = k0;
+    for (GgmlType t : {GgmlType::q4_k, GgmlType::mxfp4}) {  // no f16 twin (it spills; f16 keeps f32_to_f16 + gemvh)
+        const std::string s = std::to_string(static_cast<int>(t));
+        k.gemvhf[ti(t)] = tag("gemvhf_" + s);
+        k.gemvhf2[ti(t)] = tag("gemvhf2_" + s);
+    }
+    const std::string smx = std::to_string(static_cast<int>(GgmlType::mxfp4)), sq4 = std::to_string(static_cast<int>(GgmlType::q4_k));
+    for (const std::uint32_t n : {1u, 4u, 16u}) {
+        const ops::GemmPlan p = ops::chooseGemmF16(mx, n, 0, pre, k);
+        CHECK(p.kind == ops::GemmKind::gemvh && nameOf(p.f) == "gemvh_" + smx);
+        CHECK(nameOf(ops::gemvhF32(p, GgmlType::mxfp4, true, pre, k)) == "gemvhf_" + smx);
+        CHECK(ops::gemvhF32(p, GgmlType::mxfp4, false, pre, k) == nullptr);  // WHIRL_GEMVH_F32 off (default)
+        CHECK(ops::gemvhF32(p, GgmlType::mxfp4, true, pre, k0) == nullptr);  // no twin in the code object
+    }
+    ops::GemmFlags pre32 = pre;
+    pre32.gv_max = 32;  // a wide precise verify (Context::gvMax() = small_max 32): 17..32 rows on gemvh2
+    for (const std::uint32_t n : {17u, 32u}) {
+        const ops::GemmPlan p = ops::chooseGemmF16(q4, n, 0, pre32, k);
+        CHECK(p.kind == ops::GemmKind::gemvh && nameOf(p.f) == "gemvh2_" + sq4);
+        CHECK(nameOf(ops::gemvhF32(p, GgmlType::q4_k, true, pre32, k)) == "gemvhf2_" + sq4);
+    }
+    // f16 weights: gemvh, but no twin -> null
+    {
+        const ops::GemmPlan p = ops::chooseGemmF16(f16, 4, 0, pre, k);
+        CHECK(p.kind == ops::GemmKind::gemvh && ops::gemvhF32(p, GgmlType::f16, true, pre, k) == nullptr);
+    }
+    // not a gemvh plan (WHIRL_PREC_GEMVH=0 -> gemms; balance prefill rows -> gemm_c): null
+    {
+        ops::GemmFlags nog = pre;
+        nog.prec_gemvh = false;
+        const ops::GemmPlan p = ops::chooseGemmF16(q4, 4, 0, nog, k);
+        CHECK(p.kind == ops::GemmKind::gemms && ops::gemvhF32(p, GgmlType::q4_k, true, nog, k) == nullptr);
+        ops::GemmFlags bal;
+        const ops::GemmPlan b = ops::chooseGemmF16(q4, 256, 2, bal, k);
+        CHECK(b.kind == ops::GemmKind::gemmc && ops::gemvhF32(b, GgmlType::q4_k, true, bal, k) == nullptr);
+    }
+    // a grid-capped gemvh (device profile gemvh_grid_by_rows, the gfx1151 rule): null
+    {
+        ops::GemmFlags cap = pre;
+        cap.gemvh_cap = 64;
+        const ops::GemmPlan p = ops::chooseGemmF16(q4, 4, 0, cap, k);
+        CHECK(p.kind == ops::GemmKind::gemvh && ops::gemvhF32(p, GgmlType::q4_k, true, cap, k) == nullptr);
+    }
+    // the plan's kernel must be the table's gemvh entry of that type (a kernel the twin does not reproduce: null)
+    {
+        ops::GemmPlan p = ops::chooseGemmF16(mx, 4, 0, pre, k);
+        p.f = tag("gemvh_other");
+        CHECK(ops::gemvhF32(p, GgmlType::mxfp4, true, pre, k) == nullptr);
+        const ops::GemmPlan p2 = ops::chooseGemmF16(mx, 4, 0, pre, k);
+        CHECK(ops::gemvhF32(p2, GgmlType::q4_k, true, pre, k) == nullptr);  // wrong type index
+    }
+}
+
 }  // namespace

@@ -187,4 +187,15 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
     return pl;
 }
 
+// v0252-c3port test-first stub: never fused (the 0.2.5.1 chain); the port commit gives the rule
+MoeFusePlan chooseMoeFuse(const MoeFuseProblem& p, bool enabled, const MoePlan& pl, const kernels::MoeKernels& k) {
+    (void)p;
+    (void)enabled;
+    (void)pl;
+    (void)k;
+    MoeFusePlan f;
+    f.why = "not ported (test-first stub)";
+    return f;
+}
+
 }  // namespace whirl::ops

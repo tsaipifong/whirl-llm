@@ -7,7 +7,7 @@
 // Exit: 0 pass, 1 a failing check (or, with --require-all, a kernel missing that the arch requires),
 // 2 usage error: unknown --only family, a given model path that does not exist, 0 checks run, or
 // --require-all on an arch without a required-kernel list (FIX-TEST-A, FR-TEST P3-3 / P3-4).
-// families: quant gemv gemm attn attndq4 gdn moe moemx moef misc gemvh dflash ws4 ws4g vision
+// families: quant gemv gemm attn attndq4 gdn moe moemx moef moefuse misc gemvh dflash ws4 ws4g vision
 //
 // Leak count (arch025-Q2, include/whirl/leak_count.h): with WHIRL_LEAK_CHECK=1 every family must leave as many device /
 // pinned allocations, streams and events alive as it found; a family that leaks gets a failing "leak check" result
@@ -49,7 +49,7 @@ std::string envOr(const char* name) {
 
 int usage() {
     std::printf(
-        "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,misc,dflash,gemvh,gemvhv,ws4,ws4g,vision] [--quick] [-v]\n"
+        "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,moefuse,misc,dflash,gemvh,gemvhv,ws4,ws4g,vision] [--quick] [-v]\n"
         "                         [--q4 GGUF] [--mx GGUF] [--moe GGUF] [--moemx GGUF]\n"
         "  --require-all  a kernel missing from the code object fails unless the arch lacks it by design\n"
         "  --bench gemv,gemvh,gemm,attn,moe,gdn,fdq [--jsonl FILE] [--ab HSACO] [--burst-idle S] [--bench-max-s S]\n"
@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "misc", "attnbench",
+    const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "moefuse", "misc", "attnbench",
                                "gemvh", "gemvhbench", "gemvhv", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk"};  // = fams below
     const bool bench = !bo.families.empty();
     if ((!bo.ggemv_nt.empty() || !bo.ggemv_v.empty()) && bo.families.count("ggemv") == 0) {
@@ -271,7 +271,7 @@ int main(int argc, char** argv) {
     };
     const Fam fams[] = {{"quant", kt::testQuant}, {"gemv", kt::testGemv}, {"gemm", kt::testGemm},
                         {"attn", kt::testAttn},   {"attndq4", kt::testAttnDq4},   {"gdn", kt::testGdn},   {"moe", kt::testMoe},
-                        {"moemx", kt::testMoeMx}, {"moef", kt::testMoeF}, {"misc", kt::testMisc},   {"attnbench", kt::benchAttn},
+                        {"moemx", kt::testMoeMx}, {"moef", kt::testMoeF}, {"moefuse", kt::testMoeFused}, {"misc", kt::testMisc},   {"attnbench", kt::benchAttn},
                         {"gemvh", kt::testGemvh}, {"gemvhbench", kt::benchGemvh}, {"gemvhv", kt::testGemvhv}, {"dflash", kt::testDflash},
                         {"ws4", kt::testAttnWs4}, {"ws4bench", kt::benchAttnWs4},
                         {"ws4g", kt::testAttnWs4g}, {"ws4gbench", kt::benchAttnWs4g},

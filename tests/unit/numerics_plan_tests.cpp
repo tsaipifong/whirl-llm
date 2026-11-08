@@ -504,6 +504,16 @@ void testLoadRules() {
     NCHECK(!fl({}).flags.moe_rfuse && fl({{"MOE_RFUSE", "1"}}).flags.moe_rfuse && fl({{"MOE_RFUSE", ""}}).flags.moe_rfuse &&
                !fl({{"MOE_RFUSE", "0"}}).flags.moe_rfuse && !fl({{"MOE_RFUSE", "1"}}, "precise").lossy_override,
            "MOE_RFUSE: envFlag rule (moe_rfuse)");
+    // v0252-c3port (feat026-moedec-r1 d53542f: envFlag rule, "true" / "yes" on, never lossy): WHIRL_MOE_FUSE /
+    // WHIRL_GEMVH_F32 -> moe_fuse / gemvh_f32, default off. Fails before the port (loadFlags does not read them).
+    NCHECK(!fl({}).flags.moe_fuse && fl({{"MOE_FUSE", "1"}}).flags.moe_fuse && fl({{"MOE_FUSE", "true"}}).flags.moe_fuse &&
+               fl({{"MOE_FUSE", ""}}).flags.moe_fuse && !fl({{"MOE_FUSE", "0"}}).flags.moe_fuse &&
+               !fl({{"MOE_FUSE", "1"}}, "precise").lossy_override,
+           "MOE_FUSE: envFlag rule (moe_fuse)");
+    NCHECK(!fl({}).flags.gemvh_f32 && fl({{"GEMVH_F32", "1"}}).flags.gemvh_f32 && fl({{"GEMVH_F32", "yes"}}).flags.gemvh_f32 &&
+               fl({{"GEMVH_F32", ""}}).flags.gemvh_f32 && !fl({{"GEMVH_F32", "0"}}).flags.gemvh_f32 &&
+               !fl({{"GEMVH_F32", "1"}}, "precise").lossy_override,
+           "GEMVH_F32: envFlag rule (gemvh_f32)");
     NCHECK(!fl({{"G8T", "0"}}).flags.g8t && fl({}).flags.g8t, "G8T");
     // feat026-moep (was loader.cpp envGet; t = the R9700 card, where the default is off): variant names -> index + 1,
     // unknown / "" / "0" / unset -> 0 (off), MOEP_COMB strtoul
@@ -688,6 +698,8 @@ void testFastOnlyOverrides() {
         // through the plan's refusal (v0251-a7pol B26-41, testMoepCombMode), so the variable's class stays 'L'.
         {"MOEP_GU", 'B'},  {"MOEP_DN", 'B'},   {"MOEP_COMB", 'L'},
         {"MOE_RFUSE", 'B'},  // v0251-a11port: fused router, bit-identical to moe_logits_f32 + moe_topk (kt moemx, golden)
+        // v0252-c3port (feat026-moedec): fused precise MoE decode / gemvh on f32 input, bit-identical (kt moefuse, golden)
+        {"MOE_FUSE", 'B'},   {"GEMVH_F32", 'B'},
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -885,6 +897,39 @@ static void testRfuseDefault() {
             }
 }
 
+// v0252-c3port (feat026-moedec, gfx1201 precise decode): WHIRL_MOE_FUSE / WHIRL_GEMVH_F32 are off by default on both
+// cards, both models and every mode (0.2.5.2 output rule: the plan of every default run is 0.2.5.1's); "1" turns only
+// that flag on (bitsKey = the off plan's with the flag set, same log line, no +overrides, never lossy); "0" = off. The
+// kernels exist only in the gfx1201 code object (ops::chooseMoeFuse / ops::gemvhF32 return the old path on gfx1151).
+// Fails before the port (loadFlags does not read the two names: "1" leaves the flag off).
+static void testMoedecDefault() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const nu::Plan d = pl(t, mode, {});
+                NCHECK(!d.flags.moe_fuse && !d.flags.gemvh_f32, "moedec default {} {} {}: off", c.name, model, mode);
+                for (const char* name : {"MOE_FUSE", "GEMVH_F32"}) {
+                    const bool fuse = std::string_view(name) == "MOE_FUSE";
+                    const nu::Plan off = pl(t, mode, {{name, "0"}});
+                    const nu::Plan one = pl(t, mode, {{name, "1"}});
+                    NCHECK(!(fuse ? off.flags.moe_fuse : off.flags.gemvh_f32), "moedec {} {} {}: WHIRL_{}=0 off", c.name, model, mode, name);
+                    NCHECK(fuse ? one.flags.moe_fuse : one.flags.gemvh_f32, "moedec {} {} {}: WHIRL_{}=1 on", c.name, model, mode, name);
+                    nu::Plan a = off;
+                    (fuse ? a.flags.moe_fuse : a.flags.gemvh_f32) = true;
+                    NCHECK(off.bitsKey() == d.bitsKey() && a.bitsKey() == one.bitsKey() && nu::logLine(off) == nu::logLine(one) &&
+                               !one.lossy_override && one.overrides == off.overrides,
+                           "moedec {} {} {}: WHIRL_{} changes only its flag", c.name, model, mode, name);
+                }
+            }
+}
+
 void testNumericsPlan(int& pass, int& fail) {
     testPlanTable();
     testApplyFrontEqualsPlan();  // arch025-N2b (replaces testUnwiredCallerUnchanged: no caller passes Target::gdn_strix now)
@@ -895,6 +940,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testMoepDefault();  // v0251-a7port (fails before the port: the plan has no gfx1151 default)
     testMoepCombMode();  // v0251-a7pol B26-41 (the refusal rows fail on cfce7ea)
     testRfuseDefault();  // v0251-a11port (fails before the port: the plan has no gfx1151 default)
+    testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)
