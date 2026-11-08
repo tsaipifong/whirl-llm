@@ -292,6 +292,12 @@ AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -
 # of 240+ UTF-16 units fails (tools/gates/pathlen_check.py); its block / pass tests run first.
 AddStep "cpu_pathlen" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\pathlen_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\pathlen_check.py")' --root '$repo' --root '$Build'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^pathlen check test: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^pathlen check: ok \(") }
+# v0252-path5 (PATH-256 P5, progress\pathlen256.DISCOVERY.md §2d-3 A-3): whirl.exe and whirl-server.exe copied with a marker
+# amdhip64_7.dll (<Build>\pkg_marker, CMake target whirl-test-marker-hiprt) into folders of 150 / 151 / 153 (Chinese) UTF-8
+# bytes: over 150 they refuse (exit 2) before the AMD runtime loads (no marker file); 150 works. The marker is the only
+# runtime the exes can load there, so no driver runtime and no GPU (tools/gates/pkg_pathlen_check.py; exit 2 = not run).
+AddStep "cpu_pkg_pathlen" $false @($py, "-I", (Join-Path $repo "tools\gates\pkg_pathlen_check.py"), "--exe-dir", $Build, "--marker", (Join-Path $Build "pkg_marker\amdhip64_7.dll"), "--work", "@WORK@\pkgpath") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^pkg pathlen check: ok \(([1-9]\d*)/\1 cases\)") }
 # arch025 D11 N2: every product file in exactly one module (census; files a lane is still registering only through
 # tools/gates/census_pending.json) and no undeclared cross-module include or include cycle (layering ratchet against
 # tools/gates/layering_baseline.json); the block / pass tests of each check run first.

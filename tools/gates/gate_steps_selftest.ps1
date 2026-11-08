@@ -49,6 +49,7 @@ try {
     }
     Check "list cpu_platform_check CPU (arch025-PL5)" (@($r97.out | Where-Object { $_ -match "^cpu_platform_check\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^cpu_platform_check\s+CPU\s*$" }).Count -eq 1) "missing"
     Check "list cpu_pathlen CPU (v0251-pathb, PATH-256 P6)" (@($r97.out | Where-Object { $_ -match "^cpu_pathlen\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^cpu_pathlen\s+CPU\s*$" }).Count -eq 1) "missing"
+    Check "list cpu_pkg_pathlen CPU (v0252-path5, PATH-256 P5)" (@($r97.out | Where-Object { $_ -match "^cpu_pkg_pathlen\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^cpu_pkg_pathlen\s+CPU\s*$" }).Count -eq 1) "missing"
     # rel025-c5bench: the measure-tools test exes under the names tools/impact/impact.py derives (exe minus whirl- / -tests)
     foreach ($n in "cpu_bench-out", "cpu_kt-bench", "cpu_stage-bench") {
         Check "list $n CPU on both cards (rel025-c5bench)" (@($r97.out | Where-Object { $_ -match "^$n\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^$n\s+CPU\s*$" }).Count -eq 1) "missing"
@@ -127,6 +128,10 @@ try {
         @{ step = "cpu_pathlen"; name = "planted: an exe over 150 bytes"; exit = 1; lines = @("pathlen check test: 9/9 as expected", "FAIL exe 151 bytes > 150: C:\x\y.exe", "pathlen check: FAIL (1 path(s))"); want = $false },
         @{ step = "cpu_pathlen"; name = "planted: the block / pass tests failed"; exit = 1; lines = @("pathlen check test: 8/9 as expected"); want = $false },
         @{ step = "cpu_pathlen"; name = "planted: exit 0 but no ok line"; exit = 0; lines = @("pathlen check test: 9/9 as expected"); want = $false },
+        @{ step = "cpu_pkg_pathlen"; name = "clean (v0252-path5)"; exit = 0; lines = @("ok    a151 whirl.exe --version: exit 2 (want 2), marker 0 (want 0)", "pkg pathlen check: ok (14/14 cases)"); want = $true },
+        @{ step = "cpu_pkg_pathlen"; name = "planted: a case failed"; exit = 1; lines = @("FAIL  a151 whirl.exe --version: exit 0 (want 2), marker 0 (want 0)", "pkg pathlen check: FAIL (13/14 cases)"); want = $false },
+        @{ step = "cpu_pkg_pathlen"; name = "planted: not run (marker missing)"; exit = 2; lines = @("pkg pathlen check: NOT RUN (missing C:\b\pkg_marker\amdhip64_7.dll)"); want = $false },
+        @{ step = "cpu_pkg_pathlen"; name = "planted: exit 0, counts differ"; exit = 0; lines = @("pkg pathlen check: ok (13/14 cases)"); want = $false },
         @{ step = "cpu_platform_check"; name = "clean"; exit = 0; lines = @("platform check: ok (0 site(s) in 0 file(s), 0 pending entr(y/ies); 0 new, 0 grown, 0 stale, 0 blocked)"); want = $true },
         @{ step = "cpu_platform_check"; name = "planted: a raw OS call outside the whitelist"; exit = 1; lines = @("  BLOCKED platform header / OS call src/model/x.cpp: 1 site(s) in a blocked scope (any mode)", "platform check: FAIL (1 site(s) in 1 file(s), 0 pending entr(y/ies); 0 new, 0 grown, 0 stale, 1 blocked)"); want = $false },
         @{ step = "cpu_platform_check"; name = "planted: exit 0 but sites reported (report line)"; exit = 0; lines = @("platform check: report (3 site(s) in 1 file(s), 0 pending entr(y/ies); 0 new, 0 grown, 0 stale, 0 blocked)"); want = $false },
