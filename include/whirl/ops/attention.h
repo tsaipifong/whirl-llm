@@ -93,7 +93,12 @@ Function attnKgVariant(std::uint32_t var, const kernels::AttnKernels& k, std::ui
 // shipped attn_kg) on every other (NP, path) - the AO-1 re-bench extends it by a table edit. An explicit
 // WHIRL_ATTN_KGVAR=0 / 1 / 3 bypasses the table.
 inline constexpr std::uint32_t kAttnKgVarAuto = 255;
-enum class KgPath : std::uint8_t { f16, q8p };  // plain f16 KV from the cache; Q8P = kv_dq_rows + the f16 kernel
+// plain f16 KV from the cache; Q8P = kv_dq_rows + the f16 kernel; v0252-fasta: dqr1 = FC-1c with every key in ONE
+// dequantized range (kv_dq_rows_r into ffn_g / ffn_u, then one launch series instead of attn_kgs): on gfx1201 the q4
+// fast-mode prefill (q8 / q8h reach it only when Q8P is not taken). Only var 3 (attn_kgk) is taken there: M0-A proved
+// attn_kgk<np> == one-range attn_kgs<np> bit for bit on q4 dq rows (kt attnkgl Q4P 24/24, 2026-11-08 23:44); attn_kgv
+// was not run on them, so var 1 keeps attn_kgs.
+enum class KgPath : std::uint8_t { f16, q8p, dqr1 };
 struct KgAutoRow {
     std::uint32_t np;
     KgPath path;
