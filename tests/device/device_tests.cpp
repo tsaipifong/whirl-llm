@@ -173,6 +173,7 @@ void testProfiles() {
     CHECK(a.attn_dq4_dynamic_splits);
     // v0252-n2 (N1): the embedded 64k draft-head subset is the MoE default on the R9700 only; the 8060S row stays off
     CHECK(a.draft64k_moe && !b.draft64k_moe);
+    CHECK(a.relax_rank_check && !b.relax_rank_check);  // v0252-f2def2: F1's one-pass check on the R9700 only
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
     CHECK(a.prefill_exec_moe == 2048 && !a.prefill_fill_batch && a.vision_attn_threads == 128);

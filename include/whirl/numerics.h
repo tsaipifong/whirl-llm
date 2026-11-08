@@ -183,17 +183,22 @@ struct Target {
     bool k_gdn_v0 = false;       // gdn_step_norm_v0 present (WHIRL_GDN_V0)
     // ---- v0252-f2 (DISCOVERY v4 row F2): fast MoE relaxed acceptance. relax_moe_arm = the name of the RelaxArm fast
     // takes on a MoE model by default (the loader fills relaxMoeDefaultName(gfx1151); "" = off, every hand-built
-    // Target); k_relax_rank = the code object has the one-pass relaxacc check (F1, argmax_rank_rows_to): the R9700
-    // takes the arm only with it (today's topk_rows check costs ~5.5-12 % of an R9700 Ornith cycle [est]).
+    // Target); k_relax_rank = the one-pass relaxacc check (F1, argmax_rank_rows_to) is in the code object and enabled
+    // on this family (v0252-f2def2: device::Profile::relax_rank_check, the R9700 only): the R9700 takes the arm only
+    // with it (the topk_rows check costs ~5.5-12 % of an R9700 Ornith cycle [est]); the 8060S arm needs no F1.
     std::string_view relax_moe_arm{};
     bool k_relax_rank = false;
 };
 
 // ---- v0252-f2: the fast MoE relaxacc arms (the G3a / G4a screen arms) and the shipped default per GPU.
 // drafts = the fixed MTP drafts per cycle with this arm (0 = the device's default, spec::mtpDefaults: 1 on MoE).
-// The screen runs an arm without a build: k4a10 = WHIRL_RELAX=1; k6a05 = + WHIRL_RELAX_K=6 WHIRL_RELAX_ALPHA=0.05;
-// k4a10d2 = WHIRL_RELAX=1 WHIRL_MTP_DRAFTS=2. Landing the screen's pick = changing the name below (and its pin in
-// tests/unit numerics_plan_tests testRelaxMoeArms), not the rule.
+// The F2 screen ran the arms on builds whose default was "off", where WHIRL_RELAX=1 meant k4a10. Since v0252-f2def
+// ships an arm, WHIRL_RELAX=1 (or no WHIRL_RELAX) on Ornith fast = the GPU's shipped arm (R9700 k4a10d2 with 2 drafts,
+// 8060S k6a05), and WHIRL_RELAX_K / _ALPHA override k / alpha but keep the arm's drafts (numerics.cpp loadOverrides).
+// So a runner must name every knob of an arm: off = WHIRL_RELAX=0; k4a10 = WHIRL_RELAX=1 WHIRL_RELAX_K=4
+// WHIRL_RELAX_ALPHA=0.1 WHIRL_MTP_DRAFTS=1; k6a05 = ... K=6 ALPHA=0.05 DRAFTS=1; k4a10d2 = ... K=4 ALPHA=0.1 DRAFTS=2.
+// Landing a new pick = changing the name below (and its pin in tests/unit numerics_plan_tests testRelaxMoeArms), not
+// the rule.
 struct RelaxArm {
     std::string_view name;
     bool on;

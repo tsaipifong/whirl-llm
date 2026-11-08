@@ -829,8 +829,9 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     t.k_gemm8t = m.hasTiledFp8();
     // v0252-f2: the fast MoE relaxacc arm this GPU ships (numerics::relax_moe_default_*); v0252-f2def: k_relax_rank =
     // F1's one-pass check (KernelTable::argmax_rank_rows_to) is in the code object (the R9700 takes the arm only with it)
+    // and (v0252-f2def2) the family enables it (device::Profile::relax_rank_check; Context::setRelaxRank reads the same)
     t.relax_moe_arm = whirl::numerics::relaxMoeDefaultName(t.gfx1151);
-    t.k_relax_rank = m.k.argmax_rank_rows_to != nullptr;
+    t.k_relax_rank = prof.relax_rank_check && m.k.argmax_rank_rows_to != nullptr;
     return t;
 }
 

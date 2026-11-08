@@ -386,8 +386,9 @@ void Context::argmaxRows(u32 n, std::span<u32> out) {
 }
 
 // relaxacc one-pass check (v0252-f1): see the header.
+// v0252-f2def2: only on a family whose profile enables it (device::Profile::relax_rank_check; numericsTarget agrees)
 bool Context::setRelaxRank(DevPtr stats, u32 seg_mask, u32 stride) {
-    if (stats == 0 || seg_mask == 0 || !k.argmax_rank_rows_to) return false;
+    if (stats == 0 || seg_mask == 0 || !k.argmax_rank_rows_to || !device::profile(arch).relax_rank_check) return false;
     rr_stats = stats;
     rr_mask = seg_mask;
     rr_stride = stride;
@@ -420,7 +421,7 @@ RowIdx Context::relaxRankSrc(std::span<const VSeg> segs, u32 mask) {
 }
 
 bool Context::relaxRankEnqueue(const RelaxRank& rr, u32 n, DevPtr out, const RowIdx& dst, const RowIdx& src) {
-    if (rr.stats == 0 || rr.mask == 0 || !k.argmax_rank_rows_to) return false;
+    if (rr.stats == 0 || rr.mask == 0 || !k.argmax_rank_rows_to || !device::profile(arch).relax_rank_check) return false;
     constexpr u32 cap = sizeof(src.v) / sizeof(src.v[0]);
     bool any = false;
     for (u32 b = 0; b < n && b < cap; ++b) any = any || src.v[b] >= 0;

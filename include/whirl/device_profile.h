@@ -67,6 +67,12 @@ struct Profile {
     // (spec.policy draftVocabDefaultFits moe_ok; dense qwen35 models have it on every family). Drafts only: the
     // verify is unchanged, so the output is the same (v0252-n2 / feat027-draft64k97 b334a52, DISCOVERY v0252 N1)
     bool draft64k_moe;
+    // v0252-f2def2: relaxacc greedy uses F1's one-pass check (argmax_rank_rows_to ranks the MTP drafts in the verify's
+    // argmax; no topk_rows launch) on this family. Both code objects have the kernel; it is enabled only where F1 was
+    // measured (ADR-0015: the R9700, G3a). Read by qwen35::numericsTarget (Target::k_relax_rank: the R9700's MoE fast
+    // arm needs it) and Context::setRelaxRank / relaxRankEnqueue (server and CLI decode). The 8060S: run F1's G4a there,
+    // then flip this to true (and widen ADR-0015)
+    bool relax_rank_check;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
     // v0252-n10: whirl-server writes the TAIL-CK checkpoint inside the solo prefill forward that contains the tail point
@@ -102,6 +108,7 @@ inline constexpr Profile k_profile_gfx1201{
     // Part S, KB v0252-n2:s-speed-r9700-ornith; research draft_vocab 2026-10-26-draft64k-per-arch.md; feat027-draft64k97
     // b334a52); drafts only, output unchanged
     .draft64k_moe = true,
+    .relax_rank_check = true,  // v0252-f1 G3a (ADR-0015)
     .prefill_exec_moe = 2048,
     .prefill_fill_batch = false,
     .tail_ck_in_forward = true,  // v0252-n10 (R9700 precise pp 2k: one forward instead of 1024 + 1034)
@@ -131,6 +138,7 @@ inline constexpr Profile k_profile_gfx1151{
     .mtp_costly_verify_rows = true,
     // off since the 0.2.2 freeze (9a58324); FAST-8S-1 item 2 measured +2.5..+3.7 % chat here, not part of 0.2.5.2
     .draft64k_moe = false,
+    .relax_rank_check = false,  // v0252-f2def2: F1 never measured here (no G4a); relaxacc keeps topk_rows
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = false,  // v0252-n10: 0.2.5.2 does not touch the Radeon 8060S (the 0.2.5.1 forward end stays)
