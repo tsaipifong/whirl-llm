@@ -361,19 +361,42 @@ void SpecCycle::draftSampling(Cycle& cy) {
 }
 
 void SpecCycle::enqueueVerify(Cycle& cy) {
-    if (cy.nd_max > 0) {
-        m_.setDraftCutoff(opt_.p_min, std::min(opt_.n_min, cy.nd_max));
+    // v0252-btl: the MTP step r = 0 takes every slot's pend rows: the rows its LAST verify kept (acc + 1, within that
+    // cycle's per-slot caps for the slots of that cycle), 1 for a slot that joined after its prefill since. After a join
+    // they can be more than one batched MTP step takes (spec_.vrows = the model's verifyRows(): Context::mtpBatchStepEx threw
+    // BatchTooLarge and every request of the batch failed with HTTP 500). The segments then run in consecutive groups of at
+    // most spec_.vrows pend rows, each group its own draft chain r = 0 .. (a step r >= 1 reads the head rows the step just
+    // before it wrote, so one group's chain ends before the next group starts). One group (the usual case): the calls are
+    // exactly the ones of one batch. Like llama.cpp, which decodes a batch over n_batch in n_batch slices
+    // (server-context.cpp:3231-3256; progress/v0252-btl.PRIOR_ART.md).
+    if (cy.nd_max > 0 || opt_.use_mtp) {
+        // no MTP drafts this cycle (draft false): still feed the pend rows to the MTP block so
+        // its KV cache stays complete for later drafting cycles
+        const bool draft = cy.nd_max > 0;
+        if (draft) m_.setDraftCutoff(opt_.p_min, std::min(opt_.n_min, cy.nd_max));
         struct Reset {
             ServerModel& m;
-            ~Reset() { m.setDraftCutoff(0, 0); }
-        } reset{m_};
-        m_.mtpBatchStepEx(std::span<const MSeg>(cy.msegs.data(), cy.A), 0, true);
-        for (std::uint32_t r = 1; r < cy.nd_max; ++r)
-            m_.mtpBatchStepEx(std::span<const MSeg>(cy.msegs.data(), cy.n_step[r]), r, true);
-    } else if (opt_.use_mtp) {
-        // no MTP drafts this cycle: still feed the pend rows to the MTP block so
-        // its KV cache stays complete for later drafting cycles
-        m_.mtpBatchStepEx(std::span<const MSeg>(cy.msegs.data(), cy.A), 0, false);
+            bool on;
+            ~Reset() {
+                if (on) m.setDraftCutoff(0, 0);
+            }
+        } reset{m_, draft};
+        const std::uint32_t vrows = spec_.vrows;
+        std::size_t groups = 0, rows_all = 0;
+        for (std::size_t b = 0, e = 0; b < cy.A; b = e) {
+            std::size_t rows = 0;
+            while (e < cy.A && (e == b || rows + cy.msegs[e].pend.size() <= vrows)) rows += cy.msegs[e++].pend.size();
+            m_.mtpBatchStepEx(std::span<const MSeg>(cy.msegs.data() + b, e - b), 0, draft);
+            // steps r >= 1: the group's MTP slots with more than r drafts (sorted by draft count, at the front of msegs)
+            for (std::uint32_t r = 1; draft && r < cy.nd_max && b < cy.n_step[r]; ++r)
+                m_.mtpBatchStepEx(std::span<const MSeg>(cy.msegs.data() + b, std::min(e, cy.n_step[r]) - b), r, true);
+            groups += 1;
+            rows_all += rows;
+        }
+        if (groups > 1)
+            logI("batch | MTP step r = 0 split into {} groups: {} pend rows of {} decoding slots, at most {} per step (a slot joined "
+                 "since the last verify)",
+                 groups, rows_all, cy.A, vrows);
     }
     if (cy.p && cy.p->events) m_.profileStart(1, cy.pa);
     cy.rows = m_.verifyBatchEnqueue(std::span<const VSeg>(cy.vsegs.data(), cy.A));

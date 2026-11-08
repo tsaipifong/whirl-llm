@@ -2889,6 +2889,56 @@ void testConcurrency(std::uint32_t parallel, std::uint32_t n_req, bool mtp, doub
     CHECK(h.body.find("\"busy\":false") != std::string::npos);
 }
 
+// v0252-btl (PLAN V1-50): a request that finishes its prefill joins the next decode cycle while the slots already decoding
+// still carry the pend rows their last verify kept (acc + 1 each, sized by that cycle's per-slot caps for FEWER slots).
+// Field: R9700 np 4 task-accuracy runs 2026-11-07 / 08, 'failed: BatchTooLarge' right after a slot's 'prefill:' line and
+// every request of the batch answered HTTP 500 (scratch\feat027\gpu2\r9700\20261108-0454\orn_k4a10d2\server.log:309; KB
+// v0252-fjudge:f2-t1-batchtoolarge), in the shipped 0.2.5.1 too. Here two requests decode together with 7 exact MTP drafts
+// each (verify 2 x 8 = 16 rows = the mock's verifyRows(); every draft kept: 8 + 8 pend rows); then a third request joins,
+// so its first cycle has 8 + 8 + 1 = 17 pend rows for the MTP step r = 0, more than one batched MTP step takes
+// (Context::mtpBatchStepEx; the mock enforces the same limit). Every request must still answer 200 with its greedy
+// reference, no MTP step may exceed the model's rows, and a cycle's MTP step may be split only when its pend rows exceed
+// them (no extra MTP steps when nothing overflows).
+void testMtpStepJoinRows() {
+    ServerSetup su = baseSetup(true);
+    su.mc.parallel = 3;
+    su.mc.draft_miss = 0.0;  // every MTP draft is the true continuation: every verify keeps all its drafts
+    su.mc.cycle_us = 1500;   // a decode cycle takes >= 1.5 ms: the third request joins while the first two decode
+    su.eo.n_draft = 7;
+    su.eo.mtp_auto = false;  // the draft count is the cap for A slots: A 1 -> 7, A 2 -> 7 (2 x 8 = 16 rows), A 3 -> 4
+    su.eo.ngram = false;
+    su.eo.trace_nd = true;
+    TestServer srv(su);
+    g_log.clear();
+    const std::vector<std::vector<std::uint32_t>> prompts = {makePrompt(200, 501), makePrompt(230, 502), makePrompt(120, 503)};
+    const std::uint32_t max_tok = 1200;
+    std::vector<HttpResult> res(3);
+    std::vector<std::thread> th;
+    for (std::size_t i = 0; i < 2; ++i)
+        th.emplace_back([&, i] { res[i] = srv.post("/v1/completions", completionBody(prompts[i], max_tok)); });
+    // the third request once both are decoding (a slot logs 'prefill:' just before it joins its first decode cycle)
+    const auto t0 = std::chrono::steady_clock::now();
+    while (g_log.count(" | prefill: ") < 2 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(30))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    th.emplace_back([&] { res[2] = srv.post("/v1/completions", completionBody(prompts[2], max_tok)); });
+    for (auto& t : th) t.join();
+    // the scenario happened: one cycle had more step r = 0 rows than the model takes (else this test proves nothing)
+    CHECK(srv.model().maxCycleStepRows() > qwen35::max_small_batch);
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK_EQ(res[i].status, 200);
+        CHECK_EQ(completionText(res[i]), decode(srv.model().greedyReference(prompts[i], max_tok, true)));
+    }
+    CHECK_EQ(g_log.count("BatchTooLarge"), 0u);
+    CHECK(srv.model().maxStepRows() <= qwen35::max_small_batch);       // no MTP step over the model's rows
+    CHECK_EQ(srv.model().splitCycles(), srv.model().overCycles());     // split only the cycles that need it
+    // (fix commit) every split cycle is logged once: the evidence a GPU run of the fixed server shows
+    CHECK_EQ(g_log.count("MTP step r = 0 split into"), static_cast<std::size_t>(srv.model().splitCycles()));
+    CHECK_EQ(srv.model().poison(), 0u);
+    CHECK_EQ(srv.model().hidMismatch(), 0u);
+    const auto h = srv.get("/health");
+    CHECK(h.body.find("\"busy\":false") != std::string::npos);
+}
+
 // WHIRL_SLOT_DRAFTS=2 planner (planSlotDrafts / qwen35::allocDrafts): pure, synthetic cycle times
 // T = 20 + 0.8 R + 2.5 S + 3 [R > 16] + 0.002 sum(rows_i ctx_i)
 float planTrueMs(const qwen35::CycleFeat& x) {
@@ -9716,6 +9766,7 @@ int main(int argc, char** argv) {
         {"concurrency", [] { testConcurrency(4, 12, true); }},
         {"concurrency16", [] { testConcurrency(16, 24, true); }},
         {"concurrency_nomtp", [] { testConcurrency(4, 8, false); }},
+        {"mtp_step_join_rows", testMtpStepJoinRows},  // v0252-btl
         {"dflash_greedy", testDFlashGreedy},
         {"dflash_relax_exact", testDFlashRelaxExact},
         {"relax_mtp_runner_up", testRelaxMtpRunnerUp},  // arch025-mutgap2

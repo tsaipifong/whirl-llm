@@ -431,6 +431,7 @@ void MockModel::writeHTo(std::span<const server::DevPtr> conv, std::span<const s
 }
 
 void MockModel::forward(std::span<const std::uint32_t> tokens, std::uint32_t pos0) {
+    h_rows_.clear();  // v0252-btl: a forward overwrites the MTP head rows
     prefillRows(tokens.size());
     cap_.clear();
     const std::uint32_t c = takeCapture(tokens.size(), true);
@@ -439,6 +440,7 @@ void MockModel::forward(std::span<const std::uint32_t> tokens, std::uint32_t pos
 
 void MockModel::prefillMtpChunk(std::span<const std::uint32_t> tokens, std::uint32_t pos0, std::size_t off, std::size_t n,
                                 std::optional<server::DevPtr> prev_hidden) {
+    h_rows_.clear();  // v0252-btl
     prefillRows(n);
     cap_.clear();
     const std::uint32_t c = takeCapture(n, true);
@@ -447,6 +449,7 @@ void MockModel::prefillMtpChunk(std::span<const std::uint32_t> tokens, std::uint
 }
 
 void MockModel::prefillSegs(std::span<const server::PSeg> segs, bool with_mtp) {
+    h_rows_.clear();  // v0252-btl
     std::size_t rows = 0;
     for (const server::PSeg& sg : segs) rows += sg.n;
     prefillRows(rows);
@@ -479,8 +482,43 @@ std::uint32_t MockModel::corruptDraft(std::uint32_t truth, std::uint64_t key) co
     return text_ids_[mix(key, 8, 9) % text_ids_.size()];
 }
 
+void MockModel::endMtpCycle() {
+    if (cyc_calls_ > 0) {
+        if (cyc_rows_ > max_cycle_rows_.load()) max_cycle_rows_.store(cyc_rows_);
+        if (cyc_calls_ > 1) split_cycles_ += 1;
+        if (cyc_rows_ > verifyRows()) over_cycles_ += 1;
+    }
+    cyc_rows_ = 0;
+    cyc_calls_ = 0;
+}
+
 void MockModel::mtpBatchStepEx(std::span<const server::MSeg> segs, std::uint32_t r, bool draft) {
     if (!mc_.mtp) throw std::runtime_error("NoMtp");
+    // v0252-btl: the real model's limits (Context::mtpBatchStepEx, src/model/qwen35/forward/mtp_verify.cpp:235 / :244)
+    if (segs.empty() || segs.size() > qwen35::max_small_batch) throw std::runtime_error("BadBatch");
+    if (r == 0) {
+        std::uint32_t rows = 0;
+        for (const server::MSeg& sg : segs) rows += static_cast<std::uint32_t>(sg.pend.size());
+        cyc_rows_ += rows;
+        cyc_calls_ += 1;
+        if (rows > max_step_rows_.load()) max_step_rows_.store(rows);
+        std::uint32_t n = 0;
+        for (const server::MSeg& sg : segs) {
+            if (sg.pend.size() > qwen35::max_small_batch || n + sg.pend.size() > verifyRows()) {
+                endMtpCycle();  // the cycle ends here (the engine fails the requests of the batch)
+                h_rows_.clear();
+                throw std::runtime_error("BatchTooLarge");
+            }
+            n += static_cast<std::uint32_t>(sg.pend.size());
+        }
+    } else {
+        // step r reads, for segment kk, the head row kk that step r - 1 of the same sequence wrote just before
+        for (std::size_t kk = 0; kk < segs.size(); ++kk)
+            if (kk >= h_rows_.size() || !(h_rows_[kk] == HeadRow{segs[kk].seq, r - 1})) hid_mismatch_ += 1;
+    }
+    h_rows_.clear();
+    if (draft)
+        for (const server::MSeg& sg : segs) h_rows_.push_back(HeadRow{sg.seq, r});
     const std::uint64_t E = cfg_.n_embd;
     for (const server::MSeg& sg : segs) {
         Seq& s = seqs_[sg.seq];
@@ -512,6 +550,8 @@ void MockModel::mtpBatchStepEx(std::span<const server::MSeg> segs, std::uint32_t
 }
 
 std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) {
+    endMtpCycle();    // v0252-btl: the MTP steps of this cycle are done
+    h_rows_.clear();  // the verify overwrites the MTP head rows
     std::uint32_t row = 0;
     cap_.clear();
     spinUs(mc_.cycle_us);
@@ -532,7 +572,8 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
         for (std::uint32_t r = 0; r < sg.nd; ++r)
             toks.push_back(!sg.drafts.empty() ? sg.drafts[r]
                                               : static_cast<std::uint32_t>(s.ctl[qwen35::ctl_drafts + r]));
-        if (row + toks.size() > qwen35::max_small_batch) throw std::runtime_error("BatchTooLarge");
+        // the real model's limits (Context::verifyBatchEnqueue, mtp_verify.cpp:165; verifyRows() = max_small_batch by default)
+        if (toks.size() > qwen35::max_small_batch || row + toks.size() > verifyRows()) throw std::runtime_error("BatchTooLarge");
         if (sg.pos + toks.size() > mc_.slot_ctx) throw std::runtime_error("ContextTooLong");
         const State st0{readH(s), kvPrefix(s, sg.pos), sg.pos};
         State st = st0;
@@ -570,7 +611,7 @@ void MockModel::readCtl(std::span<std::int32_t> dst) {
         std::memcpy(dst.data() + s * qwen35::ctl_words, seqs_[s].ctl.data(), qwen35::ctl_words * 4);
 }
 
-void MockModel::mtpEnqueue(server::DevPtr, std::span<const std::uint32_t>, std::uint32_t) {}
+void MockModel::mtpEnqueue(server::DevPtr, std::span<const std::uint32_t>, std::uint32_t) { h_rows_.clear(); }
 
 void MockModel::topkRows(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, server::DevPtr ids,
                          server::DevPtr vals, server::DevPtr stats) {

@@ -85,6 +85,10 @@ struct MockConfig {
     // v0252-n10: the in-forward state capture (ServerModel::stateCaptureOk / setStateCapture) is available; false = a model
     // without it (the engine then keeps the TAIL-CK forward end)
     bool state_capture = true;
+    // v0252-btl: most rows of one batched verify / MTP step (ServerModel::verifyRows; the real model: 16, or 32 with the
+    // wide verify). A verify or an MTP step r = 0 with more rows throws BatchTooLarge, as Context::verifyBatchEnqueue /
+    // mtpBatchStepEx do (src/model/qwen35/forward/mtp_verify.cpp:165 / :244).
+    std::uint32_t verify_rows = qwen35::max_small_batch;
 };
 
 class MockModel final : public server::ServerModel {
@@ -149,6 +153,19 @@ public:
     void mtpEnqueue(server::DevPtr hidden, std::span<const std::uint32_t> tokens, std::uint32_t pos0) override;
     void topkRows(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, server::DevPtr ids,
                   server::DevPtr vals, server::DevPtr stats) override;
+
+    std::uint32_t verifyRows() const override { return mc_.verify_rows; }
+    // v0252-btl: the batched MTP step's contract, as the real model has it (Context::mtpBatchStepEx): r = 0 takes at most
+    // verifyRows() pend rows in all (and max_small_batch per segment), else BatchTooLarge; a step r >= 1 reads, for its
+    // segment kk, the head row kk the step just before it wrote for the same sequence at r - 1 (the model's h rows; any
+    // other model call in between overwrites them): a mismatch counts in hidMismatch(). Per decode cycle (the MTP steps
+    // up to the verify, or up to an MTP step that throws): the largest single step r = 0 and the largest cycle total of
+    // step r = 0 rows (both counted before the limit check), the cycles with more than one step r = 0 (split) and the
+    // cycles whose step r = 0 rows exceed verifyRows().
+    std::uint32_t maxStepRows() const { return max_step_rows_.load(); }
+    std::uint32_t maxCycleStepRows() const { return max_cycle_rows_.load(); }
+    std::uint32_t splitCycles() const { return split_cycles_.load(); }
+    std::uint32_t overCycles() const { return over_cycles_.load(); }
 
     std::uint32_t dflashMaxDrafts() const override { return mc_.dflash ? mc_.dfl_block - 1 : 0; }
     std::uint32_t captureN() const override;
@@ -253,6 +270,15 @@ private:
     std::atomic<std::uint32_t> resizes_{0};
     std::atomic<std::uint32_t> max_pf_rows_{0};
     std::atomic<std::uint32_t> max_seg_nd_{0};
+    // v0252-btl: the MTP step accounting of the current decode cycle (engine thread) and its results (read by the test)
+    struct HeadRow {
+        std::uint32_t seq = 0, r = 0;
+        bool operator==(const HeadRow&) const = default;
+    };
+    std::vector<HeadRow> h_rows_;  // the head rows of the last MTP step with draft = true (empty: overwritten since)
+    std::uint32_t cyc_rows_ = 0, cyc_calls_ = 0;
+    void endMtpCycle();
+    std::atomic<std::uint32_t> max_step_rows_{0}, max_cycle_rows_{0}, split_cycles_{0}, over_cycles_{0};
     mutable std::atomic<std::uint64_t> hid_mismatch_{0};
     std::uint64_t rows_run_ = 0;
     std::vector<std::uint32_t> seg_logits_rows_;
