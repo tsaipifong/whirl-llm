@@ -78,8 +78,9 @@ struct AttnPrefillFlags {
     std::uint32_t attn_seg = 0;
     // v0252-c1port (C1, feat026-attnkg97 / -97k): the f16 attn_kg variant (numerics flag attn_kg_var, WHIRL_ATTN_KGVAR):
     // 0 the shipped attn_kg, 1 attn_kgv, 3 attn_kgk (both designed bit-identical: every mode); taken on the plain f16
-    // path and on Q8P (kv_dq_rows + f16 attn_kgf), never on q8 / q8v without the scratch, FC-1c (attn_kgs) or q4;
-    // v0252-c1acc: kAttnKgVarAuto = the per-(NP, path) table kAttnKgAuto
+    // path and on Q8P (kv_dq_rows + f16 attn_kgf), never on q8 / q8v without the scratch or multi-range FC-1c (attn_kgs);
+    // v0252-c1acc: kAttnKgVarAuto = the per-(NP, path) table kAttnKgAuto; v0252-fasta: var 3 also on one-range FC-1c
+    // (KgPath::dqr1, the gfx1201 q4 fast prefill)
     std::uint32_t attn_kg_var = 0;
 };
 // v0252-c1port (C1): the f16 attn_kg variant `var` for NP query heads per block, or nullptr = none (the caller keeps
@@ -93,7 +94,12 @@ Function attnKgVariant(std::uint32_t var, const kernels::AttnKernels& k, std::ui
 // shipped attn_kg) on every other (NP, path) - the AO-1 re-bench extends it by a table edit. An explicit
 // WHIRL_ATTN_KGVAR=0 / 1 / 3 bypasses the table.
 inline constexpr std::uint32_t kAttnKgVarAuto = 255;
-enum class KgPath : std::uint8_t { f16, q8p };  // plain f16 KV from the cache; Q8P = kv_dq_rows + the f16 kernel
+// plain f16 KV from the cache; Q8P = kv_dq_rows + the f16 kernel; v0252-fasta: dqr1 = FC-1c with every key in ONE
+// dequantized range (kv_dq_rows_r into ffn_g / ffn_u, then one launch series instead of attn_kgs): on gfx1201 the q4
+// fast-mode prefill (q8 / q8h reach it only when Q8P is not taken). Only var 3 (attn_kgk) is taken there: M0-A proved
+// attn_kgk<np> == one-range attn_kgs<np> bit for bit on q4 dq rows (kt attnkgl Q4P 24/24, 2026-11-08 23:44); attn_kgv
+// was not run on them, so var 1 keeps attn_kgs.
+enum class KgPath : std::uint8_t { f16, q8p, dqr1 };
 struct KgAutoRow {
     std::uint32_t np;
     KgPath path;
@@ -102,6 +108,9 @@ struct KgAutoRow {
 inline constexpr KgAutoRow kAttnKgAuto[] = {
     {4, KgPath::f16, 3},  // Ornith 16 / 2 heads, f16 KV: e2e pp balance 128k +19.8 % (scratch/v0252_c1/gpu/20261106-1320_s)
     {6, KgPath::q8p, 3},  // Swift 24 / 4 heads, q8h KV in Q8P: e2e pp balance 128k +5.1 %, attnbench dq -8..-12.5 %
+    // v0252-fasta (M0-A, R9700 2026-11-08 23:44, attnbench dqr paired median kgk / kgs on the same q4 dq rows; kt Q4P bitwise):
+    {4, KgPath::dqr1, 3},  // Ornith fast (q4 KV), one range: 0.768 at 32k, 0.766 at 128k
+    {6, KgPath::dqr1, 3},  // Swift fast (q4 KV), one range: 0.896 at 32k, 0.869 at 128k
 };
 // the table's var for (np, path), 0 for any (np, path) not in it
 std::uint32_t attnKgAutoVar(std::uint32_t np, KgPath path);

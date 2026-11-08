@@ -375,9 +375,9 @@ void testAttnPrefill() {
 // v0252-c1port (C1, feat026-attnkg97 / -97k; DISCOVERY v4 C3-1): the f16 attn_kg variant selector. ops::attnKgVariant is
 // exhaustive (np 6 / 4 / 2 written out, any other np -> nullptr: never the kernel of another NP, whose grid / block would
 // not match), and chooseAttnPrefill takes the variant only on the plain f16 path and on Q8P (kv_dq_rows + the f16
-// attn_kgf), with the shipped kernel's grid / block; q8 / q8v without the scratch, FC-1c (attn_kgs), q4 and the 8060S
-// set keep their kernels. Fails before the port (test-first stub: attnKgVariant returns nullptr, chooseAttnPrefill
-// never asks it).
+// attn_kgf), with the shipped kernel's grid / block; q8 / q8v without the scratch, multi-range FC-1c (attn_kgs) and the
+// 8060S set keep their kernels (v0252-fasta: one-range FC-1c, the q4 fast path, takes var 3 = attn_kgk, case 6). Fails
+// before the port (test-first stub: attnKgVariant returns nullptr, chooseAttnPrefill never asks it).
 kn::KernelTable kgTable(bool variants) {
     kn::KernelTable k = attnTable(false, false, false, true);
     for (const char* np : {"6", "4", "2"}) {
@@ -410,6 +410,7 @@ bool kgShapesMatch(const ops::AttnPrefillPlan& pl) {
 }
 
 void testAttnKgAuto();
+void testAttnFastQ4Kgk();  // v0252-fasta
 
 void testAttnKgVariant() {
     // v0252-c1asan: a KernelTable is large and under ASan every local gets its own stack slot; main -> testAttnKgVariant ->
@@ -487,7 +488,9 @@ void testAttnKgVariant() {
             const auto pl = plan(var, kv);
             CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg" + s && !pl.steps[0].from_copy && kgShapesMatch(pl));
         }
-        // (6) q4 KV on the gfx1201 set (no attn_kg*_q4: FC-1c attn_kgs over dequantized ranges): no variant, every var
+        // (6) q4 KV on the gfx1201 set (no attn_kg*_q4: FC-1c over dequantized ranges), all 2048 keys in one range.
+        // v0252-fasta (KgPath::dqr1): var 0 and var 1 keep attn_kgs (ranged); var 3 takes attn_kgk<np> (one launch on the
+        // copy, not ranged); auto takes attn_kgk for NP 4 / 6 (the M0-A shapes) and attn_kgs for NP 2 (not measured)
         const auto kq4p = std::make_unique<kn::KernelTable>(kv);  // heap, see the note at the top of the function
         kn::KernelTable& kq4 = *kq4p;
         kq4.attn_kg6 = kq4.attn_kg4 = kq4.attn_kg2 = nullptr;
@@ -495,12 +498,17 @@ void testAttnKgVariant() {
         p.dq_rows = 8192;
         p.dq_ptab = true;
         p.dq_st_ml = true;
-        for (const std::uint32_t var : {0u, 1u, 3u}) {
+        for (const std::uint32_t var : {0u, 1u, 3u, ops::kAttnKgVarAuto}) {
             const auto pl = plan(var, kq4);
-            std::size_t kgs = 0, other = 0;
+            const bool kgk = var == 3 || (var == ops::kAttnKgVarAuto && sh.np != 2);
+            std::size_t kgs = 0, kgks = 0, other = 0;
             for (const auto& st : pl.steps)
-                if (st.op == ops::AttnStep::Op::attn) (nameOf(st.f) == "attn_kgs" + s ? kgs : other) += 1;
-            CHECK(kgs == 1 && other == 0 && kgShapesMatch(pl));
+                if (st.op == ops::AttnStep::Op::attn) {
+                    if (nameOf(st.f) == "attn_kgs" + s && st.ranged) kgs += 1;
+                    else if (nameOf(st.f) == "attn_kgk" + s && !st.ranged && st.from_copy) kgks += 1;
+                    else other += 1;
+                }
+            CHECK(kgs == (kgk ? 0u : 1u) && kgks == (kgk ? 1u : 0u) && other == 0 && kgShapesMatch(pl));
         }
         p.kv_q8 = false;
         p.dq_rows = 0;
@@ -550,15 +558,16 @@ void testAttnKgVariant() {
 // v0252-c1acc (REVIEW-v0252-c1 C-1 / C-3): attn_kg_var "auto" (ops::kAttnKgVarAuto, the gfx1201 default) = the explicit
 // table ops::kAttnKgAuto: var 3 only on NP 4 plain f16 (Ornith precise / balance) and NP 6 Q8P (Swift balance), var 0 on
 // every other (NP, KV path): Swift precise f16 (NP 6, unproven: AO-1 confound), NP 4 Q8P (not measured), NP 2 and any
-// other np. Explicit 0 / 1 / 3 bypass the table; the 8060S set and FC-1c / q4 are unchanged. Fails before c1acc (the
-// test-first stub attnKgAutoVar returns 0 for every row).
+// other np. Explicit 0 / 1 / 3 bypass the table; the 8060S set and multi-range FC-1c are unchanged (v0252-fasta: the
+// dqr1 rows, testAttnFastQ4Kgk). Fails before c1acc (the test-first stub attnKgAutoVar returns 0 for every row).
 void testAttnKgAuto() {
     CHECK(ops::kAttnKgVarAuto == 255);  // == numerics::kAttnKgVarAuto (static_assert in src/model/qwen35/forward/attn.cpp)
-    // (1) the table: exactly the two measured rows; every other (np, path) -> 0
-    CHECK(std::size(ops::kAttnKgAuto) == 2);
+    // (1) the table: exactly the measured rows (C1: two; v0252-fasta: dqr1 for NP 4 and NP 6, M0-A); every other (np, path) -> 0
+    CHECK(std::size(ops::kAttnKgAuto) == 4);
     for (const std::uint32_t np : {0u, 1u, 2u, 3u, 4u, 6u, 8u, 12u, 16u})
-        for (const ops::KgPath path : {ops::KgPath::f16, ops::KgPath::q8p}) {
-            const bool on = (np == 4 && path == ops::KgPath::f16) || (np == 6 && path == ops::KgPath::q8p);
+        for (const ops::KgPath path : {ops::KgPath::f16, ops::KgPath::q8p, ops::KgPath::dqr1}) {
+            const bool on = (np == 4 && path == ops::KgPath::f16) || (np == 6 && path == ops::KgPath::q8p) ||
+                            ((np == 4 || np == 6) && path == ops::KgPath::dqr1);
             CHECK(ops::attnKgAutoVar(np, path) == (on ? 3u : 0u));
             CHECK(ops::attnKgVarFor(ops::kAttnKgVarAuto, np, path) == (on ? 3u : 0u));
             for (const std::uint32_t var : {0u, 1u, 3u, 2u}) CHECK(ops::attnKgVarFor(var, np, path) == var);  // explicit: as given
@@ -643,6 +652,110 @@ void testAttnKgAuto() {
             CHECK(same);
         }
     }
+    testAttnFastQ4Kgk();  // v0252-fasta
+}
+
+// v0252-fasta (PLAN V1-57 candidate A, DISCOVERY v0252-r97fast 2 A): the R9700 fast-mode prefill (q4 KV: no attn_kg*_q4,
+// FC-1c) with every key in ONE dequantized range takes attn_kgk<np> (auto, KgPath::dqr1) instead of attn_kgs<np>, at the
+// product shapes and lengths (Ornith 16 / 2 heads NP 4, Swift 24 / 4 NP 6; 8k / 32k / 128k): the same kv_dq_rows_r step,
+// then the same launches (count, grid, block, head0) with attn_kgk, on the copy, not ranged. Bit-identical by M0-A
+// (kt attnkgl Q4P 24/24). More than one range keeps attn_kgs; WHIRL_ATTN_KGVAR=0 keeps attn_kgs; the 8060S set, f16
+// (precise) and Q8P (balance) are unchanged. Fails before the v0252-fasta selector (the stub table has no dqr1 rows).
+void testAttnFastQ4Kgk() {
+    static const kn::KernelTable kv = kgTable(true);  // static: see testAttnKgVariant
+    const auto kq4p = std::make_unique<kn::KernelTable>(kv);
+    kn::KernelTable& kq4 = *kq4p;  // the gfx1201 q4 set: no attn_kg*_q4, no kv_dq_rows (kv_dq_rows_r_q4 only)
+    kq4.attn_kg6 = kq4.attn_kg4 = kq4.attn_kg2 = nullptr;
+    kq4.kv_dq_rows = nullptr;
+    static const kn::KernelTable k8 = attnTable(true, true, true, false);  // the gfx1151 set
+    struct Shape {
+        std::uint32_t heads, kv, np;
+    };
+    std::size_t cells = 0;
+    for (const Shape sh : {Shape{16, 2, 4}, Shape{24, 4, 6}}) {
+        const std::string s = std::to_string(sh.np);
+        for (const std::uint32_t L : {8192u, 32768u, 131072u})
+            for (const std::uint32_t n : {2048u, 4096u, 8192u}) {
+                ops::AttnPrefillProblem p;
+                p.n = n;
+                p.pos0 = L - n;  // the last prefill chunk of an L-token prompt (the longest key range)
+                p.head_dim = 256;
+                p.n_head = sh.heads;
+                p.n_head_kv = sh.kv;
+                p.scale = 1.0f / 16.0f;
+                p.kv_q8 = true;
+                p.dq_ptab = p.dq_st_ml = true;
+                ops::AttnPrefillFlags fa, f0, f1, f3;
+                fa.attn_kg_var = ops::kAttnKgVarAuto;
+                f1.attn_kg_var = 1;
+                f3.attn_kg_var = 3;
+                // (1) one range (scratch >= L): auto and var 3 = the var-0 plan with attn_kgk in place of attn_kgs
+                p.dq_rows = 131072;
+                const auto base = ops::chooseAttnPrefill(p, f0, kq4);
+                bool base_kgs = base.steps.size() >= 2 && base.steps[0].op == ops::AttnStep::Op::dq_rows_r && base.steps[0].r0 == 0 &&
+                                base.steps[0].nrows == L;
+                for (std::size_t i = 1; base_kgs && i < base.steps.size(); ++i)
+                    base_kgs = base.steps[i].op == ops::AttnStep::Op::attn && nameOf(base.steps[i].f) == "attn_kgs" + s && base.steps[i].ranged;
+                CHECK(base_kgs);
+                for (const ops::AttnPrefillFlags& f : {fa, f3}) {
+                    const auto pl = ops::chooseAttnPrefill(p, f, kq4);
+                    bool ok = pl.steps.size() == base.steps.size() && kgShapesMatch(pl);
+                    for (std::size_t i = 0; ok && i < pl.steps.size(); ++i) {
+                        const auto &x = pl.steps[i], &y = base.steps[i];
+                        ok = x.op == y.op && x.grid.x == y.grid.x && x.grid.y == y.grid.y && x.block.x == y.block.x && x.head0 == y.head0;
+                        if (ok && i == 0) ok = x.f == y.f && x.r0 == y.r0 && x.nrows == y.nrows && x.row_el == y.row_el;
+                        if (ok && i > 0) ok = nameOf(x.f) == "attn_kgk" + s && x.from_copy && !x.ranged && x.r0 == 0 && x.r1 == 0;
+                    }
+                    if (!ok) std::printf("  fastq4 NP %s L %u n %u: not the attn_kgk plan\n", s.c_str(), L, n);
+                    CHECK(ok);
+                }
+                // var 1 (attn_kgv not proven on q4 rows): attn_kgs as var 0
+                {
+                    const auto pl = ops::chooseAttnPrefill(p, f1, kq4);
+                    bool same = pl.steps.size() == base.steps.size();
+                    for (std::size_t i = 0; same && i < pl.steps.size(); ++i) same = pl.steps[i].f == base.steps[i].f && pl.steps[i].ranged == base.steps[i].ranged;
+                    CHECK(same);
+                }
+                // (2) more than one range (scratch < L): attn_kgs with the softmax state carried, every var
+                if (L > 65536) {
+                    p.dq_rows = 65536;
+                    for (const ops::AttnPrefillFlags& f : {fa, f0, f1, f3}) {
+                        const auto pl = ops::chooseAttnPrefill(p, f, kq4);
+                        std::size_t kgs = 0, other = 0, dq = 0;
+                        for (const auto& st : pl.steps) {
+                            dq += st.op == ops::AttnStep::Op::dq_rows_r;
+                            if (st.op == ops::AttnStep::Op::attn) (nameOf(st.f) == "attn_kgs" + s && st.ranged ? kgs : other) += 1;
+                        }
+                        CHECK(dq == 2 && kgs >= 2 && other == 0 && kgShapesMatch(pl));
+                    }
+                    p.dq_rows = 131072;
+                }
+                // (3) the gfx1151 set: auto == 0 (KG-3, attn_pwf on the copy)
+                {
+                    const auto a = ops::chooseAttnPrefill(p, f0, k8), b = ops::chooseAttnPrefill(p, fa, k8);
+                    bool same = a.steps.size() == b.steps.size() && !a.steps.empty();
+                    for (std::size_t i = 0; same && i < a.steps.size(); ++i) same = a.steps[i].f == b.steps[i].f && a.steps[i].grid.y == b.steps[i].grid.y;
+                    CHECK(same && nameOf(b.steps.back().f) != "attn_kgk" + s);
+                }
+                cells += 1;
+            }
+        // (4) precise (f16 KV) and balance (q8h in Q8P) on gfx1201 with auto: C1's kernels, unchanged
+        ops::AttnPrefillProblem p;
+        p.n = 512;
+        p.pos0 = 1536;
+        p.head_dim = 256;
+        p.n_head = sh.heads;
+        p.n_head_kv = sh.kv;
+        p.scale = 1.0f / 16.0f;
+        ops::AttnPrefillFlags fa;
+        fa.attn_kg_var = ops::kAttnKgVarAuto;
+        CHECK(nameOf(ops::chooseAttnPrefill(p, fa, kv).steps.back().f) == (sh.np == 4 ? "attn_kgk4" : "attn_kg6"));
+        p.kv_q8 = true;
+        p.dq_rows = 8192;
+        p.dq_ptab = p.dq_st_ml = true;
+        CHECK(nameOf(ops::chooseAttnPrefill(p, fa, kv).steps.back().f) == (sh.np == 4 ? "attn_kgf4" : "attn_kgk6"));
+    }
+    std::printf("  fast q4 one-range prefill: %zu shape x length x chunk cells\n", cells);
 }
 
 // the attention-prep / attention-core rules (arch025-n8b1: the block of testGdnChoice that calls only src/ops/attention.cpp,

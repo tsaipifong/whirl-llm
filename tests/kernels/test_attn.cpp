@@ -1514,6 +1514,10 @@ void testAttnDq4(Ctx& c) {
 //     (the reference every attn_kg kernel is bit-identical to; precise golden is recorded on it);
 //   * Q8P: a random q8 cache, kv_dq_rows of keys 0 .. pos0 + n - 1 into contiguous f16 rows, then attn_kg<np> (attn_kgf),
 //     attn_kgv<np>, attn_kgk<np> on the rows == attn_prefill_wmma_q8 on the cache (Swift balance q8h, Ornith WHIRL_KV=q8).
+//   * Q4P (v0252-m0a, M0-A): a random q4 cache, kv_dq_rows_r_q4 into contiguous rows, attn_kgk<np> (1 and 2 launches) and
+//     attn_kg<np> == attn_kgs<np> over one key range [0, rows) (the fast prefill today; candidate A routes it to attn_kgk);
+//     WHIRL_KT_KGL_PERTURB=1 is the RED control (candidate scale +1 ulp: these rows must fail).
+// WHIRL_KT_KGL_PATHS (comma list of f16, q8p, q4p; default all) picks the paths.
 // A kernel missing from the code object (gfx1151) is a skip row. The AO-4 mutation object (WHIRL_KGK_INJECT=1, loaded
 // through WHIRL_KT_CODE_OBJECT) must fail the attn_kgk rows here and in "attn".
 void testAttnKgLong(Ctx& c) {
@@ -1525,6 +1529,9 @@ void testAttnKgLong(Ctx& c) {
     std::vector<int> lens = {32768, 131072};
     if (c.quick) lens = {32768};
     if (const char* e = std::getenv("WHIRL_KT_KGL_L")) lens = {std::atoi(e)};
+    // v0252-m0a: WHIRL_KT_KGL_PATHS = comma list of f16, q8p, q4p (default all three)
+    const std::string kgl_paths = std::getenv("WHIRL_KT_KGL_PATHS") ? std::string(",") + std::getenv("WHIRL_KT_KGL_PATHS") + "," : std::string(",f16,q8p,q4p,");
+    auto pathOn = [&](const char* p) { return kgl_paths.find(std::string(",") + p + ",") != std::string::npos; };
     struct Shape {
         int heads, nkv, np;
         const char* model;
@@ -1569,6 +1576,25 @@ void testAttnKgLong(Ctx& c) {
             a8.ks = dks.p();
             a8.vs = dvs.p();
             a8.ptab = dpt.p();
+            // v0252-m0a: a random q4 cache (nibbles, scales 0.02..0.1) behind the same shuffled page table (the Q4P path below)
+            Buf dk4, dv4, dk4s, dv4s;
+            wk::KvArgs a4{};
+            if (pathOn("q4p")) {
+                std::vector<std::uint8_t> b4(nel / 2);
+                std::vector<std::uint16_t> sc(nel / 32);
+                std::uniform_real_distribution<float> sd(0.02f, 0.1f);
+                for (int which = 0; which < 2; ++which) {
+                    for (auto& x : b4) x = static_cast<std::uint8_t>(c.rng());
+                    for (auto& x : sc) x = f2h(sd(c.rng));
+                    (which ? dv4 : dk4) = Buf(b4);
+                    (which ? dv4s : dk4s) = Buf(sc);
+                }
+                a4.k = dk4.p();
+                a4.v = dv4.p();
+                a4.ks = dk4s.p();
+                a4.vs = dv4s.p();
+                a4.ptab = dpt.p();
+            }
             struct Case {
                 int n, p0;
             };
@@ -1580,6 +1606,7 @@ void testAttnKgLong(Ctx& c) {
                 const std::string where = std::string(" (") + sh.model + " " + std::to_string(sh.heads) + "/" + std::to_string(sh.nkv) + ", L " +
                                           std::to_string(L) + ", n " + std::to_string(n) + " at " + std::to_string(p0) + ")";
                 for (const bool q8p : {false, true}) {
+                    if (!pathOn(q8p ? "q8p" : "f16")) continue;  // v0252-m0a: WHIRL_KT_KGL_PATHS
                     const auto fref = c.fnOpt(q8p ? "attn_prefill_wmma_q8" : "attn_prefill_wmma");
                     const auto fdq = c.fnOpt("kv_dq_rows");
                     if (!fref || (q8p && !fdq)) {
@@ -1620,6 +1647,57 @@ void testAttnKgLong(Ctx& c) {
                             c.rep.add(cmpExact((q8p ? "kv_dq_rows + " : "") + name + " == " + (q8p ? "attn_prefill_wmma_q8" : "attn_prefill_wmma") +
                                                    (split > 1 ? " (2 head-range launches)" : "") + where,
                                                ob.down<float>(on), want, Kind::invariant));
+                        }
+                    }
+                }
+                // v0252-m0a (PLAN V1-57, DISCOVERY v0252-r97fast §2 A / §4 M0-A): Q4P = the R9700 fast (q4 KV) prefill input.
+                // kv_dq_rows_r_q4 of keys 0 .. rows - 1 into contiguous f16 rows (identity page table), then today's FC-1c launch
+                // with every key in one range (attn_kgs<np>, kb0 = 0, kb1 = rows; the reference) vs candidate A's launch on the
+                // same rows: attn_kgk<np> (one and two head-range launches) and attn_kg<np> (kernels_abi.h: one-range attn_kgs ==
+                // attn_kg). Bitwise. WHIRL_KT_KGL_PERTURB=1 (RED control only) runs the candidates with the softmax scale one
+                // float ulp up, so these rows must FAIL: proof that the comparison sees a 1-ulp input change.
+                if (pathOn("q4p")) {
+                    const auto f4 = c.fnOpt("kv_dq_rows_r_q4");
+                    const auto fks = c.fnOpt("attn_kgs" + s);
+                    if (!f4 || !fks) {
+                        c.rep.skip("attnkgl", "Q4P attn_kgs" + s + where, "kv_dq_rows_r_q4 / attn_kgs not in this code object");
+                    } else {
+                        Buf rk(static_cast<std::size_t>(rows) * rel * 2), rv(static_cast<std::size_t>(rows) * rel * 2);
+                        hip::launch(f4, {static_cast<unsigned>(cdiv(static_cast<long long>(rows) * rel, 2048)), 1, 1}, {256, 1, 1}, 0, c.s, a4, rk.p(),
+                                    rv.p(), 0, rows, rel);
+                        wk::KvArgs ar{};
+                        ar.k = rk.p();
+                        ar.v = rv.p();
+                        ar.ptab = did.p();
+                        Buf st(static_cast<std::size_t>(n) * sh.heads * 2 * 4);
+                        Buf ref(on * 4);
+                        ref.fill(0x7f);
+                        hip::launch(fks, {cdiv(n, 16), static_cast<unsigned>(sh.heads / sh.np), 1}, {static_cast<unsigned>(64 * sh.np), 1, 1}, 0, c.s, dq.p(),
+                                    ar, ref.p(), sh.heads, sh.nkv, kQStride, dpos.p(), n, scale, 0, 0, rows, st.p());
+                        c.sync();
+                        const auto want = ref.down<float>(on);
+                        const bool perturb = std::getenv("WHIRL_KT_KGL_PERTURB") != nullptr;
+                        const float csc = perturb ? std::nextafter(scale, 1.0f) : scale;
+                        for (const std::string& name : {"attn_kgk" + s, "attn_kg" + s}) {
+                            const auto fk = c.fnOpt(name);
+                            if (!fk) {
+                                c.rep.skip("attnkgl", "Q4P " + name + where, "not in this code object");
+                                continue;
+                            }
+                            for (const int split : {1, 2}) {
+                                if (split > 1 && name.rfind("attn_kgk", 0) != 0) continue;  // attn_kg: one launch (the ABI claim)
+                                const int hp = sh.heads / split;
+                                Buf ob(on * 4);
+                                ob.fill(0x7f);
+                                for (int h0 = 0; h0 < sh.heads; h0 += hp)
+                                    hip::launch(fk, {cdiv(n, 16), static_cast<unsigned>(hp / sh.np), 1}, {static_cast<unsigned>(64 * sh.np), 1, 1}, 0, c.s,
+                                                dq.p(), ar, ob.p(), sh.heads, sh.nkv, kQStride, dpos.p(), n, csc, h0);
+                                c.sync();
+                                c.rep.add(cmpExact("kv_dq_rows_r_q4 + " + name + (split > 1 ? " (2 head-range launches)" : "") + " == attn_kgs" + s +
+                                                       " one key range [0, " + std::to_string(rows) + ") (Q4P, fast)" +
+                                                       (perturb ? " [RED control: candidate scale +1 ulp, must FAIL]" : "") + where,
+                                                   ob.down<float>(on), want, Kind::invariant));
+                            }
                         }
                     }
                 }

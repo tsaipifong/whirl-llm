@@ -42,6 +42,9 @@ static void benchBitRow(Ctx& c, const std::string& what, int heads, int nkv, int
 // overwrote them with dequantized random rows (f16 rows after a dq row read other data than the first). "dq" keeps its
 // own scratch. WHIRL_KT_BENCH_ROUNDS (default 2): every round times every kernel, odd rounds in the reverse order; each
 // bitwise line is also a check (Result), so the family reports pass / fail.
+// v0252-m0a (M0-A): fmt "dqr" (one random q4-derived dq-row set per L, all keys in one range; see below) and
+// WHIRL_KT_BENCH_NODEF=1 (drop the default kernel list), e.g. Ornith: WHIRL_KT_BENCH_HEADS=16 WHIRL_KT_BENCH_NKV=2
+// WHIRL_KT_BENCH_KERNELS=attn_kgs4:dqr:4:1,attn_kgk4:dqr:4:1 -> "M0A L .. NP 4" ratio lines.
 static void benchPrefill(Ctx& c) {
     const int hd = 256, qstride = 2 * hd, n = 4096;
     const int heads = std::getenv("WHIRL_KT_BENCH_HEADS") ? std::atoi(std::getenv("WHIRL_KT_BENCH_HEADS")) : 24;
@@ -60,6 +63,7 @@ static void benchPrefill(Ctx& c) {
         int np = 6, qt = 1;
     };
     std::vector<K> ks = {{"attn_kg6", "f16"}, {"attn_kg6_q8v", "q8v"}, {"attn_kg6_q8", "q8"}, {"attn_kg6", "dq"}};
+    if (std::getenv("WHIRL_KT_BENCH_NODEF")) ks.clear();  // v0252-m0a: only the WHIRL_KT_BENCH_KERNELS list
     if (const char* e = std::getenv("WHIRL_KT_BENCH_KERNELS")) {
         std::string s = e;
         std::size_t a = 0;
@@ -135,6 +139,53 @@ static void benchPrefill(Ctx& c) {
         Buf out(static_cast<std::size_t>(n) * heads * hd * 4);
         std::vector<float> ref_q8, ref_f16;
         std::string ref_q8_name, ref_f16_name;
+        // v0252-m0a (PLAN V1-57, DISCOVERY v0252-r97fast §4 M0-A): fmt "dqr" = the fast (q4 KV) prefill input as FC-1c sees it
+        // with all keys in one range: L contiguous f16 rows (identity page table) made ONCE per L by kv_dq_rows_r_q4 from a
+        // random q4 cache (random nibbles, scales 0.02..0.1, shuffled pages; N(0, 0.5) f16 rows if the kernel is missing),
+        // read-only afterwards, so every "dqr" kernel of every round reads the same contents. attn_kgs<np> runs as one key
+        // range [0, L) (st_ml scratch), any other kernel (attn_kgk<np>, attn_kg<np>) with the plain attn_kg arguments. Outputs
+        // are compared bitwise with the first "dqr" kernel's (a check row); the per-round times feed the M0A ratio lines.
+        bool any_dqr = false;
+        for (const K& kk : ks) any_dqr = any_dqr || kk.fmt == "dqr";
+        const std::size_t drel = static_cast<std::size_t>(L) * nkv * hd;
+        Buf drk(any_dqr ? drel * 2 : 16), drv(any_dqr ? drel * 2 : 16);
+        std::string dqr_src = "none";
+        if (any_dqr) {
+            const hip::Function f4 = c.fnOpt("kv_dq_rows_r_q4");
+            if (f4) {
+                std::vector<std::uint8_t> k4(nel / 2), v4(nel / 2);
+                for (auto& x : k4) x = static_cast<std::uint8_t>(c.rng());
+                for (auto& x : v4) x = static_cast<std::uint8_t>(c.rng());
+                std::vector<std::uint16_t> s4k(nel / 32), s4v(nel / 32);
+                const auto a = c.randu(nel / 32, 0.02f, 0.1f), b = c.randu(nel / 32, 0.02f, 0.1f);
+                for (std::size_t i = 0; i < s4k.size(); ++i) {
+                    s4k[i] = f2h(a[i]);
+                    s4v[i] = f2h(b[i]);
+                }
+                Buf dk4(k4), dv4(v4), dk4s(s4k), dv4s(s4v);
+                wk::KvArgs a4{};
+                a4.k = dk4.p();
+                a4.v = dv4.p();
+                a4.ks = dk4s.p();
+                a4.vs = dv4s.p();
+                a4.ptab = dpt.p();
+                hip::launch(f4, {cdiv(static_cast<std::uint64_t>(L) * nkv * hd, 2048), 1, 1}, {256, 1, 1}, 0, c.s, a4, drk.p(), drv.p(), 0, L, nkv * hd);
+                c.sync();
+                dqr_src = "kv_dq_rows_r_q4 of a random q4 cache";
+            } else {
+                std::vector<std::uint16_t> h(drel);
+                for (int which = 0; which < 2; ++which) {
+                    const auto f = c.randn(drel, 0.5f);
+                    for (std::size_t i = 0; i < drel; ++i) h[i] = f2h(f[i]);
+                    (which ? drv : drk) = Buf(h);
+                }
+                dqr_src = "N(0, 0.5) f16 (kv_dq_rows_r_q4 not in this code object)";
+            }
+            std::printf("   prefill L %d dqr rows: %s\n", L, dqr_src.c_str());
+        }
+        std::vector<float> ref_dqr;
+        std::string ref_dqr_name;
+        std::vector<std::pair<std::string, std::vector<double>>> dqr_us;  // name -> us per round (M0A ratio lines)
         for (int rd = 0; rd < rounds; ++rd) {
         std::vector<K> order = ks;
         if (rd % 2) std::reverse(order.begin(), order.end());
@@ -189,7 +240,21 @@ static void benchPrefill(Ctx& c) {
                 a.vs = 0;
                 a.ptab = did.p();
             }
+            const bool dqr = fmt == "dqr";  // v0252-m0a
+            const bool dqr_seg = dqr && name.rfind("attn_kgs", 0) == 0;
+            if (dqr) {
+                a.k = drk.p();
+                a.v = drv.p();
+                a.ks = 0;
+                a.vs = 0;
+                a.ptab = did.p();
+            }
             auto launch = [&]() {
+                if (dqr_seg) {  // FC-1c with all L keys in one range
+                    hip::launch(f, {static_cast<unsigned>(cdiv(n, 16)), static_cast<unsigned>(heads / kk.np), 1}, {static_cast<unsigned>(64 * kk.np), 1, 1}, 0,
+                                c.s, dq.p(), a, out.p(), heads, nkv, qstride, dpos.p(), n, scale, 0, 0, L, dst.p());
+                    return;
+                }
                 if (dqs) {
                     for (int r0 = 0; r0 < L; r0 += seg) {
                         const int r1 = std::min(L, r0 + seg), nr = r1 - r0;
@@ -239,6 +304,27 @@ static void benchPrefill(Ctx& c) {
                     benchBitRow(c, name + ":" + fmt + " == " + ref_q8_name, heads, nkv, L, rd, bad, o.size());
                 }
             }
+            if (dqr) {  // v0252-m0a: per-round time + bitwise vs the first "dqr" kernel (attn_kgk<np> == one-range attn_kgs<np>)
+                const std::string key = name + ":dqr";
+                auto it = std::find_if(dqr_us.begin(), dqr_us.end(), [&](const auto& pr) { return pr.first == key; });
+                if (it == dqr_us.end()) {
+                    dqr_us.push_back({key, {}});
+                    it = dqr_us.end() - 1;
+                }
+                it->second.push_back(us);
+                launch();
+                c.sync();
+                const auto o = out.down<float>(static_cast<std::size_t>(n) * heads * hd);
+                if (ref_dqr.empty()) {
+                    ref_dqr = o;
+                    ref_dqr_name = key;
+                } else {
+                    std::size_t bad = 0;
+                    for (std::size_t i = 0; i < o.size(); ++i) bad += std::memcmp(&o[i], &ref_dqr[i], 4) != 0;
+                    std::printf("   prefill %-22s bitwise mismatches vs first dqr (%s): %zu of %zu\n", name.c_str(), ref_dqr_name.c_str(), bad, o.size());
+                    benchBitRow(c, key + " == " + ref_dqr_name, heads, nkv, L, rd, bad, o.size());
+                }
+            }
             if (fmt == "f16") {  // v0252-c11: bitwise vs the first f16 kernel (attn_kg8 vs attn_kg4 in the C11 bench)
                 launch();
                 c.sync();
@@ -255,6 +341,29 @@ static void benchPrefill(Ctx& c) {
             }
         }
         }  // rounds
+        // v0252-m0a: the M0-A verdict input - kgk<np> / kgs<np> per round (same round = same clock state, the order alternates
+        // between rounds), the median of those paired ratios, and the ratio of the best times. Parsed by
+        // scratch\v0252_m0a\m0a_gpu.ps1 ("M0A L <L> NP <np>: ... paired-median <r> ...").
+        auto times = [&](const std::string& key) -> const std::vector<double>* {
+            for (const auto& pr : dqr_us)
+                if (pr.first == key) return &pr.second;
+            return nullptr;
+        };
+        for (const char* np : {"6", "4", "2"}) {
+            const std::vector<double>* ts = times(std::string("attn_kgs") + np + ":dqr");
+            const std::vector<double>* tk = times(std::string("attn_kgk") + np + ":dqr");
+            if (!ts || !tk || ts->empty() || ts->size() != tk->size()) continue;
+            std::vector<double> rr;
+            for (std::size_t i = 0; i < ts->size(); ++i) rr.push_back((*tk)[i] / (*ts)[i]);
+            std::sort(rr.begin(), rr.end());
+            const std::size_t m = rr.size();
+            const double med = m % 2 ? rr[m / 2] : 0.5 * (rr[m / 2 - 1] + rr[m / 2]);
+            const double bs = *std::min_element(ts->begin(), ts->end()), bk = *std::min_element(tk->begin(), tk->end());
+            std::printf("   M0A L %d NP %s heads %d/%d: attn_kgk%s/attn_kgs%s paired-median %.4f best %.4f (kgs best %.1f us, kgk best %.1f us, %zu rounds, "
+                        "min %.4f max %.4f)\n",
+                        L, np, heads, nkv, np, np, med, bk / bs, bs, bk, m, rr.front(), rr.back());
+            std::fflush(stdout);
+        }
     }
 }
 
