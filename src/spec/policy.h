@@ -69,7 +69,7 @@ DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, c
 // vocabulary size of the qwen35 tokenizer the embedded subset was built for
 inline constexpr std::uint32_t draft_vocab_embedded_n_vocab = 248320;
 // the default (embedded 64k) subset is used for dense qwen35 models with that vocabulary, and for MoE ones where the
-// GPU family's profile row turns it on (moe_ok = device::Profile::draft64k_moe; v0252-n2: the R9700)
+// GPU family's profile row turns it on (moe_ok = device::Profile::draft64k_moe; v0252-n2: the R9700, v0252-8sdraft: the 8060S)
 inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab, bool moe_ok = false) {
     return (!moe || moe_ok) && n_vocab == draft_vocab_embedded_n_vocab;
 }

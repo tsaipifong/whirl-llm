@@ -171,8 +171,9 @@ void testProfiles() {
     CHECK(!a.tune_fast && !a.gdn_strix && !a.numerics_8060s && !a.mtp_costly_verify_rows);
     // v0252-n2: the attn_dq4 dynamic split count on the R9700 too (FAST-8S-1 item 1; same partition, bitwise)
     CHECK(a.attn_dq4_dynamic_splits);
-    // v0252-n2 (N1): the embedded 64k draft-head subset is the MoE default on the R9700 only; the 8060S row stays off
-    CHECK(a.draft64k_moe && !b.draft64k_moe);
+    // v0252-n2 (N1): the embedded 64k draft-head subset is the MoE default on the R9700; v0252-8sdraft (PLAN V1-58): on
+    // the 8060S too (FAST-8S-1 item 2; drafts only, the verify and the output unchanged)
+    CHECK(a.draft64k_moe && b.draft64k_moe);
     CHECK(a.relax_rank_check && !b.relax_rank_check);  // v0252-f2def2: F1's one-pass check on the R9700 only
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
@@ -194,6 +195,10 @@ void testProfiles() {
     // v0251-a3fix: from 2305 rows the 8060S slot is c2 (t2 1.33-1.35x the old pair at 4096 rows), off on the R9700
     CHECK(b.fdq_big == 1);
     CHECK(a.fdq_big == 0);
+    // v0252-8sbadopt: the gemmfq slots that run their grouped-raster twin (bit slot - 1, bitwise the same): 8060S dense
+    // t2 (Swift's <= 2304-row forwards), MoE c2 (Ornith's 4096-row forwards), job 94 re-judged ADOPT; none on the R9700
+    CHECK(b.fq_grp_dense == 2 && b.fq_grp_moe == 1);
+    CHECK(a.fq_grp_dense == 0 && a.fq_grp_moe == 0);
     // v0251-a6port: gfx1151 MXFP4 gemvk rows (dense: v7 at 5 / 6 verify rows; MoE 0), gfx1201 rows 0 (no gemvk in that object)
     const std::array<std::uint8_t, 17> kb = {0, 0, 0, 0, 0, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, k0{};
     CHECK(b.gemvk_dense == kb);

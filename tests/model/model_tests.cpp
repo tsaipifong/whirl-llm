@@ -697,15 +697,15 @@ void testDraftVocab() {
               !q::draftVocabDefaultFits(false, 151936),
           "draft vocab: default only for dense qwen35 with the 248320-token vocabulary");
     // v0252-n2 (N1): the front ends' default decision with each family's profile row: MoE (Ornith) takes the embedded
-    // subset on the R9700 only, the 8060S row is unchanged (full head); dense takes it on both
+    // subset on the R9700 (v0252-n2) and on the 8060S (v0252-8sdraft, PLAN V1-58); dense takes it on both
     {
         namespace dv = whirl::device;
         const bool r97 = dv::profile(whirl::hip::Arch::gfx1201).draft64k_moe, s8 = dv::profile(whirl::hip::Arch::gfx1151).draft64k_moe;
         check(q::draftVocabGate(c0, true, 248320, true, r97) == q::DraftVocabGate::subset &&
-                  q::draftVocabGate(c0, true, 248320, true, s8) == q::DraftVocabGate::not_fit &&
+                  q::draftVocabGate(c0, true, 248320, true, s8) == q::DraftVocabGate::subset &&
                   q::draftVocabGate(c0, false, 248320, true, r97) == q::DraftVocabGate::subset &&
                   q::draftVocabGate(c0, false, 248320, true, s8) == q::DraftVocabGate::subset,
-              "draft vocab: MoE default subset on gfx1201 only (gfx1151 MoE stays on the full head), dense on both (v0252-n2)");
+              "draft vocab: MoE default subset on gfx1201 and gfx1151, dense on both (v0252-n2, v0252-8sdraft)");
     }
     const std::vector<std::uint32_t> e64 = q::embeddedDraftVocab64k();
     bool asc = e64.size() == 65536;
@@ -2627,6 +2627,30 @@ bool oldPrecGemvh(const char* v) { return v == nullptr || *v != '0'; }
 int oldPrecGs(const char* v) { return v != nullptr && *v != 0 ? std::atoi(v) : -1; }
 }  // namespace f7
 
+// v0252-8sbadopt (PLAN V1-53): the gemmfq kernel names the table loader asks for per slot (src/kernels_host/kernels_abi.cpp
+// loadMatmul; a pure function of WHIRL_FQ_RASTER, kernels::gemmFqNames). Unset: the product kernel in the slot and its
+// grouped-raster twin gemmfq_<slot>g8_mxfp4 in MatmulKernels::gemmfq_grp (run where GemmFlags::fq_grp has the slot's bit,
+// testFdqEnv). Set (the development A/B of job 94, also "off"): the listed prototype replaces its slot and there is no
+// twin, so an env A/B never mixes with the default.
+void testGemmFqNames() {
+    namespace kn = whirl::kernels;
+    check(kn::kGemmFqGrpG == 8, "fq names: the twin raster group is 8 (job 61 PICK -G 8)");
+    const kn::GemmFqNames d = kn::gemmFqNames(std::nullopt);
+    check(d.slot[0] == "gemmfq_c2_mxfp4" && d.slot[1] == "gemmfq_t2_mxfp4", "fq names: unset -> the product kernels in the slots");
+    check(d.grp[0] == "gemmfq_c2g8_mxfp4" && d.grp[1] == "gemmfq_t2g8_mxfp4", "fq names: unset -> the g8 twins");
+    const kn::GemmFqNames t = kn::gemmFqNames(std::string("t2g8"));
+    check(t.slot[0] == "gemmfq_c2_mxfp4" && t.slot[1] == "gemmfq_t2g8_mxfp4" && t.grp[0].empty() && t.grp[1].empty(),
+          "fq names: WHIRL_FQ_RASTER=t2g8 -> t2 slot = gemmfq_t2g8_mxfp4, c2 product, no twin (job 94 arm B)");
+    const kn::GemmFqNames c = kn::gemmFqNames(std::string("c2g16,t2g4"));
+    check(c.slot[0] == "gemmfq_c2g16_mxfp4" && c.slot[1] == "gemmfq_t2g4_mxfp4" && c.grp[0].empty() && c.grp[1].empty(),
+          "fq names: WHIRL_FQ_RASTER=c2g16,t2g4 -> both slots replaced, no twin");
+    for (const char* off : {"", "off", "0", "none", "x2g8", "t2", "t2x8"}) {
+        const kn::GemmFqNames o = kn::gemmFqNames(std::string(off));
+        check(o.slot[0] == "gemmfq_c2_mxfp4" && o.slot[1] == "gemmfq_t2_mxfp4" && o.grp[0].empty() && o.grp[1].empty(),
+              std::string("fq names: WHIRL_FQ_RASTER='") + off + "' -> the product kernels, no twin (the A arm / off)");
+    }
+}
+
 // v0251-a3port: WHIRL_FDQ8S / WHIRL_FDQ8S_MIN (qwen35::fdqEnv at Model::load -> Context::fdq / fdq_min) and their use in
 // Context::gemmFlags. Literal expectations (include/whirl/model.h FdqEnv): FDQ8S unset / "" -> -1 (the device default),
 // "c2" / "1" -> slot 1, "t2" / "2" -> slot 2, anything else -> 0 (the old dequant + f16 GEMM; the screening-only probe
@@ -2691,6 +2715,11 @@ void testFdqEnv() {
         // v0251-a3fix: unset -> the device's slot from 2305 rows (device::Profile::fdq_big: gfx1201 0; gfx1151 1 = c2
         // is pinned by tests/device testProfiles), so the bucket-1 tune (4096 rows) times the kernel that wins there
         check(m.gemmFlags().fdq_big == 0 && m.gemmFlags().fdq_big_min == 2305, "fdq: gfx1201 default from 2305 rows = off (fdq_big 0)");
+        // v0252-8sbadopt: no grouped-raster twin on the gfx1201 row, dense or MoE
+        check(m.gemmFlags().fq_grp == 0, "fq_grp: gfx1201 dense = 0");
+        m.cfg.moe = true;
+        check(m.gemmFlags().fq_grp == 0, "fq_grp: gfx1201 MoE = 0");
+        m.cfg.moe = false;
     }
     // v0251-a3key (REVIEW-v0251-a3 C1): the gfx1151 row, so a miswired Context::gemmFlags (fdq_big from fdq_default, the
     // two swapped) fails on the CPU; before this only the gfx1201 row (0 == 0) and the Profile values were pinned.
@@ -2712,6 +2741,15 @@ void testFdqEnv() {
         check(f.fdq == 2 && f.fdq == static_cast<int>(p.fdq_default), "fdq: gfx1151 default slot = Profile::fdq_default = 2 (t2)");
         check(f.fdq_big == 1 && f.fdq_big == static_cast<int>(p.fdq_big), "fdq: gfx1151 slot from 2305 rows = Profile::fdq_big = 1 (c2)");
         check(f.fdq_min == 1025 && f.fdq_big_min == 2305, "fdq: gfx1151 thresholds 1025 (fdq_min) / 2305 (fdq_big_min)");
+        // v0252-8sbadopt: the grouped-raster twin per model class from the profile (a miswired gemmFlags - the two rows
+        // swapped, or no class test - fails here): dense = t2 bit (2), MoE = c2 bit (1); WHIRL_FDQ8S does not change it
+        check(!m.cfg.moe && f.fq_grp == 2 && f.fq_grp == p.fq_grp_dense, "fq_grp: gfx1151 dense = Profile::fq_grp_dense = 2 (t2 twin)");
+        m.cfg.moe = true;
+        check(m.gemmFlags().fq_grp == 1 && m.gemmFlags().fq_grp == p.fq_grp_moe, "fq_grp: gfx1151 MoE = Profile::fq_grp_moe = 1 (c2 twin)");
+        m.fdq = 1;
+        check(m.gemmFlags().fq_grp == 1, "fq_grp: gfx1151 MoE with WHIRL_FDQ8S=c2 keeps the c2 twin bit");
+        m.fdq = -1;
+        m.cfg.moe = false;
         m.fdq = 2;
         check(m.gemmFlags().fdq == 2 && m.gemmFlags().fdq_big == -1, "fdq: gfx1151 WHIRL_FDQ8S=t2 -> t2 at every row count (fdq_big -1)");
         m.fdq = 0;
@@ -5084,6 +5122,7 @@ int main(int argc, char** argv) {
     testEnvSnapshot();
     testForwardEnv();
     testFdqEnv();  // v0251-a3port
+    testGemmFqNames();  // v0252-8sbadopt
     testTuneCacheKey();  // v0251-a3key
     testPlanVsLoadOrTune();  // arch025-N2a
     testRelaxDefaultTarget();  // v0252-f2def

@@ -47,6 +47,10 @@ struct Profile {
     std::uint8_t fdq_default;
     // v0251-a3fix: the slot from ops::GemmFlags::fdq_big_min (2305) rows (same encoding; WHIRL_FDQ8S overrides it too)
     std::uint8_t fdq_big;
+    // v0252-8sbadopt (PLAN V1-53): the gemmfq slots that run their grouped-raster twin (kernels::MatmulKernels::gemmfq_grp,
+    // same tile, grid and bits) per model class, bit (slot - 1) in the fdq_default encoding (1 = c2, 2 = t2);
+    // Context::gemmFlags -> ops::GemmFlags::fq_grp. A family whose object lacks the twins runs its slots unchanged
+    std::uint8_t fq_grp_dense, fq_grp_moe;
     // q4 KV decode through attn_dq4: the smallest split count with the same key partition (FAST-8S-1)
     bool attn_dq4_dynamic_splits;
     // ---- tuning (src/model/tune.cpp)
@@ -94,6 +98,8 @@ inline constexpr Profile k_profile_gfx1201{
     .gemms_tie_larger_bm = false,
     .fdq_default = 0,
     .fdq_big = 0,
+    .fq_grp_dense = 0,  // v0252-8sbadopt: the gfx1201 object has no gemmfq
+    .fq_grp_moe = 0,
     // v0252-n2: FAST-8S-1 item 1 on the R9700 (same shared attn_dq4 / combine kernels; the dq4 rows are one query per
     // group here too, so the split rule gives the 256 grid's partitions: bitwise the same output). Measured R9700 Ornith
     // fast chat +9.68 % (v0252-n2 Part S, KB v0252-n2:s-speed-r9700-ornith)
@@ -129,6 +135,12 @@ inline constexpr Profile k_profile_gfx1151{
     .gemms_tie_larger_bm = true,
     .fdq_default = 2,  // t2 (v0251-a3port; v0251-judge1 sec 1 screening)
     .fdq_big = 1,      // c2 from 2305 rows (v0251-a3fix; scratch/v0251_a3/gpu/8060s_20261104-0439/results.txt:106-124)
+    // v0252-8sbadopt: dense (Swift, <= 2304-row forwards) t2 -> t2g8, MoE (Ornith, 4096-row forwards) c2 -> c2g8; one-object
+    // A/B job 94 (scratch/v0252_8sbal/gpu/8060s_e2e2_20261109-1021, re-judged rejudge_*): balance pp 8k / 32k Swift +1.14 /
+    // +2.17 %, Ornith +2.50 / +3.39 %, 6 of 6 rounds each, decode hash identical. Exactly the measured arms (Ornith's t2
+    // tail and Swift's unused c2 stay plain)
+    .fq_grp_dense = 2,
+    .fq_grp_moe = 1,
     .attn_dq4_dynamic_splits = true,
     .tune_fast = true,
     .tune_cache_suffix = "-gfx1151r3",  // r3: gemmfq in the dequant family (v0251-a3key; tests/model testTuneCacheKey)
@@ -136,8 +148,11 @@ inline constexpr Profile k_profile_gfx1151{
     .gdn_strix = true,
     .numerics_8060s = true,
     .mtp_costly_verify_rows = true,
-    // off since the 0.2.2 freeze (9a58324); FAST-8S-1 item 2 measured +2.5..+3.7 % chat here, not part of 0.2.5.2
-    .draft64k_moe = false,
+    // v0252-8sdraft (PLAN V1-58): on again for 0.2.5.2 (8060S balance / fast are in scope, ADR-0013); off since the 0.2.2
+    // freeze (9a58324), FAST-8S-1 item 2 (b2a3a9b) measured chat +2.5..+3.7 % here in all three modes. Drafts only (MoE
+    // relaxacc is off in every mode: exact acceptance), so the output is unchanged; kept only on the 8060S A/B
+    // (scratch\v0252_8sdraft\s8draft_gpu.ps1 -Part s, rule in its header)
+    .draft64k_moe = true,
     .relax_rank_check = false,  // v0252-f2def2: F1 never measured here (no G4a); relaxacc keeps topk_rows
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,

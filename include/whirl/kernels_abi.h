@@ -210,6 +210,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -556,6 +557,21 @@ inline constexpr std::array<GemmCfg, 2> kGemmFqCfgs = {{
     {256, 128, 256}, {128, 256, 256},
 }};
 inline constexpr std::array<const char*, 2> kGemmFqNames = {"c2", "t2"};
+// v0252-8sbadopt (PLAN V1-53): the grouped-raster twin of each slot, gemmfq_<kGemmFqNames[i]>g<kGemmFqGrpG>_mxfp4
+// (kernels/gfx1151/gemm_fq.hip, block order kernels/gfx1151/fq_raster.h: 8 neighbouring row tiles share an activation
+// panel): same tile, ABI, grid and bits as the slot. The host picks it per slot and model class (ops::GemmFlags::fq_grp
+// from device::Profile::fq_grp_dense / fq_grp_moe), so the shipped code object and its layout stay as built (rebuilding the
+// product symbol with G = 8 moved ~650 functions and cost Swift ~3 %, job 62).
+inline constexpr int kGemmFqGrpG = 8;
+// the names MatmulKernels::load asks for (a pure function of WHIRL_FQ_RASTER; tests/unit/contract_tests.cpp
+// testGemmFqNames). Unset: slot[i] = the product kernel gemmfq_<name>_mxfp4, grp[i] = its g8 twin. Set (the development
+// A/B, any value: "t2g8", "c2g8,t2g8", "off"): slot[i] = the listed prototype gemmfq_<name>g<G>_mxfp4 of that slot (the
+// loader keeps the product kernel when the object lacks it) or the product kernel, grp[i] = "" (no twin: an env A/B never
+// mixes with the default)
+struct GemmFqNames {
+    std::array<std::string, kGemmFqCfgs.size()> slot, grp;
+};
+GemmFqNames gemmFqNames(const std::optional<std::string>& fq_raster);
 // gemvw_nt<N>v<V>_<T>: rows per block per variant (v0 = not a gemvw kernel).
 inline constexpr int kNGemvw = 9;
 inline constexpr std::array<int, kNGemvw> kGemvwRows = {0, 16, 32, 16, 32, 16, 16, 32, 32};
@@ -633,6 +649,7 @@ struct MatmulKernels {
     std::array<F, kGemm8tCfgs.size()> gemm8t{}, gemm8th{};
     std::array<F, kGemmCfgs.size()> gemmch{};
     std::array<F, kGemmFqCfgs.size()> gemmfq{};  // gemmfq_<kGemmFqNames[i]>_mxfp4 (gfx1151 code object; null elsewhere)
+    std::array<F, kGemmFqCfgs.size()> gemmfq_grp{};  // v0252-8sbadopt: the slot's g8 twin (gemmFqNames; null: none / WHIRL_FQ_RASTER set)
     F gemmh_f16{}, gemmhh_f16{};
     // activation converters of the GEMV / GEMM inputs
     F f32_to_f16{}, quantize_q8{}, qact_fp8{}, qact_fp8t{};

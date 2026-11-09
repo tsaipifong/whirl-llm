@@ -449,6 +449,49 @@ void testOpsGemmFq() {
     dh.out_h16 = true;
     CHECK(ops::chooseGemmF16(gate, 4096, deq2, dh, k51).kind != ops::GemmKind::gemmfq);
     CHECK(ops::chooseGemmF16(gate, 4096, deq2, dv, k01).kind == ops::GemmKind::gemmh);
+    // v0252-8sbadopt: GemmFlags::fq_grp bit (slot - 1) runs the slot's grouped-raster twin (MatmulKernels::gemmfq_grp,
+    // gemmfq_<slot>g8_mxfp4: same tile, grid and bits) - the gfx1151 default per model class (device::Profile::fq_grp_dense
+    // = t2 bit, fq_grp_moe = c2 bit; job 94 re-judged ADOPT). No bit, no twin in the object or the old plan: unchanged.
+    CHECK(t2.fq_grp == 0);
+    kn::KernelTable kg = k51;
+    kg.gemmfq_grp[0] = tag("gemmfq_c2g8_mxfp4");
+    kg.gemmfq_grp[1] = tag("gemmfq_t2g8_mxfp4");
+    ops::GemmFlags gd = dv;  // the gfx1151 dense row: t2 twin up to 2304 rows, c2 (plain) from 2305
+    gd.fq_grp = 2;
+    p = ops::chooseGemmF16(gate, 2048, deq2, gd, kg);  // the Swift forward
+    CHECK(p.kind == ops::GemmKind::gemmfq && !p.dequant && nameOf(p.f) == "gemmfq_t2g8_mxfp4" && p.grid.x == 8 && p.grid.y == 136 && p.block.x == 256);
+    p = ops::chooseGemmF16(down, 2304, deq2, gd, kg);
+    CHECK(p.kind == ops::GemmKind::gemmfq && nameOf(p.f) == "gemmfq_t2g8_mxfp4" && p.grid.x == 9 && p.grid.y == 40);
+    p = ops::chooseGemmF16(gate, 4096, deq2, gd, kg);
+    CHECK(p.kind == ops::GemmKind::gemmfq && nameOf(p.f) == "gemmfq_c2_mxfp4" && p.grid.x == 32 && p.grid.y == 68);
+    ops::GemmFlags gm = dv;  // the gfx1151 MoE row: c2 twin from 2305 rows, t2 (plain) below
+    gm.fq_grp = 1;
+    p = ops::chooseGemmF16(shg, 4096, deq1, gm, kg);  // the Ornith forward
+    CHECK(p.kind == ops::GemmKind::gemmfq && nameOf(p.f) == "gemmfq_c2g8_mxfp4" && p.grid.x == 32 && p.grid.y == 2 && p.block.x == 256);
+    p = ops::chooseGemmF16(gate, 4096, deq2, gm, kg);
+    CHECK(p.kind == ops::GemmKind::gemmfq && nameOf(p.f) == "gemmfq_c2g8_mxfp4" && p.grid.x == 32 && p.grid.y == 68);
+    p = ops::chooseGemmF16(shg, 2048, deq1, gm, kg);  // an Ornith tail chunk: the plain t2
+    CHECK(p.kind == ops::GemmKind::gemmfq && nameOf(p.f) == "gemmfq_t2_mxfp4");
+    // flags without a bit (every non-gfx1151 row, WHIRL_FQ_RASTER set): the product kernels, also when the twins exist
+    CHECK(nameOf(ops::chooseGemmF16(gate, 2048, deq2, dv, kg).f) == "gemmfq_t2_mxfp4");
+    CHECK(nameOf(ops::chooseGemmF16(gate, 4096, deq2, dv, kg).f) == "gemmfq_c2_mxfp4");
+    // a bit without the twin in the object: the slot's product kernel
+    kn::KernelTable kn1 = kg;
+    kn1.gemmfq_grp[1] = nullptr;
+    p = ops::chooseGemmF16(gate, 2048, deq2, gd, kn1);
+    CHECK(p.kind == ops::GemmKind::gemmfq && nameOf(p.f) == "gemmfq_t2_mxfp4" && p.grid.x == 8 && p.grid.y == 136);
+    // the bits never reach the old plan, a fused choice, f16 outputs or a code object without gemmfq
+    ops::GemmFlags gb = bo;
+    gb.fq_grp = 3;
+    p = ops::chooseGemmF16(gate, 4096, deq2, gb, kg);
+    CHECK(p.kind == ops::GemmKind::gemmc && p.dequant && nameOf(p.f) == "gemm_c2_" + f16);
+    ops::GemmFlags ga = dv;
+    ga.fq_grp = 3;
+    CHECK(ops::chooseGemmF16(gate, 2048, 2, ga, kg).kind == ops::GemmKind::gemmc);
+    ga.out_h16 = true;
+    CHECK(ops::chooseGemmF16(gate, 2048, deq2, ga, kg).kind != ops::GemmKind::gemmfq);
+    ga.out_h16 = false;
+    CHECK(ops::chooseGemmF16(gate, 2048, deq2, ga, k01).kind == ops::GemmKind::gemmh);
 }
 
 }  // namespace
