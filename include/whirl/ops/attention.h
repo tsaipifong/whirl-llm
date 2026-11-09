@@ -92,7 +92,7 @@ Function attnKgVariant(std::uint32_t var, const kernels::AttnKernels& k, std::ui
 // the variant per (NP, KV path) from the explicit table kAttnKgAuto: var 3 (attn_kgk) only on the paths measured
 // faster in the C1 screening (NP 4 on plain f16 KV = Ornith precise / balance; NP 6 on Q8P = Swift balance), var 0 (the
 // shipped attn_kg) on every other (NP, path) - the AO-1 re-bench extends it by a table edit. An explicit
-// WHIRL_ATTN_KGVAR=0 / 1 / 3 bypasses the table.
+// WHIRL_ATTN_KGVAR=0 / 1 / 3 bypasses the table. v0252-c1np6 (PLAN V1-52): + NP 6 on plain f16 KV (Swift precise).
 inline constexpr std::uint32_t kAttnKgVarAuto = 255;
 // plain f16 KV from the cache; Q8P = kv_dq_rows + the f16 kernel; v0252-fasta: dqr1 = FC-1c with every key in ONE
 // dequantized range (kv_dq_rows_r into ffn_g / ffn_u, then one launch series instead of attn_kgs): on gfx1201 the q4
@@ -108,6 +108,8 @@ struct KgAutoRow {
 inline constexpr KgAutoRow kAttnKgAuto[] = {
     {4, KgPath::f16, 3},  // Ornith 16 / 2 heads, f16 KV: e2e pp balance 128k +19.8 % (scratch/v0252_c1/gpu/20261106-1320_s)
     {6, KgPath::q8p, 3},  // Swift 24 / 4 heads, q8h KV in Q8P: e2e pp balance 128k +5.1 %, attnbench dq -8..-12.5 %
+    {6, KgPath::f16, 3},  // Swift 24 / 4 heads, f16 KV (precise): same-object e2e pp 128k +3.6 % (6/6 rounds; scratch/v0252_c1/
+                          // gpu/20261106-2233_acc_S_snap0139), attnp kgk6 f16 -11.6 %; v0252-c1np6 screen 2k / 8k / 32k
     // v0252-fasta (M0-A, R9700 2026-11-08 23:44, attnbench dqr paired median kgk / kgs on the same q4 dq rows; kt Q4P bitwise):
     {4, KgPath::dqr1, 3},  // Ornith fast (q4 KV), one range: 0.768 at 32k, 0.766 at 128k
     {6, KgPath::dqr1, 3},  // Swift fast (q4 KV), one range: 0.896 at 32k, 0.869 at 128k

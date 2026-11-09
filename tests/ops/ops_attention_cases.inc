@@ -560,13 +560,17 @@ void testAttnKgVariant() {
 // every other (NP, KV path): Swift precise f16 (NP 6, unproven: AO-1 confound), NP 4 Q8P (not measured), NP 2 and any
 // other np. Explicit 0 / 1 / 3 bypass the table; the 8060S set and multi-range FC-1c are unchanged (v0252-fasta: the
 // dqr1 rows, testAttnFastQ4Kgk). Fails before c1acc (the test-first stub attnKgAutoVar returns 0 for every row).
+// v0252-c1np6 (PLAN V1-52): fifth row {6, f16, 3} = Swift precise (plain f16 KV, NP 6) after AO-1 lifted the confound
+// (c1acc same-object e2e 131072 +3.59..+3.70 % in 6/6 rounds, attnp kgk6 f16 -11.6 %; progress\v0252-c1np6.HANDOFF.md).
+// NP 6 now takes attn_kgk6 on both the f16 and the Q8P path. Fails before c1np6 (table of 4 rows, Swift f16 -> attn_kg6).
 void testAttnKgAuto() {
     CHECK(ops::kAttnKgVarAuto == 255);  // == numerics::kAttnKgVarAuto (static_assert in src/model/qwen35/forward/attn.cpp)
-    // (1) the table: exactly the measured rows (C1: two; v0252-fasta: dqr1 for NP 4 and NP 6, M0-A); every other (np, path) -> 0
-    CHECK(std::size(ops::kAttnKgAuto) == 4);
+    // (1) the table: exactly the measured rows (C1: two; v0252-fasta: dqr1 for NP 4 and NP 6, M0-A; v0252-c1np6: NP 6 f16);
+    // every other (np, path) -> 0
+    CHECK(std::size(ops::kAttnKgAuto) == 5);
     for (const std::uint32_t np : {0u, 1u, 2u, 3u, 4u, 6u, 8u, 12u, 16u})
         for (const ops::KgPath path : {ops::KgPath::f16, ops::KgPath::q8p, ops::KgPath::dqr1}) {
-            const bool on = (np == 4 && path == ops::KgPath::f16) || (np == 6 && path == ops::KgPath::q8p) ||
+            const bool on = (np == 4 && path == ops::KgPath::f16) || (np == 6 && path == ops::KgPath::q8p) || (np == 6 && path == ops::KgPath::f16) ||
                             ((np == 4 || np == 6) && path == ops::KgPath::dqr1);
             CHECK(ops::attnKgAutoVar(np, path) == (on ? 3u : 0u));
             CHECK(ops::attnKgVarFor(ops::kAttnKgVarAuto, np, path) == (on ? 3u : 0u));
@@ -578,7 +582,7 @@ void testAttnKgAuto() {
         std::uint32_t heads, kv, np;
         const char *f16, *q8p;
     };
-    for (const Want w : {Want{24, 4, 6, "attn_kg6", "attn_kgk6"}, Want{16, 2, 4, "attn_kgk4", "attn_kgf4"}, Want{4, 2, 2, "attn_kg2", "attn_kgf2"}}) {
+    for (const Want w : {Want{24, 4, 6, "attn_kgk6", "attn_kgk6"}, Want{16, 2, 4, "attn_kgk4", "attn_kgf4"}, Want{4, 2, 2, "attn_kg2", "attn_kgf2"}}) {
         ops::AttnPrefillProblem p;
         p.n = 512;
         p.pos0 = 1536;
@@ -630,6 +634,23 @@ void testAttnKgAuto() {
             const std::string s = std::to_string(w.np);
             CHECK(nameOf(a.steps.back().f) == (q8 ? "attn_kgf" : "attn_kg") + s && nameOf(b.steps.back().f) == "attn_kgk" + s);
         }
+    }
+    // (2b) v0252-c1np6: the row is per NP, not per model: Swift 24 / 4 past 256k keys (n 4096, 3 head ranges of 8 heads)
+    // falls to NP 2, which is not in the table -> the shipped attn_kg2 under auto
+    {
+        ops::AttnPrefillProblem p;
+        p.n = 4096;
+        p.pos0 = 3 * 131072 - 4096;
+        p.head_dim = 256;
+        p.n_head = 24;
+        p.n_head_kv = 4;
+        p.scale = 1.0f / 16.0f;
+        ops::AttnPrefillFlags f;
+        f.attn_kg_var = ops::kAttnKgVarAuto;
+        const auto pl = ops::chooseAttnPrefill(p, f, kv);
+        bool kg2 = pl.steps.size() == 3;
+        for (const auto& st : pl.steps) kg2 = kg2 && nameOf(st.f) == "attn_kg2" && st.block.x == 128;
+        CHECK(kg2 && kgShapesMatch(pl));
     }
     // (3) the 8060S set: auto changes nothing (no attn_kg there; numerics also keeps 0 on gfx1151)
     {
@@ -749,7 +770,7 @@ void testAttnFastQ4Kgk() {
         p.scale = 1.0f / 16.0f;
         ops::AttnPrefillFlags fa;
         fa.attn_kg_var = ops::kAttnKgVarAuto;
-        CHECK(nameOf(ops::chooseAttnPrefill(p, fa, kv).steps.back().f) == (sh.np == 4 ? "attn_kgk4" : "attn_kg6"));
+        CHECK(nameOf(ops::chooseAttnPrefill(p, fa, kv).steps.back().f) == (sh.np == 4 ? "attn_kgk4" : "attn_kgk6"));  // v0252-c1np6: Swift f16 now kgk6
         p.kv_q8 = true;
         p.dq_rows = 8192;
         p.dq_ptab = p.dq_st_ml = true;
