@@ -26,6 +26,16 @@
 // The source branch's LUT / decode-at-fetch probes (c2l, t2l, c2f) were screening-only and are not ported.
 
 #include "mx_inject.h"
+#include "fq_raster.h"  // v0252-8sbal: grouped-raster block order (GRP > 0 prototypes)
+
+// v0252-8sbal: the group width of the PRODUCT entry points (gemmfq_c2 / _t2). 0 = the shipped plain order; a screen
+// object is compiled with -DWHIRL_FQ_GRP_T2=<g> / -DWHIRL_FQ_GRP_C2=<g> (WHIRL_CODE_OBJECT A/B, bitwise-equal output).
+#ifndef WHIRL_FQ_GRP_T2
+#define WHIRL_FQ_GRP_T2 0
+#endif
+#ifndef WHIRL_FQ_GRP_C2
+#define WHIRL_FQ_GRP_C2 0
+#endif
 
 // 8 values of one LUT group: dec_group_h<QT_MXFP4>'s math on registers (same calls -> same bits)
 __device__ __forceinline__ half8 fq_lut8(uint32_t n0, uint32_t n1, _Float16 dl) {
@@ -65,7 +75,7 @@ __device__ __forceinline__ void fq_decode_sb(uint2 qa, uint2 qb, uint32_t e, hal
     }
 }
 
-template <int BM, int BN, int WAVES_M>
+template <int BM, int BN, int WAVES_M, int GRP = 0>
 __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
                             float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {
     constexpr int NTH = 256, BK = 64;
@@ -81,7 +91,16 @@ __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, c
 
     const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
     const int wm = wid % WAVES_M, wn = wid / WAVES_M;
-    const int m0 = blockIdx.y * BM, t0 = blockIdx.x * BN;
+    int m0, t0;
+    if constexpr (GRP == 0) {
+        m0 = blockIdx.y * BM;
+        t0 = blockIdx.x * BN;
+    } else {  // v0252-8sbal: block -> (row tile, token tile) in groups of GRP row tiles (fq_raster.h)
+        unsigned rt, tt;
+        fq_group_tile(blockIdx.x, blockIdx.y, gridDim.x, gridDim.y, GRP, &rt, &tt);
+        m0 = static_cast<int>(rt) * BM;
+        t0 = static_cast<int>(tt) * BN;
+    }
 
     float8 acc[TM][TN];
 #pragma unroll
@@ -177,5 +196,20 @@ __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, c
 // GemmFlags::fdq: the device default device::Profile::fdq_default, WHIRL_FDQ8S overrides). Same ABI as gemm_c*.
 //   gemmfq_c2_mxfp4   256 x 128 WAVES_M 4, injected decode   (the kept c2 layout; slot 1)
 //   gemmfq_t2_mxfp4   128 x 256 WAVES_M 2, injected decode   (quantized side short; slot 2, the gfx1151 default)
-extern "C" __global__ void __launch_bounds__(256) gemmfq_c2_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemmfq_impl<256, 128, 4>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
-extern "C" __global__ void __launch_bounds__(256) gemmfq_t2_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemmfq_impl<128, 256, 2>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
+extern "C" __global__ void __launch_bounds__(256) gemmfq_c2_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemmfq_impl<256, 128, 4, WHIRL_FQ_GRP_C2>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
+extern "C" __global__ void __launch_bounds__(256) gemmfq_t2_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemmfq_impl<128, 256, 2, WHIRL_FQ_GRP_T2>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
+
+// v0252-8sbal prototypes (kt only: tests/kernels/kt.h kFqProto; not in kernels::kGemmFqNames, so the product never
+// selects them): the c2 / t2 tiles with the grouped raster of GRP row tiles. Same ABI and grid as their base slot.
+#define GEMMFQ_PROTO(name_, bm_, bn_, wm_, g_)                                                                          \
+    extern "C" __global__ void __launch_bounds__(256) gemmfq_##name_##_mxfp4(const uint8_t *W, uint64_t row_bytes,    \
+        const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) {                               \
+        gemmfq_impl<bm_, bn_, wm_, g_>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);                          \
+    }
+GEMMFQ_PROTO(t2g4, 128, 256, 2, 4)
+GEMMFQ_PROTO(t2g8, 128, 256, 2, 8)
+GEMMFQ_PROTO(t2g16, 128, 256, 2, 16)
+GEMMFQ_PROTO(c2g4, 256, 128, 4, 4)
+GEMMFQ_PROTO(c2g8, 256, 128, 4, 8)
+#undef GEMMFQ_PROTO
+
