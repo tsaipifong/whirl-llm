@@ -242,4 +242,15 @@ void testDflash(Ctx& c);
 
 inline unsigned cdiv(std::uint64_t a, std::uint64_t b) { return static_cast<unsigned>((a + b - 1) / b); }
 
+// v0252-8sbal (PLAN V1-53): grouped-raster prototypes of the gfx1151 fused-dequant GEMM, gemmfq_<name>_mxfp4 =
+// gemmfq_<base>_mxfp4 with the blocks walked in groups of <g> row tiles (Gufo prefill_quant_gemm.hpp:207-223). Same
+// tile, same WMMA chain per output -> bitwise == the base slot (kt gemm checks it); the same ABI and grid as the base
+// slot (x = token blocks, y = row blocks). Not in the product tables (kernels::kGemmFqNames): kt only, until the
+// screen picks one. base = index into kernels::kGemmFqCfgs (0 c2, 1 t2).
+struct FqProto {
+    const char* name;
+    int base;
+};
+inline constexpr FqProto kFqProto[] = {{"t2g4", 1}, {"t2g8", 1}, {"t2g16", 1}, {"c2g4", 0}, {"c2g8", 0}};
+
 }  // namespace kt

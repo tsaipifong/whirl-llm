@@ -6,6 +6,7 @@
 #include "../test_env.h"
 #include "../../kernels/gemm_small_addr.h"
 #include "../../kernels/gfx1151/mx_inject.h"  // v0251-a3port: the gemmfq decode helpers (host + device)
+#include "../../kernels/gfx1151/fq_raster.h"  // v0252-8sbal: the gemmfq grouped-raster block order (host + device)
 
 #include <algorithm>
 #include <atomic>
@@ -232,6 +233,57 @@ void testMxInject() {
     CHECK(order_bad == 0);
 }
 
+// v0252-8sbal: the grouped raster of the gfx1151 gemmfq prototypes (kernels/gfx1151/fq_raster.h, the function the
+// kernels run). For every grid nx x ny up to 40 x 70 and grp 0 / 1 / 2 / 3 / 4 / 8 / 16 / 64: (1) every (row, token)
+// tile has exactly one owner (a bijection of the grid); (2) grp 0 is the plain order (row = y, token = x); (3) inside a
+// full group the row tile changes fastest: linear ids k and k + 1 of one group map to rows r and r + 1 of the same
+// token tile, and the first grp ids of a group are grp distinct rows (the property the screen is about); (4) a group
+// never leaves its grp row tiles.
+void testFqRaster() {
+    long bad_owner = 0, bad_plain = 0, bad_fast = 0, bad_span = 0;
+    for (unsigned nx = 1; nx <= 40; nx += (nx < 9 ? 1 : 7))
+        for (unsigned ny = 1; ny <= 70; ny += (ny < 12 ? 1 : 11))
+            for (const unsigned grp : {0u, 1u, 2u, 3u, 4u, 8u, 16u, 64u}) {
+                std::vector<int> owner(static_cast<std::size_t>(nx) * ny, 0);
+                for (unsigned by = 0; by < ny; ++by)
+                    for (unsigned bx = 0; bx < nx; ++bx) {
+                        unsigned r = 0, t = 0;
+                        fq_group_tile(bx, by, nx, ny, grp, &r, &t);
+                        if (r >= ny || t >= nx) {
+                            ++bad_owner;
+                            continue;
+                        }
+                        ++owner[static_cast<std::size_t>(r) * nx + t];
+                        if (grp == 0 && (r != by || t != bx)) ++bad_plain;
+                        const unsigned lin = by * nx + bx;
+                        if (grp > 0) {
+                            const unsigned first = lin / (grp * nx) * grp;
+                            if (r < first || r >= first + grp) ++bad_span;
+                            const bool full = first + grp <= ny;
+                            const unsigned within = lin - first * nx;
+                            if (full && within + 1 < grp * nx && (within + 1) % grp != 0) {
+                                const unsigned l2 = lin + 1;
+                                unsigned r2 = 0, t2 = 0;
+                                fq_group_tile(l2 % nx, l2 / nx, nx, ny, grp, &r2, &t2);
+                                if (r2 != r + 1 || t2 != t) ++bad_fast;
+                            }
+                        }
+                    }
+                for (const int o : owner) bad_owner += o != 1;
+            }
+    CHECK_EQ(bad_owner, 0L);
+    CHECK_EQ(bad_plain, 0L);
+    CHECK_EQ(bad_fast, 0L);
+    CHECK_EQ(bad_span, 0L);
+    // the product shapes: Swift ffn_gate_up t2 at 2048 / 4096 rows (136 row tiles x 8 / 16 token tiles), grp 8: the
+    // first 8 linear ids are row tiles 0..7 of token tile 0 (Gufo's order)
+    for (unsigned k = 0; k < 8; ++k) {
+        unsigned r = 0, t = 0;
+        fq_group_tile(k % 16, k / 16, 16, 136, 8, &r, &t);
+        CHECK(r == k && t == 0);
+    }
+}
+
 }  // namespace
 
 // the old main()'s calls of this module, in their order (tests/unit/unit_tests.cpp ORDER lists all modules)
@@ -240,6 +292,7 @@ const whirl::test::Suite& unitSuite_kernels_gemm() {
                                       {
                                           {"testKernelFetchBounds", [] { testKernelFetchBounds(); }},
                                           {"testMxInject", [] { testMxInject(); }},  // v0251-a3port
+                                          {"testFqRaster", [] { testFqRaster(); }},  // v0252-8sbal
                                       },
                                       nullptr};
     return s;

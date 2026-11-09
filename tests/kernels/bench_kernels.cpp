@@ -1139,9 +1139,19 @@ void benchFdq(Env& e) {
     }
     const int ti = static_cast<int>(QType::mxfp4);
     const hip::Function dq = c.k.dequant_f16[ti];
-    std::vector<int> slots;
-    for (std::size_t fi = 0; fi < wk::kGemmFqCfgs.size(); ++fi) {
-        const std::string v = wk::kGemmFqNames[fi];
+    // B kernels: the product slots (kGemmFqNames), plus the v0252-8sbal grouped-raster prototypes (kt.h kFqProto) when
+    // --fdq-v names them (never by default: the default rows stay the shipped slots)
+    struct FqB {
+        std::string name;
+        wk::GemmCfg g;
+    };
+    std::vector<FqB> cand;
+    for (std::size_t fi = 0; fi < wk::kGemmFqCfgs.size(); ++fi) cand.push_back({wk::kGemmFqNames[fi], wk::kGemmFqCfgs[fi]});
+    if (!e.o.fdq_v.empty())
+        for (const FqProto& pv : kFqProto) cand.push_back({pv.name, wk::kGemmFqCfgs[static_cast<std::size_t>(pv.base)]});
+    std::vector<FqB> slots;
+    for (const FqB& cb : cand) {
+        const std::string& v = cb.name;
         if (!e.o.fdq_v.empty() && std::find(e.o.fdq_v.begin(), e.o.fdq_v.end(), v) == e.o.fdq_v.end()) continue;
         if (!c.fnOpt("gemmfq_" + v + "_mxfp4")) {
             Result r;
@@ -1151,7 +1161,18 @@ void benchFdq(Env& e) {
             std::printf("   fdq: gemmfq_%s_mxfp4 not in this code object (FAIL)\n", v.c_str());
             continue;
         }
-        slots.push_back(static_cast<int>(fi));
+        slots.push_back(cb);
+    }
+    for (const std::string& v : e.o.fdq_v) {  // a name that is neither a slot nor a prototype is a usage error, not a skip
+        bool known = false;
+        for (const FqB& cb : cand) known = known || cb.name == v;
+        if (!known) {
+            Result r;
+            r.name = "bench fdq: --fdq-v " + v + " is neither a gemmfq slot nor a kt.h kFqProto prototype";
+            r.pass = false;
+            c.rep.add(r);
+            std::printf("   fdq: unknown --fdq-v %s (FAIL)\n", v.c_str());
+        }
     }
     if (!dq || slots.empty()) {
         if (!dq) c.rep.skip("fdq", "bench fdq", "no dequant_f16_mxfp4 in this code object");
@@ -1171,6 +1192,17 @@ void benchFdq(Env& e) {
         if (const whirl::gguf::File* f = c.open(c.models.moemx); f && f->tensor("blk.0.ffn_gate_shexp.weight")) {
             HostMat m = loadMat(*f, "blk.0.ffn_gate_shexp.weight");
             if (m.type == QType::mxfp4) ws.push_back({"ornith", "blk.0.ffn_gate_shexp.weight", m, 1});
+            // v0252-8sbal: with prototypes named, also Ornith's K 2048 / 4096 dense shapes (qkv 8192 x 2048, ssm_out
+            // 2048 x 4096: 60 % of the probe in the P1a bench, research\b8s s4.1); the pair is the c2 one (tuned c1/c2
+            // there is not known for these shapes: the A side only anchors the ratio, the variants compare B to B)
+            bool proto = false;
+            for (const FqProto& pv : kFqProto)
+                proto = proto || std::find(e.o.fdq_v.begin(), e.o.fdq_v.end(), std::string(pv.name)) != e.o.fdq_v.end();
+            for (const char* tn : {"blk.0.attn_qkv.weight", "blk.0.ssm_out.weight"})
+                if (proto && f->tensor(tn)) {
+                    HostMat mo = loadMat(*f, tn);
+                    if (mo.type == QType::mxfp4) ws.push_back({"ornith", tn, mo, 2});
+                }
         }
     }
     for (const FqW& fw : ws) {
@@ -1195,17 +1227,17 @@ void benchFdq(Env& e) {
             std::vector<std::uint16_t> xh(x.size());
             for (std::size_t i = 0; i < x.size(); ++i) xh[i] = f2h(x[i]);
             Buf x16(xh), y(static_cast<std::size_t>(n) * nrows * 4);
-            for (const int fi : slots) {
-                const auto& g = wk::kGemmFqCfgs[static_cast<std::size_t>(fi)];
-                const hip::Function fb = c.fnOpt(std::string("gemmfq_") + wk::kGemmFqNames[static_cast<std::size_t>(fi)] + "_mxfp4");
+            for (const FqB& sb : slots) {
+                const wk::GemmCfg g = sb.g;
+                const hip::Function fb = c.fnOpt(std::string("gemmfq_") + sb.name + "_mxfp4");
                 Cell k;
                 // the cell names the B slot too: the A row of each slot's cell is its own pair measurement
-                k.ci = e.info("fdq", a_name, fw.label + "." + shortName(fw.tensor) + ".n" + std::to_string(n) + "." + wk::kGemmFqNames[static_cast<std::size_t>(fi)],
+                k.ci = e.info("fdq", a_name, fw.label + "." + shortName(fw.tensor) + ".n" + std::to_string(n) + "." + sb.name,
                               shapeStr(nrows, ncols));
                 k.ci.settings = e.settings(static_cast<std::uint64_t>(wc.n()) * m.data.size(), wc.n());
                 k.ci.flops = 2.0 * n * nrows * ncols;
                 k.kernel = a_name;
-                k.kernel_b = std::string("gemmfq_") + wk::kGemmFqNames[static_cast<std::size_t>(fi)] + "_mxfp4";
+                k.kernel_b = std::string("gemmfq_") + sb.name + "_mxfp4";
                 k.fa = ga;
                 k.call = [&c, &wc, &x16, &y, w16, dq, ac, groups, rb, ncols, nrows, n](hip::Function f, std::uint64_t r) {
                     hip::launch(dq, {static_cast<unsigned>(std::min<std::uint64_t>((groups + 255) / 256, 65535)), 1, 1}, {256, 1, 1}, 0, c.s, wc.at(r),

@@ -566,6 +566,34 @@ void testGemm(Ctx& c) {
                             c.rep.add(cmpExact(name, y.down<float>(static_cast<std::size_t>(nt) * nr), accumulate ? ref1 : ref0, Kind::invariant));
                         }
                     }
+                    // v0252-8sbal: the grouped-raster prototypes (kt.h kFqProto) on the same grid: every output tile has
+                    // exactly one owner (1000 rows = 8 t2 / 4 c2 row tiles: full and partial groups of 4 / 8 / 16)
+                    for (const FqProto& pv : kFqProto) {
+                        const std::string kn = std::string("gemmfq_") + pv.name + "_mxfp4";
+                        const hip::Function f = c.fnOpt(kn);
+                        if (variant == 0 && nt == ns.front()) {
+                            Result r;
+                            r.kind = Kind::invariant;
+                            r.n = 1;
+                            r.name = kn + " (v0252-8sbal prototype) in the gfx1151 code object";
+                            r.pass = f != nullptr;
+                            if (!r.pass) r.note = "missing from the code object";
+                            r.mismatches = r.pass ? 0 : 1;
+                            c.rep.add(r);
+                        }
+                        if (!f) continue;
+                        const auto& g = wk::kGemmFqCfgs[static_cast<std::size_t>(pv.base)];
+                        for (int accumulate = 0; accumulate < 2; ++accumulate) {
+                            Buf y(static_cast<std::size_t>(nt) * nr * 4);
+                            if (accumulate) y.up(y0); else y.fill(0xff);
+                            hip::launch(f, {cdiv(nt, g.bn), cdiv(nr, g.bm), 1}, {static_cast<unsigned>(g.nth), 1, 1}, 0, c.s, w.p(), hm.row_bytes,
+                                        x16.p(), y.p(), nc, nr, nt, accumulate);
+                            c.sync();
+                            const std::string name = kn + " == dequant + gemm_c2_f16 (" + (variant ? "e 96..135" : "random") +
+                                                     ", 1000 rows, n=" + std::to_string(nt) + (accumulate ? ", accumulate)" : ")");
+                            c.rep.add(cmpExact(name, y.down<float>(static_cast<std::size_t>(nt) * nr), accumulate ? ref1 : ref0, Kind::invariant));
+                        }
+                    }
                 }
             }
         }
