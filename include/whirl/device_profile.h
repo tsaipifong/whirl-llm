@@ -132,8 +132,8 @@ inline constexpr Profile k_profile_gfx1151{
     // A/B job 94 (scratch/v0252_8sbal/gpu/8060s_e2e2_20261109-1021, re-judged rejudge_*): balance pp 8k / 32k Swift +1.14 /
     // +2.17 %, Ornith +2.50 / +3.39 %, 6 of 6 rounds each, decode hash identical. Exactly the measured arms (Ornith's t2
     // tail and Swift's unused c2 stay plain)
-    .fq_grp_dense = 0,  // RED STUB
-    .fq_grp_moe = 0,  // RED STUB
+    .fq_grp_dense = 2,
+    .fq_grp_moe = 1,
     .attn_dq4_dynamic_splits = true,
     .tune_fast = true,
     .tune_cache_suffix = "-gfx1151r3",  // r3: gemmfq in the dequant family (v0251-a3key; tests/model testTuneCacheKey)

@@ -121,10 +121,24 @@ std::string gemmsName(QType t, int cfg, bool f16_out) {
     return std::string(f16_out ? "gemmsh_c" : "gemms_c") + std::to_string(cfg) + "_" + sfx(t);
 }
 
-// RED STUB (v0252-8sbadopt test-first commit): the declared name function without the twin or the env parse
-GemmFqNames gemmFqNames(const std::optional<std::string>&) {
+GemmFqNames gemmFqNames(const std::optional<std::string>& fq_raster) {
     GemmFqNames r;
-    for (std::size_t fi = 0; fi < kGemmFqCfgs.size(); ++fi) r.slot[fi] = std::string("gemmfq_") + kGemmFqNames[fi] + "_mxfp4";
+    for (std::size_t fi = 0; fi < kGemmFqCfgs.size(); ++fi) {
+        r.slot[fi] = std::string("gemmfq_") + kGemmFqNames[fi] + "_mxfp4";
+        r.grp[fi] = fq_raster ? std::string() : std::string("gemmfq_") + kGemmFqNames[fi] + "g" + std::to_string(kGemmFqGrpG) + "_mxfp4";
+    }
+    if (!fq_raster) return r;
+    // the job-94 parse: tokens <slot>g<G> separated by ','; anything else ignored ("off": all product kernels)
+    const std::string& fr = *fq_raster;
+    std::size_t p = 0;
+    while (p <= fr.size()) {
+        const std::size_t q = std::min(fr.find(',', p), fr.size());
+        const std::string tok = fr.substr(p, q - p);
+        p = q + 1;
+        if (tok.size() < 4 || tok[2] != 'g') continue;
+        for (std::size_t fi = 0; fi < kGemmFqCfgs.size(); ++fi)
+            if (tok.compare(0, 2, kGemmFqNames[fi]) == 0) r.slot[fi] = "gemmfq_" + tok + "_mxfp4";
+    }
     return r;
 }
 
@@ -247,20 +261,17 @@ void loadMatmul(MatmulKernels& k, const Loader& L) {
         k.gemmhqh[i] = L.opt("gemmhqh_mxfp4");
         // v0251-a3port: the gfx1151 fused-dequant GEMMs (absent from the gfx1201 object: null there)
         for (std::size_t fi = 0; fi < kGemmFqCfgs.size(); ++fi) k.gemmfq[fi] = L.opt(std::string("gemmfq_") + kGemmFqNames[fi] + "_mxfp4");
-        // v0252-8sbal (development A/B, PLAN V1-53): WHIRL_FQ_RASTER=<slot>g<G>[,...] (e.g. "c2g8" or "c2g8,t2g8") loads the
-        // grouped-raster prototype gemmfq_<slot>g<G>_mxfp4 (kernels/gfx1151/gemm_fq.hip) into its base slot. Same tile, ABI
-        // and grid as the slot, bitwise-equal output; A and B then run ONE code object, so a speed A/B sees only the block
-        // order (the 11-09 e2e compared two objects whose layouts differed in ~650 functions). Unknown names: ignored.
-        if (const std::optional<std::string> fr = getEnv("FQ_RASTER")) {
-            std::size_t p = 0;
-            while (p <= fr->size()) {
-                const std::size_t q = std::min(fr->find(',', p), fr->size());
-                const std::string tok = fr->substr(p, q - p);
-                p = q + 1;
-                if (tok.size() < 4 || tok[2] != 'g') continue;
-                for (std::size_t fi = 0; fi < kGemmFqCfgs.size(); ++fi)
-                    if (tok.compare(0, 2, kGemmFqNames[fi]) == 0)
-                        if (const Function f = L.opt("gemmfq_" + tok + "_mxfp4")) k.gemmfq[fi] = f;
+        // v0252-8sbal / v0252-8sbadopt (PLAN V1-53): WHIRL_FQ_RASTER=<slot>g<G>[,...] (development A/B, e.g. "c2g8") loads
+        // that grouped-raster prototype into its slot and no twin; unset, the slots keep the product kernels and
+        // gemmfq_grp gets their g8 twins, which ops::chooseGemmF16 runs where GemmFlags::fq_grp has the slot's bit (the
+        // gfx1151 default per model class, device::Profile::fq_grp_dense / fq_grp_moe). Same tile, ABI, grid and bits
+        // either way; one code object, so the layout is the one built (gemmFqNames, kernels_abi.h).
+        {
+            const GemmFqNames fqn = gemmFqNames(getEnv("FQ_RASTER"));
+            for (std::size_t fi = 0; fi < kGemmFqCfgs.size(); ++fi) {
+                if (fqn.slot[fi] != std::string("gemmfq_") + kGemmFqNames[fi] + "_mxfp4")
+                    if (const Function f = L.opt(fqn.slot[fi])) k.gemmfq[fi] = f;
+                k.gemmfq_grp[fi] = fqn.grp[fi].empty() ? nullptr : L.opt(fqn.grp[fi]);
             }
         }
         for (int ci = 0; ci < static_cast<int>(kGemmCfgs.size()); ++ci) k.gemmc[ci][i] = L.opt(gemmcName(t, ci));

@@ -241,6 +241,9 @@ ops::GemmFlags Context::gemmFlags() const {
     f.fdq_min = fdq_min;
     // v0251-a3fix: the device's slot from GemmFlags::fdq_big_min rows; WHIRL_FDQ8S set -> that slot everywhere (-1)
     f.fdq_big = fdq >= 0 ? -1 : static_cast<int>(device::profile(arch).fdq_big);
+    // v0252-8sbadopt: the slots that run their grouped-raster twin, per model class (WHIRL_FDQ8S does not change it;
+    // WHIRL_FQ_RASTER set leaves MatmulKernels::gemmfq_grp empty, so the bits select nothing then)
+    f.fq_grp = cfg.moe ? device::profile(arch).fq_grp_moe : device::profile(arch).fq_grp_dense;
     f.gv_max = gvMax();
     return f;
 }
