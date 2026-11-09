@@ -697,15 +697,15 @@ void testDraftVocab() {
               !q::draftVocabDefaultFits(false, 151936),
           "draft vocab: default only for dense qwen35 with the 248320-token vocabulary");
     // v0252-n2 (N1): the front ends' default decision with each family's profile row: MoE (Ornith) takes the embedded
-    // subset on the R9700 only, the 8060S row is unchanged (full head); dense takes it on both
+    // subset on the R9700 (v0252-n2) and on the 8060S (v0252-8sdraft, PLAN V1-58); dense takes it on both
     {
         namespace dv = whirl::device;
         const bool r97 = dv::profile(whirl::hip::Arch::gfx1201).draft64k_moe, s8 = dv::profile(whirl::hip::Arch::gfx1151).draft64k_moe;
         check(q::draftVocabGate(c0, true, 248320, true, r97) == q::DraftVocabGate::subset &&
-                  q::draftVocabGate(c0, true, 248320, true, s8) == q::DraftVocabGate::not_fit &&
+                  q::draftVocabGate(c0, true, 248320, true, s8) == q::DraftVocabGate::subset &&
                   q::draftVocabGate(c0, false, 248320, true, r97) == q::DraftVocabGate::subset &&
                   q::draftVocabGate(c0, false, 248320, true, s8) == q::DraftVocabGate::subset,
-              "draft vocab: MoE default subset on gfx1201 only (gfx1151 MoE stays on the full head), dense on both (v0252-n2)");
+              "draft vocab: MoE default subset on gfx1201 and gfx1151, dense on both (v0252-n2, v0252-8sdraft)");
     }
     const std::vector<std::uint32_t> e64 = q::embeddedDraftVocab64k();
     bool asc = e64.size() == 65536;
