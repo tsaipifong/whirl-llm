@@ -12,6 +12,7 @@ mutsym    hip
 hdr       kernels/gemm_small_addr.h
 hdr       kernels/gfx1151/mx_inject.h
 hdr       kernels/gemv_hv_map.h
+hdr       kernels/gemv_hv_tune.h
 # test program
 testsrc   tests/unit/kernels_gemm_tests.cpp
 testhdr   tests/test_check.h
