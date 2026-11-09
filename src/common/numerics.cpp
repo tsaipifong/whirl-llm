@@ -366,9 +366,13 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     // object and the shape (else moe_logits_f32 + moe_topk).
     F.moe_rfuse = flagOr(e.moe_rfuse, t.moe);
     // v0252-c3port (feat026-moedec-p25 0ae5530: WHIRL_MOE_FUSE / WHIRL_GEMVH_F32, the envFlag rule): the fused precise MoE
-    // decode launch and gemvh on f32 input, default off on every card / model / mode (bitwise switches, class B; only the
-    // gfx1201 code object has the kernels: ops::chooseMoeFuse / ops::gemvhF32 keep the old path elsewhere)
-    F.moe_fuse = flagOr(e.moe_fuse, false);
+    // decode launch and gemvh on f32 input (bitwise switches, class B; only the gfx1201 code object has the kernels:
+    // ops::chooseMoeFuse / ops::gemvhF32 keep the old path elsewhere). v0252-c3bdef (PLAN V1-36; q7 9505 c3bgold=ok, q7 9507
+    // screen KEEP, Ornith precise decode plain +4.26 % / MTP +5.93 %, hash diffs 0): moe_fuse is the default on the gfx1201
+    // code object (R9700) for MoE models, every mode (ops::chooseMoeFuse takes it only on the precise f32 decode chain);
+    // off on dense models and on the gfx1151 one (8060S: no moe_gus*_f kernels, the 0.2.5.1 plan). gemvh_f32 stays off
+    // everywhere (C3 screen: Swift -10 %). WHIRL_MOE_FUSE=0 / any other value overrides it (the loader's envFlag rule).
+    F.moe_fuse = flagOr(e.moe_fuse, !t.gfx1151 && t.moe);
     F.gemvh_f32 = flagOr(e.gemvh_f32, false);
     // tune.cpp:852-861
     if (e.fp8) F.fp8_prefill = *e.fp8 != "0";

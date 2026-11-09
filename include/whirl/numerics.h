@@ -260,8 +260,9 @@ struct ItemState {
 // in bitsKey (C-4, conservative: the default change re-keys the gfx1201 KV tiers once).
 // v0252-c3port (feat026-moedec, gfx1201 precise decode): moe_fuse (WHIRL_MOE_FUSE: ops::chooseMoeFuse, the fused
 // routed + shared gate/up + SwiGLU launch) and gemvh_f32 (WHIRL_GEMVH_F32: ops::gemvhF32, gemvh on the f32 input):
-// bitwise switches, default off (until the R9700 A/B decides), the loader's envFlag rule ("0" off, any other value
-// on), class B (no +overrides label, never lossy); not in the S0b-2 dump (the launch log pins the kernels).
+// bitwise switches, the loader's envFlag rule ("0" off, any other value on), class B (no +overrides label, never lossy);
+// not in the S0b-2 dump (the launch log pins the kernels). v0252-c3bdef: moe_fuse defaults on for MoE models on the
+// gfx1201 code object (R9700 A/B q7 9507 KEEP), off on dense models and on gfx1151; gemvh_f32 default off everywhere.
 #define WHIRL_NUMERICS_FLAGS(X)                                  \
     X(B, use_graph, true, "use_graph")                           \
     X(B, no_fuse, false, "no_fuse")                              \
