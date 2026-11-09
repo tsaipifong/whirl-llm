@@ -1,4 +1,3 @@
-// RED STUB (v0252-8sbvalu test-first): every function returns 0
 // gfx1151 fused-dequant GEMM (gemm_fq.hip) load addressing of the v0252-8sbvalu levers (PLAN V1-53 N2).
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -25,17 +24,17 @@
 #endif
 
 // uniform (SGPR) parts: qs bytes of sub-block 0 of the chunk at k0, and its E8M0 byte
-FQA_HD uint32_t fq_q_soff(uint32_t k0) { return 0u; }
-FQA_HD uint32_t fq_e_soff(uint32_t k0) { return 0u; }
+FQA_HD uint32_t fq_q_soff(uint32_t k0) { return (k0 >> 8) * 136u + 16u * ((k0 & 255u) >> 5); }
+FQA_HD uint32_t fq_e_soff(uint32_t k0) { return (k0 >> 8) * 136u + ((k0 & 255u) >> 5); }
 // per-lane (VGPR) parts: local row lrow (0 = the block's first row), sub-block sb of the chunk, 8-byte half h of its qs
 FQA_HD uint32_t fq_q_voff(uint32_t lrow, uint32_t row_bytes, uint32_t sb, uint32_t h) {
-    return 0u;
+    return lrow * row_bytes + 8u + 16u * sb + 8u * h;
 }
-FQA_HD uint32_t fq_e_voff(uint32_t lrow, uint32_t row_bytes, uint32_t sb) { return 0u; }
+FQA_HD uint32_t fq_e_voff(uint32_t lrow, uint32_t row_bytes, uint32_t sb) { return lrow * row_bytes + sb; }
 // activations (f16): local token ltok, 8-value column group c8 of the chunk; the uniform part is k0 * 2
-FQA_HD uint32_t fq_b_voff(uint32_t ltok, uint32_t ncols, uint32_t c8) { return 0u; }
-FQA_HD uint32_t fq_b_soff(uint32_t k0) { return 0u; }
+FQA_HD uint32_t fq_b_voff(uint32_t ltok, uint32_t ncols, uint32_t c8) { return ltok * ncols * 2u + c8 * 16u; }
+FQA_HD uint32_t fq_b_soff(uint32_t k0) { return k0 * 2u; }
 // part p of a sub-block: which 8 qs bytes (0 = bytes 0-7, 1 = bytes 8-15), which nibble (0 low, 1 high), LDS column
-FQA_HD uint32_t fq_part_half(uint32_t p) { return 0u; }
-FQA_HD uint32_t fq_part_hi(uint32_t p) { return 0u; }
-FQA_HD uint32_t fq_part_col(uint32_t p) { return 0u; }
+FQA_HD uint32_t fq_part_half(uint32_t p) { return p & 1u; }
+FQA_HD uint32_t fq_part_hi(uint32_t p) { return p >> 1; }
+FQA_HD uint32_t fq_part_col(uint32_t p) { return 8u * p; }

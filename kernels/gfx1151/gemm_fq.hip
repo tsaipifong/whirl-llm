@@ -27,6 +27,7 @@
 
 #include "mx_inject.h"
 #include "fq_raster.h"  // v0252-8sbal: grouped-raster block order (GRP > 0 prototypes)
+#include "fq_addr.h"    // v0252-8sbvalu: buffer-load offsets of the VALU-lever prototypes (gemmfq_lever)
 
 // v0252-8sbal: the group width of the PRODUCT entry points (gemmfq_c2 / _t2). 0 = the shipped plain order; a screen
 // object is compiled with -DWHIRL_FQ_GRP_T2=<g> / -DWHIRL_FQ_GRP_C2=<g> (WHIRL_CODE_OBJECT A/B, bitwise-equal output).
@@ -213,3 +214,279 @@ GEMMFQ_PROTO(c2g4, 256, 128, 4, 4)
 GEMMFQ_PROTO(c2g8, 256, 128, 4, 8)
 #undef GEMMFQ_PROTO
 
+// ---------------------------------------------------------------------------------------------------------------------
+// v0252-8sbvalu (PLAN V1-53 N2): VALU-per-WMMA levers on the gemmfq tile, as separate prototypes (kt only: tests/kernels
+// kt.h kFqProto; not in kernels::kGemmFqNames). The shipped gemmfq_impl above is untouched; gemmfq_lever is a copy with
+// lever bits (progress\v0252-8sbvalu.PRIOR_ART.md; ISA of the shipped t2 loop: ~103 VALU per BK-64 step, ~40 of them
+// 64-bit address adds, two __syncthreads = vmcnt(0) + s_barrier + buffer_gl0_inv):
+//   FQ_OPT_LBAR  1  LDS-only barrier: s_waitcnt lgkmcnt(0) + s_barrier (hipfire XL_BARRIER; CK block_sync_lds)
+//   FQ_OPT_SLOAD 2  buffer loads: per-lane offset in voffset (fixed for the loop), the k0 part in soffset (fq_addr.h;
+//                   hipfire qwen4_gemm_mqv2_wmma_gfx11_bt.hip:849-856, resource word 3 0x31004000)
+//   FQ_OPT_PP    4  one barrier per K step: two LDS buffers (BK 32 only: 2 x (BM + BN) x 40 x 2 B <= 64 KB)
+// BK 32 / NTH 512 tiles split a 32-value sub-block over LPS = 2 or 4 lanes (parts of 8 values, fq_addr.h fq_part_*).
+// Bitwise == gemmfq_impl of the same BM / BN: the same f16 weight values in LDS, the same WMMA chain over k per output.
+#define FQ_OPT_LBAR 1
+#define FQ_OPT_SLOAD 2
+#define FQ_OPT_PP 4
+typedef unsigned int fq_v4u __attribute__((ext_vector_type(4)));
+typedef unsigned int fq_v2u __attribute__((ext_vector_type(2)));
+#define FQ_RSRC_W3 0x31004000
+template <int N>
+struct FqBuf {
+    static constexpr int value = N;
+};
+
+__device__ __forceinline__ void fq_lds_barrier() { asm volatile("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory"); }
+// the 8 qs bytes q of one half of a sub-block -> its low-nibble part (lo) and high-nibble part (hi): fq_decode_sb's
+// o[h] and o[h + 2] for half h (same calls -> same bits)
+__device__ __forceinline__ void fq_decode_half(uint2 q, uint32_t e, half8 *lo, half8 *hi) {
+    if (mxi_fast_ok(e)) {
+        const uint32_t sb = mxi_scale_bits(e);
+        const half2_t s2 = __builtin_bit_cast(half2_t, sb | (sb << 16));
+        *lo = fq_inj8(mxi_hib_lo(q.x), mxi_hib_lo(q.y), s2);
+        *hi = fq_inj8(mxi_hib_hi(q.x), mxi_hib_hi(q.y), s2);
+    } else {
+        const _Float16 dl = (_Float16)e8m0_half(e);
+        *lo = fq_lut8(q.x & 0x0F0F0F0Fu, q.y & 0x0F0F0F0Fu, dl);
+        *hi = fq_lut8((q.x >> 4) & 0x0F0F0F0Fu, (q.y >> 4) & 0x0F0F0F0Fu, dl);
+    }
+}
+__device__ __forceinline__ half8 fq_decode_part(uint2 q, uint32_t e, uint32_t hi) {
+    if (mxi_fast_ok(e)) {
+        const uint32_t sb = mxi_scale_bits(e);
+        const half2_t s2 = __builtin_bit_cast(half2_t, sb | (sb << 16));
+        return hi ? fq_inj8(mxi_hib_hi(q.x), mxi_hib_hi(q.y), s2) : fq_inj8(mxi_hib_lo(q.x), mxi_hib_lo(q.y), s2);
+    }
+    const _Float16 dl = (_Float16)e8m0_half(e);
+    return hi ? fq_lut8((q.x >> 4) & 0x0F0F0F0Fu, (q.y >> 4) & 0x0F0F0F0Fu, dl) : fq_lut8(q.x & 0x0F0F0F0Fu, q.y & 0x0F0F0F0Fu, dl);
+}
+
+template <int BM, int BN, int WAVES_M, int GRP, int OPT, int NTH, int BK>
+__device__ void gemmfq_lever(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
+                             float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {
+    constexpr bool LBAR = (OPT & FQ_OPT_LBAR) != 0, SLOAD = (OPT & FQ_OPT_SLOAD) != 0, PP = (OPT & FQ_OPT_PP) != 0;
+    constexpr int WAVES_N = NTH / 32 / WAVES_M;
+    constexpr int TM = BM / 16 / WAVES_M, TN = BN / 16 / WAVES_N;
+    constexpr int LD = BK + 8;
+    constexpr int GPR = BK / 8;
+    constexpr int SBR = BK / 32;                    // 32-value sub-blocks per row per K chunk
+    constexpr int NSB = BM * SBR;                   // sub-blocks per K chunk
+    constexpr int LPS = NTH > NSB ? NTH / NSB : 1;  // lanes per sub-block (1, 2 or 4)
+    constexpr int AN = LPS == 1 ? NSB / NTH : 1;    // sub-blocks (or parts) per lane
+    constexpr int ND = LPS == 1 ? 4 * AN : 4 / LPS; // decoded half8 per lane per K chunk
+    constexpr int B_PER = BN * GPR / NTH;
+    constexpr int NBUF = PP ? 2 : 1;
+    static_assert(BK == 32 || BK == 64, "BK");
+    static_assert(LPS == 1 || LPS == 2 || LPS == 4, "lanes per sub-block");
+    static_assert(LPS == 1 ? (NSB % NTH == 0 && AN >= 1) : (NTH % NSB == 0), "A slots");
+    static_assert(B_PER >= 1 && BN * GPR % NTH == 0, "B slots");
+    static_assert(TM >= 1 && TN >= 1 && BM == TM * 16 * WAVES_M && BN == TN * 16 * WAVES_N, "wave tiles");
+    static_assert(NBUF * (BM + BN) * LD * 2 <= 65536, "LDS per workgroup");
+    static_assert(!PP || BK == 32, "ping-pong only at BK 32 (BK 64 needs > 64 KB)");
+    __shared__ _Float16 As[NBUF][BM][LD];
+    __shared__ _Float16 Bs[NBUF][BN][LD];
+
+    const int tid = threadIdx.x;
+    const int lane = tid % WARP, wid = tid / WARP;
+    const int wm = wid % WAVES_M, wn = wid / WAVES_M;
+    int m0, t0;
+    if constexpr (GRP == 0) {
+        m0 = blockIdx.y * BM;
+        t0 = blockIdx.x * BN;
+    } else {
+        unsigned rt, tt;
+        fq_group_tile(blockIdx.x, blockIdx.y, gridDim.x, gridDim.y, GRP, &rt, &tt);
+        m0 = static_cast<int>(rt) * BM;
+        t0 = static_cast<int>(tt) * BN;
+    }
+
+    float8 acc[TM][TN];
+#pragma unroll
+    for (int i = 0; i < TM; ++i)
+#pragma unroll
+        for (int j = 0; j < TN; ++j) acc[i][j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
+
+    // A slots: LPS 1: slot s = tid + e * NTH = sub-block s (row s / SBR, sb s % SBR) - the shipped mapping at BK 64;
+    // LPS 2 / 4: sub-block tid / LPS, its 8-byte half tid & 1 and (LPS 4) the nibble (tid >> 1) & 1 (part p = tid & 3)
+    int a_row[AN], a_sb[AN];
+#pragma unroll
+    for (int e = 0; e < AN; ++e) {
+        const int q = LPS == 1 ? tid + e * NTH : tid / LPS;
+        a_row[e] = q / SBR;
+        a_sb[e] = q % SBR;
+    }
+    const uint32_t a_half = LPS == 1 ? 0u : static_cast<uint32_t>(tid & 1);
+    const uint32_t a_hi = LPS == 4 ? static_cast<uint32_t>((tid >> 1) & 1) : 0u;
+    const uint8_t *arow[AN];
+    uint32_t voq[AN], voe[AN];
+    const _Float16 *brow[B_PER];
+    uint32_t vob[B_PER];
+    // block bases (uniform, SALU): the offsets inside the block's rows / tokens stay far below 2^31 (unused without SLOAD)
+    // (the resources are built inside fetch from these uniform pointers: no buffer-resource value is captured by a lambda)
+    const uint8_t *const wbase = W + (size_t)m0 * row_bytes;
+    const _Float16 *const xbase = X + (size_t)t0 * ncols;
+#pragma unroll
+    for (int e = 0; e < AN; ++e) {  // rows past the end are clamped (their outputs are never stored), as in gemmfq_impl
+        const uint32_t lrow = static_cast<uint32_t>(min(m0 + a_row[e], nrows - 1) - m0);
+        voq[e] = fq_q_voff(SLOAD ? lrow : 0u, static_cast<uint32_t>(row_bytes), static_cast<uint32_t>(a_sb[e]), a_half);
+        voe[e] = fq_e_voff(SLOAD ? lrow : 0u, static_cast<uint32_t>(row_bytes), static_cast<uint32_t>(a_sb[e]));
+        arow[e] = W + (size_t)(m0 + static_cast<int>(lrow)) * row_bytes;
+    }
+#pragma unroll
+    for (int e = 0; e < B_PER; ++e) {
+        const int i = tid + e * NTH;
+        const uint32_t ltok = static_cast<uint32_t>(min(t0 + i / GPR, n_tok - 1) - t0);
+        vob[e] = fq_b_voff(ltok, static_cast<uint32_t>(ncols), static_cast<uint32_t>(i % GPR));
+        brow[e] = X + (size_t)(t0 + static_cast<int>(ltok)) * ncols + (i % GPR) * 8;
+    }
+    uint2 qa[AN], qb[AN];
+    uint32_t qe[AN];
+    half8 rb[B_PER];
+    half8 da[ND];
+    auto fetch = [&](int k0) {
+        const uint32_t sq = fq_q_soff(static_cast<uint32_t>(k0)), se = fq_e_soff(static_cast<uint32_t>(k0));
+        const __amdgpu_buffer_rsrc_t rw = __builtin_amdgcn_make_buffer_rsrc((void *)wbase, (short)0, 0x7FFFFFFF, FQ_RSRC_W3);
+        const __amdgpu_buffer_rsrc_t rx = __builtin_amdgcn_make_buffer_rsrc((void *)xbase, (short)0, 0x7FFFFFFF, FQ_RSRC_W3);
+#pragma unroll
+        for (int e = 0; e < AN; ++e) {
+            if constexpr (SLOAD) {
+                if constexpr (LPS == 1) {
+                    const fq_v4u v = __builtin_amdgcn_raw_buffer_load_b128(rw, static_cast<int>(voq[e]), static_cast<int>(sq), 0);
+                    qa[e] = make_uint2(v[0], v[1]);
+                    qb[e] = make_uint2(v[2], v[3]);
+                } else {
+                    const fq_v2u v = __builtin_amdgcn_raw_buffer_load_b64(rw, static_cast<int>(voq[e]), static_cast<int>(sq), 0);
+                    qa[e] = make_uint2(v[0], v[1]);
+                }
+                qe[e] = __builtin_amdgcn_raw_buffer_load_b8(rw, static_cast<int>(voe[e]), static_cast<int>(se), 0);
+            } else {
+                const uint8_t *q = arow[e] + sq + voq[e];
+                qa[e] = *(const uint2 *)q;
+                if constexpr (LPS == 1) qb[e] = *(const uint2 *)(q + 8);
+                qe[e] = arow[e][se + voe[e]];
+            }
+        }
+#pragma unroll
+        for (int e = 0; e < B_PER; ++e) {
+            if constexpr (SLOAD) {
+                const fq_v4u v = __builtin_amdgcn_raw_buffer_load_b128(rx, static_cast<int>(vob[e]),
+                                                                       static_cast<int>(fq_b_soff(static_cast<uint32_t>(k0))), 0);
+                rb[e] = __builtin_bit_cast(half8, v);
+            } else {
+                rb[e] = *(const half8 *)(brow[e] + k0);
+            }
+        }
+    };
+    auto decode = [&]() {
+        if constexpr (LPS == 1) {
+#pragma unroll
+            for (int e = 0; e < AN; ++e) fq_decode_sb(qa[e], qb[e], qe[e], &da[4 * e]);
+        } else if constexpr (LPS == 2) {
+            fq_decode_half(qa[0], qe[0], &da[0], &da[1]);
+        } else {
+            da[0] = fq_decode_part(qa[0], qe[0], a_hi);
+        }
+    };
+    auto store = [&](auto bufc) {
+        constexpr int buf = decltype(bufc)::value;
+#pragma unroll
+        for (int e = 0; e < AN; ++e) {
+            _Float16 *dst = &As[buf][a_row[e]][a_sb[e] * 32];
+            if constexpr (LPS == 1) {
+#pragma unroll
+                for (int j = 0; j < 4; ++j) *(half8 *)(dst + j * 8) = da[4 * e + j];
+            } else if constexpr (LPS == 2) {  // parts h (low nibbles) and h + 2 (high nibbles): columns 8h and 16 + 8h
+                *(half8 *)(dst + 8 * a_half) = da[0];
+                *(half8 *)(dst + 16 + 8 * a_half) = da[1];
+            } else {  // part p = 2 * hi + half: column 8p
+                *(half8 *)(dst + 16 * a_hi + 8 * a_half) = da[0];
+            }
+        }
+#pragma unroll
+        for (int e = 0; e < B_PER; ++e) {
+            const int i = tid + e * NTH;
+            *(half8 *)&Bs[buf][i / GPR][(i % GPR) * 8] = rb[e];
+        }
+    };
+    auto bar = [&]() {
+        if constexpr (LBAR) fq_lds_barrier();
+        else __syncthreads();
+    };
+    auto mma = [&](auto bufc) {
+        constexpr int buf = decltype(bufc)::value;
+#pragma unroll
+        for (int kk = 0; kk < BK; kk += 16) {
+            half16 a[TM], b[TN];
+#pragma unroll
+            for (int i = 0; i < TM; ++i) a[i] = ld_frag16(&As[buf][(wm * TM + i) * 16 + lane % 16][kk]);
+#pragma unroll
+            for (int j = 0; j < TN; ++j) b[j] = ld_frag16(&Bs[buf][(wn * TN + j) * 16 + lane % 16][kk]);
+#pragma unroll
+            for (int i = 0; i < TM; ++i)
+#pragma unroll
+                for (int j = 0; j < TN; ++j) acc[i][j] = WMMA16(a[i], b[j], acc[i][j]);
+        }
+    };
+
+    fetch(0);
+    if constexpr (!PP) {  // the shipped schedule: decode, barrier, store, barrier, next fetch, WMMAs
+        for (int k0 = 0; k0 < ncols; k0 += BK) {
+            decode();
+            bar();
+            store(FqBuf<0>{});
+            bar();
+            if (k0 + BK < ncols) fetch(k0 + BK);
+            mma(FqBuf<0>{});
+        }
+    } else {  // one barrier per K step; ncols % 256 == 0 -> an even number of BK-32 steps: buffers alternate 0, 1
+        decode();
+        store(FqBuf<0>{});
+        bar();
+        for (int k0 = 0; k0 < ncols; k0 += 2 * BK) {
+            fetch(k0 + BK);  // k0 + BK < ncols always (even step count)
+            mma(FqBuf<0>{});
+            decode();
+            store(FqBuf<1>{});  // buffer 1 was last read in the previous step, before that step's barrier
+            bar();
+            const bool more = k0 + 2 * BK < ncols;
+            if (more) fetch(k0 + 2 * BK);
+            mma(FqBuf<1>{});
+            if (more) {
+                decode();
+                store(FqBuf<0>{});  // buffer 0 was read by mma above; every wave passed the barrier after its stores
+            }
+            bar();
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < TM; ++i) {
+#pragma unroll
+        for (int j = 0; j < TN; ++j) {
+            const int t = t0 + (wn * TN + j) * 16 + lane % 16;
+            if (t >= n_tok) continue;
+#pragma unroll
+            for (int v = 0; v < 8; ++v) {
+                const int row = m0 + (wm * TM + i) * 16 + CROW(lane, v);
+                if (row < nrows) {
+                    float *dst = Y + (size_t)t * nrows + row;
+                    *dst = accumulate ? *dst + acc[i][j][v] : acc[i][j][v];
+                }
+            }
+        }
+    }
+}
+
+// name, BM, BN, WAVES_M, GRP, OPT, NTH, BK (same ABI as gemmfq_t2; grid x = cdiv(n, BN), y = cdiv(rows, BM), NTH threads)
+#define GEMMFQ_LEVER(name_, bm_, bn_, wm_, g_, opt_, nth_, bk_)                                                          \
+    extern "C" __global__ void __launch_bounds__(nth_) gemmfq_##name_##_mxfp4(const uint8_t *W, uint64_t row_bytes,  \
+        const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) {                               \
+        gemmfq_lever<bm_, bn_, wm_, g_, opt_, nth_, bk_>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);        \
+    }
+GEMMFQ_LEVER(t2l, 128, 256, 2, 0, FQ_OPT_LBAR, 256, 64)
+GEMMFQ_LEVER(t2s, 128, 256, 2, 0, FQ_OPT_SLOAD, 256, 64)
+GEMMFQ_LEVER(t2ls, 128, 256, 2, 0, FQ_OPT_LBAR | FQ_OPT_SLOAD, 256, 64)
+GEMMFQ_LEVER(t2lsp, 128, 256, 2, 0, FQ_OPT_LBAR | FQ_OPT_SLOAD | FQ_OPT_PP, 256, 32)
+GEMMFQ_LEVER(t2g8ls, 128, 256, 2, 8, FQ_OPT_LBAR | FQ_OPT_SLOAD, 256, 64)
+GEMMFQ_LEVER(c2g8ls, 256, 128, 4, 8, FQ_OPT_LBAR | FQ_OPT_SLOAD, 256, 64)
+GEMMFQ_LEVER(w5ls, 128, 512, 2, 0, FQ_OPT_LBAR | FQ_OPT_SLOAD, 512, 32)
+#undef GEMMFQ_LEVER
