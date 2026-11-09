@@ -240,6 +240,22 @@ void loadMatmul(MatmulKernels& k, const Loader& L) {
         k.gemmhqh[i] = L.opt("gemmhqh_mxfp4");
         // v0251-a3port: the gfx1151 fused-dequant GEMMs (absent from the gfx1201 object: null there)
         for (std::size_t fi = 0; fi < kGemmFqCfgs.size(); ++fi) k.gemmfq[fi] = L.opt(std::string("gemmfq_") + kGemmFqNames[fi] + "_mxfp4");
+        // v0252-8sbal (development A/B, PLAN V1-53): WHIRL_FQ_RASTER=<slot>g<G>[,...] (e.g. "c2g8" or "c2g8,t2g8") loads the
+        // grouped-raster prototype gemmfq_<slot>g<G>_mxfp4 (kernels/gfx1151/gemm_fq.hip) into its base slot. Same tile, ABI
+        // and grid as the slot, bitwise-equal output; A and B then run ONE code object, so a speed A/B sees only the block
+        // order (the 11-09 e2e compared two objects whose layouts differed in ~650 functions). Unknown names: ignored.
+        if (const std::optional<std::string> fr = getEnv("FQ_RASTER")) {
+            std::size_t p = 0;
+            while (p <= fr->size()) {
+                const std::size_t q = std::min(fr->find(',', p), fr->size());
+                const std::string tok = fr->substr(p, q - p);
+                p = q + 1;
+                if (tok.size() < 4 || tok[2] != 'g') continue;
+                for (std::size_t fi = 0; fi < kGemmFqCfgs.size(); ++fi)
+                    if (tok.compare(0, 2, kGemmFqNames[fi]) == 0)
+                        if (const Function f = L.opt("gemmfq_" + tok + "_mxfp4")) k.gemmfq[fi] = f;
+            }
+        }
         for (int ci = 0; ci < static_cast<int>(kGemmCfgs.size()); ++ci) k.gemmc[ci][i] = L.opt(gemmcName(t, ci));
         k.gemvq[i] = L.opt("gemvq_mxfp4");
         for (int nt = 2; nt <= kMaxSmallBatch; ++nt) {

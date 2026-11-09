@@ -38,6 +38,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_FLOAT_GEMV",  // src/common/numerics.cpp
     "WHIRL_FP8",  // src/common/numerics.cpp
     "WHIRL_FP8_MASK",  // src/common/numerics.cpp
+    "WHIRL_FQ_RASTER",  // src/kernels_host/kernels_abi.cpp (v0252-8sbal: gemmfq grouped-raster prototype per slot; bitwise-equal, hashed like FDQ8S)
     "WHIRL_G8T",  // src/common/numerics.cpp
     "WHIRL_GDN_BA",  // src/common/numerics.cpp
     "WHIRL_GDN_IN2",  // src/common/numerics.cpp
