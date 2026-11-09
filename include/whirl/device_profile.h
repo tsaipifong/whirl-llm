@@ -141,8 +141,11 @@ inline constexpr Profile k_profile_gfx1151{
     .gdn_strix = true,
     .numerics_8060s = true,
     .mtp_costly_verify_rows = true,
-    // off since the 0.2.2 freeze (9a58324); FAST-8S-1 item 2 measured +2.5..+3.7 % chat here, not part of 0.2.5.2
-    .draft64k_moe = false,
+    // v0252-8sdraft (PLAN V1-58): on again for 0.2.5.2 (8060S balance / fast are in scope, ADR-0013); off since the 0.2.2
+    // freeze (9a58324), FAST-8S-1 item 2 (b2a3a9b) measured chat +2.5..+3.7 % here in all three modes. Drafts only (MoE
+    // relaxacc is off in every mode: exact acceptance), so the output is unchanged; kept only on the 8060S A/B
+    // (scratch\v0252_8sdraft\s8draft_gpu.ps1 -Part s, rule in its header)
+    .draft64k_moe = true,
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = false,  // v0252-n10: 0.2.5.2 does not touch the Radeon 8060S (the 0.2.5.1 forward end stays)

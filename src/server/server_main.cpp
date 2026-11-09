@@ -193,7 +193,7 @@ void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::D
         case qwen35::DraftVocabGate::not_fit:
             if (dv.by_default)
                 logI("draft head: full vocabulary (the embedded 64k subset is for qwen35 models with a {}-token vocabulary: dense ones, and "
-                     "MoE ones on the R9700)",
+                     "MoE ones on the R9700 and the Radeon 8060S)",
                      qwen35::draft_vocab_embedded_n_vocab);
             else
                 logW("WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a {}-token vocabulary (model: {})",
