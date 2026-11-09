@@ -247,10 +247,23 @@ inline unsigned cdiv(std::uint64_t a, std::uint64_t b) { return static_cast<unsi
 // tile, same WMMA chain per output -> bitwise == the base slot (kt gemm checks it); the same ABI and grid as the base
 // slot (x = token blocks, y = row blocks). Not in the product tables (kernels::kGemmFqNames): kt only, until the
 // screen picks one. base = index into kernels::kGemmFqCfgs (0 c2, 1 t2).
+// v0252-8sbvalu (PLAN V1-53 N2): the VALU-lever prototypes (gemm_fq.hip OPT bits; progress\v0252-8sbvalu.PRIOR_ART.md):
+// suffix l = LDS-only barrier (s_waitcnt lgkmcnt(0) + s_barrier, no buffer_gl0_inv), s = buffer loads with the per-lane
+// offset in voffset and the k0 part in soffset (fq_addr.h), p = one-barrier LDS ping-pong at BK 32. w5ls = a 128 x 512
+// tile, 512 threads, BK 32 (half the decode per WMMA), its own geometry (bm / bn / nth != 0 override the base slot's).
+// All bitwise == the base slot (same WMMA chain per output). Names with another geometry never start with a slot name.
 struct FqProto {
     const char* name;
     int base;
+    int bm = 0, bn = 0, nth = 0;  // 0 = the base slot's kGemmFqCfgs entry
 };
-inline constexpr FqProto kFqProto[] = {{"t2g4", 1}, {"t2g8", 1}, {"t2g16", 1}, {"c2g4", 0}, {"c2g8", 0}};
+inline constexpr FqProto kFqProto[] = {{"t2g4", 1},   {"t2g8", 1},   {"t2g16", 1},  {"c2g4", 0},   {"c2g8", 0},
+                                       {"t2l", 1},    {"t2s", 1},    {"t2ls", 1},   {"t2lsp", 1},  {"t2g8ls", 1},
+                                       {"c2g8ls", 0}, {"w5ls", 1, 128, 512, 512}};
+// the launch geometry of a prototype (grid x = cdiv(n, bn), y = cdiv(rows, bm), nth threads)
+inline wk::GemmCfg fqProtoCfg(const FqProto& p) {
+    const wk::GemmCfg b = wk::kGemmFqCfgs[static_cast<std::size_t>(p.base)];
+    return p.bm ? wk::GemmCfg{p.bm, p.bn, p.nth} : b;
+}
 
 }  // namespace kt

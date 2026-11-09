@@ -582,7 +582,7 @@ void testGemm(Ctx& c) {
                             c.rep.add(r);
                         }
                         if (!f) continue;
-                        const auto& g = wk::kGemmFqCfgs[static_cast<std::size_t>(pv.base)];
+                        const wk::GemmCfg g = fqProtoCfg(pv);  // v0252-8sbvalu: w5ls has its own geometry
                         for (int accumulate = 0; accumulate < 2; ++accumulate) {
                             Buf y(static_cast<std::size_t>(nt) * nr * 4);
                             if (accumulate) y.up(y0); else y.fill(0xff);
