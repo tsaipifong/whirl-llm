@@ -218,6 +218,7 @@ void testAttnDq4(Ctx& c);  // "attndq4": attn_dq4 at 256 splits / contexts up to
 void testAttnKgLong(Ctx& c);
 void testGemvh(Ctx& c);   // "gemvh": bitwise sweep of precise-decode gemvh/gemvh2
 void benchGemvh(Ctx& c);  // "gemvhbench": timing only
+void testGemvhv(Ctx& c);  // "gemvhv": bitwise sweep of gfx1201 gemvh candidates from WHIRL_KT_GEMVH_HSACO (on request)
 void benchAttn(Ctx& c);  // "attnbench": timing only, run with --only attnbench
 void testAttnWs4(Ctx& c);   // "ws4": gfx1151 attn_ws4 bitwise == attn_wsplit1
 void benchAttnWs4(Ctx& c);  // "ws4bench": timing only, on request
@@ -228,6 +229,9 @@ void testVision(Ctx& c);  // "vision": encoder kernels (own code object) vs CPU
 void testMoe(Ctx& c);
 void testMoeMx(Ctx& c);
 void testMoeF(Ctx& c);  // "moef": precise MoE decode experts moe_gu_f_* / moe_down_f_*
+// v0252-c3port "moefuse" (test_moe_fused.cpp): gfx1201 fused precise MoE decode moe_gus*_f_mxfp4 == moe_gu_f + silu_mul and
+// f32_to_f16 + gemvh x2 + silu_mul + f32_to_f16, gemvhf_<T> == f32_to_f16 + gemvh_<T> (bitwise); presence rows per arch
+void testMoeFused(Ctx& c);
 // v0251-a11port (called by testMoeMx, family "moemx"): fused router moe_router_fused_i* == moe_logits_f32 + moe_topk
 // (bitwise) and vs CPU, presence rows (every code object + host table; v0252-c5port adds gfx1201) (test_moe_router.cpp)
 void testMoeRouter(Ctx& c);

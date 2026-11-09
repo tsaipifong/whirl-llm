@@ -36,6 +36,8 @@
    "paths": [
     "kernels/gemm_*.hip",
     "kernels/gemv_h.hip",
+    "kernels/gemv_hv.hip",
+    "kernels/gemv_hf.hip",
     "kernels/gfx1151/gemm_*.hip",
     "kernels/gfx1151/gemv_h.hip"
    ],

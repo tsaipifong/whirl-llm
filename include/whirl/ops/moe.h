@@ -120,6 +120,34 @@ struct MoePlan {
 // silu_mul_x8h: the fp8 path's activation kernel (MiscKernels; null: no fp8 path). v0251-a7pol: the moep flags apply only
 // when moepWide(n, K, R) (else as moep_gu = moep_dn = -1, moep_comb = 0); COMB 3 / 4 need moep_comb_ok >= f16, COMB 5 atomic
 MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, Function silu_mul_x8h);
+// v0252-c3port (feat026-moedec L1 + L3, port of feat026-moedec-p25 0ae5530 to gfx1201 only): the fused precise decode
+// launch moe_gus*_f_mxfp4 (kernels/moe_fused.hip) - routed gate/up + SwiGLU and the shared expert's gate/up gemvh tiles
+// + SwiGLU (f16 output for the shared down gemvh) in one launch, bitwise the chain moe_gu_f + silu_mul and f32_to_f16 +
+// gemvh x2 + silu_mul + f32_to_f16 it replaces. Taken only where that chain would run with exactly those kernels
+// (Flags::moe_fuse, WHIRL_MOE_FUSE, default off until the GPU A/B). Only the gfx1201 code object has the kernels: on the
+// gfx1151 table the plan is never used (the 0.2.5.1 path).
+struct MoeFuseProblem {
+    std::uint32_t n = 0, C = 0, F = 0, K = 0;  // token rows, n_embd, expert FFN width, experts per token
+    GgmlType gate_ty = GgmlType::f32, up_ty = GgmlType::f32;
+    std::uint64_t gate_rb = 0, up_rb = 0;
+    bool shared = false;  // the layer has a shared expert (sh_gate)
+    GgmlType sg_ty = GgmlType::f32, su_ty = GgmlType::f32;
+    std::uint64_t sg_rb = 0, su_rb = 0;
+    std::uint32_t sg_nrows = 0, su_nrows = 0, sg_ncols = 0, su_ncols = 0;
+    // the old chain's shared gate / up / down each take matmul's f16 path, gate / up on the gemvh GEMV with one block per
+    // 16 rows (Context: chooseMatmulPath + chooseGemmF16, no grid cap) - the bits the fused tiles and the plain
+    // gemmF16 of the down matrix reproduce; and the shared rows are n_ff (the ffn_g / x16 scratch size)
+    bool shared_gemvh = false;
+};
+struct MoeFusePlan {
+    bool use = false;
+    Function f = nullptr;
+    Dim3 grid{};
+    std::uint32_t nsb = 0, nrb = 0;  // shared blocks (4 tile pairs each), routed blocks per pair (4 rows each)
+    const char* why = "";            // why not taken (diagnostics / tests)
+};
+// pl: chooseMoe's plan of the same batch (the fused launch replaces pl.gu + silu_mul; pl.down still runs after it)
+MoeFusePlan chooseMoeFuse(const MoeFuseProblem& p, bool enabled, const MoePlan& pl, const kernels::MoeKernels& k);
 // token tile: 32 when experts average under ~48 tokens (short prompts), else 64
 std::uint32_t moeTile(std::uint32_t n, std::uint32_t K, std::uint32_t R);
 

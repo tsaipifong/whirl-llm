@@ -48,6 +48,9 @@
 #include "moe_f.hip"               // precise MoE decode experts (f32 activations)
 #include "attn_kgv.hip"            // prefill attention candidates attn_kgv / attn_kgk (v0252-c1port C1; LAST: no existing kernel moves)
 #include "moe_router.hip"          // fused router logits + top-k (v0252-c5port: the R9700 default; last: no kernel moves)
+#include "gemv_hv.hip"             // precise gemvh candidates + tune table (v0252-c2port; LAST: no existing kernel moves)
+#include "gemv_hf.hip"             // precise gemvh on f32 input + the gemvh tile (v0252-c3port; after the shipped set)
+#include "moe_fused.hip"           // precise MoE decode: routed + shared gate/up + SwiGLU in one launch (v0252-c3port; LAST)
 #endif
 
 #if defined(__gfx1151__)

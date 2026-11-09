@@ -89,6 +89,8 @@ struct EnvValues {
     Raw moe_fp8, moe_mxw, moe_wide, moe_rbf, moep_gu, moep_dn, moep_comb, moe_rfuse;
     // v0252-c1port (feat026-attnkg97 / -97k): attn_kgvar (WHIRL_ATTN_KGVAR, the gfx1201 f16 attn_kg variant; class B)
     Raw attn_kgvar;
+    // v0252-c3port (feat026-moedec): moe_fuse / gemvh_f32 (WHIRL_MOE_FUSE / WHIRL_GEMVH_F32)
+    Raw moe_fuse, gemvh_f32;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -96,7 +98,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 34;
+    static constexpr std::size_t n_fields = 36;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -256,6 +258,10 @@ struct ItemState {
 // variant per NP x KV path), 0 on the gfx1151 one (no attn_kg there); WHIRL_ATTN_KGVAR = "auto" or a whole decimal 0 / 1 /
 // 3 (parseKgVar) overrides it in every mode; any other value keeps the default and Plan::ignored carries one note. Still
 // in bitsKey (C-4, conservative: the default change re-keys the gfx1201 KV tiers once).
+// v0252-c3port (feat026-moedec, gfx1201 precise decode): moe_fuse (WHIRL_MOE_FUSE: ops::chooseMoeFuse, the fused
+// routed + shared gate/up + SwiGLU launch) and gemvh_f32 (WHIRL_GEMVH_F32: ops::gemvhF32, gemvh on the f32 input):
+// bitwise switches, default off (until the R9700 A/B decides), the loader's envFlag rule ("0" off, any other value
+// on), class B (no +overrides label, never lossy); not in the S0b-2 dump (the launch log pins the kernels).
 #define WHIRL_NUMERICS_FLAGS(X)                                  \
     X(B, use_graph, true, "use_graph")                           \
     X(B, no_fuse, false, "no_fuse")                              \
@@ -305,6 +311,8 @@ struct ItemState {
     X(U, moep_dn, 0, "")                                         \
     X(U, moep_comb, 0, "")                                       \
     X(B, moe_rfuse, false, "")                                   \
+    X(B, moe_fuse, false, "")                                    \
+    X(B, gemvh_f32, false, "")                                   \
     X(B, gv_group, true, "gv_group")                             \
     X(U, gv_nmax, 0, "gv_nmax")                                  \
     X(B, gdn_v0, false, "")

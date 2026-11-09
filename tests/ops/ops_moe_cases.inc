@@ -151,6 +151,130 @@ void testOpsMoeRouter(ops::MoeProblem p, const kn::KernelTable& k97, const kn::K
     }
 }
 
+// v0252-c3port (feat026-moedec-p25 0ae5530 testMoeFuse, gfx1201 only): the fused precise decode MoE launch
+// (ops::chooseMoeFuse) - taken only for the precise f32 decode experts with one moe_gu_f_mxfp4 gate+up launch, MXFP4
+// routed and shared matrices on the gemvh path, the shapes the kernel needs (F % 4, n_embd % 256, shared rows % 64),
+// 1..32 rows, and only when enabled; grid = shared blocks + routed blocks. Per-arch selector (DISCOVERY 2e C3): with the
+// gfx1151 kernel table (no moe_gus*_f) the plan is never used, so the 8060S keeps the 0.2.5.1 chain; the plans chooseMoe
+// itself gives (precise decode on both tables, balance q8, prefill) are the inputs. Fails before the port (stub).
+void testOpsMoeFuse(ops::MoeProblem mp, const kn::KernelTable& k97, const kn::KernelTable& k8) {
+    kn::KernelTable k = k97;  // the gfx1201 table with the port's kernels (kernels_abi.cpp loadMoe)
+    k.moe_gus_f = tag("moe_gus_f_mxfp4");
+    k.moe_gus2_f = tag("moe_gus2_f_mxfp4");
+    CHECK(k97.moe_gus_f == nullptr && k8.moe_gus_f == nullptr && k8.moe_gus2_f == nullptr);  // the shipped tables
+    ops::MoeFlags pre;
+    pre.prec_dec = true;
+    mp.n = 1;
+    const ops::MoePlan pl = ops::chooseMoe(mp, pre, k, k.silu_mul_x8h);
+    CHECK(pl.small && !pl.small_q8 && pl.bits == ops::MoeBits::moe_f32_row && !pl.gu_split && nameOf(pl.gu) == "moe_gu_f_mxfp4");
+    ops::MoeFuseProblem p;  // Ornith-1.5-35B-A3B: n_embd 2048, 8 of 256 experts, F 512, shared 512 rows
+    p.n = 1;
+    p.C = 2048;
+    p.F = 512;
+    p.K = 8;
+    p.gate_ty = p.up_ty = GgmlType::mxfp4;
+    p.gate_rb = p.up_rb = 2048 / 32 * 17;
+    p.shared = true;
+    p.shared_gemvh = true;
+    p.sg_ty = p.su_ty = GgmlType::mxfp4;
+    p.sg_rb = p.su_rb = 2048 / 32 * 17;
+    p.sg_nrows = p.su_nrows = 512;
+    p.sg_ncols = p.su_ncols = 2048;
+    ops::MoeFusePlan f = ops::chooseMoeFuse(p, true, pl, k);
+    CHECK(f.use && nameOf(f.f) == "moe_gus_f_mxfp4" && f.nsb == 8 && f.nrb == 128 && f.grid.x == 8 + 128 * 8 && f.grid.y == 1 && f.grid.z == 1);
+    // off unless enabled (WHIRL_MOE_FUSE, default off)
+    CHECK(!ops::chooseMoeFuse(p, false, pl, k).use);
+    // per-arch selector: the gfx1151 table (and the shipped gfx1201 table) never fuse, even enabled, with either plan
+    {
+        const ops::MoePlan pl8 = ops::chooseMoe(mp, pre, k8, k8.silu_mul_x8h);
+        CHECK(!ops::chooseMoeFuse(p, true, pl8, k8).use && !ops::chooseMoeFuse(p, true, pl, k8).use && !ops::chooseMoeFuse(p, true, pl, k97).use);
+        for (const std::uint32_t n : {1u, 4u, 16u, 17u, 32u}) {
+            ops::MoeFuseProblem q = p;
+            q.n = n;
+            mp.n = n;
+            CHECK(!ops::chooseMoeFuse(q, true, ops::chooseMoe(mp, pre, k8, k8.silu_mul_x8h), k8).use);
+        }
+        mp.n = 1;
+    }
+    // never for the balance / fast int8 experts or a prefill batch (the plans chooseMoe gives)
+    {
+        ops::MoeFlags bal;
+        bal.moe_fp8 = true;
+        CHECK(!ops::chooseMoeFuse(p, true, ops::chooseMoe(mp, bal, k, k.silu_mul_x8h), k).use);
+        ops::MoeProblem big = mp;
+        big.n = 4096;
+        ops::MoeFuseProblem q = p;
+        q.n = 4096;
+        CHECK(!ops::chooseMoeFuse(q, true, ops::chooseMoe(big, pre, k, k.silu_mul_x8h), k).use);
+    }
+    ops::MoePlan q8 = pl;
+    q8.small_q8 = true;
+    q8.bits = ops::MoeBits::moe_q8_row;
+    CHECK(!ops::chooseMoeFuse(p, true, q8, k).use);
+    ops::MoePlan pf = pl;
+    pf.small = false;
+    CHECK(!ops::chooseMoeFuse(p, true, pf, k).use);
+    ops::MoePlan split = pl;
+    split.gu_split = true;
+    CHECK(!ops::chooseMoeFuse(p, true, split, k).use);
+    // the plan's gate+up kernel must be the one the fused routed blocks reproduce (moe_gu_f_mxfp4)
+    ops::MoePlan other = pl;
+    other.gu = tag("moe_gu_f_q8_0");
+    CHECK(!ops::chooseMoeFuse(p, true, other, k).use);
+    // rows: 17..32 take the two-token-tile twin, 0 / 33 none
+    p.n = 16;
+    CHECK(nameOf(ops::chooseMoeFuse(p, true, pl, k).f) == "moe_gus_f_mxfp4");
+    p.n = 17;
+    f = ops::chooseMoeFuse(p, true, pl, k);
+    CHECK(f.use && nameOf(f.f) == "moe_gus2_f_mxfp4" && f.grid.x == 8 + 128 * 17 * 8);
+    p.n = 32;
+    CHECK(ops::chooseMoeFuse(p, true, pl, k).use);
+    p.n = 33;
+    CHECK(!ops::chooseMoeFuse(p, true, pl, k).use);
+    p.n = 0;
+    CHECK(!ops::chooseMoeFuse(p, true, pl, k).use);
+    p.n = 1;
+    // shapes and types
+    ops::MoeFuseProblem b = p;
+    b.F = 510;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.C = 2048 + 128;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.gate_ty = b.up_ty = GgmlType::q4_k;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.up_rb = b.gate_rb + 17;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.sg_nrows = b.su_nrows = 512 + 32;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.su_ty = GgmlType::q8_0;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.shared_gemvh = false;  // the old chain would not run gemvh on the shared matrices -> other bits, never fused
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.sg_ncols = 1024;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    // no shared expert: routed blocks only (the shared checks do not apply)
+    b = p;
+    b.shared = false;
+    b.shared_gemvh = false;
+    b.sg_ty = b.su_ty = GgmlType::f32;
+    f = ops::chooseMoeFuse(b, true, pl, k);
+    CHECK(f.use && f.nsb == 0 && f.grid.x == 128 * 8);
+    // a code object with only the 16-row entry: 17..32 rows keep the old chain
+    kn::KernelTable only16 = k;
+    only16.moe_gus2_f = nullptr;
+    p.n = 20;
+    CHECK(!ops::chooseMoeFuse(p, true, pl, only16).use);
+    p.n = 16;
+    CHECK(ops::chooseMoeFuse(p, true, pl, only16).use);
+}
+
 void testOpsMoe() {
     ops::MoeProblem p;  // Ornith-like: E 2048, 8 of 256 experts, F 512, all MXFP4 with row exponents
     p.E = 2048;
@@ -412,6 +536,7 @@ void testOpsMoe() {
         }
     }
     testOpsMoeRouter(p, k97, k8);
+    testOpsMoeFuse(p, k97, k8);  // v0252-c3port (fails before the port: chooseMoeFuse is a stub)
 }
 
 }  // namespace

@@ -8,6 +8,8 @@
 #include "../../kernels/gfx1151/mx_inject.h"  // v0251-a3port: the gemmfq decode helpers (host + device)
 #include "../../kernels/gfx1151/fq_raster.h"  // v0252-8sbal: the gemmfq grouped-raster block order (host + device)
 #include "../../kernels/gfx1151/fq_addr.h"    // v0252-8sbvalu: the gemmfq buffer-load offsets (host + device)
+#include "gemvh_map_check.h"  // v0252-c2port (feat026-gemvh): gfx1201 direct gemvh lane -> byte map
+#include "../../kernels/gemv_hv_tune.h"  // v0252-c2acc: the gfx1201 precise gemvh tune table (preprocessor only)
 
 #include <algorithm>
 #include <atomic>
@@ -322,6 +324,20 @@ void testFqAddr() {
     CHECK_EQ(bad_part, 0L);
 }
 
+// v0252-c2port (feat026-gemvh): the gfx1201 direct gemvh candidates read the bytes dec_group_h reads (kernels/gemv_hv_map.h)
+void testGemvhDirectMap() { CHECK(whirl_gvh_check::run(false) == 0); }
+
+// v0252-c2acc (KB v0252-c2:screen): the gfx1201 precise decode / verify gemvh default is the screened direct candidate
+// m1_q1 = id 1 (ring depth D 4, activation lookahead XD 1, no s_prefetch_data) for both MXFP4 and Q6_K. Only the gfx1201
+// block of kernels/whirl_kernels.hip reads kernels/gemv_hv_tune.h (gfx1151 builds kernels/gfx1151/gemv_h.hip: object
+// byte-identical, chain objcheck). Values read through volatile so the check is a run-time comparison (/W4 C4127).
+void testGemvhTuneDefault() {
+    volatile int mx = WHIRL_GVH_MXFP4;
+    volatile int q6 = WHIRL_GVH_Q6_K;
+    CHECK_EQ(static_cast<int>(mx), 1);
+    CHECK_EQ(static_cast<int>(q6), 1);
+}
+
 }  // namespace
 
 // the old main()'s calls of this module, in their order (tests/unit/unit_tests.cpp ORDER lists all modules)
@@ -332,6 +348,8 @@ const whirl::test::Suite& unitSuite_kernels_gemm() {
                                           {"testMxInject", [] { testMxInject(); }},  // v0251-a3port
                                           {"testFqRaster", [] { testFqRaster(); }},  // v0252-8sbal
                                           {"testFqAddr", [] { testFqAddr(); }},      // v0252-8sbvalu
+                                          {"testGemvhDirectMap", [] { testGemvhDirectMap(); }},  // v0252-c2port
+                                          {"testGemvhTuneDefault", [] { testGemvhTuneDefault(); }},  // v0252-c2acc
                                       },
                                       nullptr};
     return s;

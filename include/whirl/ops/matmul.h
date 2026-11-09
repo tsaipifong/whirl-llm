@@ -158,6 +158,11 @@ struct GemmPlan {
 std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k);
 // w.row_bytes is read (an f16 matrix whose rows are padded is not gemmh's layout)
 GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k);
+// v0252-c3port (feat026-moedec L1): the f32-input twin of a gemvh plan p of weight type ty - gemvhf_<T> for gemvh_<T>,
+// gemvhf2_<T> for gemvh2_<T> - when enabled (Flags::gemvh_f32, WHIRL_GEMVH_F32), the grid is one block per 16 rows
+// (no gemvh_cap) and the code object has the kernel (gfx1201 only); else null = f32_to_f16 + p.f (the 0.2.5.1 path).
+// Same bits: the B load rounds each f32 element with (_Float16)v, as f32_to_f16 does.
+Function gemvhF32(const GemmPlan& p, GgmlType ty, bool enabled, const GemmFlags& f, const kernels::MatmulKernels& k);
 
 // ---- MXFP4 x fp8 GEMM (MatmulPath::gemm_fp8; K-2), class fp8_gemm
 struct Gemm8Plan {

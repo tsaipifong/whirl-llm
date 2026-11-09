@@ -231,6 +231,7 @@ int main() {
     testGemvWide();
     testOpsGemm();
     testOpsGemmFq();  // v0251-a3port
+    testGemvhF32();   // v0252-c3port (fails before the port: gemvhF32 is a stub)
     testAttnDecode();
     testDq4Partition();  // v0252-n2 (feat027-dq4r9700 764af36)
     testAttnPrefill();

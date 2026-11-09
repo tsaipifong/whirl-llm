@@ -50,6 +50,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_GDN_WMMA",  // src/common/numerics.cpp
     "WHIRL_GEMMH",  // src/common/numerics.cpp
     "WHIRL_GEMMHQ",  // src/common/numerics.cpp
+    "WHIRL_GEMVH_F32",  // src/common/numerics.cpp (feat026-moedec, v0252-c3port: other kernels, same bits)
     "WHIRL_GEMVH_WAVES",  // src/kernels_host/kernels_abi.cpp
     "WHIRL_GEMVX_VARIANT",  // src/kernels_host/kernels_abi.cpp
     "WHIRL_GEMV_BITWISE_FLOAT",  // src/config/env_snapshot.cpp
@@ -83,6 +84,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_MOEP_DN",    // src/common/numerics.cpp
     "WHIRL_MOEP_COMB",  // src/common/numerics.cpp
     "WHIRL_MOE_RFUSE",  // src/common/numerics.cpp (feat026-router, v0251-a11port)
+    "WHIRL_MOE_FUSE",   // src/common/numerics.cpp (feat026-moedec, v0252-c3port: other kernels, same bits; hashed as MOE_RFUSE)
     "WHIRL_MOE_WIDE",  // src/common/numerics.cpp
     "WHIRL_MTP",  // src/cli/cmd_bench.cpp
     "WHIRL_MTP_ADAPT",  // src/cli/decode.cpp

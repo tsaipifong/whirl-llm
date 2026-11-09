@@ -176,6 +176,19 @@ void Context::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate)
         hip::launch(g8.f, g8.grid, g8.block, 0, stream, w.ptr, w.row_bytes, w.ref, x16, sx8, y, ncols, nrows, I(n), acc);
     } else {
         const u32 count = n * w.ncols;
+        // v0252-c3port (feat026-moedec L1; WHIRL_GEMVH_F32 -> nf().gemvh_f32, default off; gfx1201 only, ops::gemvhF32): a
+        // precise decode / verify gemvh whose input is not in the x16 cache reads the f32 input itself (gemvhf: each
+        // element rounded to f16 in the B load exactly as f32_to_f16 does) - the conversion launch goes away, the bits
+        // stay those of f32_to_f16 + gemvh. x16 is not registered (later matmuls on xin take gemvhf again).
+        if (nf().gemvh_f32 && (x16_src != xin || x16_count != count || x16_fp8)) {
+            const ops::GemmFlags gf = gemmFlags();
+            const ops::GemmPlan gp = ops::chooseGemmF16(matShape(w), n, w.tune[tuneBucket(n)], gf, k);
+            if (const hip::Function hf = ops::gemvhF32(gp, w.ty, true, gf, k); hf != nullptr) {
+                hip::launch(hf, gp.grid, gp.block, 0, stream, w.ptr, w.row_bytes, xin, y, ncols, nrows, I(n), acc);
+                finish();
+                return;
+            }
+        }
         if (x16_src != xin || x16_count != count || x16_fp8) {
             hip::launch(k.f32_to_f16, D((count / 4 + 255) / 256), D(256), 0, stream, xin, x16, I(count));
             x16_src = xin;
