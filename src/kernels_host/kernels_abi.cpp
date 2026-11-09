@@ -121,6 +121,13 @@ std::string gemmsName(QType t, int cfg, bool f16_out) {
     return std::string(f16_out ? "gemmsh_c" : "gemms_c") + std::to_string(cfg) + "_" + sfx(t);
 }
 
+// RED STUB (v0252-8sbadopt test-first commit): the declared name function without the twin or the env parse
+GemmFqNames gemmFqNames(const std::optional<std::string>&) {
+    GemmFqNames r;
+    for (std::size_t fi = 0; fi < kGemmFqCfgs.size(); ++fi) r.slot[fi] = std::string("gemmfq_") + kGemmFqNames[fi] + "_mxfp4";
+    return r;
+}
+
 namespace {
 
 struct Loader {

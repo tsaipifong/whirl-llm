@@ -138,6 +138,9 @@ struct GemmFlags {
     // the largest dense forward (prefill_exec_default 2048 + prefill_merge 256), whose rows keep t2
     int fdq_big = -1;
     std::uint32_t fdq_big_min = 2305;
+    // v0252-8sbadopt: bit (slot - 1) set -> that gemmfq slot runs its grouped-raster twin (MatmulKernels::gemmfq_grp, same
+    // tile, grid and bits) when the object has it. Context::gemmFlags: device::Profile::fq_grp_dense / fq_grp_moe
+    std::uint8_t fq_grp = 0;
     std::uint32_t gv_max = 16;
 };
 enum class GemmKind : std::uint8_t { gemvh, gemms, gemmhq, gemmh, gemmc, gemmfq };

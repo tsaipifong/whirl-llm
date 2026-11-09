@@ -193,6 +193,10 @@ void testProfiles() {
     // v0251-a3fix: from 2305 rows the 8060S slot is c2 (t2 1.33-1.35x the old pair at 4096 rows), off on the R9700
     CHECK(b.fdq_big == 1);
     CHECK(a.fdq_big == 0);
+    // v0252-8sbadopt: the gemmfq slots that run their grouped-raster twin (bit slot - 1, bitwise the same): 8060S dense
+    // t2 (Swift's <= 2304-row forwards), MoE c2 (Ornith's 4096-row forwards), job 94 re-judged ADOPT; none on the R9700
+    CHECK(b.fq_grp_dense == 2 && b.fq_grp_moe == 1);
+    CHECK(a.fq_grp_dense == 0 && a.fq_grp_moe == 0);
     // v0251-a6port: gfx1151 MXFP4 gemvk rows (dense: v7 at 5 / 6 verify rows; MoE 0), gfx1201 rows 0 (no gemvk in that object)
     const std::array<std::uint8_t, 17> kb = {0, 0, 0, 0, 0, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, k0{};
     CHECK(b.gemvk_dense == kb);
