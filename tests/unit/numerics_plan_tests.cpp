@@ -1102,11 +1102,17 @@ static void testKgVarFlag() {
             }
 }
 
-// v0252-c3port (feat026-moedec, gfx1201 precise decode): WHIRL_MOE_FUSE / WHIRL_GEMVH_F32 are off by default on both
-// cards, both models and every mode (0.2.5.2 output rule: the plan of every default run is 0.2.5.1's); "1" turns only
-// that flag on (bitsKey = the off plan's with the flag set, same log line, no +overrides, never lossy); "0" = off. The
-// kernels exist only in the gfx1201 code object (ops::chooseMoeFuse / ops::gemvhF32 return the old path on gfx1151).
-// Fails before the port (loadFlags does not read the two names: "1" leaves the flag off).
+// v0252-c3port (feat026-moedec, gfx1201 precise decode): WHIRL_MOE_FUSE / WHIRL_GEMVH_F32 were off by default on both
+// cards, both models and every mode; "1" turns only that flag on (bitsKey = the off plan's with the flag set, same log
+// line, no +overrides, never lossy); "0" = off. The kernels exist only in the gfx1201 code object (ops::chooseMoeFuse /
+// ops::gemvhF32 return the old path on gfx1151). Fails before the port (loadFlags does not read the two names).
+// v0252-c3bdef (PLAN V1-36; q7 9505 c3bgold=ok, q7 9507 screen KEEP: Ornith precise decode plain +4.26 % / MTP +5.93 %,
+// hash diffs 0): moe_fuse is the default on the R9700 card (gfx1201 code object, Target::gfx1151 false) for MoE models,
+// every mode (the flag is bitwise; ops::chooseMoeFuse takes the fused launch only on the precise f32 decode chain, see
+// ops_moe_cases.inc), and stays off on dense models and on the 8060S (the 0.2.5.1 / v0252-c3port rule: the gfx1151 plan
+// does not move). gemvh_f32 stays off everywhere (C3 screen: Swift -10 %). WHIRL_MOE_FUSE=0 / =1 still win both ways and
+// change only the moe_fuse flag; the default is not an override (no +overrides, never lossy). The R9700 MoE default rows
+// fail before c3bdef (default off).
 static void testMoedecDefault() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -1118,8 +1124,14 @@ static void testMoedecDefault() {
         for (const CardFake& c : k_cards)
             for (const char* model : {"swift", "moe"}) {
                 const nu::Target t = target(c, model, false);
+                const bool fuse_on = std::string_view(c.name) == "r9700" && std::string_view(model) == "moe";
                 const nu::Plan d = pl(t, mode, {});
-                NCHECK(!d.flags.moe_fuse && !d.flags.gemvh_f32, "moedec default {} {} {}: off", c.name, model, mode);
+                NCHECK(d.flags.moe_fuse == fuse_on && !d.flags.gemvh_f32, "moedec default {} {} {}: moe_fuse {} (want {}), gemvh_f32 {} (want off)",
+                       c.name, model, mode, d.flags.moe_fuse, fuse_on, d.flags.gemvh_f32);
+                // per-card selector check: the 8060S rows keep the v0252-c3port (= 0.2.5.1 plan) rule, off
+                if (std::string_view(c.name) == "8060s")
+                    NCHECK(t.gfx1151 && !d.flags.moe_fuse, "moedec 8060s {} {}: the gfx1151 default moved", model, mode);
+                NCHECK(!d.lossy_override && d.ignored.empty(), "moedec default {} {} {}: the default is not an override", c.name, model, mode);
                 for (const char* name : {"MOE_FUSE", "GEMVH_F32"}) {
                     const bool fuse = std::string_view(name) == "MOE_FUSE";
                     const nu::Plan off = pl(t, mode, {{name, "0"}});
@@ -1128,8 +1140,11 @@ static void testMoedecDefault() {
                     NCHECK(fuse ? one.flags.moe_fuse : one.flags.gemvh_f32, "moedec {} {} {}: WHIRL_{}=1 on", c.name, model, mode, name);
                     nu::Plan a = off;
                     (fuse ? a.flags.moe_fuse : a.flags.gemvh_f32) = true;
-                    NCHECK(off.bitsKey() == d.bitsKey() && a.bitsKey() == one.bitsKey() && nu::logLine(off) == nu::logLine(one) &&
-                               !one.lossy_override && one.overrides == off.overrides,
+                    // the default plan equals the "=1" plan where the default is on (R9700 MoE moe_fuse), else the "=0" one
+                    const nu::Plan& same = (fuse && fuse_on) ? one : off;
+                    NCHECK(same.bitsKey() == d.bitsKey() && a.bitsKey() == one.bitsKey() && nu::logLine(off) == nu::logLine(one) &&
+                               nu::logLine(d) == nu::logLine(off) && !one.lossy_override && one.overrides == off.overrides &&
+                               d.overrides == off.overrides,
                            "moedec {} {} {}: WHIRL_{} changes only its flag", c.name, model, mode, name);
                 }
             }
@@ -1146,7 +1161,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testMoepCombMode();  // v0251-a7pol B26-41 (the refusal rows fail on cfce7ea)
     testRfuseDefault();  // v0251-a11port (fails before the port: the plan has no gfx1151 default)
     testKgVarFlag();  // v0252-c1port; v0252-c1acc auto default + invalid-value note (fails before c1acc)
-    testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port)
+    testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port); v0252-c3bdef (the R9700 MoE default rows fail before c3bdef)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)
