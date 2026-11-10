@@ -9,7 +9,7 @@
 #
 # The three modes (owner standard): precise = strictly lossless (golden bitwise, blocking; not judged here);
 # balance = near-lossless by industry standard, defined by its allowed items (fp8, moefp8, q8dec, h16, gdnwmma,
-# int8 KV), acceptance = task accuracy; fast = 4-bit-level items, acceptance = task-accuracy recovery >= 95% of
+# int8 KV), acceptance = task accuracy; fast = 4-bit-level items, acceptance = task-accuracy recovery >= 92% of
 # precise. KL / top-1 limits (klgate.py LIMITS / MOE_LIMITS) are each mode's guard line.
 #
 # Verdicts (the LAST line printed is always one of these "kl guard: ..." lines):
@@ -43,6 +43,9 @@ $Modes = @($Modes | ForEach-Object { $_ -split "," } | Where-Object { $_ -in @("
 # allowed balance items (owner standard; numerics.cpp item names) and the fast-only items
 $balanceItems = @("fp8", "moefp8", "q8dec", "h16", "gdnwmma", "kvq8", "specsample")
 $fastItems = @("kvq4", "relaxacc", "headq", "moeskip", "a8", "a4")
+
+# the ONE device -> GPU architecture table (this machine's two GPUs: 8060S pci:196:0 = gfx1151, R9700 pci:71:0 = gfx1201)
+$DeviceArch = @{ "8060s" = "gfx1151"; "pci:196:0" = "gfx1151"; "gfx1151" = "gfx1151"; "r9700" = "gfx1201"; "pci:71:0" = "gfx1201"; "gfx1201" = "gfx1201" }
 
 function Fail([string]$why) { Write-Host "kl guard: ERROR $why (not usable as evidence; a KL miss is a WARN, this is a broken or wrong measurement)"; exit 2 }
 
@@ -82,8 +85,15 @@ if ($Report) {
         if ("$($r.exe_sha256)".ToLower() -ne $h) { Fail "KL report $Report is for another exe (sha256 $($r.exe_sha256), this exe $h)" }
     }
     if ($Arch) {
-        $is8060 = "$($r.device)" -eq "8060s"
-        if (($Arch -eq "gfx1151") -ne $is8060) { Fail "KL report $Report was measured on device '$($r.device)', not on $Arch" }
+        # V1-59: identify the GPU by ARCHITECTURE: the arch klgate.py recorded from the whirl device line, else the one
+        # table below (device alias or pci id -> arch). Unknown device = ERROR (never "not 8060s, so it is the R9700").
+        $dev = "$($r.device)".Trim().ToLower()
+        $devArch = $DeviceArch[$dev]
+        $recArch = "$($r.arch)".Trim().ToLower()
+        if ($recArch -and $devArch -and $recArch -ne $devArch) { Fail "KL report $Report is inconsistent: device '$($r.device)' is $devArch but the recorded arch is $recArch" }
+        $repArch = if ($recArch) { $recArch } else { $devArch }
+        if (-not $repArch) { Fail "KL report $Report has device '$($r.device)' and no recorded arch: cannot tell which GPU family it was measured on (known: $(@($DeviceArch.Keys | Sort-Object) -join ', '))" }
+        if ($repArch -ne $Arch.ToLower()) { Fail "KL report $Report was measured on device '$($r.device)' ($repArch), not on $Arch" }
     }
     foreach ($md in $Modes) { if ($md -notin @($r.modes)) { Fail "KL report $Report has no $md cases" } }
     # KL-ROBUST: 3 window positions per length (klgate.py default); a 1-position report carries chunk-schedule jitter
@@ -145,7 +155,7 @@ if ($Modes.Count -gt 0) {
         } else { Fail "-TaskAccuracy '$TaskAccuracy' is neither a file nor a KB exp_id (item:slug)" }
         $lines += "kl guard: task-accuracy reference $($ev.task_accuracy.ref)$(if ($ev.task_accuracy.sha256) { " sha256 $($ev.task_accuracy.sha256)" })"
     } else {
-        $todo += "TODO task-accuracy: $($Modes -join ' / ') changed ($Context) without a task-accuracy result reference (-TaskAccuracy FILE|exp_id): acceptance is task accuracy (balance: no loss vs precise by industry standard; fast: >= 95% of precise), KL is only the guard"
+        $todo += "TODO task-accuracy: $($Modes -join ' / ') changed ($Context) without a task-accuracy result reference (-TaskAccuracy FILE|exp_id): acceptance is task accuracy (balance: no loss vs precise by industry standard; fast: >= 92% of precise), KL is only the guard"
     }
 }
 $ev.todo = @($todo)

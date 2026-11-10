@@ -35,17 +35,17 @@ $num = @{
     swift_code_balance = "numerics: balance - enabled: fp8, gdnwmma, h16, kvq8 (q8h KV (int8 + f16 scale / 32, Hadamard-rotated q/k)), specsample (temperature > 0: race sampler); skipped: moefp8 (dense model); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)"
     moe_zh_fast = "numerics: fast - enabled: fp8, moefp8, gdnwmma, h16, specsample (x), kvq4 (q4: int4 + f16 scale / 32, Hadamard-rotated q/k); skipped: kvq8 (MoE models keep f16 KV); decode: q8dec (int8 activations)"
 }
-function Rep([string]$name, [string]$s = $sha, [switch]$Miss, [switch]$FastMiss, [switch]$Errors, [switch]$Neg) {
+function Rep([string]$name, [string]$s = $sha, [switch]$Miss, [switch]$FastMiss, [switch]$Errors, [switch]$Neg, [string]$Device = "r9700", [string]$RepArch = "") {
     $p = Join-Path $tmp $name
     $cases = @(
         @{ model = "swift"; prompt = "code"; mode = "balance"; length = 131072; rule = "dense-length"; kl_mean = $(if ($Miss) { 0.0072 } else { 0.0012 })
            kl_limit = 0.005; top1 = 0.9818; top1_limit = 0.97; zero_rows = 0; pass = -not $Miss },
         @{ model = "moe"; prompt = "zh"; mode = "fast"; length = 0; rule = "moe-mean"; kl_mean = $(if ($FastMiss) { 0.06 } else { 0.02 }); kl_limit = 0.04
            x_noise = $(if ($FastMiss) { 12.0 } else { 4.0 }); pass = -not $FastMiss })
-    @{ exe_sha256 = $s; device = "r9700"; pass = -not ($Miss -or $FastMiss); summary = "selftest"; modes = @("balance", "fast"); positions = 3
+    @{ exe_sha256 = $s; device = $Device; pass = -not ($Miss -or $FastMiss); summary = "selftest"; modes = @("balance", "fast"); positions = 3
        lengths = @(8192, 32768, 98304, 131072); models = @{ swift = "Swift-fake.gguf"; moe = "Ornith-fake.gguf" }; cases = $cases
        mode_args = $(if ($Neg) { @{ balance = "--balance=fp8" } } else { @{} }); errors = @(if ($Errors) { "moe_zh_fast: exit 3" }); numerics = $num
-    } | ConvertTo-Json -Depth 6 | Set-Content $p
+    } | ForEach-Object { if ($RepArch) { $_.arch = $RepArch }; $_ } | ConvertTo-Json -Depth 6 | Set-Content $p
     return $p
 }
 $ta = Join-Path $tmp "taskacc.json"; '{"selftest": true}' | Set-Content $ta
@@ -106,6 +106,17 @@ try {
     Expect "-Modes empty: NOT NEEDED, no TODO" @{ rc = $c; out = $o } 0 { $o[-1] -match "^kl guard: NOT NEEDED" -and -not ($o -match "^TODO ") }
     $o = @(& $guard -Report (Join-Path $tmp "miss.json") -TaskAccuracy "no such thing" *>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE
     Expect "a -TaskAccuracy that is neither a file nor an exp_id: exit 2" @{ rc = $c; out = $o } 2 { $o -match "kl guard: ERROR -TaskAccuracy" }
+    # 7) V1-59: the GPU is identified by architecture, not one exact device string (-ValidateOnly: rc 0 = usable, 2 = ERROR)
+    foreach ($c in @(
+        @("pci:196:0", "", "gfx1151", 0), @("pci:196:0", "", "gfx1201", 2), @("pci:71:0", "", "gfx1201", 0), @("pci:71:0", "", "gfx1151", 2),
+        @("8060s", "", "gfx1151", 0), @("8060s", "", "gfx1201", 2), @("r9700", "", "gfx1201", 0), @("r9700", "", "gfx1151", 2),
+        @("PCI:196:0", "", "gfx1151", 0), @("default", "", "gfx1151", 2), @("default", "", "gfx1201", 2), @("pci:9:9", "", "gfx1201", 2),
+        @("pci:9:9", "gfx1151", "gfx1151", 0), @("pci:9:9", "gfx1151", "gfx1201", 2), @("pci:196:0", "gfx1201", "gfx1201", 2), @("pci:71:0", "gfx1201", "gfx1201", 0))) {
+        $o = @(& $guard -Report (Rep ("dev_" + [guid]::NewGuid().ToString("N").Substring(0, 6) + ".json") -Device $c[0] -RepArch $c[1]) -Arch $c[2] -ValidateOnly *>&1 | ForEach-Object { "$_" }); $rc = $LASTEXITCODE
+        Expect "device '$($c[0])' recorded arch '$($c[1])' for -Arch $($c[2])" @{ rc = $rc; out = $o } $c[3] { $c[3] -eq 0 -or ($o -match "kl guard: ERROR") }
+    }
+    $o = @(& $guard -Report (Join-Path $tmp "ok.json") -Modes fast *>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE
+    Expect "task-accuracy TODO names the 92 % fast bar" @{ rc = $c; out = $o } 0 { ($o -match "fast: >= 92% of precise") -and -not ($o -match "95%") }
 } finally {
     foreach ($k in $saved.Keys) { SetEnvOrRemove $k $saved[$k] }
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

@@ -207,6 +207,20 @@ def log_info(logf):
     return arch, num
 
 
+def gpu_arch(logf):
+    """The GPU architecture a run really used, from the whirl log line "  whirl build, device 0: <name> (gfx1151)"
+    (V1-59: kl_guard.ps1 identifies the GPU family by this, not by the --device string); "" if the line is missing."""
+    try:
+        with open(logf, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = re.search(r"whirl build, device \d+: .*\((gfx[0-9a-z]+)\)\s*$", line)
+                if m:
+                    return m.group(1).lower()
+    except OSError:
+        pass
+    return ""
+
+
 def logsm(x):
     z = x - x.max(1, keepdims=True)
     return z - np.log(np.exp(z).sum(1, keepdims=True))
@@ -478,6 +492,13 @@ def main():
                     break
                 arch, num = log_info(logf)
                 rep["numerics"][tag] = num
+                ga = gpu_arch(logf)
+                if ga and rep.get("arch") and rep["arch"] != ga:
+                    rep["errors"].append(f"{tag}: GPU arch {ga}, earlier runs {rep['arch']} (one report = one GPU)")
+                    ok_runs = False
+                    break
+                if ga:
+                    rep["arch"] = ga
                 try:
                     t = load_dump(dump, len(ends))
                 except Exception as e:
