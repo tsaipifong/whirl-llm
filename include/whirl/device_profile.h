@@ -115,8 +115,13 @@ inline constexpr Profile k_profile_gfx1201{
     // b334a52); drafts only, output unchanged
     .draft64k_moe = true,
     .relax_rank_check = true,  // v0252-f1 G3a (ADR-0015)
-    .prefill_exec_moe = 2048,
-    .prefill_fill_batch = false,
+    // v0252-ch4k (PLAN V1-75): MoE solo prefills run 4096-row forwards in the 8060S fill form (whole chunks up to the
+    // batch 4096; no extra memory, the prefill buffers are sized for the batch). Timed e2e A/B on the R9700 (Ornith
+    // MXFP4, 4 ABBA rounds, 4096-row forwards vs 2048, scratch/v0252_ch4k/gpu/20261111-0310/summary.md): precise pp 8k
+    // +8.47 % / 32k +6.94 %, balance 8k +8.24 % / 32k +6.44 % / 128k +3.21 %, fast 8k +8.02 % / 32k +6.55 %, 2k +-0;
+    // precise output bitwise the same at 2k / 8k / 32k / 129k. Dense (Swift) keeps 2048 (prefill_exec_default).
+    .prefill_exec_moe = 4096,
+    .prefill_fill_batch = true,
     .tail_ck_in_forward = true,  // v0252-n10 (R9700 precise pp 2k: one forward instead of 1024 + 1034)
     .vision_attn_threads = 128,
 };
