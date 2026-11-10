@@ -703,7 +703,7 @@ void testFastOnlyOverrides() {
         {"ATTN_KGVAR", 'B'},  // v0252-c1port: attn_kgv / attn_kgk, designed bit-identical to attn_kg (kt attn, golden)
         // v0252-c3port (feat026-moedec): fused precise MoE decode / gemvh on f32 input, bit-identical (kt moefuse, golden)
         {"MOE_FUSE", 'B'},   {"GEMVH_F32", 'B'},
-        {"ATTN_SX", 'L'},  // v0252-strixc2: attn_sx<NP> (strix fattn-rdna35), not bitwise: balance only (testAttnSxFlag)
+        {"ATTN_SX", 'L'},  // v0252-strixc2 / strixf: attn_sx<NP> (strix fattn-rdna35), not bitwise: balance + fast (testAttnSxFlag)
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -1104,13 +1104,14 @@ static void testKgVarFlag() {
             }
 }
 
-// v0252-strixc2 (PLAN V1-09): the gfx1151 balance prefill attention attn_sx (strix-llama.cpp fattn-rdna35, NOT bitwise).
-// The plan flag attn_sx is on exactly in balance mode on the 8060S card (device::Profile::attn_sx_balance -> Target::
-// attn_sx_profile) with the item h16 (f16 intermediates) in the request, both models; never in precise or fast (precise
-// stays bit-identical, fast keeps its own path), never on the R9700 card (no kernel). WHIRL_ATTN_SX=0 turns it off and
-// changes nothing else (bitsKey = the default plan's with attn_sx false, same log line, no +overrides, never lossy); "1"
-// changes nothing in balance; a non-"0" value in precise / fast leaves the flag off and adds exactly one Plan::ignored
-// note. A custom balance item list without h16 leaves it off. Fails before the port (loadFlags never sets attn_sx).
+// v0252-strixc2 (PLAN V1-09): the gfx1151 prefill attention attn_sx (strix-llama.cpp fattn-rdna35, NOT bitwise).
+// v0252-strixf (PLAN V1-73): balance AND fast. The plan flag attn_sx is on exactly in balance and fast mode on the 8060S
+// card (device::Profile::attn_sx_balance -> Target::attn_sx_profile) with the item h16 (f16 intermediates) in the request,
+// both models; never in precise (stays bit-identical), never on the R9700 card (no kernel). WHIRL_ATTN_SX=0 turns it off
+// and changes nothing else (bitsKey = the default plan's with attn_sx false, same log line, no +overrides, never lossy);
+// "1" changes nothing in balance / fast; a non-"0" value in precise leaves the flag off and adds exactly one
+// Plan::ignored note. A custom balance or fast item list without h16 leaves it off. Fails before the port (loadFlags
+// never sets attn_sx) and, for the fast cells, before v0252-strixf (the flag was balance-only).
 static void testAttnSxFlag() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -1123,7 +1124,7 @@ static void testAttnSxFlag() {
         for (const CardFake& c : k_cards)
             for (const char* model : {"swift", "moe"}) {
                 const nu::Target t = target(c, model, false);
-                const bool want = std::string_view(mode) == "balance" && c.prof.attn_sx_balance;
+                const bool want = std::string_view(mode) != "precise" && c.prof.attn_sx_balance;  // v0252-strixf: balance + fast
                 const nu::Plan d = pl(t, mode, {});
                 NCHECK(d.flags.attn_sx == want, "attn_sx default {} {} {}: {} (want {})", c.name, model, mode, d.flags.attn_sx, want);
                 on_cells += d.flags.attn_sx;
@@ -1140,12 +1141,12 @@ static void testAttnSxFlag() {
                            "attn_sx {} {} {}: WHIRL_ATTN_SX='{}' keeps the plan's choice", c.name, model, mode, v);
                     std::size_t notes = 0;
                     for (const std::string& n : o.ignored) notes += n.rfind(std::string("WHIRL_ATTN_SX=") + v + " ignored", 0) == 0;
-                    const std::size_t want_notes = std::string_view(mode) == "balance" ? 0 : 1;
+                    const std::size_t want_notes = std::string_view(mode) == "precise" ? 1 : 0;  // v0252-strixf: only precise refuses it
                     NCHECK(notes == want_notes && o.ignored.size() == want_notes, "attn_sx {} {} {}: WHIRL_ATTN_SX='{}': {} ignored notes (want {})",
                            c.name, model, mode, v, notes, want_notes);
                 }
             }
-    NCHECK(on_cells == 2, "attn_sx: on in exactly 2 cells (8060S balance, both models), got {}", on_cells);
+    NCHECK(on_cells == 4, "attn_sx: on in exactly 4 cells (8060S balance + fast, both models), got {}", on_cells);
     // a custom balance list without h16: off; with h16: on (8060S)
     for (const char* model : {"swift", "moe"}) {
         const nu::Target t = target(card("8060s"), model, false);
@@ -1156,6 +1157,17 @@ static void testAttnSxFlag() {
         nu::Target tq = t;  // no MXFP4 tensor (h16 is MXFP4-only on this GPU): off
         tq.has_mxfp4 = false;
         NCHECK(!pl(tq, "balance", {}).flags.attn_sx, "attn_sx {}: a model without MXFP4 tensors -> off", model);
+        // v0252-strixf: the same rules in fast (a custom fast list without h16: off; with h16: on; no MXFP4: off), and
+        // the fast plan with attn_sx differs from WHIRL_ATTN_SX=0 in bitsKey (KV tier keys keep the two apart)
+        const nu::Plan fno = pl(t, "fast:kvq4", {});
+        const nu::Plan fyes = pl(t, "fast:h16,kvq4", {});
+        NCHECK(!fno.flags.attn_sx && fyes.flags.attn_sx, "attn_sx {}: custom fast without h16 -> off ({}), with h16 -> on ({})", model,
+               fno.flags.attn_sx, fyes.flags.attn_sx);
+        NCHECK(!pl(tq, "fast", {}).flags.attn_sx, "attn_sx {}: fast, a model without MXFP4 tensors -> off", model);
+        const nu::Plan fd = pl(t, "fast", {}), f0 = pl(t, "fast", {{"ATTN_SX", "0"}});
+        NCHECK(fd.flags.attn_sx && !f0.flags.attn_sx && fd.bitsKey() != f0.bitsKey(), "attn_sx {}: fast default on, =0 off, bitsKey differs", model);
+        // precise: never, with or without a value ("1" is refused with one note)
+        NCHECK(!pl(t, "precise", {{"ATTN_SX", "1"}}).flags.attn_sx, "attn_sx {}: precise never takes it", model);
     }
 }
 
