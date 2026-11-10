@@ -296,6 +296,7 @@ int main(int argc, char** argv) {
         if (only.empty() && (std::string(f.name) == "attnbench" || std::string(f.name) == "gemvhbench" || std::string(f.name) == "gemvhv" || std::string(f.name) == "ws4bench" || std::string(f.name) == "ws4gbench" || std::string(f.name) == "attnkgl")) continue;  // timing only / long (attnkgl), on request
         const auto t0 = std::chrono::steady_clock::now();
         std::printf("== %s\n", f.name);
+        c.beginFamily(f.name);  // v0252-ktrng: this family's own input stream (kt_seed.h)
         std::fflush(stdout);
         const whirl::hip::leakcount::Snapshot leak0 = whirl::hip::leakcount::snapshot();
         try {

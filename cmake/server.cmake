@@ -196,3 +196,6 @@ target_link_libraries(whirl-server-gate PRIVATE whirl)
 if(MSVC)
   target_link_options(whirl-server-gate PRIVATE /ENTRY:wmainCRTStartup)
 endif()
+
+# v0252-ktrng (PLAN B26-53 (c)): kt families seed their own input stream from their name (tests/kernels/kt_seed.h); CPU only.
+add_executable(whirl-kt-seed-tests ${CMAKE_SOURCE_DIR}/tests/kernels/unit/kt_seed_tests.cpp)

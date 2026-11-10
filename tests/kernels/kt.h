@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "kt_seed.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -166,7 +167,8 @@ struct Ctx {
     hip::Stream s = nullptr;
     Report rep;
     Models models;
-    std::mt19937_64 rng{12345};
+    std::mt19937_64 rng{12345};  // v0252-ktrng: reseeded per family by beginFamily (kt_seed.h); nothing is shared across families
+    void beginFamily(const std::string& name) { rng.seed(familySeed(name)); }
     bool quick = false;  // smaller shapes
 
     hip::Function fn(const std::string& name) const { return mod.getFunction(name.c_str()); }
