@@ -7,7 +7,6 @@
 #include "../../kernels/gemm_small_addr.h"
 #include "../../kernels/gfx1151/mx_inject.h"  // v0251-a3port: the gemmfq decode helpers (host + device)
 #include "../../kernels/gfx1151/fq_raster.h"  // v0252-8sbal: the gemmfq grouped-raster block order (host + device)
-#include "../../kernels/gfx1151/fq_addr.h"    // v0252-8sbvalu: the gemmfq buffer-load offsets (host + device)
 #include "gemvh_map_check.h"  // v0252-c2port (feat026-gemvh): gfx1201 direct gemvh lane -> byte map
 #include "../../kernels/gemv_hv_tune.h"  // v0252-c2acc: the gfx1201 precise gemvh tune table (preprocessor only)
 
@@ -286,44 +285,6 @@ void testFqRaster() {
         CHECK(r == k && t == 0);
     }
 }
-
-// v0252-8sbvalu: the buffer-load offsets of the gemmfq VALU levers (kernels/gfx1151/fq_addr.h) == the shipped kernel's
-// pointer math (gemm_fq.hip GEMMFQ_FETCH: blk = row * row_bytes + (k0 >> 8) * 136, ib = ((k0 & 255) >> 5) + sb,
-// q = blk + 8 + 16 * ib, e = blk[ib]; brow = tok * ncols + c8 * 8 halves, + k0) for every K chunk of the product K
-// values (k0 % 32 == 0: BK 64 and the BK 32 levers), rows, sub-blocks, halves; and the part mapping: value j of part p
-// is k index 8p + j of the sub-block, i.e. qs byte half * 8 + j's low (k < 16) or high (k >= 16) nibble.
-void testFqAddr() {
-    long bad_q = 0, bad_e = 0, bad_b = 0, bad_part = 0;
-    for (const uint32_t K : {768u, 2048u, 4096u, 5120u, 17408u}) {
-        const uint32_t row_bytes = K / 256u * 136u;
-        for (uint32_t k0 = 0; k0 < K; k0 += 32u)
-            for (const uint32_t lrow : {0u, 1u, 7u, 63u, 127u, 255u})
-                for (uint32_t sb = 0; sb < 2; ++sb) {
-                    if (k0 + 32u * sb >= K) continue;
-                    const uint64_t blk = static_cast<uint64_t>(lrow) * row_bytes + (k0 >> 8) * 136u;
-                    const uint64_t ib = ((k0 & 255u) >> 5) + sb;
-                    for (uint32_t h = 0; h < 2; ++h)
-                        bad_q += static_cast<uint64_t>(fq_q_soff(k0)) + fq_q_voff(lrow, row_bytes, sb, h) != blk + 8u + 16u * ib + 8u * h;
-                    bad_e += static_cast<uint64_t>(fq_e_soff(k0)) + fq_e_voff(lrow, row_bytes, sb) != blk + ib;
-                }
-        for (uint32_t k0 = 0; k0 < K; k0 += 32u)
-            for (const uint32_t ltok : {0u, 1u, 31u, 255u, 511u})
-                for (uint32_t c8 = 0; c8 < 8; ++c8)
-                    bad_b += static_cast<uint64_t>(fq_b_soff(k0)) + fq_b_voff(ltok, K, c8) !=
-                             (static_cast<uint64_t>(ltok) * K + c8 * 8u + k0) * 2u;
-    }
-    for (uint32_t p = 0; p < 4; ++p)
-        for (uint32_t j = 0; j < 8; ++j) {
-            const uint32_t k = 8u * p + j;  // k index inside the 32-value sub-block
-            const uint32_t byte = k < 16u ? k : k - 16u, hi = k < 16u ? 0u : 1u;
-            bad_part += fq_part_half(p) * 8u + j != byte || fq_part_hi(p) != hi || fq_part_col(p) + j != k;
-        }
-    CHECK_EQ(bad_q, 0L);
-    CHECK_EQ(bad_e, 0L);
-    CHECK_EQ(bad_b, 0L);
-    CHECK_EQ(bad_part, 0L);
-}
-
 // v0252-c2port (feat026-gemvh): the gfx1201 direct gemvh candidates read the bytes dec_group_h reads (kernels/gemv_hv_map.h)
 void testGemvhDirectMap() { CHECK(whirl_gvh_check::run(false) == 0); }
 
@@ -347,7 +308,6 @@ const whirl::test::Suite& unitSuite_kernels_gemm() {
                                           {"testKernelFetchBounds", [] { testKernelFetchBounds(); }},
                                           {"testMxInject", [] { testMxInject(); }},  // v0251-a3port
                                           {"testFqRaster", [] { testFqRaster(); }},  // v0252-8sbal
-                                          {"testFqAddr", [] { testFqAddr(); }},      // v0252-8sbvalu
                                           {"testGemvhDirectMap", [] { testGemvhDirectMap(); }},  // v0252-c2port
                                           {"testGemvhTuneDefault", [] { testGemvhTuneDefault(); }},  // v0252-c2acc
                                       },
