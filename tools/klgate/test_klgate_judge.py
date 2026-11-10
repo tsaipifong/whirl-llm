@@ -266,5 +266,30 @@ class Replay(unittest.TestCase):
         self.assertTrue(out)
 
 
+class GpuArch(unittest.TestCase):
+    """V1-59: the measured GPU architecture is read from the whirl device line of a run log."""
+
+    def _log(self, text):
+        import tempfile
+        fd, p = tempfile.mkstemp(suffix=".log")
+        os.close(fd)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        self.addCleanup(os.remove, p)
+        return p
+
+    def test_8060s(self):
+        p = self._log("whirl gguf: x\n  whirl build, device 0: AMD Radeon(TM) 8060S Graphics (gfx1151)\n")
+        self.assertEqual(klgate.gpu_arch(p), "gfx1151")
+
+    def test_r9700(self):
+        p = self._log("  whirl build, device 1: AMD Radeon AI PRO R9700 (gfx1201)\n")
+        self.assertEqual(klgate.gpu_arch(p), "gfx1201")
+
+    def test_missing_line(self):
+        self.assertEqual(klgate.gpu_arch(self._log("nothing\n")), "")
+        self.assertEqual(klgate.gpu_arch("no_such_file.log"), "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
