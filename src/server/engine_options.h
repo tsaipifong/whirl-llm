@@ -72,6 +72,18 @@ struct EngineOptions {
     // (prefill forwards limited, decode cycles interleaved); 0 = off
     double decode_min_tps = 0;
     int profile = 0;  // 0 off, 1 events, 2 cycle stats only
+    // v0252-hostwait (PLAN V1-61): how the decode cycle waits for the GPU and submits its launches (bit mask; host
+    // scheduling only: same kernels, same order, same bytes, so the same tokens in every mode). bit 0 pinned: the control
+    // words (and, folded, the sampling / relaxacc readbacks) go through pinned host memory with async copies on the model
+    // stream and ONE event wait instead of blocking null-stream hipMemcpy calls; bit 1 spin: that wait polls the event
+    // (implies bit 0); bit 2 kick: an event record + query after every MTP step and every kick_layers layers of the decode
+    // forward, so the runtime submits the queued launches while the host keeps enqueueing; bit 3 record-only kick: the
+    // same kick points with the event record alone, no query (a hipEventQuery of an unfinished event can make ROCclr's
+    // submission thread wait for the GPU: REVIEW-v0252-hostwait A2; bit 3 overrides bit 2's query). whirl-server sets it
+    // from device::Profile::cycle_sync (0 on every family until the R9700 A/B), WHIRL_CYCLE_SYNC overrides it;
+    // SpecCycle::initSync keeps the known bits here (bit 1 adds bit 0), so every component reads the effective mode.
+    std::uint32_t cycle_sync = 0;
+    std::uint32_t kick_layers = 8;  // bits 2 / 3: layers between two submissions inside a decode / verify forward
     std::uint32_t sys_min = 2048;
     bool lcp_on = true;
     std::size_t n_ck = 2;

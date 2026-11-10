@@ -6531,6 +6531,9 @@ void testShutdownEventStream() {
     CHECK_EQ(dead, 0u);
 }
 
+// v0252-hostwait (PLAN V1-61): WHIRL_CYCLE_SYNC (pinned readback + one wait, spin, early submission)
+#include "cycle_sync_tests.inc"
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -9839,6 +9842,9 @@ int main(int argc, char** argv) {
         {"concurrency16", [] { testConcurrency(16, 24, true); }},
         {"concurrency_nomtp", [] { testConcurrency(4, 8, false); }},
         {"mtp_step_join_rows", testMtpStepJoinRows},  // v0252-btl
+        {"cycle_sync_tokens", testCycleSyncTokens},  // v0252-hostwait
+        {"cycle_sync_waits", testCycleSyncWaits},    // v0252-hostwait
+        {"cycle_sync_defer_model", testCycleSyncDeferModel},  // v0252-hostwait2 (REVIEW B3)
         {"dflash_greedy", testDFlashGreedy},
         {"dflash_relax_exact", testDFlashRelaxExact},
         {"relax_mtp_runner_up", testRelaxMtpRunnerUp},  // arch025-mutgap2

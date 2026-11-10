@@ -26,6 +26,9 @@ static_assert(!std::is_copy_constructible_v<X> && !std::is_copy_assignable_v<X>)
 static_assert(!std::is_default_constructible_v<X>);
 static_assert(std::is_constructible_v<X, ServerModel&, device::Backend&, const chat::ChatTokens&, EngineOptions&, std::uint32_t&, SpecState&, SampleBuffers&, bool&, std::vector<Slot>&, BatchStats&, std::uint64_t&, DrafterCtx&, SlotEnd&, SlotPages&, VramWatch&>);
 static_assert(!std::is_constructible_v<X, ServerModel&, device::Backend&, const chat::ChatTokens&, EngineOptions&, std::uint32_t&, SpecState&, SampleBuffers&, bool&, std::vector<Slot>&, BatchStats&, std::uint64_t&, DrafterCtx&, SlotEnd&, SlotPages&>);
+// v0252-hostwait2 (REVIEW-v0252-hostwait D1): "References only" - the object is exactly its 15 references (a value member,
+// e.g. a mode copy, a pinned buffer or an event handle owned here, makes it larger and fails this)
+static_assert(sizeof(X) == 15 * sizeof(void*), "SpecCycle holds references only (module server.spec_cycle, DESIGN v3 3.1)");
 
 void checkOne(bool defined) { ISO_CHECK(defined); }
 template <class... M>

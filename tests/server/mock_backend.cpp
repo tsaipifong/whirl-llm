@@ -131,7 +131,39 @@ MockModel::~MockModel() {
     for (auto p : xc_) ops_.free(p);
     ops_.free(logits_);
     ops_.free(hn_);
+    // v0252-hostwait: allocated only by readCtlAsync (WHIRL_CYCLE_SYNC); the pins run without it (feat026-hostgap-r1-pins:
+    // an unconditional free of 0 shows up as "F ?" in their recorded phases)
+    if (ctl_dev_ != 0) ops_.free(ctl_dev_);
+    if (kick_ev_ != nullptr) ops_.eventDestroy(kick_ev_);  // made by the first kick only (bits 2 / 3)
     ops_.streamDestroy(stream_);
+}
+
+// v0252-hostwait2: Context::kickQueue's Backend calls (record on the model stream; the query only with bit 2 alone)
+void MockModel::kickQueue() {
+    if (kick_ev_ == nullptr) kick_ev_ = ops_.eventCreate();
+    ops_.eventRecord(kick_ev_, stream_);
+    if (kick_query_.load()) (void)ops_.eventDone(kick_ev_);
+}
+
+void MockModel::kick() {
+    kickQueue();
+    kick_calls_ += 1;
+}
+
+// v0252-hostwait: the control words reach the host through a copy on the model stream, as Context::readCtlAsync's
+// hipMemcpyAsync from out_tok does: the mock's control area is mirrored into a device buffer at the call (the state the
+// GPU has when the copy runs in stream order) and copied to `dst` with the backend's copyAsync, so the copy is a real
+// Backend call the tests can order against the engine's event record / wait.
+bool MockModel::readCtlAsync(void* dst, std::size_t words) {
+    if (!mc_.ctl_async) return false;
+    const std::size_t all = seqs_.size() * qwen35::ctl_words;
+    if (ctl_dev_ == 0) ctl_dev_ = ops_.malloc(static_cast<std::uint64_t>(all) * 4);
+    const std::size_t n = std::min(words, all);
+    for (std::size_t s = 0; s < seqs_.size() && (s + 1) * qwen35::ctl_words <= n; ++s)
+        std::memcpy(at<std::int32_t>(ctl_dev_) + s * qwen35::ctl_words, seqs_[s].ctl.data(), qwen35::ctl_words * 4);
+    ops_.copyAsync(reinterpret_cast<server::DevPtr>(dst), ctl_dev_, static_cast<std::uint64_t>(n) * 4, stream_);
+    ctl_async_calls_ += 1;
+    return true;
 }
 
 bool MockModel::resizePool(std::uint32_t tokens) {
@@ -495,6 +527,7 @@ void MockModel::endMtpCycle() {
 
 void MockModel::mtpBatchStepEx(std::span<const server::MSeg> segs, std::uint32_t r, bool draft) {
     if (!mc_.mtp) throw std::runtime_error("NoMtp");
+    mtp_steps_ += 1;  // v0252-hostwait: MTP step calls (the engine's kicks follow each one)
     // v0252-btl: the real model's limits (Context::mtpBatchStepEx, src/model/qwen35/forward/mtp_verify.cpp:235 / :244)
     if (segs.empty() || segs.size() > qwen35::max_small_batch) throw std::runtime_error("BadBatch");
     if (r == 0) {
@@ -559,6 +592,14 @@ bool MockModel::setRelaxRank(server::DevPtr stats, std::uint32_t seg_mask, std::
 }
 
 std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) {
+    verifies_ += 1;   // v0252-hostwait: one per decode cycle
+    // v0252-hostwait2: the verify forward's early submissions (Context::run's rule over the mock's layers)
+    if (const std::uint32_t kl = kick_layers_.load(); kl != 0)
+        for (std::uint32_t i = 0; i < cfg_.n_layer; ++i)
+            if ((i + 1) % kl == 0 && i + 1 < cfg_.n_layer) {
+                kickQueue();
+                kick_fwd_ += 1;
+            }
     endMtpCycle();    // v0252-btl: the MTP steps of this cycle are done
     h_rows_.clear();  // the verify overwrites the MTP head rows
     // v0252-f1: take the one-pass request (one-shot, as Context::takeRelaxRank)
@@ -647,6 +688,10 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
 }
 
 void MockModel::readCtl(std::span<std::int32_t> dst) {
+    read_ctl_calls_ += 1;  // v0252-hostwait: the blocking control-word reads
+    // v0252-hostwait2: the production read (a null-stream hipMemcpy) waits for the blocking model stream first, so the
+    // readbacks queued on it before have landed (NullBackend deferred completion; not a Backend call)
+    if (auto* nb = dynamic_cast<device::NullBackend*>(&ops_)) nb->deviceReached(stream_);
     for (std::size_t s = 0; s < seqs_.size() && (s + 1) * qwen35::ctl_words <= dst.size(); ++s)
         std::memcpy(dst.data() + s * qwen35::ctl_words, seqs_[s].ctl.data(), qwen35::ctl_words * 4);
 }

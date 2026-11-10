@@ -99,6 +99,22 @@ public:
     // verify row; sampling::RelaxRows rank layout). One-shot. false: not supported (the engine keeps topkRows).
     virtual bool setRelaxRank(DevPtr stats, std::uint32_t seg_mask, std::uint32_t stride) { (void)stats, (void)seg_mask, (void)stride; return false; }
     virtual void readCtl(std::span<std::int32_t> dst) = 0;
+    // v0252-hostwait (WHIRL_CYCLE_SYNC bit 0): enqueue the copy of the first `words` control words (readCtl's data) into
+    // pinned host memory `dst` on stream() and return without waiting (the caller records an event after it and waits on
+    // that). false: not supported (the engine keeps readCtl).
+    virtual bool readCtlAsync(void* dst, std::size_t words) { (void)dst, (void)words; return false; }
+    // v0252-hostwait (WHIRL_CYCLE_SYNC bits 2 / 3, early submission): kick() makes the runtime hand the launches the model
+    // has queued on stream() to the GPU now: an event record on stream() (a flushing marker), plus a query of that event
+    // when `query` (bit 2 alone; bit 3 = record only, REVIEW-v0252-hostwait A2). setKick(layers, query): the same every
+    // `layers` layers of a decode / verify forward (<= verifyRows() rows); 0 = never (the default; the model keeps its
+    // event). Same kernels, same order: the output does not change. kickCount(): kicks done since start (kick() calls,
+    // kicks inside forwards), the server log's proof that they ran (REVIEW B4).
+    struct KickCount {
+        std::uint64_t calls = 0, forward = 0;
+    };
+    virtual void setKick(std::uint32_t layers, bool query) { (void)layers, (void)query; }
+    virtual void kick() {}
+    virtual KickCount kickCount() const { return {}; }
     // speculative sampling of MTP drafts (numerics item specsample): per sequence, set before the
     // draft steps of a cycle. Race coupling (whirl/spec_sample.h): the device draws draft r as
     // argmin E/q and the host draws the target as argmin E/p with the same E, accepting on an exact
