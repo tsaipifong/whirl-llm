@@ -72,10 +72,11 @@ struct Profile {
     // verify is unchanged, so the output is the same (v0252-n2 / feat027-draft64k97 b334a52, DISCOVERY v0252 N1)
     bool draft64k_moe;
     // v0252-f2def2: relaxacc greedy uses F1's one-pass check (argmax_rank_rows_to ranks the MTP drafts in the verify's
-    // argmax; no topk_rows launch) on this family. Both code objects have the kernel; it is enabled only where F1 was
-    // measured (ADR-0015: the R9700, G3a). Read by qwen35::numericsTarget (Target::k_relax_rank: the R9700's MoE fast
-    // arm needs it) and Context::setRelaxRank / relaxRankEnqueue (server and CLI decode). The 8060S: run F1's G4a there,
-    // then flip this to true (and widen ADR-0015)
+    // argmax; no topk_rows launch) on this family. Both code objects have the kernel. On for the R9700 (ADR-0015 G3a) and,
+    // since v0252-f1flip (ADR-0015 Revision 1, decided 11-10 05:09 by the per-cycle-cost rule), the 8060S: the pre-registered
+    // speed test ended INCONCLUSIVE twice with no loss on any key (Ornith fast tg +1.65..+2.43 %, Swift +0.3..+0.7 %) and the
+    // fast outputs were identical. Read by qwen35::numericsTarget (Target::k_relax_rank: the R9700's MoE fast arm needs it;
+    // the 8060S arm k6a05 does not) and Context::setRelaxRank / relaxRankEnqueue (server and CLI decode)
     bool relax_rank_check;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
@@ -153,7 +154,7 @@ inline constexpr Profile k_profile_gfx1151{
     // relaxacc is off in every mode: exact acceptance), so the output is unchanged; kept only on the 8060S A/B
     // (scratch\v0252_8sdraft\s8draft_gpu.ps1 -Part s, rule in its header)
     .draft64k_moe = true,
-    .relax_rank_check = false,  // v0252-f2def2: F1 never measured here (no G4a); relaxacc keeps topk_rows
+    .relax_rank_check = true,  // v0252-f1flip (ADR-0015 Revision 1): F1 on here too; the 8060S speed test ended INCONCLUSIVE twice with no loss, outputs identical
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = false,  // v0252-n10: 0.2.5.2 does not touch the Radeon 8060S (the 0.2.5.1 forward end stays)
