@@ -81,12 +81,12 @@ void testRelaxRank() {
     w.m->k.argmax_rank_rows_to = reinterpret_cast<whirl::hip::Function>(0x20);
     ISO_CHECK(w.b->setRelaxRank(0x4000, 0x3, 32));
     ISO_CHECK(w.m->rr_stats == 0x4000 && w.m->rr_mask == 0x3 && w.m->rr_stride == 32);
-    // v0252-f2def2: on the Radeon 8060S (gfx1151, device::Profile::relax_rank_check false) the server's request is
-    // refused although the code object has the kernel: the engine keeps topk_rows (cy.rank1p false, no rank verify)
+    // v0252-f1flip (ADR-0015 Revision 1): on the Radeon 8060S (gfx1151, device::Profile::relax_rank_check true) the
+    // server's request is taken as on the R9700 (before f1flip it was refused and the engine kept topk_rows)
     (void)w.m->takeRelaxRank();
     w.m->arch = whirl::hip::Arch::gfx1151;
-    ISO_CHECK(!w.b->setRelaxRank(0x4000, 0x3, 32));
-    ISO_CHECK(w.m->rr_stats == 0 && w.m->rr_mask == 0);
+    ISO_CHECK(w.b->setRelaxRank(0x4000, 0x3, 32));
+    ISO_CHECK(w.m->rr_stats == 0x4000 && w.m->rr_mask == 0x3 && w.m->rr_stride == 32);
 }
 
 void testCaptureAndDflash() {

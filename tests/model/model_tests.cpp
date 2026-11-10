@@ -3117,8 +3117,8 @@ std::map<std::string, std::string> dumpKv(const std::string& d) {
 // v0252-f2def: the shipped fast MoE relaxacc default as the loader builds it (q::numericsTarget, tune.cpp): the arm is
 // relax_moe_default_r9700 = k4a10d2 on gfx1201 and relax_moe_default_8060s = k6a05 on gfx1151; k_relax_rank = F1's
 // one-pass check (KernelTable::argmax_rank_rows_to) is in the code object AND the device profile enables it
-// (v0252-f2def2: device::Profile::relax_rank_check, gfx1201 only; the gfx1151 object has the kernel too, but F1 was never
-// measured there, ADR-0015), so the 8060S keeps topk_rows and its arm k6a05 (which needs no F1); the
+// (v0252-f2def2: device::Profile::relax_rank_check, on for gfx1201 and, since v0252-f1flip / ADR-0015 Revision 1, for
+// gfx1151), so both GPUs set k_relax_rank; the 8060S arm k6a05 does not need F1; the
 // test's n2a::targetOf copy agrees; Ornith fast then plans the arm (2 MTP drafts on the R9700), precise / balance and a
 // dense model do not; the user's draft count (--mtp-drafts / WHIRL_MTP_DRAFTS) still wins over the arm's (source pin
 // on the two callers). Fails before f2def: both defaults "off" and numericsTarget never set k_relax_rank.
@@ -3135,7 +3135,7 @@ void testRelaxDefaultTarget() {
             const std::string cell = std::format("f2def {} rank {}", g51 ? "gfx1151" : "gfx1201", rank);
             nu::Target t = q::numericsTarget(*m);
             check(t.relax_moe_arm == want, std::format("{}: numericsTarget arm '{}' (want {})", cell, t.relax_moe_arm, want));
-            const bool want_rank = rank && !g51;  // v0252-f2def2: F1 on the R9700 only (device profile relax_rank_check)
+            const bool want_rank = rank;  // v0252-f1flip (ADR-0015 Rev 1): F1 on both GPUs (device profile relax_rank_check)
             check(t.k_relax_rank == want_rank, std::format("{}: numericsTarget k_relax_rank {} (want {})", cell, t.k_relax_rank, want_rank));
             const nu::Target tc = n2a::targetOf(*m);
             check(tc.relax_moe_arm == t.relax_moe_arm && tc.k_relax_rank == t.k_relax_rank, cell + ": n2a::targetOf differs from numericsTarget");
