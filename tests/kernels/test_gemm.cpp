@@ -582,7 +582,7 @@ void testGemm(Ctx& c) {
                             c.rep.add(r);
                         }
                         if (!f) continue;
-                        const wk::GemmCfg g = fqProtoCfg(pv);  // v0252-8sbvalu: w5ls has its own geometry
+                        const auto& g = wk::kGemmFqCfgs[static_cast<std::size_t>(pv.base)];
                         for (int accumulate = 0; accumulate < 2; ++accumulate) {
                             Buf y(static_cast<std::size_t>(nt) * nr * 4);
                             if (accumulate) y.up(y0); else y.fill(0xff);
@@ -594,6 +594,19 @@ void testGemm(Ctx& c) {
                             c.rep.add(cmpExact(name, y.down<float>(static_cast<std::size_t>(nt) * nr), accumulate ? ref1 : ref0, Kind::invariant));
                         }
                     }
+                    // v0252-valuout: the rejected v0252-8sbvalu lever prototypes are not in the shipped object (kt.h kFqRetired)
+                    if (variant == 0 && nt == ns.front())
+                        for (const char* rn : kFqRetired) {
+                            const std::string kn = std::string("gemmfq_") + rn + "_mxfp4";
+                            Result r;
+                            r.kind = Kind::invariant;
+                            r.n = 1;
+                            r.name = kn + " (v0252-8sbvalu lever, REVERT) absent from the gfx1151 code object";
+                            r.pass = c.fnOpt(kn) == nullptr;
+                            if (!r.pass) r.note = "still in the code object";
+                            r.mismatches = r.pass ? 0 : 1;
+                            c.rep.add(r);
+                        }
                 }
             }
         }

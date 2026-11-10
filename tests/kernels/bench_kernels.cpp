@@ -1148,7 +1148,7 @@ void benchFdq(Env& e) {
     std::vector<FqB> cand;
     for (std::size_t fi = 0; fi < wk::kGemmFqCfgs.size(); ++fi) cand.push_back({wk::kGemmFqNames[fi], wk::kGemmFqCfgs[fi]});
     if (!e.o.fdq_v.empty())
-        for (const FqProto& pv : kFqProto) cand.push_back({pv.name, fqProtoCfg(pv)});
+        for (const FqProto& pv : kFqProto) cand.push_back({pv.name, wk::kGemmFqCfgs[static_cast<std::size_t>(pv.base)]});
     std::vector<FqB> slots;
     for (const FqB& cb : cand) {
         const std::string& v = cb.name;
