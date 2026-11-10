@@ -6,8 +6,9 @@
 # REAL model core and everything below it (the src lines of tests/iso/model.core, unchanged), the server contract headers and
 # the vision encoder sources (vision.*). Link doubles (test program): the HIP layer (tests/iso/fake_hip.cpp: launch recorder, fake kernel handles), the GPU
 # restriction half of gpusel (tests/iso/model.core/fake_gpu_restrict.cpp), the embedded draft vocabulary (3 ids), the vision code
-# objects (tests/iso/vision/fake_vision_objects.cpp, as tests/iso/vision) and the two async copies vision.cpp references
-# (tests/iso/model.qwen35.server/fake_hip_async.cpp, kept out of fake_hip.cpp so the forward programs stay strict). NOT declared:
+# objects (tests/iso/vision/fake_vision_objects.cpp, as tests/iso/vision) and the async upload vision.cpp references
+# (tests/iso/model.qwen35.server/fake_hip_async.cpp, kept out of fake_hip.cpp so the forward programs stay strict; downloadAsync is in
+# fake_hip.cpp since v0252-hostwait: the forward references it). NOT declared:
 # the server (server.*), the engine, the server log, the KV host tier, the product architecture table (module.cpp). Format:
 # tests/sampling/isolation.txt.
 module    model.qwen35.server
