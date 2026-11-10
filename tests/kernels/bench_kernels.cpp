@@ -16,6 +16,8 @@
 //   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state)
 //   fdq   in-object A/B: dequant_f16_mxfp4 + gemm_c<i>_f16 (the shipped MXFP4 dequant choice) vs gemmfq_<v>_mxfp4 (gfx1151),
 //         B bitwise == A on the full output first, then ABBA pairs; rows --fdq-n, slots --fdq-v (v0251-a3port)
+//   swamax in-object A/B (v0252-swamax, gfx1201): gemm8r_moeh + silu_mul_x8h vs gemm8r_moeswa / gemm8r_moeswa32 on real
+//         Ornith routing (kt::swamaxDumpPaths), B bitwise == A first, then ABBA pairs
 //   ggemv gemvq_nt<N>r2_mxfp4 vs gemvk_nt<N>v1..9_mxfp4 (gfx1151 verify GEMV, N = every gemvk width 2..8 of
 //         kt::ggemvBenchNts(), --bench-nt a subset; feat026-ggemv, v0251-a6bench)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
@@ -1023,6 +1025,147 @@ void benchMoe(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- swamax (v0252-swamax, gfx1201 fp8 MoE prefill gate + up)
+// In-object A/B on real Ornith routing (kt::swamaxDumpPaths(), the 11-10 R9700 dumps rt_code2k / 8k / 32k): one cell per
+// dump and B kernel at the last full forward (2048 / 2054 rows), layer 20 (its weights), the plan's token tile for n
+// (ops::moeTile: n * K >= 48 * R -> 64):
+//   A = gemm8r_moeh (gate + up, f16 out) + silu_mul_x8h (fp8 rows + row scales)   (the shipped MoE gate + up + silu)
+//   B = gemm8r_moeswa (halves 1)  or  gemm8r_moeswa32 (halves 2)                  (one launch)
+// B bitwise == A on every fp8 byte and row scale first (bitwise_b), then ABBA pairs (Bench::runAB) -> ab_ratio B / A.
+// The kt job's KEEP rule is in scratch\v0252_swamax\swamax_kt.ps1 (registered before data).
+void benchSwamax(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "swamax";
+    if (!c.k.gemm8r_moeswa || !c.k.gemm8r_moeswa32 || !c.k.gemm8r_moeh || !c.k.gemm8r_moe32h || !c.k.silu_mul_x8h || !c.k.moe_route ||
+        !c.k.moe_gather_fp8) {
+        c.rep.skip("swamax", "bench gemm8r_moeswa", "kernel not in this code object");
+        return;
+    }
+    const whirl::gguf::File* f = c.models.moemx.empty() ? nullptr : c.open(c.models.moemx);
+    const int layer = 20;
+    const std::string lp = "blk." + std::to_string(layer) + ".";
+    if (!f || !f->tensor(lp + "ffn_gate_exps.weight") || f->tensor(lp + "ffn_gate_exps.weight")->type != whirl::gguf::GgmlType::mxfp4) {
+        Result r;
+        r.family = "swamax";
+        r.name = "bench swamax needs --moemx (Ornith-1.5-35B-A3B MXFP4): real routing on synthetic weights is not a production shape";
+        r.pass = false;
+        c.rep.add(r);
+        return;
+    }
+    auto gate = std::make_shared<HostMat>(loadMat(*f, lp + "ffn_gate_exps.weight"));
+    auto up = std::make_shared<HostMat>(loadMat(*f, lp + "ffn_up_exps.weight"));
+    const int E = gate->ncols, F = static_cast<int>(f->tensor(lp + "ffn_down_exps.weight")->ne[0]), R = gate->nrows / F;
+    const int K = static_cast<int>(f->getUintOr("qwen35moe.expert_used_count", 8));
+    auto dg = std::make_shared<Buf>(gate->data), du = std::make_shared<Buf>(up->data), rg = std::make_shared<Buf>(gate->ref),
+         ru = std::make_shared<Buf>(up->ref);
+    const std::uint64_t grb = gate->row_bytes;
+    for (const std::string& path : swamaxDumpPaths()) {
+        SwaDump d;
+        std::string why;
+        if (!swamaxLoadDump(path, K, d, why)) {
+            Result r;
+            r.family = "swamax";
+            r.name = "bench swamax routing " + path + ": " + why;
+            r.pass = false;
+            c.rep.add(r);
+            continue;
+        }
+        const int j = swamaxForward(d.fwd), n = d.fwd[static_cast<std::size_t>(j)], pairs = n * K;
+        const int bn = n * K < 48 * R ? 32 : 64;  // ops::moeTile
+        const int max_tiles = (pairs + bn - 1) / bn + R;
+        const unsigned nby = cdiv(F, wk::kMoeBm);
+        const std::vector<int> ids = swamaxDumpLayer(d, K, j, layer);
+        auto dids = std::make_shared<Buf>(ids);
+        auto perm = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * 4), inv = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * 4);
+        auto tiles = std::make_shared<Buf>(static_cast<std::size_t>(max_tiles) * 16), nt = std::make_shared<Buf>(4);
+        auto x8 = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * E), sx = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * 4);
+        {
+            Buf dh(c.randn(static_cast<std::size_t>(n) * E));
+            hip::launch(c.k.moe_route, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dids->p(), pairs, R, bn, perm->p(), inv->p(), tiles->p(), nt->p());
+            hip::launch(c.k.moe_gather_fp8, {static_cast<unsigned>(pairs), 1, 1}, {256, 1, 1}, 0, c.s, dh.p(), perm->p(), x8->p(), sx->p(), E, K);
+            c.sync();
+        }
+        auto hg = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * F * 2), hu = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * F * 2);
+        auto qa = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * F), sxa = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * 4);
+        auto qb = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * F), sxb = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * 4);
+        const hip::Function fgu = bn == 32 ? c.k.gemm8r_moe32h : c.k.gemm8r_moeh;
+        const std::size_t sl = path.find_last_of("\\/");
+        std::string base = sl == std::string::npos ? path : path.substr(sl + 1);
+        if (base.size() > 4) base.resize(base.size() - 4);  // rt_code2k
+        struct V {
+            const char* name;
+            hip::Function f;
+            int bnk;
+        };
+        const V vs[] = {{"gemm8r_moeswa", c.k.gemm8r_moeswa, 64}, {"gemm8r_moeswa32", c.k.gemm8r_moeswa32, 32}};
+        for (const V& v : vs) {
+            if (bn % v.bnk != 0) continue;  // gemm8r_moeswa needs a 64-token tile list
+            const int halves = bn / v.bnk;
+            Cell k;
+            k.ci = e.info("swamax", bn == 32 ? "gemm8r_moe32h+silu_mul_x8h" : "gemm8r_moeh+silu_mul_x8h",
+                          "ornith." + base + ".fwd" + std::to_string(j) + ".l" + std::to_string(layer) + ".bn" + std::to_string(bn) + "." + v.name,
+                          "E" + std::to_string(E) + "_F" + std::to_string(F) + "_R" + std::to_string(R) + "_K" + std::to_string(K) + "_n" + std::to_string(n));
+            k.ci.settings = e.settings(dg->bytes() + du->bytes(), 1) + ";routing=" + base + ";forward=" + std::to_string(j) + ";layer=" + std::to_string(layer);
+            k.kernel = k.ci.kernel;
+            k.fa = fgu;
+            k.call = [&c, dg, du, rg, ru, x8, sx, hg, hu, qa, sxa, tiles, nt, grb, max_tiles, nby, F, E, pairs](hip::Function fn, std::uint64_t) {
+                hip::launch(fn, {static_cast<unsigned>(max_tiles) * 2 * nby, 1, 1}, {256, 1, 1}, 0, c.s, dg->p(), du->p(), grb, rg->p(), ru->p(), F, x8->p(),
+                            sx->p(), hg->p(), hu->p(), E, tiles->p(), nt->p());
+                hip::launch(c.k.silu_mul_x8h, {static_cast<unsigned>(pairs), 1, 1}, {256, 1, 1}, 0, c.s, hg->p(), hu->p(), qa->p(), sxa->p(), F);
+            };
+            k.run = [&c, &k, qa, sxa, pairs, F](hip::Function fn) {
+                qa->fill(0x5a);
+                sxa->fill(0x5a);
+                k.call(fn, 0);
+                c.sync();
+                const auto s = sxa->down<float>(static_cast<std::size_t>(pairs));
+                std::vector<float> o(s.begin(), s.end());
+                const auto q = qa->down<std::uint8_t>(static_cast<std::size_t>(pairs) * F);
+                for (std::size_t i = 0; i < q.size(); i += 61) o.push_back(static_cast<float>(q[i]));
+                return o;
+            };
+            k.verify = [pairs](const std::vector<float>& got) {
+                // A is the shipped chain (kt swamax / moemx check its values); here: every row scale written (none left
+                // at the 0x5a fill) and finite and positive for these Gaussian activations
+                std::size_t bad = 0;
+                for (int p = 0; p < pairs && p < static_cast<int>(got.size()); ++p)
+                    bad += !std::isfinite(got[static_cast<std::size_t>(p)]) || got[static_cast<std::size_t>(p)] <= 0.f || got[static_cast<std::size_t>(p)] > 1e30f;
+                Result r;
+                r.kind = Kind::invariant;
+                r.n = static_cast<std::size_t>(pairs);
+                r.mismatches = bad;
+                r.pass = bad == 0;
+                r.name = "A row scales written, finite and positive";
+                return r;
+            };
+            k.kernel_b = v.name;
+            const hip::Function fb = v.f;
+            k.call_b = [&c, fb, dg, du, rg, ru, x8, sx, qb, sxb, tiles, nt, grb, max_tiles, halves, F, E](std::uint64_t) {
+                hip::launch(fb, {static_cast<unsigned>(max_tiles * halves), 1, 1}, {256, 1, 1}, 0, c.s, dg->p(), du->p(), grb, rg->p(), ru->p(), F, x8->p(),
+                            sx->p(), sxb->p(), qb->p(), E, tiles->p(), nt->p(), halves);
+            };
+            k.bitwise_b = [&c, &k, fgu, qa, sxa, qb, sxb, pairs, F]() -> std::pair<std::size_t, std::size_t> {
+                qa->fill(0x5a);
+                sxa->fill(0x5a);
+                qb->fill(0xa5);
+                sxb->fill(0xa5);
+                k.call(fgu, 0);
+                k.call_b(0);
+                c.sync();
+                const auto a1 = qa->down<std::uint8_t>(static_cast<std::size_t>(pairs) * F), b1 = qb->down<std::uint8_t>(static_cast<std::size_t>(pairs) * F);
+                const auto a2 = sxa->down<std::uint32_t>(static_cast<std::size_t>(pairs)), b2 = sxb->down<std::uint32_t>(static_cast<std::size_t>(pairs));
+                std::size_t bad = 0;
+                for (int p = 0; p < pairs; ++p) {
+                    bad += std::memcmp(&a1[static_cast<std::size_t>(p) * F], &b1[static_cast<std::size_t>(p) * F], static_cast<std::size_t>(F)) != 0;
+                    bad += a2[static_cast<std::size_t>(p)] != b2[static_cast<std::size_t>(p)];
+                }
+                return {2 * static_cast<std::size_t>(pairs), bad};
+            };
+            runCell(e, k);
+        }
+    }
+}
+
 // ---------------------------------------------------------------- gdn (decode step + gated norm)
 void benchGdn(Env& e) {
     Ctx& c = e.c;
@@ -1296,7 +1439,7 @@ void benchFdq(Env& e) {
 
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "swamax"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -1347,7 +1490,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
         void (*fn)(Env&);
     };
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
-                      {"fdq", benchFdq}, {"ggemv", benchGGemv}};
+                      {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"swamax", benchSwamax}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

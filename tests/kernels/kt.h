@@ -232,6 +232,20 @@ void testMoeF(Ctx& c);  // "moef": precise MoE decode experts moe_gu_f_* / moe_d
 // v0252-c3port "moefuse" (test_moe_fused.cpp): gfx1201 fused precise MoE decode moe_gus*_f_mxfp4 == moe_gu_f + silu_mul and
 // f32_to_f16 + gemvh x2 + silu_mul + f32_to_f16, gemvhf_<T> == f32_to_f16 + gemvh_<T> (bitwise); presence rows per arch
 void testMoeFused(Ctx& c);
+// v0252-swamax "swamax" (test_moe_swamax.cpp): gfx1201 gemm8r_moeswa / gemm8r_moeswa32 == gemm8r_moe*h + silu_mul_x8h (fp8 rows
+// and row scales bitwise; synthetic, edge-value and real Ornith routing), presence rows per arch. The real-routing
+// dumps (WHIRL_KT_SWA_RT, ';'-separated .i32 with the moesm .md beside each) and the forward a case takes are shared
+// with the bench family "swamax" (bench_kernels.cpp)
+void testMoeSwamax(Ctx& c);
+std::vector<std::string> swamaxDumpPaths();
+int swamaxForward(const std::vector<int>& fwd);
+struct SwaDump {
+    std::string path;
+    std::vector<int> fwd;  // rows per forward
+    std::vector<int> ids;  // forward-major, then 40 layers of rows x K
+};
+bool swamaxLoadDump(const std::string& path, int K, SwaDump& d, std::string& why);
+std::vector<int> swamaxDumpLayer(const SwaDump& d, int K, int j, int l);
 // v0251-a11port (called by testMoeMx, family "moemx"): fused router moe_router_fused_i* == moe_logits_f32 + moe_topk
 // (bitwise) and vs CPU, presence rows (every code object + host table; v0252-c5port adds gfx1201) (test_moe_router.cpp)
 void testMoeRouter(Ctx& c);

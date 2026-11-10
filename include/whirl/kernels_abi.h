@@ -185,6 +185,11 @@
 //   gemm8r_moe / gemm8r_moe32 / gemm8r_moeh / gemm8r_moe32h (optional): same arguments,
 //            same outputs; 1-D grid n_tile_slots * nbt, nbt = 2 * ceil(rows_e / kMoeBm)
 //            with W2 else ceil(rows_e / kMoeBm), row block fastest
+//   gemm8r_moeswa / gemm8r_moeswa32 (optional, v0252-swamax)(W1, W2, rb, ref1, ref2, F, const u8* X8, const float* sx,
+//            float* sx_out, u8* Q, E, const Int4* tiles, const int* n_tiles, int halves): gate + up + SwiGLU + per-pos
+//            fp8 quantization in one launch = gemm8r_moeh / gemm8r_moe32h followed by silu_mul_x8h(Q, sx_out), bitwise;
+//            1-D grid n_tile_slots * halves, token half-tile 64 / 32 (halves = tile bn / 64 or / 32); sx_out may be sx,
+//            Q must not alias X8; F must pass swamaxShapeOk
 //   gemmr_moegu / gemmr_moegu32 (optional, MXFP4)(Wg, Wu, rb, F, const f16* X, f16* A, ncols,
 //            const Int4* tiles, const int* n_tiles): grouped gate + up of the f16 (precise) MoE
 //            prefill, A = f16(silu(g) * u) (moe_act_f16's values; A must not alias X); 1-D grid
@@ -253,6 +258,10 @@ inline constexpr bool gemmrMoeShapeOk(std::uint32_t E, std::uint32_t F) {
     return E > 0 && F > 0 && E % kGemmrMoeBk == 0 && F % kGemmrMoeBk == 0;
 }
 inline constexpr int kMoeBn32 = 32;                                        // gemm_moe32_* token tile
+// v0252-swamax (gfx1201, optional): gemm8r_moeswa / gemm8r_moeswa32 keep the whole F row of their tokens in registers
+// (at most kSwamaxMaxF rows, 4 slices of kMoeBm); F a multiple of 8 (silu_mul_x8h's 8-value rows).
+inline constexpr int kSwamaxMaxF = 512;
+inline constexpr bool swamaxShapeOk(std::uint32_t F) { return F > 0 && F % 8 == 0 && F <= static_cast<std::uint32_t>(kSwamaxMaxF); }
 // feat026-moep variants (kernels/gfx1151/moe_prefill_mt.hip MOEPGU_ENTRY / MOEPDN_ENTRY; keep in step).
 struct MoepGuVariant {
     const char* name;
@@ -713,6 +722,7 @@ struct MoeKernels {
     F moe_gu_mxw{}, moe_down_mxw{};
     F gemm8_moe{}, gemm8_moe32{}, gemm8_moeh{}, gemm8_moe32h{}, moe_gather_fp8{};
     F gemm8r_moe{}, gemm8r_moe32{}, gemm8r_moeh{}, gemm8r_moe32h{};  // optional
+    F gemm8r_moeswa{}, gemm8r_moeswa32{};  // optional (v0252-swamax, gfx1201)
     F gemmr_moegu{}, gemmr_moegu32{}, gemmr_moedn{}, gemmr_moedn32{};  // optional (MXFP4, f16 activations)
     // feat026-moep (optional, gfx1151, MXFP4): multi-fragment expert GEMMs per variant, fused-combine down twins,
     // the vectorised combine

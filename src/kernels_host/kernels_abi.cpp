@@ -476,6 +476,8 @@ void loadMoe(MoeKernels& k, const Loader& L) {
         k.gemm8r_moe32 = L.opt("gemm8r_moe32");
         k.gemm8r_moeh = L.opt("gemm8r_moeh");
         k.gemm8r_moe32h = L.opt("gemm8r_moe32h");
+        k.gemm8r_moeswa = L.opt("gemm8r_moeswa");      // v0252-swamax (gfx1201 only)
+        k.gemm8r_moeswa32 = L.opt("gemm8r_moeswa32");
         k.gemmr_moegu = L.opt("gemmr_moegu_mxfp4");
         k.gemmr_moegu32 = L.opt("gemmr_moegu32_mxfp4");
         k.gemmr_moedn = L.opt("gemmr_moedn_mxfp4");
