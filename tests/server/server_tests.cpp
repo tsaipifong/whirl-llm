@@ -2193,17 +2193,18 @@ void testTailInsideLongPrompt() {
 }
 
 // v0252-n10: where the capture does not apply, the 0.2.5.1 forward end stays (tail_ck_in_forward on): a model without the
-// capture (MockConfig::state_capture false), DFlash2 drafts (PrefillPhase::soloLen; WHIRL_CKPT_HOST is the same kind of
-// condition there, not run here). The answers and the resume point are the same either way.
+// capture (MockConfig::state_capture false), DFlash2 drafts, WHIRL_CKPT_HOST (pinned host checkpoints; PrefillPhase::soloLen;
+// v0252-ktrng pins the third as a CPU test). The answers and the resume point are the same either way.
 void testTailInsideFallbacks() {
-    enum class Why { no_capture, dflash };
-    for (const Why why : {Why::no_capture, Why::dflash}) {
+    enum class Why { no_capture, dflash, ckpt_host };
+    for (const Why why : {Why::no_capture, Why::dflash, Why::ckpt_host}) {
         ServerSetup su = why == Why::dflash ? dflashSetup(false) : baseSetup();
         su.eo.n_ck = 3;
         su.eo.cold_resume = true;
         su.eo.tail_ck_in_forward = true;
         su.mc.sched_grid = 1024;
         if (why == Why::no_capture) su.mc.state_capture = false;
+        if (why == Why::ckpt_host) su.eo.ckpt_host = true;  // v0252-ktrng: the N10 fallback pin (PrefillPhase::soloLen: !opt_.ckpt_host)
         TestServer srv(su);
         g_log.clear();
         const auto p1 = makePrompt(2058, 61);
