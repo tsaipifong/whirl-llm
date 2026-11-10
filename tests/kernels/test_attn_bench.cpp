@@ -512,8 +512,171 @@ static void benchPrefill1151(Ctx& c) {
     }
 }
 
+// v0252-strixc2 (PLAN V1-09): the kernel A/B of the balance prefill attention attn_sx<NP> (B) against attn_prefill_wmma
+// (A: the kernel the gfx1151 balance prefill runs today, f16 cache and KG-3 copy alike) - WHIRL_KT_BENCH_SX=1 with
+// --only attnbench. f16 paged cache (shuffled pages, as the pool), n queries at the end of L keys (pos L - n), the
+// production launch geometry (head ranges of <= 4096 x 128k query-key pairs, ops::chooseAttnPrefill headParts; attn_sx NP
+// by ops::attnSxFor's rule). Rounds alternate ABBA / BAAB (each arm timed twice per round, one launch series each after
+// one warm series); per round ratio = mean(A) / mean(B) (> 1: attn_sx faster). Cells: WHIRL_KT_BENCH_SHAPES (default
+// "24/4,16/2" = Swift, Ornith), WHIRL_KT_BENCH_NS ("2048,4096"), WHIRL_KT_BENCH_LS ("8192,32768,65536,131072"),
+// WHIRL_KT_BENCH_ROUNDS (6). Lines: "SXAB <heads>/<kv> n <n> L <L> round <r> A <us> B <us> ratio <x>" per round,
+// "SXNUM ... rel_rms <x> maxabs <y> finite <0|1>" per cell (B vs A over the whole output; also a check row: rel_rms <= 4e-3,
+// finite - the v0252-b8s-c2 pair limit). The judge (scratch/v0252_strixc2/strixc2_kt_judge.py) applies the KEEP rule.
+static std::vector<int> envInts(const char* name, std::vector<int> def) {
+    const char* e = std::getenv(name);
+    if (!e) return def;
+    std::vector<int> v;
+    std::string s = e;
+    for (std::size_t a = 0; a < s.size();) {
+        std::size_t b = s.find_first_of(",/", a);
+        if (b == std::string::npos) b = s.size();
+        if (b > a) v.push_back(std::atoi(s.substr(a, b - a).c_str()));
+        a = b + 1;
+    }
+    return v.empty() ? def : v;
+}
+
+static void benchSx1151(Ctx& c) {
+    const int hd = 256, qstride = 2 * hd;
+    const float scale = 1.0f / 16.0f;
+    const auto fA = c.fnOpt("attn_prefill_wmma");
+    const hip::Function fsx[3] = {c.fnOpt("attn_sx2"), c.fnOpt("attn_sx4"), c.fnOpt("attn_sx8")};
+    if (!fA || (!fsx[0] && !fsx[1] && !fsx[2])) {
+        std::printf("   SX: attn_prefill_wmma / attn_sx* not in this code object\n");
+        c.rep.skip("attnbench", "attn_sx kernel A/B", "kernel not in this code object");
+        return;
+    }
+    const std::vector<int> shp = envInts("WHIRL_KT_BENCH_SHAPES", {24, 4, 16, 2});
+    const std::vector<int> ns = envInts("WHIRL_KT_BENCH_NS", {2048, 4096});
+    const std::vector<int> ls = envInts("WHIRL_KT_BENCH_LS", {8192, 32768, 65536, 131072});
+    const int rounds = std::getenv("WHIRL_KT_BENCH_ROUNDS") ? std::max(1, std::atoi(std::getenv("WHIRL_KT_BENCH_ROUNDS"))) : 6;
+    const int lmax = *std::max_element(ls.begin(), ls.end());
+    for (std::size_t si = 0; si + 1 < shp.size(); si += 2) {
+        const int heads = shp[si], nkv = shp[si + 1];
+        if (heads <= 0 || nkv <= 0 || heads % nkv != 0) continue;
+        const int grp = heads / nkv;
+        // the f16 cache for the longest L of this shape (shorter L read its first keys): random N(0, 0.3) f16 values,
+        // a 1M-element random block repeated (generation time), shuffled pages
+        const int pages = (lmax + wk::kKvPage - 1) / wk::kKvPage;
+        const std::size_t nel = static_cast<std::size_t>(pages) * wk::kKvPage * nkv * hd;
+        std::vector<int> pt(static_cast<std::size_t>(pages));
+        std::iota(pt.begin(), pt.end(), 0);
+        std::shuffle(pt.begin(), pt.end(), c.rng);
+        Buf dpt(pt);
+        std::vector<std::uint16_t> kh(nel), vh(nel);
+        {
+            const std::size_t blk = std::min<std::size_t>(nel, 1u << 20);
+            const auto kf = c.randn(blk, 0.3f), vf = c.randn(blk, 0.3f);
+            for (std::size_t i = 0; i < nel; ++i) {
+                kh[i] = f2h(kf[i % blk]);
+                vh[i] = f2h(vf[(i * 7 + 3) % blk]);
+            }
+        }
+        Buf dk(kh), dv(vh);
+        wk::KvArgs a{};
+        a.k = dk.p();
+        a.v = dv.p();
+        a.ptab = dpt.p();
+        for (const int n : ns) {
+            const std::vector<float> qp = c.randn(static_cast<std::size_t>(n) * heads * qstride);
+            Buf dq(qp), outA(static_cast<std::size_t>(n) * heads * hd * 4), outB(outA.bytes());
+            for (const int L : ls) {
+                if (L < n) continue;
+                Buf dpos(std::vector<int>{L - n});
+                // head ranges (ops::chooseAttnPrefill headParts): <= 4096 x 128k query-key pairs per launch
+                const long long budget = 4096ll * 131072ll;
+                int P = static_cast<int>(std::min<long long>(heads, (static_cast<long long>(n) * L + budget - 1) / budget));
+                while (P > 1 && heads % P != 0) ++P;
+                const int hp = heads / P;
+                int np = 0;
+                for (const int x : {8, 4, 2})
+                    if (grp % x == 0) {
+                        np = hp % x == 0 ? x : 0;
+                        break;
+                    }
+                const hip::Function fB = np == 8 ? fsx[2] : np == 4 ? fsx[1] : np == 2 ? fsx[0] : hip::Function{};
+                if (!fB) {
+                    std::printf("   SXSKIP %d/%d n %d L %d: no attn_sx for group %d / %d heads per launch\n", heads, nkv, n, L, grp, hp);
+                    continue;
+                }
+                const unsigned cols = 64u / static_cast<unsigned>(np);
+                auto goA = [&] {
+                    for (int p = 0; p < P; ++p)
+                        hip::launch(fA, {cdiv(n, 128), static_cast<unsigned>(hp), 1}, {256, 1, 1}, 0, c.s, dq.p(), a, outA.p(), heads, nkv, qstride,
+                                    dpos.p(), n, scale, p * hp);
+                };
+                auto goB = [&] {
+                    for (int p = 0; p < P; ++p)
+                        hip::launch(fB, {cdiv(n, cols) * static_cast<unsigned>(hp / np), 1, 1}, {256, 1, 1}, 0, c.s, dq.p(), a, outB.p(), heads, nkv,
+                                    qstride, dpos.p(), n, scale, p * hp);
+                };
+                auto timed = [&](const std::function<void()>& go) {
+                    hip::Event e0 = hip::eventCreate(true), e1 = hip::eventCreate(true);
+                    hip::eventRecord(e0, c.s);
+                    go();
+                    hip::eventRecord(e1, c.s);
+                    hip::eventSync(e1);
+                    const double us = 1000.0 * hip::eventElapsedMs(e0, e1);
+                    hip::eventDestroy(e0);
+                    hip::eventDestroy(e1);
+                    return us;
+                };
+                goA();
+                goB();
+                c.sync();
+                // numerics: B vs A over the whole output
+                {
+                    const std::size_t on = static_cast<std::size_t>(n) * heads * hd;
+                    const auto oa = outA.down<float>(on), ob = outB.down<float>(on);
+                    double se = 0, sr = 0, ma = 0;
+                    bool fin = true;
+                    for (std::size_t i = 0; i < on; ++i) {
+                        fin = fin && std::isfinite(ob[i]);
+                        const double d = static_cast<double>(ob[i]) - oa[i];
+                        se += d * d;
+                        sr += static_cast<double>(oa[i]) * oa[i];
+                        ma = std::max(ma, std::fabs(d));
+                    }
+                    const double rel = sr > 0 ? std::sqrt(se / sr) : INFINITY;
+                    std::printf("   SXNUM %d/%d n %d L %d np %d parts %d rel_rms %.4g maxabs %.4g finite %d\n", heads, nkv, n, L, np, P, rel, ma, fin ? 1 : 0);
+                    Result r;
+                    r.family = "attnbench";
+                    r.name = "attn_sx" + std::to_string(np) + " vs attn_prefill_wmma (heads " + std::to_string(heads) + " / kv " + std::to_string(nkv) +
+                             ", n " + std::to_string(n) + ", L " + std::to_string(L) + ")";
+                    r.kind = Kind::tol;
+                    r.n = on;
+                    r.max_err = ma;
+                    r.metric = rel / 4e-3;
+                    r.pass = fin && rel <= 4e-3;
+                    c.rep.add(r);
+                }
+                for (int rd = 0; rd < rounds; ++rd) {
+                    double ta = 0, tb = 0;
+                    if (rd % 2 == 0) {  // A B B A
+                        ta += timed(goA);
+                        tb += timed(goB);
+                        tb += timed(goB);
+                        ta += timed(goA);
+                    } else {  // B A A B
+                        tb += timed(goB);
+                        ta += timed(goA);
+                        ta += timed(goA);
+                        tb += timed(goB);
+                    }
+                    std::printf("   SXAB %d/%d n %d L %d round %d A %.1f B %.1f ratio %.4f\n", heads, nkv, n, L, rd + 1, ta / 2, tb / 2, ta / tb);
+                    std::fflush(stdout);
+                }
+            }
+        }
+    }
+}
+
 void benchAttn(Ctx& c) {
     c.rep.family = "attnbench";
+    if (std::getenv("WHIRL_KT_BENCH_SX")) {  // v0252-strixc2
+        benchSx1151(c);
+        return;
+    }
     if (std::getenv("WHIRL_KT_BENCH_PREFILL")) {
         if (!c.fnOpt("attn_kg6") && c.fnOpt("attn_prefill_wmma_q8")) {
             benchPrefill1151(c);

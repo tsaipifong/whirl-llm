@@ -15,6 +15,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_ATTN_KGVAR",  // src/common/numerics.cpp (feat026-attnkg97, v0252-c1port)
     "WHIRL_ATTN_KX",  // src/common/numerics.cpp
     "WHIRL_ATTN_SEG",  // src/common/numerics.cpp
+    "WHIRL_ATTN_SX",  // src/common/numerics.cpp (v0252-strixc2: balance attn_sx off when "0")
     "WHIRL_ATTN_WIDE",  // src/common/numerics.cpp
     "WHIRL_ATTN_WS4",  // src/common/numerics.cpp
     "WHIRL_BENCH_MAX_BATCH",  // src/cli/cmd_bench.cpp
