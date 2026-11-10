@@ -91,6 +91,10 @@ struct EnvValues {
     Raw attn_kgvar;
     // v0252-c3port (feat026-moedec): moe_fuse / gemvh_f32 (WHIRL_MOE_FUSE / WHIRL_GEMVH_F32)
     Raw moe_fuse, gemvh_f32;
+    // v0252-blasst (PLAN V1-70, BLASST attention block skip; fast only, class F): attn_skip (WHIRL_ATTN_SKIP: a, lambda =
+    // a / keys), attn_skip_min (WHIRL_ATTN_SKIP_MIN: the first key count it applies at), attn_skip_probe
+    // (WHIRL_ATTN_SKIP_PROBE: up to four a values for the count-only probe kernels)
+    Raw attn_skip, attn_skip_min, attn_skip_probe;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -98,7 +102,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 36;
+    static constexpr std::size_t n_fields = 39;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -263,6 +267,13 @@ struct ItemState {
 // bitwise switches, the loader's envFlag rule ("0" off, any other value on), class B (no +overrides label, never lossy);
 // not in the S0b-2 dump (the launch log pins the kernels). v0252-c3bdef: moe_fuse defaults on for MoE models on the
 // gfx1201 code object (R9700 A/B q7 9507 KEEP), off on dense models and on gfx1151; gemvh_f32 default off everywhere.
+// v0252-blasst (PLAN V1-70, BLASST attention block skip, lossy: FAST ONLY, not on the balance allowed list; not an Item, so
+// the item lines of every mode stay as they are): attn_skip_a = WHIRL_ATTN_SKIP (a > 0: lambda = a / keys; 0 = off, the
+// default until R-M0 calibrates a), attn_skip_min = WHIRL_ATTN_SKIP_MIN (default 16384: launches with fewer keys keep
+// attn_kgk, so golden (max_ctx 8192), long4k and T1-T3 never see it), attn_skip_pr0..3 = WHIRL_ATTN_SKIP_PROBE (a comma list
+// of up to four a values; the probe kernels count skippable tiles and the dropped mass, output unchanged; the probe wins
+// over attn_skip_a). Applied in fast only; precise / balance keep the defaults and Plan::ignored notes a set variable.
+// Not in the S0b-2 dump (the launch log pins attn_kgk<np>_sk / _pr).
 #define WHIRL_NUMERICS_FLAGS(X)                                  \
     X(B, use_graph, true, "use_graph")                           \
     X(B, no_fuse, false, "no_fuse")                              \
@@ -297,6 +308,12 @@ struct ItemState {
     X(U, attn_seg, 0, "attn_seg")                                \
     X(B, attn_kg_on, true, "attn_kg_on")                         \
     X(U, attn_kg_var, 0, "")                                     \
+    X(F, attn_skip_a, 0.0f, "")                                  \
+    X(U, attn_skip_min, 16384, "")                               \
+    X(F, attn_skip_pr0, 0.0f, "")                                \
+    X(F, attn_skip_pr1, 0.0f, "")                                \
+    X(F, attn_skip_pr2, 0.0f, "")                                \
+    X(F, attn_skip_pr3, 0.0f, "")                                \
     X(B, ffn_h16, false, "ffn_h16")                              \
     X(B, h16_dq, false, "h16_dq")                                \
     X(B, g8t, false, "g8t")                                      \

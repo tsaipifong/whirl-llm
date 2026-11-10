@@ -16,6 +16,8 @@
 #include "whirl/hip.h"
 #include "whirl/kernels_abi.h"
 
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -82,7 +84,22 @@ struct AttnPrefillFlags {
     // v0252-c1acc: kAttnKgVarAuto = the per-(NP, path) table kAttnKgAuto; v0252-fasta: var 3 also on one-range FC-1c
     // (KgPath::dqr1, the gfx1201 q4 fast prefill)
     std::uint32_t attn_kg_var = 0;
+    // v0252-blasst (PLAN V1-70, BLASST block skip; fast mode only: numerics flags attn_skip_a / _min / _pr0..3, WHIRL_ATTN_SKIP*,
+    // which precise / balance never set): on the one-range FC-1c path (KgPath::dqr1, the gfx1201 q4 fast prefill) a launch
+    // whose keys (pos0 + n) reach skip_min_keys takes attn_kgk<np>_sk with skip_lim = attnSkipLimit(skip_a, keys, scale)
+    // (skip_a > 0), or attn_kgk<np>_pr with probe_lim[t] = attnSkipLimit(probe_a[t], keys, scale) (any probe_a > 0; the
+    // probe wins: its output is attn_kgk's). Below skip_min_keys, with skip_a 0 and no probe, or without the kernels: the
+    // plan is exactly the one without these fields.
+    float skip_a = 0.0f;
+    std::uint32_t skip_min_keys = 16384;
+    std::array<float, 4> probe_a{};
 };
+// v0252-blasst (T0): the BLASST skip limit in the gfx1201 kgk units (unscaled q.k; the kernels' exp2 runs on (s - m) *
+// scale * log2 e): skip a tile when its max mx < m + limit, i.e. exp((mx - m) * scale) < lambda = a / n_keys (TensorRT-LLM
+// threshold_scale_factor / kv length). = (log2 a - log2 n_keys) / (scale * log2 e). -INFINITY (never skip) when a <= 0
+// (or NaN), n_keys == 0, scale <= 0, or a >= n_keys (lambda >= 1 would skip tiles above the running max; TensorRT-LLM's
+// reference turns the skip off there too, kernels/xqa/test/refAttention.cpp:72).
+float attnSkipLimit(float a, std::uint32_t n_keys, float scale);
 // v0252-c1port (C1): the f16 attn_kg variant `var` for NP query heads per block, or nullptr = none (the caller keeps
 // its shipped kernel, whose NP is the same). Exhaustive: var 1 -> attn_kgv<np>, var 3 -> attn_kgk<np> for np 6 / 4 / 2
 // only; any other var, and any other np (8, ...), gives nullptr - never the kernel of another NP (that kernel with
@@ -131,6 +148,12 @@ struct AttnStep {
     std::uint32_t r0 = 0, r1 = 0, nrows = 0;  // dq_rows: rows (nrows); dq_rows_r / ranged: the key range
     std::uint32_t head0 = 0;     // attn: first head of this launch's head range
     std::uint32_t row_el = 0;    // dq_rows / dq_rows_r: elements per row (n_head_kv * head_dim)
+    // v0252-blasst: attn with f = attn_kgk<np>_sk takes skip_lim as its extra argument; probe (f = attn_kgk<np>_pr) takes
+    // probe_lim[0..3] and the probe counter block. Defaults on every other step.
+    bool skip = false;  // f is attn_kgk<np>_sk: launched with skip_lim (finite: the selector never picks _sk for a -inf limit)
+    float skip_lim = -INFINITY;
+    bool probe = false;
+    std::array<float, 4> probe_lim{-INFINITY, -INFINITY, -INFINITY, -INFINITY};
 };
 struct AttnPrefillPlan {
     std::vector<AttnStep> steps;

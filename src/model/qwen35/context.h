@@ -461,6 +461,11 @@ protected:
     void decodeStepLaunches();
     void attnBlock(const AttnW& a, const KvLayer& lkv, std::uint32_t n);
     void prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, std::uint32_t n, std::uint32_t pos0, float scale);
+    // v0252-blasst (PLAN V1-70, R-M0 probe): the attn_kgk<np>_pr counter block's size, and its readback: one stderr line
+    // "attn-skip-probe seq=.. keys=.. n=.. np=.. | a=.. tiles=.. skip=.. s=.. hist=<16 counts> | ..." per probed launch
+    // series (keys = the launch's key count), then the block is cleared. Waits for the GPU (probe runs are not timed).
+    static constexpr std::uint64_t kAttnProbeBytes = 4 * 18 * 8;
+    void attnProbeFlush(std::uint32_t keys, std::uint32_t n, std::uint32_t np, const std::array<float, 4>& a);
     void ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const Mat& down, std::uint32_t n);
     void moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& sd, const MoeW& mo, std::uint32_t n);
     void setTokensDev(DevPtr ids_dev, std::span<const std::uint32_t> host, DevPtr dev_src, std::uint32_t n_dev,

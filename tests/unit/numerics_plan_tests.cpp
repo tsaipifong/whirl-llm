@@ -702,6 +702,9 @@ void testFastOnlyOverrides() {
         {"ATTN_KGVAR", 'B'},  // v0252-c1port: attn_kgv / attn_kgk, designed bit-identical to attn_kg (kt attn, golden)
         // v0252-c3port (feat026-moedec): fused precise MoE decode / gemvh on f32 input, bit-identical (kt moefuse, golden)
         {"MOE_FUSE", 'B'},   {"GEMVH_F32", 'B'},
+        // v0252-blasst (PLAN V1-70): BLASST attention block skip, its length gate and its count-only probe: fast-only
+        // (precise / balance refuse all three, testAttnSkipFlags)
+        {"ATTN_SKIP", 'F'},  {"ATTN_SKIP_MIN", 'F'}, {"ATTN_SKIP_PROBE", 'F'},
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -1150,6 +1153,70 @@ static void testMoedecDefault() {
             }
 }
 
+// v0252-blasst (PLAN V1-70, T2): WHIRL_ATTN_SKIP (a, lambda = a / keys), WHIRL_ATTN_SKIP_MIN (the first key count) and
+// WHIRL_ATTN_SKIP_PROBE (up to four a values) are fast-only: precise and balance keep the Flags defaults (attn_skip_a 0,
+// attn_skip_min 16384, no probe), their bitsKey and log line stay those of the plan without the variables, and Plan::ignored
+// carries one note per set variable ("" and "0" are no request); fast takes the values (invalid ones are off: 0). Both
+// cards, both product models. Fails before the v0252-blasst numerics (the fields exist, nothing parses them).
+void testAttnSkipFlags() {
+    auto planOf = [](const char* mode, const nu::Target& t, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    const nu::Flags d0{};
+    NCHECK(d0.attn_skip_a == 0.0f && d0.attn_skip_min == 16384u && d0.attn_skip_pr0 == 0.0f && d0.attn_skip_pr3 == 0.0f, "attn_skip defaults");
+    const std::vector<std::pair<const char*, const char*>> all = {{"ATTN_SKIP", "1000"}, {"ATTN_SKIP_MIN", "8192"}, {"ATTN_SKIP_PROBE", "10,100,1000,10000"}};
+    for (const CardFake& c : k_cards)
+        for (const char* model : {"swift", "moe"}) {
+            const nu::Target t = target(c, model, false);
+            for (const char* mode : {"precise", "balance"}) {
+                const nu::Plan base = planOf(mode, t, {});
+                const nu::Plan p = planOf(mode, t, all);
+                NCHECK(p.flags.attn_skip_a == 0.0f && p.flags.attn_skip_min == 16384u && p.flags.attn_skip_pr0 == 0.0f && p.flags.attn_skip_pr1 == 0.0f &&
+                           p.flags.attn_skip_pr2 == 0.0f && p.flags.attn_skip_pr3 == 0.0f,
+                       "attnskip {} {} {}: the BLASST variables must not reach the flags", c.name, model, mode);
+                NCHECK(p.bitsKey() == base.bitsKey() && nu::logLine(p) == nu::logLine(base) && p.overrides == base.overrides,
+                       "attnskip {} {} {}: the BLASST variables changed the plan", c.name, model, mode);
+                const std::vector<std::string> want = {
+                    std::format("WHIRL_ATTN_SKIP=1000 ignored: attention block skip (BLASST) is fast-only ({} never takes it)", mode),
+                    std::format("WHIRL_ATTN_SKIP_MIN=8192 ignored: attention block skip (BLASST) is fast-only ({} never takes it)", mode),
+                    std::format("WHIRL_ATTN_SKIP_PROBE=10,100,1000,10000 ignored: attention block skip (BLASST) is fast-only ({} never takes it)", mode)};
+                NCHECK(p.ignored == want, "attnskip {} {} {}: one refusal note per variable ({} notes)", c.name, model, mode, p.ignored.size());
+                const nu::Plan z = planOf(mode, t, {{"ATTN_SKIP", "0"}, {"ATTN_SKIP_PROBE", ""}});
+                NCHECK(z.ignored.empty(), "attnskip {} {} {}: '0' / '' are no request", c.name, model, mode);
+            }
+            // fast: the values, and nothing else changes
+            const nu::Plan fb = planOf("fast", t, {});
+            NCHECK(fb.flags.attn_skip_a == 0.0f && fb.flags.attn_skip_min == 16384u && fb.flags.attn_skip_pr0 == 0.0f, "attnskip {} {} fast: default off", c.name, model);
+            const nu::Plan f = planOf("fast", t, all);
+            NCHECK(f.flags.attn_skip_a == 1000.0f && f.flags.attn_skip_min == 8192u && f.flags.attn_skip_pr0 == 10.0f && f.flags.attn_skip_pr1 == 100.0f &&
+                       f.flags.attn_skip_pr2 == 1000.0f && f.flags.attn_skip_pr3 == 10000.0f,
+                   "attnskip {} {} fast: a {} min {} probe {} {} {} {}", c.name, model, f.flags.attn_skip_a, f.flags.attn_skip_min, f.flags.attn_skip_pr0,
+                   f.flags.attn_skip_pr1, f.flags.attn_skip_pr2, f.flags.attn_skip_pr3);
+            NCHECK(f.ignored.empty() && f.bitsKey() != fb.bitsKey() && nu::logLine(f) == nu::logLine(fb), "attnskip {} {} fast: applied without a note, in bitsKey",
+                   c.name, model);
+            {
+                nu::Plan same = f;
+                same.flags.attn_skip_a = fb.flags.attn_skip_a;
+                same.flags.attn_skip_min = fb.flags.attn_skip_min;
+                same.flags.attn_skip_pr0 = same.flags.attn_skip_pr1 = same.flags.attn_skip_pr2 = same.flags.attn_skip_pr3 = 0.0f;
+                NCHECK(same.flags == fb.flags, "attnskip {} {} fast: the variables change only their own flags", c.name, model);
+            }
+            // invalid values are off; at most four probe values
+            for (const char* bad : {"x", "-5", "inf", "nan", "1000x", ""})
+                NCHECK(planOf("fast", t, {{"ATTN_SKIP", bad}}).flags.attn_skip_a == 0.0f, "attnskip {} {} fast: WHIRL_ATTN_SKIP='{}' must be off", c.name, model, bad);
+            NCHECK(planOf("fast", t, {{"ATTN_SKIP", " 300 "}}).flags.attn_skip_a == 300.0f, "attnskip {} {} fast: spaces around a", c.name, model);
+            const nu::Plan pp = planOf("fast", t, {{"ATTN_SKIP_PROBE", "10,x,1000"}});
+            NCHECK(pp.flags.attn_skip_pr0 == 10.0f && pp.flags.attn_skip_pr1 == 0.0f && pp.flags.attn_skip_pr2 == 1000.0f && pp.flags.attn_skip_pr3 == 0.0f,
+                   "attnskip {} {} fast: probe list with an invalid entry", c.name, model);
+            const nu::Plan p5 = planOf("fast", t, {{"ATTN_SKIP_PROBE", "1,2,3,4,5"}});
+            NCHECK(p5.flags.attn_skip_pr0 == 1.0f && p5.flags.attn_skip_pr3 == 4.0f, "attnskip {} {} fast: four probe values at most", c.name, model);
+            NCHECK(planOf("fast", t, {{"ATTN_SKIP_MIN", "0"}}).flags.attn_skip_min == 0u, "attnskip {} {} fast: WHIRL_ATTN_SKIP_MIN=0 (every length)", c.name, model);
+        }
+}
+
 void testNumericsPlan(int& pass, int& fail) {
     testPlanTable();
     testApplyFrontEqualsPlan();  // arch025-N2b (replaces testUnwiredCallerUnchanged: no caller passes Target::gdn_strix now)
@@ -1167,6 +1234,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)
     testFastOnlyRefusal();  // bug-fastonly: refusal notes, fast unchanged
     testRelaxMoeArms();  // v0252-f2 (fails before the port: no arm is known)
+    testAttnSkipFlags();  // v0252-blasst (fails before the v0252-blasst numerics: nothing parses WHIRL_ATTN_SKIP*)
     pass += g_p;
     fail += g_f;
 }

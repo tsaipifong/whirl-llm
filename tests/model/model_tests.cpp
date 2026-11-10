@@ -2571,7 +2571,8 @@ void testEnvSnapshot() {
     const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "MOEP_GU", "MOEP_DN", "MOEP_COMB", "MOE_RFUSE", "MOE_FUSE", "GEMVH_F32", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
                                      "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS",  // these three: Model::load -> forwardEnv (testForwardEnv)
                                      "FDQ8S", "FDQ8S_MIN",  // v0251-a3port: Model::load -> fdqEnv (testFdqEnv)
-                                     "ATTN_KGVAR"};  // v0252-c1port: numerics loadFlags, not in the exec dump (unit testKgVarFlag)
+                                     "ATTN_KGVAR",  // v0252-c1port: numerics loadFlags, not in the exec dump (unit testKgVarFlag)
+                                     "ATTN_SKIP", "ATTN_SKIP_MIN", "ATTN_SKIP_PROBE"};  // v0252-blasst: numerics loadFlags (unit testAttnSkipFlags)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();

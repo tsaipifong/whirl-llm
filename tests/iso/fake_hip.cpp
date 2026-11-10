@@ -106,6 +106,9 @@ void hostFree(void* p) {
 std::uint64_t pinnedHostBytes() { return 0; }
 void upload(DevPtr, const void*, std::size_t) { gpu("upload"); }
 void download(void*, DevPtr, std::size_t) { gpu("download"); }
+// v0252-hostwait: the forward references it since Context::readCtlAsync (mtp_verify.cpp, WHIRL_CYCLE_SYNC bit 0); moved
+// here from tests/iso/model.qwen35.server/fake_hip_async.cpp (one definition per program). uploadAsync stays there.
+void downloadAsync(void*, DevPtr, std::size_t, Stream) { gpu("downloadAsync"); }
 void copyAsync(DevPtr, DevPtr, std::size_t, Stream) { gpu("copyAsync"); }
 void copyAnyAsync(DevPtr, DevPtr, std::size_t, Stream) { gpu("copyAnyAsync"); }
 void memset(DevPtr p, int, std::size_t) {

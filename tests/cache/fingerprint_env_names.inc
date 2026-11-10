@@ -13,6 +13,9 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_ATTN_DQF",  // src/common/numerics.cpp
     "WHIRL_ATTN_KG",  // src/common/numerics.cpp
     "WHIRL_ATTN_KGVAR",  // src/common/numerics.cpp (feat026-attnkg97, v0252-c1port)
+    "WHIRL_ATTN_SKIP",  // src/common/numerics.cpp (v0252-blasst: BLASST block skip a, fast only; changes the output)
+    "WHIRL_ATTN_SKIP_MIN",  // src/common/numerics.cpp (v0252-blasst: the skip's first key count)
+    "WHIRL_ATTN_SKIP_PROBE",  // src/common/numerics.cpp (v0252-blasst: count-only probe; output unchanged, hashed like a plan flag)
     "WHIRL_ATTN_KX",  // src/common/numerics.cpp
     "WHIRL_ATTN_SEG",  // src/common/numerics.cpp
     "WHIRL_ATTN_WIDE",  // src/common/numerics.cpp

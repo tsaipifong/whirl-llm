@@ -85,6 +85,9 @@
 //            -97k): the f16 attn_kg with the same arguments, grid and block; kgv = each head pair shares its V^T
 //            fragments (WHIRL_ATTN_KGVAR=1), kgk = K and V^T shared (2 S^T + 2 softmax / P.V waves per head pair;
 //            WHIRL_ATTN_KGVAR=3); designed bit-identical to attn_kg (every mode), picked by ops::attnKgVariant
+//   attn_kgk6_sk / attn_kgk4_sk (attn_kg arguments, float lim; gfx1201, v0252-blasst, fast only): attn_kgk with the BLASST
+//            block skip (lim = ops::attnSkipLimit; -inf = attn_kgk bit for bit); attn_kgk6_pr / attn_kgk4_pr (attn_kg
+//            arguments, float lim0..3, u64* probe): attn_kgk's output plus the skip / dropped-mass counters of four limits
 //   kv_dq_rows(KvArgs, f16* k16, f16* v16, n_rows, row_el) (q8 / q8h: keys [0, n_rows) of one
 //            sequence (tab0) dequantized into contiguous f16 rows; grid ceil(n_rows * row_el / 2048), block 256)
 //   kv_dq_rows_r[_q4](KvArgs, f16* k16, f16* v16, r0, n_rows, row_el): keys [r0, r0 + n_rows) into
@@ -684,6 +687,9 @@ struct AttnKernels {
     // shared K + V^T (kgk, var 3); loaded for every KV format (f16 entries: the plain f16 path and Q8P)
     F attn_kgv6{}, attn_kgv4{}, attn_kgv2{};
     F attn_kgk6{}, attn_kgk4{}, attn_kgk2{};
+    // v0252-blasst (PLAN V1-70, fast only): attn_kgk<np> with the BLASST block skip (_sk: + float lim) and its count-only
+    // probe (_pr: + float lim0..3, u64* probe; output = attn_kgk<np>'s); gfx1201, NP 6 / 4; null elsewhere
+    F attn_kgk6_sk{}, attn_kgk4_sk{}, attn_kgk6_pr{}, attn_kgk4_pr{};
     // q8 / q8h KV prefill (Q8P): kv_dq_rows + the f16 attn_kg variants (null otherwise)
     F kv_dq_rows{}, attn_kgf6{}, attn_kgf4{}, attn_kgf2{};
     // FC-1c: key-range variants (prefills past the f16 scratch, q4 prefill): kv_dq_rows_r (q8 / q8h)

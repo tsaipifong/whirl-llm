@@ -44,6 +44,10 @@ struct Scratch {
     // FC-1c: attn_kgs softmax state (m, l per query row and head) between key ranges of a prefill
     // longer than dq_rows (and for q4: every prefill dequantizes its keys into ffn_g / ffn_u)
     DevPtr dq_st_ml = 0;
+    // v0252-blasst (PLAN V1-70, R-M0): the attn_kgk<np>_pr counter block (4 limits x 18 u64), allocated on the first probe
+    // launch only (a run without WHIRL_ATTN_SKIP_PROBE never allocates it); attn_probe_seq numbers the probe log lines
+    DevPtr attn_probe = 0;
+    std::uint32_t attn_probe_seq = 0;
     DevPtr hn = 0, mtp_cat = 0, mtp_h = 0, mtp_ids = 0;
     std::uint32_t ff_scratch = 0;
     DevPtr moe_logits = 0, moe_ids = 0, moe_w = 0, moe_sg = 0, moe_g = 0, moe_u = 0, moe_xq = 0, moe_xd = 0, moe_ysh = 0,

@@ -12,6 +12,8 @@ int main(int argc, char** argv) {
                      {"dq4_partition", testDq4Partition},  // v0252-n2
                      {"attn_prefill", testAttnPrefill},
                      {"attn_kgvar", testAttnKgVariant},  // v0252-c1port
+                     {"attn_skip_limit", testAttnSkipLimit},    // v0252-blasst
+                     {"attn_skip_select", testAttnSkipSelect},  // v0252-blasst
                      {"attn_prep", testAttnPrepRules}},
                     argc, argv);
 }

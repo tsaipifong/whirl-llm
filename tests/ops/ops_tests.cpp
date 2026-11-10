@@ -31,6 +31,7 @@
 #include "ops_act_cases.inc"
 #include "ops_gdn_cases.inc"
 #include "ops_mtp_cases.inc"
+#include "ops_blasst_cases.inc"  // v0252-blasst: the BLASST CPU reference (tests/kernels/blasst_ref.h) checked on its own
 
 namespace {
 
@@ -236,6 +237,9 @@ int main() {
     testDq4Partition();  // v0252-n2 (feat027-dq4r9700 764af36)
     testAttnPrefill();
     testAttnKgVariant();  // v0252-c1port (fails before the port: the stub has no variant, chooseAttnPrefill never asks)
+    testAttnSkipLimit();   // v0252-blasst (fails before the port: the test-first stub returns 0)
+    testAttnSkipSelect();  // v0252-blasst (fails before the port: the selector ignores the BLASST fields)
+    testBlasstRef();       // v0252-blasst: the test oracle of the kt SK1 / PR rows (no product code)
     testOpsMoe();
     testOpTables();
     testActChoice();

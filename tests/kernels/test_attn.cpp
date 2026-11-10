@@ -15,9 +15,12 @@
 #include <algorithm>
 #include <numeric>
 
+#include <cmath>
 #include <cstdint>
+#include <format>
 #include <span>
 
+#include "blasst_ref.h"  // v0252-blasst: the BLASST CPU reference and the hot / cold data of the SK1 / PR rows
 #include "cpu_ref.h"
 #include "kt_rope_bound.h"
 #include "whirl/ops/attention.h"  // ops::dq4Splits: the host's attn_dq4 split count (v0252-n2 dynamic-split rows)
@@ -1520,12 +1523,175 @@ void testAttnDq4(Ctx& c) {
 // WHIRL_KT_KGL_PATHS (comma list of f16, q8p, q4p; default all) picks the paths.
 // A kernel missing from the code object (gfx1151) is a skip row. The AO-4 mutation object (WHIRL_KGK_INJECT=1, loaded
 // through WHIRL_KT_CODE_OBJECT) must fail the attn_kgk rows here and in "attn".
+// v0252-blasst (PLAN V1-70, T3 rows SK1 / PR counts; plan review focus 1): hot / cold key tiles (tests/kernels/blasst_ref.h:
+// tile 0 hot for both heads of a pair, then tiles cold for both or - "mixed" - hot for one head of the pair only, so the two
+// heads of a pair skip different tiles and the skip marks travel through the LDS parity buffers of attn_kgk's PV waves),
+// p_cold 0.25 / 0.75 (0.5 with a partial last block), Ornith 16 / 2 (NP 4) and Swift 24 / 4 (NP 6), n 64 / 77 queries at the
+// end of 1024 f16 key rows (contiguous, identity page table: the dq rows of the fast path). Against the CPU reference
+// (double, f16-rounded inputs):
+//   * attn_kgk<np>_pr (limits -10 / -20 / -40 / -80 q.k units) == attn_kgk<np> bit for bit; its skip and tile counts == the
+//     reference's (exact integers: the data keeps a margin of >= 20 q.k units around every limit), its delta bins hold the
+//     reference's rows (within 2 % + 2 rows: bin edges in f32 vs double);
+//   * attn_kgk<np>_sk (lim -20): the reference's skip output (softmax over the kept tiles, times the output gate) within the
+//     f16 tolerance (rel L2 <= 4e-3), and not attn_kgk's output (the skipped mass shows: rel L2 > 1e-3).
+static void testAttnSkipRows(Ctx& c) {
+    struct Shape {
+        int heads, nkv, np;
+        const char* model;
+    };
+    struct Case {
+        double p;
+        bool mixed;
+        int n;
+    };
+    const int hd = kHd, L = 1024;
+    const float scale = 1.0f / 16.0f;
+    const std::uint32_t seed = 20261110u;
+    std::vector<int> idt(static_cast<std::size_t>(L / wk::kKvPage + 2));
+    std::iota(idt.begin(), idt.end(), 0);
+    Buf did(idt);
+    const float lims[4] = {-10.0f, -20.0f, -40.0f, -80.0f};
+    for (const Shape sh : {Shape{16, 2, 4, "Ornith"}, Shape{24, 4, 6, "Swift"}}) {
+        const std::string s = std::to_string(sh.np);
+        const auto fk = c.fnOpt("attn_kgk" + s), fsk = c.fnOpt("attn_kgk" + s + "_sk"), fpr = c.fnOpt("attn_kgk" + s + "_pr");
+        if (!fk || !fsk || !fpr) {
+            c.rep.skip("attnkgl", std::string("SK1 attn_kgk") + s + "_sk / _pr hot / cold tiles (" + sh.model + ")", "not in this code object");
+            continue;
+        }
+        const int grp = sh.heads / sh.nkv;
+        for (const Case cs : {Case{0.25, false, 64}, Case{0.75, false, 64}, Case{0.25, true, 64}, Case{0.75, true, 64}, Case{0.5, true, 77}}) {
+            const int n = cs.n, pos0 = L - n;
+            const std::string where = std::format(" ({} {}/{}, p_cold {:.2f}, {}, n {} at {})", sh.model, sh.heads, sh.nkv, cs.p,
+                                                  cs.mixed ? "heads of a pair differ" : "same tiles for both heads", n, pos0);
+            // K / V rows [L][nkv][hd] (f16) and the f16-rounded values per KV head for the reference
+            std::vector<std::vector<float>> kh(static_cast<std::size_t>(sh.nkv)), vh(static_cast<std::size_t>(sh.nkv));
+            std::vector<std::uint16_t> k16(static_cast<std::size_t>(L) * sh.nkv * hd), v16(k16.size());
+            for (int h = 0; h < sh.nkv; ++h) {
+                std::vector<float> kf, vf;
+                blasst::makeKv(L, hd, h, cs.p, cs.mixed, seed, kf, vf);
+                kh[h].resize(kf.size());
+                vh[h].resize(vf.size());
+                for (int j = 0; j < L; ++j)
+                    for (int e = 0; e < hd; ++e) {
+                        const std::size_t src = static_cast<std::size_t>(j) * hd + e, dst = (static_cast<std::size_t>(j) * sh.nkv + h) * hd + e;
+                        k16[dst] = f2h(kf[src]);
+                        v16[dst] = f2h(vf[src]);
+                        kh[h][src] = h2f(k16[dst]);
+                        vh[h][src] = h2f(v16[dst]);
+                    }
+            }
+            // Q [n][heads][q (hd) | gate (hd)]: head h's queries from its KV head's directions (even / odd head of the pair)
+            const std::vector<float> gate = c.randn(static_cast<std::size_t>(n) * sh.heads * hd);
+            std::vector<float> qp(static_cast<std::size_t>(n) * sh.heads * kQStride);
+            std::vector<std::vector<float>> qh(static_cast<std::size_t>(sh.heads));
+            for (int h = 0; h < sh.heads; ++h) {
+                const std::vector<float> qv = blasst::makeQ(n, hd, h / grp, (h & 1) != 0, seed, 1000u + static_cast<std::uint32_t>(h));
+                qh[h].resize(qv.size());
+                for (int i = 0; i < n; ++i)
+                    for (int e = 0; e < hd; ++e) {
+                        const std::size_t row = (static_cast<std::size_t>(i) * sh.heads + h) * kQStride;
+                        qp[row + e] = qv[static_cast<std::size_t>(i) * hd + e];
+                        qp[row + hd + e] = gate[(static_cast<std::size_t>(i) * sh.heads + h) * hd + e];
+                        qh[h][static_cast<std::size_t>(i) * hd + e] = roundh(qv[static_cast<std::size_t>(i) * hd + e]);  // the kernels take f16 q
+                    }
+            }
+            Buf dq(qp), dpos(std::vector<int>{pos0}), dk(k16), dv(v16), pc(4 * 18 * 8);
+            pc.fill(0);
+            wk::KvArgs a{};
+            a.k = dk.p();
+            a.v = dv.p();
+            a.ptab = did.p();
+            const std::size_t on = static_cast<std::size_t>(n) * sh.heads * hd;
+            auto run = [&](const hip::Function& f, int mode) {  // 0 attn_kgk, 1 _sk (lim -20), 2 _pr (four limits)
+                Buf ob(on * 4);
+                ob.fill(0x7f);
+                const hip::Dim3 g{cdiv(n, 16), static_cast<unsigned>(sh.heads / sh.np), 1}, bl{static_cast<unsigned>(64 * sh.np), 1, 1};
+                if (mode == 0)
+                    hip::launch(f, g, bl, 0, c.s, dq.p(), a, ob.p(), sh.heads, sh.nkv, kQStride, dpos.p(), n, scale, 0);
+                else if (mode == 1)
+                    hip::launch(f, g, bl, 0, c.s, dq.p(), a, ob.p(), sh.heads, sh.nkv, kQStride, dpos.p(), n, scale, 0, lims[1]);
+                else
+                    hip::launch(f, g, bl, 0, c.s, dq.p(), a, ob.p(), sh.heads, sh.nkv, kQStride, dpos.p(), n, scale, 0, lims[0], lims[1], lims[2], lims[3],
+                                pc.p());
+                c.sync();
+                return ob.down<float>(on);
+            };
+            const std::vector<float> base = run(fk, 0), opr = run(fpr, 2), osk = run(fsk, 1);
+            const std::vector<std::uint64_t> cnt = pc.down<std::uint64_t>(4 * 18);
+            // the reference: per head and limit (counts, delta bins), the lim -20 skip output times the gate
+            std::uint64_t rs[4] = {}, rt[4] = {};
+            std::uint64_t rb[4][16] = {};
+            std::vector<double> want_sk(on, 0.0);
+            for (int h = 0; h < sh.heads; ++h) {
+                const int kvh = h / grp;
+                for (int t = 0; t < 4; ++t) {
+                    const blasst::RefOut r = blasst::refAttention(qh[h].data(), kh[kvh].data(), vh[kvh].data(), n, hd, pos0, scale, lims[t]);
+                    rs[t] += r.skipped;
+                    rt[t] += r.tiles;
+                    for (int i = 0; i < n; ++i) rb[t][blasst::deltaBin(r.delta[static_cast<std::size_t>(i)])] += 1;
+                    if (t != 1) continue;
+                    for (int i = 0; i < n; ++i)
+                        for (int e = 0; e < hd; ++e) {
+                            const std::size_t o = (static_cast<std::size_t>(i) * sh.heads + h) * hd + e;
+                            want_sk[o] = r.o[static_cast<std::size_t>(i) * hd + e] / (1.0 + std::exp(-static_cast<double>(gate[o])));
+                        }
+                }
+            }
+            c.rep.add(cmpExact("attn_kgk" + s + "_pr == attn_kgk" + s + " (probe: output unchanged)" + where, opr, base, Kind::invariant));
+            {
+                bool ok = true;
+                std::uint64_t bin_diff = 0;
+                for (int t = 0; t < 4; ++t) {
+                    ok = ok && cnt[static_cast<std::size_t>(t) * 18] == rs[t] && cnt[static_cast<std::size_t>(t) * 18 + 1] == rt[t];
+                    for (int b = 0; b < 16; ++b) {
+                        const std::uint64_t g = cnt[static_cast<std::size_t>(t) * 18 + 2 + b];
+                        bin_diff += g > rb[t][b] ? g - rb[t][b] : rb[t][b] - g;
+                    }
+                }
+                const std::uint64_t rows = 4ull * static_cast<std::uint64_t>(n) * static_cast<std::uint64_t>(sh.heads);
+                ok = ok && rs[1] > 0 && bin_diff <= rows / 50 + 2;  // the data does skip at -20
+                Result r;
+                r.family = "attnkgl";
+                r.name = "attn_kgk" + s + "_pr counters == CPU reference (skip / tiles exact per limit -10 / -20 / -40 / -80, delta bins within 2 %)" + where;
+                r.kind = Kind::invariant;
+                r.n = 8;
+                r.mismatches = ok ? 0 : 1;
+                r.pass = ok;
+                r.note = std::format("gpu skip {}/{}/{}/{} of {} tiles, ref {}/{}/{}/{} of {}; bin |diff| {}", cnt[0], cnt[18], cnt[36], cnt[54], cnt[1], rs[0],
+                                     rs[1], rs[2], rs[3], rt[0], bin_diff);
+                c.rep.add(r);
+            }
+            {
+                double num = 0.0, den = 0.0, dnum = 0.0;
+                for (std::size_t i = 0; i < on; ++i) {
+                    num += (osk[i] - want_sk[i]) * (osk[i] - want_sk[i]);
+                    den += want_sk[i] * want_sk[i];
+                    dnum += (static_cast<double>(osk[i]) - base[i]) * (static_cast<double>(osk[i]) - base[i]);
+                }
+                const double rel = std::sqrt(num / den), rel_base = std::sqrt(dnum / den);
+                Result r;
+                r.family = "attnkgl";
+                r.name = "attn_kgk" + s + "_sk (lim -20) == CPU reference skip output (rel L2 <= 4e-3) and != attn_kgk (rel L2 > 1e-3)" + where;
+                r.kind = Kind::tol;
+                r.n = on;
+                r.max_err = rel;
+                r.metric = rel / 4e-3;
+                r.pass = rel <= 4e-3 && rel_base > 1e-3;
+                r.mismatches = r.pass ? 0 : 1;
+                r.note = std::format("rel L2 vs reference {:.3e}, vs attn_kgk {:.3e}", rel, rel_base);
+                c.rep.add(r);
+            }
+        }
+    }
+}
+
 void testAttnKgLong(Ctx& c) {
     c.rep.family = "attnkgl";
     if (!c.fnOpt("attn_kg4") && !c.fnOpt("attn_kg6")) {
         c.rep.skip("attnkgl", "attn_kg family", "not in this code object (gfx1151)");
         return;
     }
+    testAttnSkipRows(c);  // v0252-blasst (PLAN V1-70, T3): SK1 / PR count rows on hot / cold tiles (small, before the long rows)
     std::vector<int> lens = {32768, 131072};
     if (c.quick) lens = {32768};
     if (const char* e = std::getenv("WHIRL_KT_KGL_L")) lens = {std::atoi(e)};
@@ -1697,6 +1863,65 @@ void testAttnKgLong(Ctx& c) {
                                                        " one key range [0, " + std::to_string(rows) + ") (Q4P, fast)" +
                                                        (perturb ? " [RED control: candidate scale +1 ulp, must FAIL]" : "") + where,
                                                    ob.down<float>(on), want, Kind::invariant));
+                            }
+                        }
+                        // v0252-blasst (PLAN V1-70, T3 rows SK0 / PR): on the same rows, attn_kgk<np>_sk with lim = -inf (never
+                        // skips) and attn_kgk<np>_pr (counts only, limits of a = 10 / 100 / 1000 / 10000 at this launch's keys)
+                        // == attn_kgk<np> == one-range attn_kgs<np> (want) bit for bit, one and two head-range launches; the probe's
+                        // tile count is exact (every (head, 16-query block, 32-key tile) once per limit) and its delta bins hold
+                        // every (query, head) row once. Missing from the code object (63de269): skip rows.
+                        for (const std::string& name : {"attn_kgk" + s + "_sk", "attn_kgk" + s + "_pr"}) {
+                            const auto fk = c.fnOpt(name);
+                            if (!fk) {
+                                c.rep.skip("attnkgl", "Q4P " + name + where, "not in this code object");
+                                continue;
+                            }
+                            const bool pr = name.back() == 'r';
+                            std::uint64_t tiles = 0;  // per limit: sum over blocks of ceil(keys / 32), times the heads
+                            for (int b = 0; b * 16 < n; ++b) tiles += static_cast<std::uint64_t>((p0 + std::min(16 * (b + 1), n) + 31) / 32);
+                            tiles *= static_cast<std::uint64_t>(sh.heads);
+                            for (const int split : {1, 2}) {
+                                const int hp = sh.heads / split;
+                                Buf ob(on * 4);
+                                ob.fill(0x7f);
+                                Buf pc(4 * 18 * 8);
+                                pc.fill(0);
+                                for (int h0 = 0; h0 < sh.heads; h0 += hp) {
+                                    const hip::Dim3 g{cdiv(n, 16), static_cast<unsigned>(hp / sh.np), 1}, bl{static_cast<unsigned>(64 * sh.np), 1, 1};
+                                    if (pr)
+                                        hip::launch(fk, g, bl, 0, c.s, dq.p(), ar, ob.p(), sh.heads, sh.nkv, kQStride, dpos.p(), n, scale, h0,
+                                                    whirl::ops::attnSkipLimit(10.0f, static_cast<std::uint32_t>(rows), scale),
+                                                    whirl::ops::attnSkipLimit(100.0f, static_cast<std::uint32_t>(rows), scale),
+                                                    whirl::ops::attnSkipLimit(1000.0f, static_cast<std::uint32_t>(rows), scale),
+                                                    whirl::ops::attnSkipLimit(10000.0f, static_cast<std::uint32_t>(rows), scale), pc.p());
+                                    else
+                                        hip::launch(fk, g, bl, 0, c.s, dq.p(), ar, ob.p(), sh.heads, sh.nkv, kQStride, dpos.p(), n, scale, h0, -INFINITY);
+                                }
+                                c.sync();
+                                c.rep.add(cmpExact("kv_dq_rows_r_q4 + " + name + (pr ? " (probe a 10 / 100 / 1000 / 10000)" : " (lim -inf)") +
+                                                       (split > 1 ? " (2 head-range launches)" : "") + " == attn_kgk" + s + " (Q4P, fast)" + where,
+                                                   ob.down<float>(on), want, Kind::invariant));
+                                if (pr) {
+                                    const auto cnt = pc.down<std::uint64_t>(4 * 18);
+                                    bool ok = true;
+                                    for (int t = 0; t < 4; ++t) {
+                                        std::uint64_t rowsum = 0;
+                                        for (int bb = 0; bb < 16; ++bb) rowsum += cnt[static_cast<std::size_t>(t) * 18 + 2 + bb];
+                                        ok = ok && cnt[static_cast<std::size_t>(t) * 18 + 1] == tiles && cnt[static_cast<std::size_t>(t) * 18] <= tiles &&
+                                             rowsum == static_cast<std::uint64_t>(n) * static_cast<std::uint64_t>(sh.heads);
+                                        if (t > 0) ok = ok && cnt[static_cast<std::size_t>(t) * 18] >= cnt[static_cast<std::size_t>(t - 1) * 18];  // larger a skips more
+                                    }
+                                    Result r;
+                                    r.family = "attnkgl";
+                                    r.name = name + " probe counters: tiles == " + std::to_string(tiles) + " per limit, skip <= tiles and grows with a, bins hold " +
+                                             std::to_string(n * sh.heads) + " rows" + (split > 1 ? " (2 head-range launches)" : "") + where;
+                                    r.kind = Kind::invariant;
+                                    r.n = 4;
+                                    r.mismatches = ok ? 0 : 1;
+                                    r.pass = ok;
+                                    r.note = std::format("skip {} / {} / {} / {}", cnt[0], cnt[18], cnt[36], cnt[54]);
+                                    c.rep.add(r);
+                                }
                             }
                         }
                     }

@@ -203,6 +203,9 @@ Function attnKgVariant(std::uint32_t var, const kernels::AttnKernels& k, std::ui
     }
 }
 
+// v0252-blasst test-first stub (commit 1): the BLASST limit is not implemented yet (returns 0, the tests fail)
+float attnSkipLimit(float, std::uint32_t, float) { return 0.0f; }
+
 // v0252-c1acc (C-1): the auto table's var for (np, path); 0 for any (np, path) not in kAttnKgAuto
 std::uint32_t attnKgAutoVar(std::uint32_t np, KgPath path) {
     for (const KgAutoRow& r : kAttnKgAuto)

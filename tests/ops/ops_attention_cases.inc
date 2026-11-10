@@ -8,11 +8,14 @@
 #include "ops_fakes.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <format>
 #include <memory>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -797,6 +800,175 @@ void testAttnPrepRules() {
         CHECK(ops::chooseAttnCore(16, 16, 256, false) == ops::AttnCore::decode && ops::chooseAttnCore(17, 16, 256, false) == ops::AttnCore::prefill);
         CHECK(ops::chooseAttnCore(17, 16, 128, false) == ops::AttnCore::naive && ops::chooseAttnCore(512, 16, 256, true) == ops::AttnCore::naive);
         CHECK(ops::chooseAttnCore(32, 32, 256, true) == ops::AttnCore::decode);
+    }
+}
+
+// v0252-blasst (PLAN V1-70, T0 step 1): ops::attnSkipLimit = (log2 a - log2 keys) / (scale * log2 e), the BLASST limit in the
+// gfx1201 kgk units (unscaled q.k); -inf (never skip) for a <= 0 / NaN, no keys, and lambda = a / keys >= 1. Values from the
+// plan (research note 3.1: a 1000 at 131072 keys -> -78.01). Fails before the port (test-first stub returns 0).
+void testAttnSkipLimit() {
+    const float s = 1.0f / 16.0f;
+    auto near = [](float x, double want, double tol) { return std::isfinite(x) && std::fabs(static_cast<double>(x) - want) <= tol; };
+    CHECK(near(ops::attnSkipLimit(1000.0f, 131072, s), -78.01, 0.01));
+    CHECK(near(ops::attnSkipLimit(1000.0f, 65536, s), -66.92, 0.01));
+    CHECK(near(ops::attnSkipLimit(300.0f, 131072, s), -97.28, 0.01));
+    CHECK(ops::attnSkipLimit(0.0f, 131072, s) == -INFINITY);
+    CHECK(ops::attnSkipLimit(-1.0f, 131072, s) == -INFINITY);
+    CHECK(ops::attnSkipLimit(std::nanf(""), 131072, s) == -INFINITY);
+    CHECK(ops::attnSkipLimit(1000.0f, 0, s) == -INFINITY);
+    CHECK(ops::attnSkipLimit(20000.0f, 16384, s) == -INFINITY);  // lambda >= 1 would skip tiles above the running max
+    CHECK(ops::attnSkipLimit(16384.0f, 16384, s) == -INFINITY);
+    // the gfx1151 kernels compare scaled scores with exp: their limit is lim * scale = ln a - ln keys (PLAN T4 units note)
+    CHECK(near(ops::attnSkipLimit(1000.0f, 131072, s) * s, -4.876, 0.001));
+    // a larger a skips more (a higher limit), more keys a lower one
+    CHECK(ops::attnSkipLimit(3000.0f, 131072, s) > ops::attnSkipLimit(1000.0f, 131072, s));
+    CHECK(ops::attnSkipLimit(1000.0f, 131072, s) < ops::attnSkipLimit(1000.0f, 32768, s));
+}
+
+// v0252-blasst (PLAN V1-70, T2): the selector's BLASST rows. On the one-range FC-1c path (KgPath::dqr1, the gfx1201 q4 fast
+// prefill) a launch with keys (pos0 + n) >= skip_min_keys takes attn_kgk<np>_sk with skip_lim = attnSkipLimit(skip_a, keys,
+// scale) when skip_a > 0, or attn_kgk<np>_pr with probe_lim[t] = attnSkipLimit(probe_a[t], keys, scale) when a probe value
+// is set (the probe wins); grid / block / head ranges / the dequant step stay those of the attn_kgk plan. Everything else is
+// the plan without the fields: below the length gate (and across it chunk by chunk), skip_a 0, no _sk / _pr in the object,
+// more than one key range (attn_kgs: Stage A has no kgs skip), a >= keys, the f16 / Q8P paths (precise / balance) and the
+// gfx1151 set. Ornith 16 / 2 (NP 4) and Swift 24 / 4 (NP 6). Fails before the port (the selector ignores the fields).
+void testAttnSkipSelect() {
+    static const kn::KernelTable kv = kgTable(true);
+    const auto kp = std::make_unique<kn::KernelTable>(kv);
+    kn::KernelTable& kq4 = *kp;  // the gfx1201 q4 set (as testAttnFastQ4Kgk) with the v0252-blasst variants
+    kq4.attn_kg6 = kq4.attn_kg4 = kq4.attn_kg2 = nullptr;
+    kq4.kv_dq_rows = nullptr;
+    kq4.attn_kgk6_sk = tag("attn_kgk6_sk");
+    kq4.attn_kgk4_sk = tag("attn_kgk4_sk");
+    kq4.attn_kgk6_pr = tag("attn_kgk6_pr");
+    kq4.attn_kgk4_pr = tag("attn_kgk4_pr");
+    const auto knp = std::make_unique<kn::KernelTable>(kq4);  // an older gfx1201 object: attn_kgk, no _sk / _pr
+    knp->attn_kgk6_sk = knp->attn_kgk4_sk = knp->attn_kgk6_pr = knp->attn_kgk4_pr = nullptr;
+    static const kn::KernelTable k8 = attnTable(true, true, true, false);  // the gfx1151 set
+    const float scale = 1.0f / 16.0f;
+    struct Shape {
+        std::uint32_t heads, kv, np;
+    };
+    // the attn launches of a plan: (kernel name, grid.x, grid.y, block.x, head0)
+    auto launches = [](const ops::AttnPrefillPlan& pl) {
+        std::vector<std::string> v;
+        for (const auto& s : pl.steps)
+            v.push_back(std::format("{}:{}:{}:{}:{}:{}", s.op == ops::AttnStep::Op::attn ? nameOf(s.f) : std::string("dq"), s.grid.x, s.grid.y, s.block.x,
+                                    s.head0, s.nrows));
+        return v;
+    };
+    auto renamed = [](std::vector<std::string> v, const std::string& from, const std::string& to) {
+        for (auto& x : v)
+            if (x.rfind(from + ":", 0) == 0) x = to + x.substr(from.size());
+        return v;
+    };
+    for (const Shape sh : {Shape{16, 2, 4}, Shape{24, 4, 6}}) {
+        const std::string s = std::to_string(sh.np), kgk = "attn_kgk" + s;
+        auto prob = [&](std::uint32_t L, std::uint32_t n) {
+            ops::AttnPrefillProblem p;
+            p.n = n;
+            p.pos0 = L - n;
+            p.head_dim = 256;
+            p.n_head = sh.heads;
+            p.n_head_kv = sh.kv;
+            p.scale = scale;
+            p.kv_q8 = true;
+            p.dq_ptab = p.dq_st_ml = true;
+            p.dq_rows = 131072;
+            return p;
+        };
+        ops::AttnPrefillFlags f0;
+        f0.attn_kg_var = ops::kAttnKgVarAuto;
+        ops::AttnPrefillFlags fs = f0;
+        fs.skip_a = 1000.0f;
+        ops::AttnPrefillFlags fp = f0;
+        fp.probe_a = {10.0f, 100.0f, 1000.0f, 10000.0f};
+        for (const std::uint32_t n : {4096u, 301u}) {
+            // (1) 128k keys, skip_a 1000: attn_kgk<np>_sk in place of attn_kgk<np>, the limit of this launch's keys
+            const ops::AttnPrefillProblem p = prob(131072, n);
+            const auto base = ops::chooseAttnPrefill(p, f0, kq4), sk = ops::chooseAttnPrefill(p, fs, kq4);
+            CHECK(!base.steps.empty() && nameOf(base.steps.back().f) == kgk);
+            CHECK(launches(sk) == renamed(launches(base), kgk, kgk + "_sk"));
+            bool lim_ok = true;
+            for (const auto& st : sk.steps)
+                if (st.op == ops::AttnStep::Op::attn)
+                    lim_ok = lim_ok && st.skip && !st.probe && st.skip_lim == ops::attnSkipLimit(1000.0f, 131072, scale) && std::isfinite(st.skip_lim);
+            CHECK(lim_ok);
+            // (6) the probe: attn_kgk<np>_pr with the four limits, the rest as (1)'s base plan; it wins over skip_a
+            for (const ops::AttnPrefillFlags& f : {fp, [&] {
+                                                       ops::AttnPrefillFlags b = fp;
+                                                       b.skip_a = 1000.0f;
+                                                       return b;
+                                                   }()}) {
+                const auto pr = ops::chooseAttnPrefill(p, f, kq4);
+                CHECK(launches(pr) == renamed(launches(base), kgk, kgk + "_pr"));
+                bool pr_ok = true;
+                for (const auto& st : pr.steps)
+                    if (st.op == ops::AttnStep::Op::attn) {
+                        pr_ok = pr_ok && st.probe && !st.skip;
+                        for (std::size_t t = 0; t < 4; ++t) pr_ok = pr_ok && st.probe_lim[t] == ops::attnSkipLimit(fp.probe_a[t], 131072, scale);
+                    }
+                CHECK(pr_ok);
+            }
+            // (2) below the length gate (8k keys): the attn_kgk plan, no skip / probe fields
+            {
+                const ops::AttnPrefillProblem q = prob(8192, std::min(n, 8192u));
+                const auto a = ops::chooseAttnPrefill(q, fs, kq4), b = ops::chooseAttnPrefill(q, f0, kq4), c = ops::chooseAttnPrefill(q, fp, kq4);
+                CHECK(launches(a) == launches(b) && launches(c) == launches(b) && nameOf(a.steps.back().f) == kgk && !a.steps.back().skip && !c.steps.back().probe);
+                // WHIRL_ATTN_SKIP_MIN=0: every length
+                ops::AttnPrefillFlags fz = fs;
+                fz.skip_min_keys = 0;
+                CHECK(nameOf(ops::chooseAttnPrefill(q, fz, kq4).steps.back().f) == kgk + "_sk");
+            }
+            // (3) skip_a 0 and no probe: unchanged; (4) an object without _sk / _pr: attn_kgk<np>
+            CHECK(launches(ops::chooseAttnPrefill(p, f0, kq4)) == launches(base));
+            CHECK(launches(ops::chooseAttnPrefill(p, fs, *knp)) == launches(base) && launches(ops::chooseAttnPrefill(p, fp, *knp)) == launches(base));
+            // a >= keys (lambda >= 1): no _sk
+            {
+                ops::AttnPrefillFlags fa = fs;
+                fa.skip_a = 200000.0f;
+                const auto pa = ops::chooseAttnPrefill(p, fa, kq4);
+                CHECK(launches(pa) == launches(base) && !pa.steps.back().skip);
+            }
+            // (5) more than one key range (scratch 65536 < 131072 keys): attn_kgs<np>, never _sk / _pr
+            {
+                ops::AttnPrefillProblem q = p;
+                q.dq_rows = 65536;
+                const auto a = ops::chooseAttnPrefill(q, fs, kq4), b = ops::chooseAttnPrefill(q, f0, kq4), c = ops::chooseAttnPrefill(q, fp, kq4);
+                CHECK(launches(a) == launches(b) && launches(c) == launches(b) && nameOf(a.steps.back().f) == "attn_kgs" + s);
+            }
+        }
+        // (2b) PLAN review focus 3: the length gate per chunk of one prompt (4096-row chunks): the chunk ending at 12288 keys
+        // keeps attn_kgk<np>, the one ending at 16384 (= skip_min_keys) takes _sk
+        CHECK(nameOf(ops::chooseAttnPrefill(prob(12288, 4096), fs, kq4).steps.back().f) == kgk);
+        CHECK(nameOf(ops::chooseAttnPrefill(prob(16384, 4096), fs, kq4).steps.back().f) == kgk + "_sk");
+        CHECK(nameOf(ops::chooseAttnPrefill(prob(16383, 4095), fs, kq4).steps.back().f) == kgk);
+        // (7) precise (f16 KV) and balance (Q8P) on gfx1201: the fields never reach them (kgk on the cache / the Q8P rows)
+        {
+            ops::AttnPrefillProblem p;
+            p.n = 4096;
+            p.pos0 = 131072 - 4096;
+            p.head_dim = 256;
+            p.n_head = sh.heads;
+            p.n_head_kv = sh.kv;
+            p.scale = scale;
+            const auto a = ops::chooseAttnPrefill(p, fs, kq4), b = ops::chooseAttnPrefill(p, f0, kq4);
+            CHECK(launches(a) == launches(b));
+            ops::AttnPrefillFlags fsp = fp;
+            const auto c = ops::chooseAttnPrefill(p, fsp, kv), d = ops::chooseAttnPrefill(p, f0, kv);
+            CHECK(launches(c) == launches(d));
+            p.kv_q8 = true;
+            p.dq_rows = 8192;
+            p.dq_ptab = p.dq_st_ml = true;
+            p.pos0 = 2048;
+            CHECK(launches(ops::chooseAttnPrefill(p, fs, kv)) == launches(ops::chooseAttnPrefill(p, f0, kv)));
+        }
+        // (8) the gfx1151 set: unchanged (KG-3 attn_pwf; no kgk there)
+        {
+            const ops::AttnPrefillProblem p = prob(131072, 4096);
+            CHECK(launches(ops::chooseAttnPrefill(p, fs, k8)) == launches(ops::chooseAttnPrefill(p, f0, k8)) &&
+                  launches(ops::chooseAttnPrefill(p, fp, k8)) == launches(ops::chooseAttnPrefill(p, f0, k8)));
+        }
     }
 }
 

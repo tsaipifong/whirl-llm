@@ -7,12 +7,15 @@
 // different ways; the CPU tolerance tests are in test_attn.cpp).
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <numeric>
 
+#include "blasst_ref.h"  // v0252-blasst: the hot / cold tile data of the "dqs<p>" bench rows
 #include "kt.h"
 
 namespace kt {
@@ -186,6 +189,44 @@ static void benchPrefill(Ctx& c) {
         std::vector<float> ref_dqr;
         std::string ref_dqr_name;
         std::vector<std::pair<std::string, std::vector<double>>> dqr_us;  // name -> us per round (M0A ratio lines)
+        // v0252-blasst (PLAN V1-70, T3 bench cells): fmt "dqs<p>" (p = percent of cold key tiles, e.g. dqs50) = L contiguous f16
+        // rows of hot / cold key tiles (tests/kernels/blasst_ref.h makeKv / makeQ: tile 0 hot, a share p of the later tiles cold
+        // for both heads of every pair, a margin of >= 20 q.k units around the limit) with their own queries, made once per
+        // (L, p) and read-only afterwards; attn_kgk<np> runs with the plain arguments, attn_kgk<np>_sk with lim =
+        // WHIRL_KT_BENCH_SKLIM (default -20: skips exactly the cold tiles). The per-round times feed the "SK L .. NP .. p .."
+        // ratio lines (_sk / attn_kgk paired median); at p = 0 (nothing skipped) the outputs are compared bitwise.
+        struct HotSet {
+            Buf k, v, q;
+        };
+        std::map<int, HotSet> hot;  // p -> rows + queries
+        const float sk_lim = std::getenv("WHIRL_KT_BENCH_SKLIM") ? static_cast<float>(std::atof(std::getenv("WHIRL_KT_BENCH_SKLIM"))) : -20.0f;
+        auto hotSet = [&](int pct) -> HotSet& {
+            auto it = hot.find(pct);
+            if (it != hot.end()) return it->second;
+            const std::uint32_t seed = 20261110u;
+            std::vector<std::uint16_t> k16(static_cast<std::size_t>(L) * nkv * hd), v16(k16.size());
+            for (int h = 0; h < nkv; ++h) {
+                std::vector<float> kf, vf;
+                blasst::makeKv(L, hd, h, pct / 100.0, false, seed, kf, vf);
+                for (int j = 0; j < L; ++j)
+                    for (int e = 0; e < hd; ++e) {
+                        const std::size_t src = static_cast<std::size_t>(j) * hd + e, dst = (static_cast<std::size_t>(j) * nkv + h) * hd + e;
+                        k16[dst] = f2h(kf[src]);
+                        v16[dst] = f2h(vf[src]);
+                    }
+            }
+            std::vector<float> qv(static_cast<std::size_t>(n) * heads * qstride, 0.0f);
+            const int grp = heads / nkv;
+            for (int h = 0; h < heads; ++h) {
+                const std::vector<float> qh = blasst::makeQ(n, hd, h / grp, (h & 1) != 0, seed, 1000u + static_cast<std::uint32_t>(h));
+                for (int i = 0; i < n; ++i)
+                    for (int e = 0; e < hd; ++e) qv[(static_cast<std::size_t>(i) * heads + h) * qstride + e] = qh[static_cast<std::size_t>(i) * hd + e];
+            }
+            std::printf("   prefill L %d dqs%d rows: hot / cold tiles, %d %% of the tiles after tile 0 cold, sk lim %.1f\n", L, pct, pct, sk_lim);
+            HotSet hs{Buf(k16), Buf(v16), Buf(qv)};
+            return hot.emplace(pct, std::move(hs)).first->second;
+        };
+        std::map<std::string, std::vector<float>> ref_dqs;  // fmt -> attn_kgk output (p = 0 bitwise rows)
         for (int rd = 0; rd < rounds; ++rd) {
         std::vector<K> order = ks;
         if (rd % 2) std::reverse(order.begin(), order.end());
@@ -249,7 +290,32 @@ static void benchPrefill(Ctx& c) {
                 a.vs = 0;
                 a.ptab = did.p();
             }
+            // v0252-blasst: "dqs<p>" (digits after "dqs"; plain "dqs" is the FC-1c key-range format above)
+            const bool dqp = fmt.size() > 3 && fmt.rfind("dqs", 0) == 0 && std::isdigit(static_cast<unsigned char>(fmt[3])) != 0;
+            const bool sk_kernel = name.size() > 3 && name.compare(name.size() - 3, 3, "_sk") == 0;
+            DevPtr qptr = dq.p();
+            if (dqp) {
+                HotSet& hs = hotSet(std::atoi(fmt.c_str() + 3));
+                a.k = hs.k.p();
+                a.v = hs.v.p();
+                a.ks = 0;
+                a.vs = 0;
+                a.ptab = did.p();
+                qptr = hs.q.p();
+            }
+            if (sk_kernel && !dqp) {
+                std::printf("   %s: an attn_kgk<np>_sk kernel runs only on dqs<p> rows here, skipped\n", name.c_str());
+                continue;
+            }
             auto launch = [&]() {
+                if (dqp) {  // v0252-blasst: attn_kgk<np> / attn_kgk<np>_sk on the hot / cold rows
+                    const hip::Dim3 g{cdiv(n, 16), static_cast<unsigned>(heads / kk.np), 1}, bl{static_cast<unsigned>(64 * kk.np), 1, 1};
+                    if (sk_kernel)
+                        hip::launch(f, g, bl, 0, c.s, qptr, a, out.p(), heads, nkv, qstride, dpos.p(), n, scale, 0, sk_lim);
+                    else
+                        hip::launch(f, g, bl, 0, c.s, qptr, a, out.p(), heads, nkv, qstride, dpos.p(), n, scale, 0);
+                    return;
+                }
                 if (dqr_seg) {  // FC-1c with all L keys in one range
                     hip::launch(f, {static_cast<unsigned>(cdiv(n, 16)), static_cast<unsigned>(heads / kk.np), 1}, {static_cast<unsigned>(64 * kk.np), 1, 1}, 0,
                                 c.s, dq.p(), a, out.p(), heads, nkv, qstride, dpos.p(), n, scale, 0, 0, L, dst.p());
@@ -302,6 +368,29 @@ static void benchPrefill(Ctx& c) {
                     for (std::size_t i = 0; i < o.size(); ++i) bad += std::memcmp(&o[i], &ref_q8[i], 4) != 0;
                     std::printf("   prefill %-22s bitwise mismatches vs first q8: %zu of %zu\n", name.c_str(), bad, o.size());
                     benchBitRow(c, name + ":" + fmt + " == " + ref_q8_name, heads, nkv, L, rd, bad, o.size());
+                }
+            }
+            if (dqp) {  // v0252-blasst: per-round time; at p = 0 (nothing to skip) attn_kgk<np>_sk == attn_kgk<np> bit for bit
+                const std::string key = name + ":" + fmt;
+                auto it = std::find_if(dqr_us.begin(), dqr_us.end(), [&](const auto& pr) { return pr.first == key; });
+                if (it == dqr_us.end()) {
+                    dqr_us.push_back({key, {}});
+                    it = dqr_us.end() - 1;
+                }
+                it->second.push_back(us);
+                if (std::atoi(fmt.c_str() + 3) == 0) {
+                    launch();
+                    c.sync();
+                    const auto o = out.down<float>(static_cast<std::size_t>(n) * heads * hd);
+                    auto rf = ref_dqs.find(fmt);
+                    if (rf == ref_dqs.end()) {
+                        ref_dqs.emplace(fmt, o);
+                    } else {
+                        std::size_t bad = 0;
+                        for (std::size_t i = 0; i < o.size(); ++i) bad += std::memcmp(&o[i], &rf->second[i], 4) != 0;
+                        std::printf("   prefill %-22s bitwise mismatches vs the first %s kernel: %zu of %zu\n", name.c_str(), fmt.c_str(), bad, o.size());
+                        benchBitRow(c, key + " == first " + fmt + " kernel (p 0: nothing skipped)", heads, nkv, L, rd, bad, o.size());
+                    }
                 }
             }
             if (dqr) {  // v0252-m0a: per-round time + bitwise vs the first "dqr" kernel (attn_kgk<np> == one-range attn_kgs<np>)
@@ -362,6 +451,25 @@ static void benchPrefill(Ctx& c) {
             std::printf("   M0A L %d NP %s heads %d/%d: attn_kgk%s/attn_kgs%s paired-median %.4f best %.4f (kgs best %.1f us, kgk best %.1f us, %zu rounds, "
                         "min %.4f max %.4f)\n",
                         L, np, heads, nkv, np, np, med, bk / bs, bs, bk, m, rr.front(), rr.back());
+            std::fflush(stdout);
+        }
+        // v0252-blasst (PLAN V1-70, R-K): the skip verdict input per (NP, p): attn_kgk<np>_sk / attn_kgk<np> per round (same round =
+        // same clock state, the order alternates), their paired median and the best-time ratio. "SK L <L> NP <np> p <p>: ..."
+        for (const auto& [key, tsk] : dqr_us) {
+            const std::size_t c1 = key.find("_sk:dqs");
+            if (c1 == std::string::npos || key.rfind("attn_kgk", 0) != 0) continue;
+            const std::string np = key.substr(8, c1 - 8), fmt = key.substr(c1 + 4);
+            const std::vector<double>* tb = times("attn_kgk" + np + ":" + fmt);
+            if (!tb || tb->empty() || tb->size() != tsk.size()) continue;
+            std::vector<double> rr;
+            for (std::size_t i = 0; i < tb->size(); ++i) rr.push_back(tsk[i] / (*tb)[i]);
+            std::sort(rr.begin(), rr.end());
+            const std::size_t m = rr.size();
+            const double med = m % 2 ? rr[m / 2] : 0.5 * (rr[m / 2 - 1] + rr[m / 2]);
+            const double bb = *std::min_element(tb->begin(), tb->end()), bs = *std::min_element(tsk.begin(), tsk.end());
+            std::printf("   SK L %d NP %s p %s heads %d/%d: attn_kgk%s_sk/attn_kgk%s paired-median %.4f best %.4f (kgk best %.1f us, sk best %.1f us, lim %.1f, "
+                        "%zu rounds, min %.4f max %.4f)\n",
+                        L, np.c_str(), fmt.c_str() + 3, heads, nkv, np.c_str(), np.c_str(), med, bs / bb, bb, bs, sk_lim, m, rr.front(), rr.back());
             std::fflush(stdout);
         }
     }

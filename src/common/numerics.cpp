@@ -222,6 +222,9 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"ATTN_KGVAR", &S::attn_kgvar},
         {"MOE_FUSE", &S::moe_fuse},    // v0252-c3port (feat026-moedec)
         {"GEMVH_F32", &S::gemvh_f32},  // v0252-c3port (feat026-moedec)
+        {"ATTN_SKIP", &S::attn_skip},              // v0252-blasst (BLASST, fast only)
+        {"ATTN_SKIP_MIN", &S::attn_skip_min},      // v0252-blasst
+        {"ATTN_SKIP_PROBE", &S::attn_skip_probe},  // v0252-blasst
     }};
     return t;
 }

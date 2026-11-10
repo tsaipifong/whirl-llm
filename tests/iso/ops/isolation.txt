@@ -42,3 +42,6 @@ testhdr   tests/ops/ops_gdn_cases.inc
 testhdr   tests/ops/ops_matmul_cases.inc
 testhdr   tests/ops/ops_moe_cases.inc
 testhdr   tests/ops/ops_mtp_cases.inc
+# v0252-blasst: the BLASST CPU reference's self-checks (test-only header, no module code)
+testhdr   tests/ops/ops_blasst_cases.inc
+testhdr   tests/kernels/blasst_ref.h
