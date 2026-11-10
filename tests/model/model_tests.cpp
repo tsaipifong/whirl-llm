@@ -2571,7 +2571,8 @@ void testEnvSnapshot() {
     const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "MOEP_GU", "MOEP_DN", "MOEP_COMB", "MOE_RFUSE", "MOE_FUSE", "GEMVH_F32", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
                                      "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS",  // these three: Model::load -> forwardEnv (testForwardEnv)
                                      "FDQ8S", "FDQ8S_MIN",  // v0251-a3port: Model::load -> fdqEnv (testFdqEnv)
-                                     "ATTN_KGVAR"};  // v0252-c1port: numerics loadFlags, not in the exec dump (unit testKgVarFlag)
+                                     "ATTN_KGVAR",  // v0252-c1port: numerics loadFlags, not in the exec dump (unit testKgVarFlag)
+                                     "ARGMAX_MB"};  // v0252-f1arg3: Model::load -> Context::argmaxMbMode (iso forward.mtp_verify argmax_mb)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -3270,6 +3271,7 @@ void testPlanVsLoadOrTune() {
         {"PREC_GS", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
         {"FDQ8S", "loader.cpp Model::load -> fdqEnv: bit-neutral gemmfq slot (v0251-a3port)"},
         {"FDQ8S_MIN", "loader.cpp Model::load -> fdqEnv: gemmfq row threshold (v0251-a3port)"},
+        {"ARGMAX_MB", "loader.cpp Model::load -> Context::argmaxMbMode / setArgmaxMb: the gfx1201 multi-block verify argmax twins, bitwise the one-block kernels, no numerics flag (v0252-f1arg3)"},
     };
     for (const auto& e : EnvSnapshot::names()) {
         nu::EnvValues v;

@@ -30,6 +30,15 @@ struct Launch {
 };
 void recordLaunches(bool on);
 std::vector<Launch> recordedLaunches();
+// v0252-f1arg3: the stream of each recorded launch and one registered argument word; the allocation recorder
+struct LaunchCtx {
+    Stream s;
+    std::uint64_t word;
+};
+void recordArgWord(Function f, int index);
+std::vector<LaunchCtx> recordedLaunchCtx();
+void recordAllocs(bool on);
+std::vector<std::uint64_t> recordedSizes();
 }  // namespace whirl::hip::isofake
 
 namespace {
@@ -39,6 +48,7 @@ namespace fake = whirl::hip::isofake;
 using DevPtr = whirl::hip::DevPtr;
 
 struct MtpProbe : q::Context {
+    using q::Context::argmaxRowsEnqueue;  // v0252-f1arg3
     using q::Context::draftHeadProblem;
     using q::Context::out_tok;  // Scratch (a protected base of Context)
     using q::Context::xq_src;
@@ -191,11 +201,115 @@ void testRelaxRank() {
     ISO_CHECK(c->takeRelaxRank().stats == 0x5000);
 }
 
+// v0252-f1arg3 (PLAN V1-63 / V1-64): the R9700 host switch of the multi-block verify argmax twins argmax_rows_to_mb /
+// argmax_rank_rows_to_mb (gfx1201 code object). Rules of progress/v0252-f1arg2.HANDOFF.md section 6 (C2): the switch is
+// device::Profile::argmax_mb (gfx1201 on, gfx1151 off) with the env override WHIRL_ARGMAX_MB (0 off, 1 on, 2 on + the
+// tripwire), read once per Context; the 512 B workspace is a member of the Context that owns the launching stream,
+// allocated by that Context alone directly before its control words (one allocation, zeroed once); every twin launch
+// uses the launching Context's stream and workspace, grid AM_TILES(n_vocab) x rows, AM_THREADS threads; off (or a code
+// object without the twins) launches the one-block kernels exactly as before.
+void testArgmaxMb() {
+    namespace dev = whirl::device;
+    using whirl::hip::Arch;
+    // the mode: the profile default, then the envFlag rule of the override ("0" off, any other value on), "2" adds the tripwire
+    ISO_CHECK(dev::profile(Arch::gfx1201).argmax_mb && !dev::profile(Arch::gfx1151).argmax_mb);
+    ISO_CHECK(q::Context::argmaxMbMode(true, std::nullopt) == 1 && q::Context::argmaxMbMode(false, std::nullopt) == 0);
+    ISO_CHECK(q::Context::argmaxMbMode(true, std::string("0")) == 0 && q::Context::argmaxMbMode(false, std::string("1")) == 1);
+    ISO_CHECK(q::Context::argmaxMbMode(false, std::string("2")) == 2 && q::Context::argmaxMbMode(true, std::string("")) == 1);
+    const whirl::hip::Function rows = fn(0x32), rows_to = fn(0x31), rank = fn(0x30), mb = fn(0x40), rank_mb = fn(0x41);
+    auto setup = [&](MtpProbe& c, std::uintptr_t s, bool twins) {
+        c.arch = Arch::gfx1201;
+        c.cfg.n_vocab = 248320;  // Qwen3.x vocabulary: AM_TILES = 61
+        c.k.argmax_rows = rows, c.k.argmax_rows_to = rows_to, c.k.argmax_rank_rows_to = rank;
+        if (twins) c.k.argmax_rows_to_mb = mb, c.k.argmax_rank_rows_to_mb = rank_mb;
+        c.stream = reinterpret_cast<whirl::hip::Stream>(s);
+    };
+    auto a = std::make_unique<MtpProbe>(), b = std::make_unique<MtpProbe>(), none = std::make_unique<MtpProbe>();
+    setup(*a, 0x11, true), setup(*b, 0x22, true), setup(*none, 0x33, false);
+    // a code object without the twins (gfx1151, an old gfx1201 object): off whatever is asked
+    none->setArgmaxMb(2);
+    ISO_CHECK(none->argmax_mb == 0);
+    fake::recordAllocs(true);
+    a->setArgmaxMb(1);
+    b->setArgmaxMb(2);
+    none->out_tok = none->allocCtl(256);
+    a->out_tok = a->allocCtl(256);
+    b->out_tok = b->allocCtl(256);
+    const auto sizes = fake::recordedSizes();
+    fake::recordAllocs(false);
+    ISO_CHECK(a->argmax_mb == 1 && b->argmax_mb == 2 && a->argmaxMbOn() && b->argmaxMbOn() && !none->argmaxMbOn());
+    // one workspace per Context (per stream), directly before its control words, in the same allocation
+    ISO_CHECK(none->am_ws == 0);
+    ISO_CHECK(a->am_ws != 0 && b->am_ws != 0 && a->am_ws != b->am_ws);
+    ISO_CHECK(a->out_tok == a->am_ws + q::am_ws_bytes && b->out_tok == b->am_ws + q::am_ws_bytes);
+    ISO_CHECK(sizes.size() == 3 && sizes[0] == 256 && sizes[1] == 256 + q::am_ws_bytes && sizes[2] == 256 + q::am_ws_bytes);
+    // the launches: every twin launch on the launching Context's stream with its own workspace (argument 4 of
+    // argmax_rows_to_mb, 7 of argmax_rank_rows_to_mb), grid (AM_TILES(n_vocab), rows) x 256
+    fake::recordArgWord(mb, 4);
+    fake::recordArgWord(rank_mb, 7);
+    q::RowIdx dst, src;
+    for (int r = 0; r < 32; ++r) dst.v[r] = r, src.v[r] = -1;
+    src.v[1] = 40;
+    const q::Context::RelaxRank rr{0x5000, 1, 32};
+    fake::recordLaunches(true);
+    a->argmaxRowsEnqueue(4);                                  // verifyEnqueueEx / verify: was argmax_rows
+    b->argmaxToEnqueue(3, 0x900, dst);                        // verifyBatchEnqueue: was argmax_rows_to
+    ISO_CHECK(a->relaxRankEnqueue(rr, 4, 0x900, dst, src));   // was argmax_rank_rows_to
+    b->argmaxRowsEnqueue(1);
+    none->argmaxRowsEnqueue(2);                               // no twins: the one-block kernels
+    none->argmaxToEnqueue(2, 0x900, dst);
+    ISO_CHECK(none->relaxRankEnqueue(rr, 2, 0x900, dst, src));
+    const auto l = fake::recordedLaunches();
+    const auto x = fake::recordedLaunchCtx();
+    fake::recordLaunches(false);
+    ISO_CHECK(l.size() == 7 && x.size() == 7);
+    if (l.size() == 7 && x.size() == 7) {
+        auto twin = [&](std::size_t i, whirl::hip::Function f, unsigned n, const MtpProbe& c) {
+            return l[i].f == f && l[i].grid.x == 61 && l[i].grid.y == n && l[i].block.x == 256 && x[i].s == c.stream && x[i].word == c.am_ws;
+        };
+        ISO_CHECK(twin(0, mb, 4, *a));
+        ISO_CHECK(twin(1, mb, 3, *b));
+        ISO_CHECK(twin(2, rank_mb, 4, *a));
+        ISO_CHECK(twin(3, mb, 1, *b));
+        auto old = [&](std::size_t i, whirl::hip::Function f) {
+            return l[i].f == f && l[i].grid.x == 2 && l[i].grid.y == 1 && l[i].block.x == 1024 && x[i].s == none->stream;
+        };
+        ISO_CHECK(old(4, rows) && old(5, rows_to) && old(6, rank));
+    }
+    // switched off by the override: the same Context launches the one-block kernels again
+    a->setArgmaxMb(0);
+    ISO_CHECK(!a->argmaxMbOn());
+    fake::recordLaunches(true);
+    a->argmaxRowsEnqueue(4);
+    a->argmaxToEnqueue(4, 0x900, dst);
+    ISO_CHECK(a->relaxRankEnqueue(rr, 4, 0x900, dst, src));
+    const auto l0 = fake::recordedLaunches();
+    fake::recordLaunches(false);
+    ISO_CHECK(l0.size() == 3);
+    if (l0.size() == 3) ISO_CHECK(l0[0].f == rows && l0[1].f == rows_to && l0[2].f == rank && l0[0].grid.x == 4 && l0[0].block.x == 1024);
+    // more rows than one workspace has: refused, nothing launched
+    fake::recordLaunches(true);
+    ISO_CHECK(codeOf([&] { b->argmaxToEnqueue(33, 0x900, dst); }) == "BatchTooLarge");
+    ISO_CHECK(fake::recordedLaunches().empty());
+    fake::recordLaunches(false);
+    // the tripwire: a workspace left non-zero after a cycle fails loudly
+    std::vector<std::int32_t> ws(q::am_ws_bytes / 4, 0);
+    ISO_CHECK(codeOf([&] { q::Context::checkAmWs(ws); }).empty());
+    ws[q::am_ws_bytes / 4 - 1] = 1;
+    ISO_CHECK(codeOf([&] { q::Context::checkAmWs(ws); }) == "ArgmaxWsDirty");
+    // the Radeon 8060S: the profile keeps the one-block kernels (its code object has no twins either)
+    auto g = std::make_unique<MtpProbe>();
+    setup(*g, 0x44, true);
+    g->arch = Arch::gfx1151;
+    g->setArgmaxMb(q::Context::argmaxMbMode(dev::profile(Arch::gfx1151).argmax_mb, std::nullopt));
+    ISO_CHECK(g->argmax_mb == 0 && !g->argmaxMbOn());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     return iso::run("forward.mtp_verify",
                     {{"ctl_slot", testCtlSlot}, {"refusals", testRefusals}, {"commit_seq", testCommitSeq}, {"draft_head_problem", testDraftHeadProblem},
-                     {"relax_rank", testRelaxRank}},
+                     {"relax_rank", testRelaxRank}, {"argmax_mb", testArgmaxMb}},
                     argc, argv);
 }

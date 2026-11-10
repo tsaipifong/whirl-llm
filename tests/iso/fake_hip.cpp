@@ -11,6 +11,7 @@
 #include "whirl/uma_mem.h"
 
 #include <cstdint>
+#include <cstring>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -25,6 +26,11 @@ namespace isofake {
 struct Launch {
     Function f;
     Dim3 grid, block;
+};
+// v0252-f1arg3: the stream of a recorded launch and the argument word named by recordArgWord (0: none registered)
+struct LaunchCtx {
+    Stream s;
+    std::uint64_t word;
 };
 }  // namespace isofake
 
@@ -53,6 +59,11 @@ bool handedOut(DevPtr p) { return g_live.count(p) != 0; }
 bool g_rec_launch = false;
 bool g_fake_fn = false;
 std::vector<isofake::Launch> g_launches;
+// v0252-f1arg3: per recorded launch also the stream and, for a kernel registered with recordArgWord, the 8-byte argument
+// at that index (the caller names a DevPtr argument of the kernel's signature; other kernels record 0). Parallel to
+// g_launches, so the shared Launch struct of the other test programs keeps its layout.
+std::vector<isofake::LaunchCtx> g_launch_ctx;
+std::vector<std::pair<Function, int>> g_arg_word;
 std::vector<std::string> g_fn_names;
 
 Function fakeFunction(const char* name) {
@@ -72,9 +83,21 @@ void recordAllocs(bool on) {
 std::vector<std::uint64_t> recordedSizes() { return g_sizes; }
 void recordLaunches(bool on) {
     g_rec_launch = on;
-    if (on) g_launches.clear();
+    if (on) {
+        g_launches.clear();
+        g_launch_ctx.clear();
+    }
 }
 std::vector<isofake::Launch> recordedLaunches() { return g_launches; }
+void recordArgWord(Function f, int index) {
+    for (auto& e : g_arg_word)
+        if (e.first == f) {
+            e.second = index;
+            return;
+        }
+    g_arg_word.emplace_back(f, index);
+}
+std::vector<isofake::LaunchCtx> recordedLaunchCtx() { return g_launch_ctx; }
 void fakeFunctions(bool on) { g_fake_fn = on; }
 }  // namespace isofake
 
@@ -156,9 +179,13 @@ Function Module::getFunctionOpt(const char* name) const {
 }
 DevPtr Module::getGlobal(const char*, std::size_t*) const { gpu("Module::getGlobal"); }
 
-void launchRaw(Function f, Dim3 grid, Dim3 block, unsigned, Stream, void**) {
+void launchRaw(Function f, Dim3 grid, Dim3 block, unsigned, Stream s, void** params) {
     if (!g_rec_launch) gpu("launchRaw");
     g_launches.push_back({f, grid, block});
+    std::uint64_t word = 0;
+    for (const auto& e : g_arg_word)
+        if (e.first == f && params != nullptr) std::memcpy(&word, params[e.second], sizeof word);
+    g_launch_ctx.push_back({s, word});
 }
 
 // arch025-lane2 leg 4 (model.core): the code-object loading of the kernel table (Model::loadKernels), the gfx target

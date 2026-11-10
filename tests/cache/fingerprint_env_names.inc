@@ -9,6 +9,7 @@
 
 static const char* const k_fp_hashed[] = {
     "WHIRL_ACT_FUSE",  // src/common/numerics.cpp
+    "WHIRL_ARGMAX_MB",  // src/config/env_snapshot.cpp (v0252-f1arg3: other kernels, same bits; hashed as MOE_FUSE)
     "WHIRL_ATTN_DQ4",  // src/common/numerics.cpp
     "WHIRL_ATTN_DQF",  // src/common/numerics.cpp
     "WHIRL_ATTN_KG",  // src/common/numerics.cpp
