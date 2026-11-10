@@ -18,6 +18,7 @@
 #include <numeric>
 
 #include "cpu_ref.h"
+#include "kt_f16_tie.h"
 
 namespace kt {
 
@@ -106,7 +107,9 @@ Result invariant(const std::string& name, std::size_t n, std::size_t bad) {
 
 // v0252-moedf16 (PLAN V1-76): the gfx1201 balance / fast MoE prefill stores the down projection's output moe_yd as f16 -
 // gemm8r_moeh / gemm8r_moe32h with W2 = null (one weight set, f16 epilogue) - and combines it with moe_combine4h.
-//   * f16 down == f16(the f32 gemm8r_moe down) bit for bit (the same expressions, one RNE rounding; every pos written);
+//   * f16 down == f16(the f32 gemm8r_moe down) bit for bit, except at an exact f16 tie of the f32 value, where the other
+//     neighbour is also accepted (v0252-moedf16b: the f16 epilogue compiles to v_fma_mixlo_f16 = ONE rounding of the exact
+//     product, the reference rounds twice; kt_f16_tie.h; q7 9525m: 211 of 3,276,800, all one ulp); every pos written;
 //   * moe_combine4h(f16 yd) vs an f64 combine of the f32 yd within one f16 rounding of every expert output (2^-11 rel
 //     each -> 2^-10 of the scale |x| + sum |w y| + |sg ysh|) + f32 noise; the f32 path (moe_combine) against the same
 //     reference at f32 tolerance; and the f16 values finite.
@@ -124,13 +127,21 @@ void moeYdhChecks(Ctx& c, const std::vector<int>& inv, unsigned tile_slots, int 
                 rdown.p(), DevPtr{0}, E, x8.p(), sx.p(), yh.p(), DevPtr{0}, F, tiles.p(), nt.p());
     c.sync();
     const auto yhv = yh.down<std::uint16_t>(ne);
-    std::vector<std::uint16_t> yr16(ne);
     std::size_t nonfinite = 0;
-    for (std::size_t i = 0; i < ne; ++i) {
-        yr16[i] = f2h(yr[i]);
-        nonfinite += !std::isfinite(h2f(yhv[i]));
+    for (std::size_t i = 0; i < ne; ++i) nonfinite += !std::isfinite(h2f(yhv[i]));
+    {
+        const F16TieCmp tc = cmpF16RneOrTie(yhv.data(), yr.data(), ne);
+        Result r;
+        r.name = std::string(bn == 32 ? "gemm8r_moe32h" : "gemm8r_moeh") + " W2=null (f16 moe_yd) == f16(gemm8r_moe down) or the other neighbour at an f16 tie" + tag;
+        r.kind = Kind::invariant;
+        r.n = ne;
+        r.mismatches = tc.mismatches;
+        r.max_err = tc.max_abs;
+        r.pass = tc.mismatches == 0;
+        r.note = "ties resolved to the other neighbour " + std::to_string(tc.ties_other) +
+                 (tc.mismatches ? "; first mismatch at " + std::to_string(tc.first) : std::string());
+        c.rep.add(std::move(r));
     }
-    c.rep.add(cmpExact(std::string(bn == 32 ? "gemm8r_moe32h" : "gemm8r_moeh") + " W2=null (f16 moe_yd) == f16(gemm8r_moe down)" + tag, yhv, yr16, Kind::invariant));
     c.rep.add(invariant("f16 moe_yd finite" + tag, ne, nonfinite));
     // combine: x0 + sum_k w * yd + sg * ysh
     const std::size_t nx = static_cast<std::size_t>(n) * E;

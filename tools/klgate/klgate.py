@@ -164,6 +164,31 @@ def token_ids(exe, model, prompt):
     return ids[-1].split(",")
 
 
+def parse_env(items):
+    """--env NAME=VALUE (repeat) -> {NAME: VALUE}; NAME must be a WHIRL_* switch (the only names clean_env() drops), once"""
+    out = {}
+    for x in items or []:
+        k, sep, v = x.partition("=")
+        if not sep or not k or not k.upper().startswith("WHIRL_") or k in out:
+            raise ValueError(f"bad --env {x!r} (NAME=VALUE, NAME a WHIRL_* switch, each once)")
+        out[k] = v
+    return out
+
+
+def run_env(md, env):
+    # the extra env of one run: the arm's --env on EVERY run of the gate (precise, noise, modes), + the noise floor switch.
+    # v0252-moedf16b: before, an A/B switch set in the caller's shell was dropped by clean_env() (q7 9525m: arm A == arm B)
+    e = dict(env or {})
+    if md == "noise":
+        e["WHIRL_GDN_SEQ"] = "1"
+    return e or None
+
+
+def report_passes(rc, mode_args, env):
+    # a negative test (--as) or a run with --env (another config than the product default) never passes: never feeds golden record
+    return rc == 0 and not mode_args and not env
+
+
 def run_dump(exe, model, prompt, mode, ends, n, dump, logf, wrap, device, extra=None, mode_arg=None):
     env = clean_env()
     env.update(extra or {})
@@ -314,8 +339,8 @@ def rejudge(src, out):
         return 2
     with open(src, encoding="utf-8") as f:
         old = json.load(f)
-    if old.get("mode_args"):
-        print("klgate: --rejudge of a negative test (--as) report")
+    if old.get("mode_args") or old.get("env"):
+        print("klgate: --rejudge of a negative test (--as) or an A/B arm (--env) report")
         return 2
     rep = {k: v for k, v in old.items() if k not in ("cases", "pass", "summary", "limits", "moe_limits")}
     rep.update(limits=LIMITS, moe_limits=MOE_LIMITS, cases=[], rejudged_from=os.path.abspath(src),
@@ -358,6 +383,11 @@ def rejudge(src, out):
 
 def main():
     global ROWS, POSITIONS
+    a = build_parser().parse_args()
+    return run(a)
+
+
+def build_parser():
     ap = argparse.ArgumentParser(description="KL gate: balance / fast vs precise")
     ap.add_argument("--exe", required=True)
     ap.add_argument("--model", action="append", required=True, help="NAME=PATH (repeat)")
@@ -383,7 +413,14 @@ def main():
                          "--report (exe_sha256 / device / corpus carried over, rejudged_from recorded)")
     ap.add_argument("--positions", type=int, default=POSITIONS, choices=[1, 2, 3],
                     help=f"windows per length (default {POSITIONS}; 1 = the single window before each length)")
-    a = ap.parse_args()
+    ap.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
+                    help="A/B arm switch (repeat): put WHIRL_NAME=VALUE into the env of every run (precise, noise, modes); the shell's "
+                         "WHIRL_* are dropped. Recorded in the report; the report never passes (pass false)")
+    return ap
+
+
+def run(a):
+    global ROWS, POSITIONS
     if a.rejudge:
         return rejudge(a.rejudge, a.report)
     ROWS = a.rows
@@ -409,6 +446,11 @@ def main():
         if md not in LIMITS:
             print(f"klgate: unknown mode {md}")
             return 2
+    try:
+        arm_env = parse_env(a.env)
+    except ValueError as e:
+        print(f"klgate: {e}")
+        return 2
     mode_args = {}
     for x in a.as_:
         md, _, arg = x.partition("=")
@@ -423,7 +465,7 @@ def main():
     work = os.path.abspath(a.work or os.path.join(os.path.dirname(exe), "klgate_work"))
     os.makedirs(work, exist_ok=True)
     rep = {"exe": exe, "exe_sha256": sha256(exe), "device": a.device or "default", "limits": LIMITS, "moe_limits": MOE_LIMITS,
-           "rows": ROWS, "positions": POSITIONS, "offsets": list(offsets), "mode_args": mode_args, "lengths": lengths, "modes": modes, "models": {k: os.path.basename(v) for k, v in models.items()},
+           "rows": ROWS, "positions": POSITIONS, "offsets": list(offsets), "mode_args": mode_args, "env": arm_env, "lengths": lengths, "modes": modes, "models": {k: os.path.basename(v) for k, v in models.items()},
            "corpus": {k: sha256(v) for k, v in corpus.items()}, "started": time.strftime("%Y-%m-%d %H:%M:%S"), "cases": [],
            "judge": "length-average", "noise": [], "numerics": {}, "errors": []}
     log(f"klgate: exe {exe} sha256 {rep['exe_sha256'][:16]} device {rep['device']} rows {ROWS} positions {POSITIONS} (offsets {list(offsets)})")
@@ -483,7 +525,7 @@ def main():
                 dump = os.path.join(work, tag + ".f16")
                 logf = os.path.join(work, tag + ".log")
                 # the MoE noise floor: precise with the sequential f32 DeltaNet prefill
-                extra = {"WHIRL_GDN_SEQ": "1"} if md == "noise" else None
+                extra = run_env(md, arm_env)
                 rc, wall = run_dump(exe, mpath, ppath, "precise" if md == "noise" else md, ends, n, dump, logf, wrap, a.device, extra, mode_args.get(md))
                 log(f"  run {tag}: exit {rc}, {wall:.0f} s")
                 if rc != 0 or not os.path.isfile(dump):
@@ -560,7 +602,7 @@ def main():
     nfail = len(rep["cases"]) - npass
     rc = 2 if rep["errors"] or not rep["cases"] else (1 if nfail else 0)
     rep["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    rep["pass"] = rc == 0 and not mode_args  # a negative test (--as) never passes
+    rep["pass"] = report_passes(rc, mode_args, arm_env)
     rep["summary"] = f"{npass} passed, {nfail} failed, {len(rep['errors'])} errors"
     for e in rep["errors"]:
         log("ERROR " + e)
