@@ -1351,6 +1351,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);
+        c.beginFamily(std::string("bench ") + f.name);  // v0252-ktrng: own stream per bench family
         std::fflush(stdout);
         try {
             f.fn(e);
