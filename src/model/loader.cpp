@@ -221,6 +221,9 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
                                                         " KV needs kernels this GPU does not have; use WHIRL_KV=f16, q8 or auto");
     }
     m.k = loadKernels(m.module, m.kv_fmt);
+    // v0252-f1arg3 (PLAN V1-63 / V1-64): the multi-block verify argmax twins (device::Profile::argmax_mb, WHIRL_ARGMAX_MB from
+    // this load's snapshot), once per load and before allocScratch places the workspace (Context::allocCtl)
+    m.setArgmaxMb(Model::argmaxMbMode(device::profile(m.arch).argmax_mb, env.argmax_mb));
     // MXFP4 routed experts: process-level switches (as WHIRL_KV), read by CLI and server alike
     // per-model-type request (numerics::forModel; MoE balance = dense balance items since MODES-MXFP4)
     m.num_req = numerics::forModel(opt.numerics, cfg.moe);

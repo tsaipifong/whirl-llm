@@ -77,6 +77,11 @@ struct Profile {
     // arm needs it) and Context::setRelaxRank / relaxRankEnqueue (server and CLI decode). The 8060S: run F1's G4a there,
     // then flip this to true (and widen ADR-0015)
     bool relax_rank_check;
+    // v0252-f1arg3: the MTP / batched verify argmax runs the multi-block twins argmax_rows_to_mb / argmax_rank_rows_to_mb
+    // (kernels/sample_argmax_mb.hip: AM_TILES(n_vocab) x rows blocks, bitwise the one-block argmax_rows(_to) /
+    // argmax_rank_rows_to) when the code object has both; WHIRL_ARGMAX_MB (0 off, 1 on, 2 on + workspace tripwire)
+    // overrides it, read once per load (Context::setArgmaxMb). The workspace is per Context (= per stream)
+    bool argmax_mb;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
     // v0252-n10: whirl-server writes the TAIL-CK checkpoint inside the solo prefill forward that contains the tail point
@@ -115,6 +120,9 @@ inline constexpr Profile k_profile_gfx1201{
     // b334a52); drafts only, output unchanged
     .draft64k_moe = true,
     .relax_rank_check = true,  // v0252-f1 G3a (ADR-0015)
+    // v0252-f1arg3 (PLAN V1-63 / V1-64): the multi-block verify argmax twins (kt q7 9525g: B/A 0.06-0.26, bitwise; e2e rule
+    // progress/v0252-f1arg2.HANDOFF.md section 5). WHIRL_ARGMAX_MB=0 turns it off
+    .argmax_mb = true,
     .prefill_exec_moe = 2048,
     .prefill_fill_batch = false,
     .tail_ck_in_forward = true,  // v0252-n10 (R9700 precise pp 2k: one forward instead of 1024 + 1034)
@@ -154,6 +162,7 @@ inline constexpr Profile k_profile_gfx1151{
     // (scratch\v0252_8sdraft\s8draft_gpu.ps1 -Part s, rule in its header)
     .draft64k_moe = true,
     .relax_rank_check = false,  // v0252-f2def2: F1 never measured here (no G4a); relaxacc keeps topk_rows
+    .argmax_mb = false,  // v0252-f1arg3: the gfx1151 object has no twins; the one-block argmax_rows(_to) / argmax_rank_rows_to stay
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = false,  // v0252-n10: 0.2.5.2 does not touch the Radeon 8060S (the 0.2.5.1 forward end stays)

@@ -60,6 +60,7 @@ hdr       include/whirl/uma_mem.h
 hdr       include/whirl/value_scope.h
 hdr       include/whirl/vismap.h
 hdr       kernels/gfx1151/attn_ws4_index.h
+hdr       kernels/argmax_key.h
 hdr       src/device/backend.h
 hdr       src/device/handles.h
 hdr       src/hip/launch_log.h

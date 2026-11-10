@@ -39,6 +39,22 @@ DevPtr Context::allocZero(u64 bytes) {
     return p;
 }
 
+// v0252-f1arg3: the multi-block verify argmax switch and its per-Context workspace (see the header)
+int Context::argmaxMbMode(bool profile_on, const std::optional<std::string>& env) {
+    if (!env) return profile_on ? 1 : 0;
+    if (*env == "0") return 0;
+    return *env == "2" ? 2 : 1;
+}
+
+void Context::setArgmaxMb(int mode) { argmax_mb = k.argmax_rows_to_mb != nullptr && k.argmax_rank_rows_to_mb != nullptr ? mode : 0; }
+
+DevPtr Context::allocCtl(u64 bytes) {
+    if (argmax_mb == 0) return allocZero(bytes);
+    // one allocation: [workspace am_ws_bytes][control words]; both zeroed here, once, before any launch on `stream`
+    am_ws = allocZero(am_ws_bytes + bytes);
+    return am_ws + am_ws_bytes;
+}
+
 void Context::freeAlloc(DevPtr p) {
     for (std::size_t i = 0; i < allocations.size(); ++i)
         if (allocations[i].get() == p) {

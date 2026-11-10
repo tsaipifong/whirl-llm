@@ -56,7 +56,7 @@ void Model::allocScratch(u32 fd_splits_) {
     m.ids = m.alloc(B * 4);
     m.host_ids.assign(static_cast<std::size_t>(2 * B), 0);
     m.pos_buf = m.alloc(B * 4);
-    m.out_tok = m.allocZero(ctl_words * 4);
+    m.out_tok = m.allocCtl(ctl_words * 4);  // v0252-f1arg3: + the argmax workspace before it when the switch is on
     m.fd_splits = fd_splits_;
     const u64 n_split = m.fd_splits;
     m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);

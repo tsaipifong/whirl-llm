@@ -19,6 +19,10 @@ using hip::DevPtr;
 
 struct Config;  // whirl/model_types.h
 
+// v0252-f1arg3: bytes of the multi-block verify argmax workspace (AmWs, kernels/argmax_key.h AM_WS_BYTES; static_assert in
+// forward/mtp_verify.cpp) that Context::allocCtl places directly before the control words when the switch is on
+inline constexpr std::uint64_t am_ws_bytes = 512;
+
 // Prefill / decode buffers of Model::load for prefill batch B (moved from include/whirl/model.h, arch025-lane2 N9 S2c).
 // fd_splits: attention split-K partials (resolveFdSplits: 64, 256 with q4 KV, WHIRL_FD_SPLITS).
 std::uint64_t bufferBytes(const Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint64_t max_elems, std::uint32_t fd_splits = 64);

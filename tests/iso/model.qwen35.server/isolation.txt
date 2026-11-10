@@ -111,6 +111,7 @@ hdr       include/whirl/vision.h
 hdr       include/whirl/vismap.h
 hdr       include/whirl/vram_limit.h
 hdr       kernels/gfx1151/attn_ws4_index.h
+hdr       kernels/argmax_key.h
 hdr       src/cache/cache_model.h
 hdr       src/config/env_get.h
 hdr       src/config/env_snapshot.h
