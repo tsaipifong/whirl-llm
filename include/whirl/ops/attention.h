@@ -82,7 +82,23 @@ struct AttnPrefillFlags {
     // v0252-c1acc: kAttnKgVarAuto = the per-(NP, path) table kAttnKgAuto; v0252-fasta: var 3 also on one-range FC-1c
     // (KgPath::dqr1, the gfx1201 q4 fast prefill)
     std::uint32_t attn_kg_var = 0;
+    // v0252-strixc2 (PLAN V1-09): the balance-mode gfx1151 prefill attention attn_sx<NP> (strix-llama.cpp fattn-rdna35,
+    // not bitwise; numerics flag attn_sx = balance + item h16 + device::Profile::attn_sx_balance, WHIRL_ATTN_SX=0 off).
+    // Taken for f16 rows walked in ONE key range: the f16 cache (in place of attn_kx / attn_prefill_wmma) and the KG-3
+    // single-range copy of q8 / q8h keys (in place of attn_pwf); never on attn_kg / multi-range series / WHIRL_ATTN_SEG.
+    bool attn_sx_on = false;
 };
+// v0252-strixc2: the attn_sx kernel for a GQA ratio grp (query heads per KV head) and hp heads per launch at head_dim,
+// with its NP (= strix NCOLS2: the first of 8 / 4 / 2 dividing grp, fattn-rdna35.cu:863-870) in *np; nullptr (and *np 0)
+// when head_dim != 256, no NP divides both grp and hp, or that kernel is not in the code object. Exhaustive in NP: never
+// another NP's kernel (its grid would be wrong).
+struct AttnSxPick {
+    Function f = nullptr;
+    std::uint32_t np = 0;
+};
+AttnSxPick attnSxFor(const kernels::AttnKernels& k, std::uint32_t grp, std::uint32_t hp, std::uint32_t head_dim);
+// query columns per block of attn_sx (64 / NP tokens x NP heads); the grid is ceil(n / (64 / np)) x (hp / np)
+inline constexpr std::uint32_t kAttnSxCols = 64;
 // v0252-c1port (C1): the f16 attn_kg variant `var` for NP query heads per block, or nullptr = none (the caller keeps
 // its shipped kernel, whose NP is the same). Exhaustive: var 1 -> attn_kgv<np>, var 3 -> attn_kgk<np> for np 6 / 4 / 2
 // only; any other var, and any other np (8, ...), gives nullptr - never the kernel of another NP (that kernel with

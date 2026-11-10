@@ -832,6 +832,7 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     // and (v0252-f2def2) the family enables it (device::Profile::relax_rank_check; Context::setRelaxRank reads the same)
     t.relax_moe_arm = whirl::numerics::relaxMoeDefaultName(t.gfx1151);
     t.k_relax_rank = prof.relax_rank_check && m.k.argmax_rank_rows_to != nullptr;
+    t.attn_sx_profile = prof.attn_sx_balance;  // v0252-strixc2: the gfx1151 balance prefill attention (numerics flag attn_sx)
     return t;
 }
 

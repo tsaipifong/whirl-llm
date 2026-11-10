@@ -77,6 +77,9 @@ struct Profile {
     // arm needs it) and Context::setRelaxRank / relaxRankEnqueue (server and CLI decode). The 8060S: run F1's G4a there,
     // then flip this to true (and widen ADR-0015)
     bool relax_rank_check;
+    // v0252-strixc2 (PLAN V1-09): balance-mode prefill attention attn_sx<NP> (strix-llama.cpp fattn-rdna35, gfx1151 code
+    // object only; not bitwise, so the numerics plan takes it in balance only: numerics::Target::attn_sx_profile)
+    bool attn_sx_balance;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
     // v0252-n10: whirl-server writes the TAIL-CK checkpoint inside the solo prefill forward that contains the tail point
@@ -115,6 +118,7 @@ inline constexpr Profile k_profile_gfx1201{
     // b334a52); drafts only, output unchanged
     .draft64k_moe = true,
     .relax_rank_check = true,  // v0252-f1 G3a (ADR-0015)
+    .attn_sx_balance = false,  // v0252-strixc2: no attn_sx in the gfx1201 code object
     .prefill_exec_moe = 2048,
     .prefill_fill_batch = false,
     .tail_ck_in_forward = true,  // v0252-n10 (R9700 precise pp 2k: one forward instead of 1024 + 1034)
@@ -154,6 +158,7 @@ inline constexpr Profile k_profile_gfx1151{
     // (scratch\v0252_8sdraft\s8draft_gpu.ps1 -Part s, rule in its header)
     .draft64k_moe = true,
     .relax_rank_check = false,  // v0252-f2def2: F1 never measured here (no G4a); relaxacc keeps topk_rows
+    .attn_sx_balance = true,  // v0252-strixc2: balance prefill attention (acceptance: progress/v0252-strixc2.HANDOFF.md)
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = false,  // v0252-n10: 0.2.5.2 does not touch the Radeon 8060S (the 0.2.5.1 forward end stays)

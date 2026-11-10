@@ -164,6 +164,7 @@ void Context::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u
     // v0252-c1port (C1): WHIRL_ATTN_KGVAR; v0252-c1acc: default auto on gfx1201 (ops::kAttnKgAuto), 0 on gfx1151
     static_assert(ops::kAttnKgVarAuto == numerics::kAttnKgVarAuto, "attn_kg_var auto: one value in numerics and ops");
     pf.attn_kg_var = nf().attn_kg_var;
+    pf.attn_sx_on = nf().attn_sx;  // v0252-strixc2: balance-only gfx1151 prefill attention (numerics plan)
     const ops::AttnPrefillPlan pl = ops::chooseAttnPrefill(pp, pf, k);
     const i32 H = I(cfg.n_head), HKV = I(cfg.n_head_kv), QS = I(2 * cfg.head_dim);
     for (const ops::AttnStep& s : pl.steps) {

@@ -91,6 +91,9 @@ struct EnvValues {
     Raw attn_kgvar;
     // v0252-c3port (feat026-moedec): moe_fuse / gemvh_f32 (WHIRL_MOE_FUSE / WHIRL_GEMVH_F32)
     Raw moe_fuse, gemvh_f32;
+    // v0252-strixc2 (PLAN V1-09): attn_sx (WHIRL_ATTN_SX: "0" turns the balance gfx1151 attn_sx prefill attention off;
+    // any other value keeps the plan's choice; never on in precise / fast - Plan::ignored notes a non-"0" value there)
+    Raw attn_sx;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -98,7 +101,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 36;
+    static constexpr std::size_t n_fields = 37;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -190,6 +193,8 @@ struct Target {
     // with it (the topk_rows check costs ~5.5-12 % of an R9700 Ornith cycle [est]); the 8060S arm needs no F1.
     std::string_view relax_moe_arm{};
     bool k_relax_rank = false;
+    // v0252-strixc2 (PLAN V1-09): device::Profile::attn_sx_balance (the gfx1151 row): balance prefill attention attn_sx
+    bool attn_sx_profile = false;
 };
 
 // ---- v0252-f2: the fast MoE relaxacc arms (the G3a / G4a screen arms) and the shipped default per GPU.
@@ -316,7 +321,8 @@ struct ItemState {
     X(B, gemvh_f32, false, "")                                   \
     X(B, gv_group, true, "gv_group")                             \
     X(U, gv_nmax, 0, "gv_nmax")                                  \
-    X(B, gdn_v0, false, "")
+    X(B, gdn_v0, false, "")                                      \
+    X(B, attn_sx, false, "")
 
 struct Flags {
 #define WHIRL_NF_B bool

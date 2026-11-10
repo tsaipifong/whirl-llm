@@ -30,6 +30,11 @@ Every entry here is also listed in PROVENANCE.md.
     `gdn_chunk_scan_kernel` (ggml/src/ggml-cuda/gated_delta_net.cu) of the
     strix-llama.cpp fork (https://github.com/asf0/strix-llama.cpp, rdna35-perf
     branch, same MIT license and copyright).
+  - the gfx1151 balance-mode prefill flash attention attn_sx2 / attn_sx4 /
+    attn_sx8 (balance only, `WHIRL_ATTN_SX=0` turns it off) in
+    kernels/gfx1151/attn_sx.hip, adapted from `flash_attn_rdna35`
+    (ggml/src/ggml-cuda/fattn-rdna35.cu) of the same strix-llama.cpp fork
+    (rdna35-perf branch, commit 62e9d99, same MIT license and copyright).
 - Test-only (not part of any WHIRL binary or source tree): the chat-template
   oracle in tests/template_oracle compiles llama.cpp's `common/jinja` and
   `common/json.cpp` (with the vendored nlohmann/json, MIT) from an external
