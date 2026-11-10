@@ -158,6 +158,17 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
         pl.fdn = pl.rbf ? (bn == 32 ? k.gemm8r_moe32 : k.gemm8r_moe) : (bn == 32 ? k.gemm8_moe32 : k.gemm8_moe);
         pl.gu_pgrid = pl.rbf ? D(max_tiles * 2 * nby) : D(max_tiles, 2 * nby);
         pl.dn_pgrid = pl.rbf ? D(max_tiles * nbyd) : D(max_tiles, nbyd);
+        // v0252-moedf16 (PLAN V1-76): COMB 3 = the balance item f16 intermediates on this kind too - the down projection
+        // writes moe_yd as f16 (gemm8r_moeh / gemm8r_moe32h with W2 = null: one weight set, f16 epilogue, same grid) and
+        // moe_combine4h reads it. Never in precise (prec_dec, or the mode's bitwise class with WHIRL_Q8DEC=1). The COMB of
+        // the caller, not moepFloor's (that floor is about the moep tile sharing; the yd bytes are saved at any n).
+        if (f_in.moep_comb == 3 && !f.prec_dec && f.moep_comb_ok != MoeFlags::MoepComb::bitwise && pl.rbf && k.moe_combine4h != nullptr && E % 4 == 0) {
+            pl.ydh = true;
+            pl.fdn = bn == 32 ? k.gemm8r_moe32h : k.gemm8r_moeh;
+            pl.bits = MoeBits::moe_lossy_gemm;
+            pl.comb4 = true;
+            pl.comb_grid = D((E + 1023) / 1024, n);
+        }
     } else if (fused) {
         // Radeon 8060S: gate + up + SwiGLU in one grouped GEMM over 64-token tiles, down over 32-token tiles; the
         // same perm positions for both tile lists, every row bit-identical to the generic path

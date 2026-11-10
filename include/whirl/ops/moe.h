@@ -112,7 +112,8 @@ struct MoePlan {
     std::uint32_t gu_bn = 0;
     bool comb_fused = false;         // moep: fdn is the gemm_moepdc_* twin; no moe_combine launch
     bool comb4 = false;              // moe_combine4 instead of moe_combine (any prefill kind)
-    bool ydh = false;                // moep, balance / fast: expert outputs stored f16 (moe_combine4h or the fused f16 twin)
+    bool ydh = false;                // moep, balance / fast: expert outputs stored f16 (moe_combine4h or the fused f16 twin);
+                                     // v0252-moedf16: also the fp8 kind with COMB 3 (fdn = gemm8r_moeh / _moe32h, W2 = null)
     bool comb_atomic = false;        // moep, fast candidate: fdn = gemm_moepda_* (x += w * y), shared expert first by
                                      // moe_combine4 with K = 0; no combine launch after
     Dim3 comb_grid{};

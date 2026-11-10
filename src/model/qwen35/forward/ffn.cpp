@@ -280,7 +280,8 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
     hip::launch(k.moe_route, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(bn), moe_perm, moe_inv, moe_tiles, moe_ntiles);
     if (pl.kind == ops::MoePrefillKind::fp8) {
         // MXFP4 experts x fp8 activations (per-pos scale, folded E8M0 as gemm8): gate + up in
-        // one launch with f16 outputs, silu(g) * u -> fp8 rows, down with f32 output
+        // one launch with f16 outputs, silu(g) * u -> fp8 rows, down with f32 output (v0252-moedf16: f16 when pl.ydh -
+        // balance / fast COMB 3, fdn = gemm8r_moeh / _moe32h with W2 = null; moe_combine4h below reads it)
         hip::launch(k.moe_gather_fp8, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, moe_sx, I(E), I(K));
         mark(OpClass::misc);
         // row-block-fast variants (same outputs): 1-D grid, the blocks sharing a tile's rows together
