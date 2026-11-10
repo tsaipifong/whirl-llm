@@ -175,17 +175,18 @@ void testRelaxRank() {
     fake::recordLaunches(false);
     ISO_CHECK(l.size() == 1);
     if (l.size() == 1) ISO_CHECK(l[0].f == fn(0x30) && l[0].grid.x == 4 && l[0].block.x == 1024);
-    // v0252-f2def2: the one-pass check is enabled per GPU family (device::Profile::relax_rank_check, gfx1201 only). The
-    // gfx1151 code object has argmax_rank_rows_to too, but F1 was never measured on the Radeon 8060S (ADR-0015, no G4a):
-    // there the request is refused (relaxacc keeps topk_rows) and no rank launch happens, even with a stale request
+    // v0252-f1flip (ADR-0015 Revision 1): the one-pass check is enabled per GPU family (device::Profile::relax_rank_check)
+    // and is now on for gfx1151 (the Radeon 8060S) as well as gfx1201: the request is taken and the rank launch happens
+    // (before f1flip: refused there, relaxacc kept topk_rows, no rank launch even with a stale request)
     c->arch = whirl::hip::Arch::gfx1151;
-    ISO_CHECK(!c->setRelaxRank(0x5000, 0x5, 32));
-    ISO_CHECK(c->takeRelaxRank().stats == 0);
+    ISO_CHECK(c->setRelaxRank(0x5000, 0x5, 32));
+    ISO_CHECK(c->takeRelaxRank().stats == 0x5000);
     fake::recordLaunches(true);
-    ISO_CHECK(!c->relaxRankEnqueue(rr, 4, 0x100, dst, src));
+    ISO_CHECK(c->relaxRankEnqueue(rr, 4, 0x100, dst, src));
     const auto l51 = fake::recordedLaunches();
     fake::recordLaunches(false);
-    ISO_CHECK(l51.empty());
+    ISO_CHECK(l51.size() == 1);
+    if (l51.size() == 1) ISO_CHECK(l51[0].f == fn(0x30) && l51[0].grid.x == 4 && l51[0].block.x == 1024);
     c->arch = whirl::hip::Arch::gfx1201;
     ISO_CHECK(c->setRelaxRank(0x5000, 0x5, 32));
     ISO_CHECK(c->takeRelaxRank().stats == 0x5000);

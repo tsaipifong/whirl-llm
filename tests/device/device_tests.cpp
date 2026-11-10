@@ -174,7 +174,7 @@ void testProfiles() {
     // v0252-n2 (N1): the embedded 64k draft-head subset is the MoE default on the R9700; v0252-8sdraft (PLAN V1-58): on
     // the 8060S too (FAST-8S-1 item 2; drafts only, the verify and the output unchanged)
     CHECK(a.draft64k_moe && b.draft64k_moe);
-    CHECK(a.relax_rank_check && !b.relax_rank_check);  // v0252-f2def2: F1's one-pass check on the R9700 only
+    CHECK(a.relax_rank_check && b.relax_rank_check);  // v0252-f1flip (ADR-0015 Rev 1): F1's one-pass check on both GPUs
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
     CHECK(a.prefill_exec_moe == 2048 && !a.prefill_fill_batch && a.vision_attn_threads == 128);
