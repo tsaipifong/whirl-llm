@@ -17,9 +17,11 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#include <format>
 #include <limits>
 #include <future>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 namespace whirl::server {
@@ -388,9 +390,13 @@ void SpecCycle::enqueueVerify(Cycle& cy) {
             std::size_t rows = 0;
             while (e < cy.A && (e == b || rows + cy.msegs[e].pend.size() <= vrows)) rows += cy.msegs[e++].pend.size();
             m_.mtpBatchStepEx(std::span<const MSeg>(cy.msegs.data() + b, e - b), 0, draft);
+            // v0252-hostwait bits 2 / 3: the GPU starts this step while the host enqueues the next
+            if ((opt_.cycle_sync & 12u) != 0) kick();
             // steps r >= 1: the group's MTP slots with more than r drafts (sorted by draft count, at the front of msegs)
-            for (std::uint32_t r = 1; draft && r < cy.nd_max && b < cy.n_step[r]; ++r)
+            for (std::uint32_t r = 1; draft && r < cy.nd_max && b < cy.n_step[r]; ++r) {
                 m_.mtpBatchStepEx(std::span<const MSeg>(cy.msegs.data() + b, std::min(e, cy.n_step[r]) - b), r, true);
+                if ((opt_.cycle_sync & 12u) != 0) kick();
+            }
             groups += 1;
             rows_all += rows;
         }
@@ -427,14 +433,81 @@ void SpecCycle::sampleRows(Cycle& cy) {
         sb_.launchTopk(cy.row_of[k], cy.nd_of[k] + 1, k_small, sl.sm.inv_t, sb_.sampDev(), max_rows, cy.row_of[k]);
     }
     const TimePoint t_enq = Clock::now();
-    m_.readCtl(std::span<std::int32_t>(sb_.ctlHost().data(), slots_.size() * qwen35::ctl_words));
+    const std::size_t ctl_n = slots_.size() * qwen35::ctl_words;
+    const std::size_t relax_n = cy.rank1p ? static_cast<std::size_t>(max_rows) * 12 : sb_.relaxHost().size();
+    // v0252-hostwait: the cycle's one wait (WHIRL_CYCLE_SYNC bit 0: pinned async readbacks + one event wait; else readCtl)
+    const bool pinned = readbackEnqueueWait(any_sampling, any_relax, ctl_n, relax_n);
     if (cy.p) {
         cy.p->t_ready = Clock::now();
         cy.p->enq_ms[cy.pa] += std::chrono::duration<double, std::milli>(t_enq - cy.tc0).count();
     }
+    if (pinned) {
+        // the copies landed before the wait returned: the readers below read the same host vectors as before
+        std::memcpy(sb_.ctlHost().data(), sb_.ctlPin().get(), ctl_n * 4);
+        if (any_sampling) std::memcpy(sb_.sampHost().data(), sb_.sampPin().get(), SampleBuffers::sampBytes());
+        if (any_relax) std::memcpy(sb_.relaxHost().data(), sb_.relaxPin().get(), relax_n);
+        return;
+    }
     if (any_sampling) ops_.download(sb_.sampHost().data(), sb_.sampDev(), SampleBuffers::sampBytes());
-    if (any_relax)
-        ops_.download(sb_.relaxHost().data(), sb_.relaxDev(), cy.rank1p ? static_cast<std::size_t>(max_rows) * 12 : sb_.relaxHost().size());
+    if (any_relax) ops_.download(sb_.relaxHost().data(), sb_.relaxDev(), relax_n);
+}
+
+// v0252-hostwait (PLAN V1-61): EngineOptions::cycle_sync, set up once by Engine::allocState (after sb_.alloc)
+void SpecCycle::initSync() {
+    std::uint32_t cs = opt_.cycle_sync;
+    if ((cs & ~15u) != 0) {
+        logW("cycle sync: unknown bits {:#x} of WHIRL_CYCLE_SYNC {} ignored (bit 0 pinned readback, 1 spin wait, 2 early "
+             "submission, 3 early submission by event record only)",
+             cs & ~15u, cs);
+        cs &= 15u;
+    }
+    if ((cs & 2u) != 0) cs |= 1u;  // the spin wait polls the pinned path's event
+    opt_.cycle_sync = cs;          // the effective mode: sampleRows, enqueueVerify and the "batch | cycle sync" line read it
+    if (cs == 0) return;           // the old cycle: nothing allocated, nothing called
+    if ((cs & 1u) != 0) sb_.allocPinned();
+    const bool kick_on = (cs & 12u) != 0, query = (cs & 8u) == 0;
+    if (kick_on) m_.setKick(opt_.kick_layers, query);
+    logI("decode: cycle sync {} (WHIRL_CYCLE_SYNC): readback {}, wait {}, submission {}", cs,
+         (cs & 1u) != 0 ? "pinned async + one event" : "readCtl (blocking)", (cs & 2u) != 0 ? "spin (event poll)" : "blocking",
+         kick_on ? std::format("early (after every MTP step, every {} layers of a decode forward; event record{})",
+                               opt_.kick_layers, query ? " + query" : " only")
+                 : std::string("at the cycle wait"));
+}
+
+bool SpecCycle::readbackEnqueueWait(bool any_sampling, bool any_relax, std::size_t ctl_n, std::size_t relax_n) {
+    const std::uint32_t cs = opt_.cycle_sync;
+    if ((cs & 1u) == 0 || ctl_n * 4 > sb_.ctlPin().bytes() || !m_.readCtlAsync(sb_.ctlPin().get(), ctl_n)) {
+        m_.readCtl(std::span<std::int32_t>(sb_.ctlHost().data(), ctl_n));
+        if (cs != 0) bst_.cs_readctl += 1;
+        return false;
+    }
+    // fold (feat026-hostgap bit 0): the sampling candidates / relaxacc ranks ride the same stream before the one event
+    if (any_sampling) ops_.copyAsync(sb_.sampPin().addr(), sb_.sampDev(), SampleBuffers::sampBytes(), m_.stream());
+    if (any_relax) ops_.copyAsync(sb_.relaxPin().addr(), sb_.relaxDev(), relax_n, m_.stream());
+    ops_.eventRecord(sb_.readbackEvent(), m_.stream());
+    if ((cs & 2u) != 0) spinWait(sb_.readbackEvent());
+    else ops_.eventSync(sb_.readbackEvent());
+    bst_.cs_pinned += 1;
+    return true;
+}
+
+// bit 1: poll the cycle's event (hipEventQuery; llama.cpp's iGPU ScheduleSpin, hipfire HIPFIRE_HIP_WAIT=spin, scoped to
+// this one wait). The core is yielded now and then (the runtime's worker and the HTTP threads share the host). A query
+// error throws (eventDoneChecked): the host must not read the pinned words of a failed cycle as valid.
+void SpecCycle::spinWait(device::Event e) {
+    std::uint64_t polls = 1;
+    for (std::uint32_t i = 1; !ops_.eventDoneChecked(e); ++i, ++polls)
+        if ((i & 63u) == 0) std::this_thread::yield();
+    bst_.cs_polls += polls;
+}
+
+// bits 2 / 3: on Windows the HIP runtime keeps a stream's launches in its batch until a marker or a wait needs them
+// (ROCclr HostQueue::loop flushes on user-invisible markers; hipEventRecord adds one; AMD_DIRECT_DISPATCH is Linux-only):
+// the model records its event (and with bit 2 alone queries it) so the queued launches go to the GPU now
+// (progress/v0252-hostwait.PRIOR_ART.md section 3, progress/v0252-hostwait2.PRIOR_ART.md)
+void SpecCycle::kick() {
+    m_.kick();
+    bst_.cs_kicks += 1;
 }
 
 void SpecCycle::trainCycle(Cycle& cy) {

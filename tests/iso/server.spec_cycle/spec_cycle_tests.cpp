@@ -36,7 +36,7 @@ void checkDefined(M... m) {
     (checkOne(m != nullptr), ...);
 }
 
-void testFunctionsLinked() { checkDefined(&X::pickDrafts, &X::relaxRepeats, &X::decodeCycle, &X::relaxes, &X::verifyRoom, &X::dropOutOfRoom, &X::draftLimits, &X::ngramDrafts, &X::dflashDrafts, &X::mtpDrafts, &X::layoutBatch, &X::draftSampling, &X::enqueueVerify, &X::sampleRows, &X::trainCycle, &X::cycleStats, &X::acceptSlot, &X::finishCycle, &X::splitDrafts, &X::draftCap); }
+void testFunctionsLinked() { checkDefined(&X::pickDrafts, &X::relaxRepeats, &X::decodeCycle, &X::relaxes, &X::verifyRoom, &X::dropOutOfRoom, &X::draftLimits, &X::ngramDrafts, &X::dflashDrafts, &X::mtpDrafts, &X::layoutBatch, &X::draftSampling, &X::enqueueVerify, &X::sampleRows, &X::trainCycle, &X::cycleStats, &X::acceptSlot, &X::finishCycle, &X::splitDrafts, &X::draftCap, &X::initSync); }
 
 }  // namespace
 }  // namespace whirl::server

@@ -27,6 +27,10 @@ struct BatchStats {
                   lit_drafts = 0,  // FR-SRV P2-5: DFlash2 / n-gram drafts verified (all slots)
                   prefill_tok = 0, seg_batches = 0, seg_chunks = 0;
     std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0;
+    // v0252-hostwait2 (WHIRL_CYCLE_SYNC, REVIEW-v0252-hostwait B4): what the decode cycles really did since start (never
+    // reset; the "batch | cycle sync" line): pinned waits (bit 0), event polls of the spin waits (bit 1), blocking readCtl
+    // calls left (bit 0 off, or a model without readCtlAsync), early submissions asked of the model (bits 2 / 3)
+    std::uint64_t cs_pinned = 0, cs_polls = 0, cs_readctl = 0, cs_kicks = 0;
 };
 
 // The decode cycle's draft-policy state (main thread). arch025-N4f: the former Engine members timing_ .. policy_cycles_,

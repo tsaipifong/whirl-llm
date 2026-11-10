@@ -61,10 +61,26 @@ public:
     void finishCycle(Cycle& cy);
     void splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m);
     std::uint32_t draftCap(std::uint32_t A);
+    // v0252-hostwait (PLAN V1-61, EngineOptions::cycle_sync): set the mode up once, from Engine::allocState after the
+    // sampling buffers: unknown bits dropped with a warning and the effective mode written back to opt_.cycle_sync (bit 1
+    // adds bit 0), the pinned readback mirrors + event in sb_ (SampleBuffers::allocPinned, bit 0), the model's early
+    // submission (ServerModel::setKick, bits 2 / 3). cycle_sync 0: nothing is allocated or called (the old cycle).
+    // v0252-hostwait2 (REVIEW-v0252-hostwait D1): no member of its own - the resources live in SampleBuffers (sb_) and in
+    // the model, the counters in BatchStats (bst_): references only, as the module rule says.
+    void initSync();
 
 private:
     // slot_end, called by name from the bodies above
     void finishJob(Slot& sl) { se_.finishJob(sl); }
+    // v0252-hostwait: the cycle's readbacks and its one wait (sampleRows): bit 0 enqueues the control words
+    // (ServerModel::readCtlAsync) and the sampling / relaxacc readbacks into sb_'s pinned mirrors on the model stream,
+    // records sb_.readbackEvent() and waits once (bit 1: polls it); otherwise readCtl + the blocking downloads, as before.
+    // Returns whether the pinned path ran (the caller copies the pinned data into the host vectors after its profile
+    // timestamp).
+    bool readbackEnqueueWait(bool any_sampling, bool any_relax, std::size_t ctl_n, std::size_t relax_n);
+    void spinWait(device::Event e);
+    // v0252-hostwait bits 2 / 3: the model hands the launches it queued on its stream to the GPU (ServerModel::kick)
+    void kick();
 
     ServerModel& m_;
     device::Backend& ops_;

@@ -45,6 +45,14 @@ void Scheduler::logBatchStats(bool force) {
              static_cast<double>(bst_.rows) / cyc, static_cast<double>(bst_.drafts) / cyc, lit,
              static_cast<double>(bst_.tokens) * 1000.0 / el, static_cast<double>(bst_.prefill_tok) * 1000.0 / el, el / 1000.0,
              vram.empty() ? "" : " | ", vram);
+        // v0252-hostwait2 (REVIEW-v0252-hostwait B4): what WHIRL_CYCLE_SYNC really did, counted since start (the GPU
+        // runners check these, not only the configured value of the "decode: cycle sync" line)
+        if (opt_.cycle_sync != 0) {
+            const ServerModel::KickCount kc = m_.kickCount();
+            logI("batch | cycle sync {}: {} pinned waits ({} event polls), {} blocking readCtl, {} early submissions asked, "
+                 "model kicks {} after MTP steps + {} inside forwards (since start)",
+                 opt_.cycle_sync, bst_.cs_pinned, bst_.cs_polls, bst_.cs_readctl, bst_.cs_kicks, kc.calls, kc.forward);
+        }
     }
     bst_.t0 = Clock::now();
     bst_.tokens = bst_.cycles = bst_.rows = bst_.slots = bst_.drafts = bst_.lit_drafts = 0;

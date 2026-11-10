@@ -89,7 +89,10 @@ bool fingerprintEnvKept(std::string_view key) {
                                  // arch025-i6vis (I6, X4 K4): bug-visstream-race test switch (vis-encode copy delay;
                                  // changes no kernel or KV format). Every WHIRL_* read must be classified here or in
                                  // tests/cache/fingerprint_env_names.inc (whirl-cache-tests testFingerprintEnvClassified)
-                                 "WHIRL_TEST_VIS_COPY_DELAY_MB"};
+                                 "WHIRL_TEST_VIS_COPY_DELAY_MB",
+                                 // v0252-hostwait: how the decode cycle waits / submits (host scheduling; same kernels,
+                                 // same KV format, same tokens)
+                                 "WHIRL_CYCLE_SYNC"};
     for (const char* x : skip)
         if (up == x) return false;
     return true;

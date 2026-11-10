@@ -65,6 +65,19 @@ void Context::decodeStepLaunches() {
     hip::launch(k.argmax, D(1), D(1024), 0, stream, logits, I(cfg.n_vocab), out_tok, ids, pos_buf, i32(1));
 }
 
+// v0252-hostwait (WHIRL_CYCLE_SYNC bits 2 / 3): an event record (+ a query with bit 2 alone) on the stream. On Windows
+// the HIP runtime keeps the stream's launches in its command batch until a marker or a wait needs them (ROCclr
+// HostQueue::loop flushes on user-invisible markers, and hipEventRecord adds one: hip_event.cpp addMarker with
+// !kMarkerDisableFlush; direct dispatch is Linux-only). The query adds notifyCmdQueue's marker, which carries the
+// queried event as its waitingEvent (ROCclr submitMarker then waits for the GPU on the submission thread:
+// REVIEW-v0252-hostwait A2) - bit 3 leaves it out. Never inside a HIP graph capture (the server, its only user, launches
+// without graphs).
+void Context::kickQueue() {
+    if (!kick_ev) kick_ev = device::EventH::create(device::hipBackend());
+    hip::eventRecord(kick_ev.get(), stream);
+    if (kick_query) (void)hip::eventDone(kick_ev.get());
+}
+
 // Seed device state for decodeStep after a prefill of n_past tokens.
 u32 Context::beginDecode(u32 n_past) {
     const i32 p = static_cast<i32>(n_past);
@@ -126,6 +139,12 @@ void Context::run(u32 n) {
             moeBlock(L.post_norm, L.ffn_gate, L.ffn_up, L.ffn_down, *L.moe, n);
         else
             ffnBlock(L.post_norm, L.ffn_gate, L.ffn_up, L.ffn_down, n);
+        // v0252-hostwait (WHIRL_CYCLE_SYNC bits 2 / 3, whirl-server only): hand the launches queued so far to the GPU every
+        // kick_layers layers of a decode / verify forward; the rest goes with the cycle's wait. Launches unchanged.
+        if (kick_layers != 0 && n <= max_verify_rows && (i + 1) % kick_layers == 0 && i + 1 < layers.size()) {
+            kickQueue();
+            kick_fwd += 1;
+        }
     }
     if (cap_buf) captureLayerInput(layers.size(), n);  // id n_layer: the last layer's output
     if (keep_hidden) rmsnorm(x, output_norm, hn, E, n, E, E);

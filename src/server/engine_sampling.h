@@ -56,6 +56,15 @@ public:
     std::vector<float>& rowHost() { return row_host_; }
     std::vector<sampling::Cand>* cands() { return &cands_scratch_; }
     std::vector<std::int32_t>& ctlHost() { return ctl_host_; }
+    // v0252-hostwait (WHIRL_CYCLE_SYNC bit 0; REVIEW-v0252-hostwait D1: the buffers belong here, SpecCycle holds
+    // references only): pinned mirrors of ctlHost / sampHost / relaxHost (relaxacc on only) that the decode cycle's async
+    // readbacks land in, and the event the cycle waits on once. allocPinned: once, after alloc (SpecCycle::initSync);
+    // cycle_sync 0 never calls it (nothing allocated).
+    void allocPinned();
+    device::PinnedBuf& ctlPin() { return ctl_pin_; }
+    device::PinnedBuf& sampPin() { return samp_pin_; }
+    device::PinnedBuf& relaxPin() { return relax_pin_; }
+    device::Event readbackEvent() const { return rb_ev_.get(); }
 
 private:
     void loadRow(std::uint32_t gr);
@@ -70,6 +79,9 @@ private:
     std::vector<std::uint8_t> in_cands_;
     std::vector<sampling::Cand> cands_scratch_;
     std::vector<std::int32_t> ctl_host_;
+    // v0252-hostwait: after the former Engine members (new resources, destroyed first; the backend outlives them)
+    device::PinnedBuf ctl_pin_, samp_pin_, relax_pin_;
+    device::EventH rb_ev_;
 };
 
 }  // namespace whirl::server

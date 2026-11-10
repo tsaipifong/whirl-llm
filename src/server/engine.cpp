@@ -128,6 +128,8 @@ void Engine::allocState() {
     spec_on_ = opt_.spec_sample && opt_.use_mtp && m_.draftSampleOk() && !opt_.relax.on;
     if (opt_.spec_sample && opt_.use_mtp)
         logI("sampling: speculative sampling of MTP drafts (specsample) {}", spec_on_ ? "on for temperature > 0 (race-coupled drafts; the text for a seed does not depend on drafts)" : opt_.relax.on ? "off (relaxacc typical acceptance instead)" : "unavailable (no draft_sample_rows kernel): exact-match acceptance");
+    // v0252-hostwait (PLAN V1-61): the decode cycle's wait / submission mode (cycle_sync 0: nothing allocated or called)
+    cyc_.initSync();
 }
 
 void Engine::initPool() {

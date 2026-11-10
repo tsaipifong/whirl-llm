@@ -258,6 +258,17 @@ public:
     std::uint32_t draft_vocab = 0;  // WHIRL_DRAFT_VOCAB=N: the first N rows only (old experiment)
     float draft_p_min = 0;
     std::uint32_t draft_n_min = 0;
+    // v0252-hostwait (WHIRL_CYCLE_SYNC bits 2 / 3, set by whirl-server only): every kick_layers layers of a decode / verify
+    // forward (<= max_verify_rows rows) run() records kick_ev on the stream (and queries it when kick_query: bit 2 alone),
+    // so the runtime hands the launches queued so far to the GPU (ROCclr's HostQueue worker flushes on that marker); 0 =
+    // never (the CLI and the default). kickQueue() is that call (the server also calls it after every MTP step). Same
+    // kernels, same order: the output does not change. The event is made on first use (no timing). kick_calls / kick_fwd:
+    // kicks done from outside run() / inside run(), for the server's "batch | cycle sync" line (v0252-hostwait2, B4).
+    std::uint32_t kick_layers = 0;
+    bool kick_query = true;
+    device::EventH kick_ev;
+    std::uint64_t kick_calls = 0, kick_fwd = 0;
+    void kickQueue();
     // relaxacc one-pass check of the next verify (setRelaxRank / takeRelaxRank, v0252-f1)
     DevPtr rr_stats = 0;
     std::uint32_t rr_mask = 0, rr_stride = 0;
@@ -391,6 +402,8 @@ public:
     bool relaxRankEnqueue(const RelaxRank& rr, std::uint32_t n, DevPtr out, const RowIdx& dst, const RowIdx& src);
     void mtpBatchStepEx(std::span<const MSeg> segs, std::uint32_t r, bool draft);
     void readCtl(std::span<std::int32_t> dst);
+    // v0252-hostwait (WHIRL_CYCLE_SYNC bit 0): readCtl's words into pinned host memory dst, async on the stream (no wait)
+    void readCtlAsync(void* dst, std::size_t words);
     struct Cycle {
         std::uint32_t nd = 0;  // drafts kept by the device-side p-min cutoff
         std::array<float, max_small_batch> probs{};

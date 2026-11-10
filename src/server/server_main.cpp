@@ -1021,6 +1021,10 @@ void ServerRun::makeEngine() {
     eo.tail_ck = settings::tailCk();  // debug knob: WHIRL_TAIL_CK=0 turns the tail checkpoint off
     // v0252-n10: the tail checkpoint written inside the prefill forward (R9700 only in 0.2.5.2; the 8060S row is false)
     eo.tail_ck_in_forward = device::profile(model.arch).tail_ck_in_forward;
+    // v0252-hostwait (PLAN V1-61): how the decode cycle waits for the GPU and submits its launches (bit mask, host scheduling
+    // only): the family's default (0 on every family until the R9700 A/B), WHIRL_CYCLE_SYNC overrides it; the engine drops
+    // unknown bits with a warning and logs the mode (SpecCycle::initSync)
+    eo.cycle_sync = settings::envU32("CYCLE_SYNC", device::profile(model.arch).cycle_sync, settingsWarn);
     eo.n_spe = startfit::sharedCkpts(lm.n_ck, lm.no_pc, [&] { return lm.n_spe_plan; });  // (module server.kv_fit, arch025-lane1 leg 10)
     eo.ckpt_host = settings::envFlag("CKPT_HOST", false);
     eo.prefill_exec = lm.prefill_exec;

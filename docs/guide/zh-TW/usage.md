@@ -518,6 +518,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_DUMP_MOE=FILE` | 每個 prefill MoE 區塊選到的專家（i32） |
 | `WHIRL_TRACE_ND=1` | 記錄每個 decode 回合的草稿數 |
 | `WHIRL_LOOP_LOG=1` | 記錄每圈各階段的時間（伺服器） |
+| `WHIRL_CYCLE_SYNC=N` | *（測試）* 伺服器 decode 回合怎麼等 GPU（位元遮罩，預設 0）：1＝回合的讀回走 pinned 記憶體、只等一個 event；2＝那次等待改成輪詢（佔一個 CPU 核心）；4＝每個 MTP 步驟後與每 8 層就把排隊的 launch 交給 GPU（event record＋query）；8＝同樣的時間點只做 event record。每個模式的 token 都不變 |
 | `WHIRL_TIER_VERIFY=1` | 每次 host 層寫出 / 還原都逐位元組驗證（伺服器） |
 | `WHIRL_TAIL_CK=0` | *（除錯）* 長提示詞結尾附近不保留[尾端檢查點](#prefix-cache)（日誌標示為覆寫）；同一份文件的第二個問題會重新 prefill 整份文件 |
 | `WHIRL_TIER_MIN_GAIN=N` | 只有能省下至少 N 個 token 時才從 host 層還原（預設 512） |

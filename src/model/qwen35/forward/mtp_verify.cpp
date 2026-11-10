@@ -361,6 +361,10 @@ ops::DraftHeadProblem Context::draftHeadProblem(const Mat& head) const {
 
 void Context::readCtl(std::span<i32> dst) { hip::download(dst.data(), out_tok, dst.size() * 4); }
 
+// v0252-hostwait: the same words as readCtl, as llama.cpp's get_tensor_async (hipMemcpyAsync D2H on the work stream into
+// pinned memory, the caller waits on an event recorded after it) instead of a blocking null-stream hipMemcpy
+void Context::readCtlAsync(void* dst, std::size_t words) { hip::downloadAsync(dst, out_tok, words * 4, stream); }
+
 // Draft-head logits for the n rows of h into logits: the 2-bit head when
 // built, else the Q4_K / full head.
 void Context::draftHeadMatmul(const Mat& head, u32 n) {

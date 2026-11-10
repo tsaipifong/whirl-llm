@@ -83,6 +83,11 @@ struct Profile {
     // (sched::tailInside, EngineOptions::tail_ck_in_forward) instead of ending a forward there; the CLI keeps its forward
     // end (same bits: docs/guide/en/kv-and-caching.md section 7, progress/v0252-n10.DESIGN.md). 0.2.5.2: gfx1201 only
     bool tail_ck_in_forward;
+    // v0252-hostwait (PLAN V1-61): whirl-server's default EngineOptions::cycle_sync on this family (bit 0 pinned readback +
+    // one event wait, bit 1 spin, bit 2 early submission, bit 3 early submission by event record only; host scheduling only,
+    // the same tokens). WHIRL_CYCLE_SYNC overrides it. 0 on every family until the R9700 paired A/B
+    // (scratch/v0252_hostwait/hostwait_gpu.ps1, rules in its header) keeps a bit
+    std::uint8_t cycle_sync;
     // ---- vision
     unsigned vision_attn_threads;  // kernels/vision/vision.hip vis_attn2 block size of this code object
 };
@@ -118,6 +123,7 @@ inline constexpr Profile k_profile_gfx1201{
     .prefill_exec_moe = 2048,
     .prefill_fill_batch = false,
     .tail_ck_in_forward = true,  // v0252-n10 (R9700 precise pp 2k: one forward instead of 1024 + 1034)
+    .cycle_sync = 0,             // v0252-hostwait: off until the R9700 A/B decides
     .vision_attn_threads = 128,
 };
 
@@ -157,6 +163,7 @@ inline constexpr Profile k_profile_gfx1151{
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = false,  // v0252-n10: 0.2.5.2 does not touch the Radeon 8060S (the 0.2.5.1 forward end stays)
+    .cycle_sync = 0,              // v0252-hostwait: not measured here (the A/B is R9700 only)
     .vision_attn_threads = 256,
 };
 

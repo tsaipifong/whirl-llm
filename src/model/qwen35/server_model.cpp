@@ -98,6 +98,21 @@ public:
         return m_.setRelaxRank(stats, seg_mask, stride);
     }
     void readCtl(std::span<std::int32_t> dst) override { m_.readCtl(dst); }
+    // v0252-hostwait (WHIRL_CYCLE_SYNC): the control words into pinned memory on the model stream (no wait); early
+    // submission (bits 2 / 3): the kick period and kind, the engine's kick after an MTP step, the kick counts
+    bool readCtlAsync(void* dst, std::size_t words) override {
+        m_.readCtlAsync(dst, words);
+        return true;
+    }
+    void setKick(std::uint32_t layers, bool query) override {
+        m_.kick_layers = layers;
+        m_.kick_query = query;
+    }
+    void kick() override {
+        m_.kickQueue();
+        m_.kick_calls += 1;
+    }
+    KickCount kickCount() const override { return KickCount{m_.kick_calls, m_.kick_fwd}; }
     bool draftSampleOk() const override { return m_.draftSampleOk(); }
     void setDraftSample(std::uint32_t s, const spec::DraftSample& ds) override {
         if (s < m_.draft_samp.size()) m_.draft_samp[s] = ds;

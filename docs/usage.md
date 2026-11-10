@@ -663,6 +663,7 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 | `WHIRL_DUMP_MOE=FILE` | selected experts of every prefill MoE block (i32) |
 | `WHIRL_TRACE_ND=1` | log the draft count of every decode cycle |
 | `WHIRL_LOOP_LOG=1` | log per-loop phase timing (server) |
+| `WHIRL_CYCLE_SYNC=N` | *(test)* how a server decode cycle waits for the GPU (bit mask, default 0): 1 = the cycle's readbacks through pinned memory and one event wait, 2 = that wait polls (spins a CPU core), 4 = hand the queued launches to the GPU after every MTP step and every 8 layers (event record + query), 8 = the same by the event record alone. Same tokens in every mode |
 | `WHIRL_TIER_VERIFY=1` | byte-verify every host-tier spill / restore (server) |
 | `WHIRL_TAIL_CK=0` | *(debug)* no [tail checkpoint](#prefix-cache) near the end of long prompts (logged as an override); a second question about the same document then re-prefills it |
 | `WHIRL_TIER_MIN_GAIN=N` | restore from a host tier only when it saves at least N tokens (default 512) |

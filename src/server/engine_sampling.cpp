@@ -26,6 +26,15 @@ void SampleBuffers::alloc(std::uint32_t parallel, bool relax, std::uint32_t rela
     }
 }
 
+// v0252-hostwait (WHIRL_CYCLE_SYNC bit 0): the pinned mirrors of the cycle's readbacks (same sizes as the host vectors
+// alloc made) and the cycle's readback event
+void SampleBuffers::allocPinned() {
+    ctl_pin_ = device::PinnedBuf::alloc(ops_, static_cast<std::uint64_t>(ctl_host_.size()) * 4);
+    samp_pin_ = device::PinnedBuf::alloc(ops_, sampBytes());
+    if (!relax_host_.empty()) relax_pin_ = device::PinnedBuf::alloc(ops_, relax_host_.size());
+    rb_ev_ = device::EventH::create(ops_);
+}
+
 DevPtr SampleBuffers::logitsRow(std::uint32_t r) const {
     return m_.logits() + static_cast<std::uint64_t>(r) * m_.cfg().n_vocab * 4;
 }
