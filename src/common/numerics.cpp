@@ -8,9 +8,11 @@
 #include "whirl/small_helpers.h"  // lowerAscii (arch025-N6, lane 1 leg 11)
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <format>
 #include <stdexcept>
+#include <utility>
 
 namespace whirl::numerics {
 
@@ -335,6 +337,28 @@ std::uint32_t srvU32(const Raw& v, std::uint32_t def) {
 // v0251-a7pol: the plan's MoE prefill combine without WHIRL_MOEP_COMB (the gfx1151 MXFP4-expert default, else 0)
 std::uint32_t moepCombDefault(const Target& t) { return t.gfx1151 && t.moe_mxfp4 ? kernels::kMoepDefault.comb : 0u; }
 
+// v0252-blasst: one BLASST a value: a finite number > 0 (std::strtof, the whole text after leading spaces), else 0 = off
+float parseSkipA(std::string_view s) {
+    const std::string v = trim(s);
+    if (v.empty()) return 0.0f;
+    char* end = nullptr;
+    const float a = std::strtof(v.c_str(), &end);
+    if (end == nullptr || *end != '\0' || !std::isfinite(a) || !(a > 0.0f)) return 0.0f;
+    return a;
+}
+// v0252-blasst: WHIRL_ATTN_SKIP_PROBE = up to four comma-separated a values (each parseSkipA; a fifth and later are dropped)
+std::array<float, 4> parseSkipProbe(std::string_view s) {
+    std::array<float, 4> a{};
+    std::size_t i = 0;
+    while (i < a.size() && !s.empty()) {
+        const std::size_t c = s.find(',');
+        a[i++] = parseSkipA(s.substr(0, c));
+        if (c == std::string_view::npos) break;
+        s.remove_prefix(c + 1);
+    }
+    return a;
+}
+
 // loader.cpp:548-553 and :743, then tune.cpp:850-914 (before the numerics block)
 void loadFlags(const Request& r, const Target& t, Flags& F) {
     const EnvValues& e = r.env;
@@ -406,6 +430,20 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     F.attn_kg_var = t.gfx1151 ? 0u : kAttnKgVarAuto;
     if (e.attn_kgvar)
         if (const std::optional<std::uint32_t> v = parseKgVar(*e.attn_kgvar)) F.attn_kg_var = *v;
+    // v0252-blasst (PLAN V1-70): BLASST attention block skip, fast only (lossy, not on the balance allowed list): precise and
+    // balance keep the Flags defaults (off) whatever the environment says; loadOverrides notes a refused variable
+    if (r.mode == Mode::fast) {
+        if (e.attn_skip) F.attn_skip_a = parseSkipA(*e.attn_skip);
+        if (e.attn_skip_min && !e.attn_skip_min->empty())
+            F.attn_skip_min = static_cast<std::uint32_t>(std::min<unsigned long>(std::strtoul(e.attn_skip_min->c_str(), nullptr, 10), 0xffffffffu));
+        if (e.attn_skip_probe) {
+            const std::array<float, 4> a = parseSkipProbe(*e.attn_skip_probe);
+            F.attn_skip_pr0 = a[0];
+            F.attn_skip_pr1 = a[1];
+            F.attn_skip_pr2 = a[2];
+            F.attn_skip_pr3 = a[3];
+        }
+    }
     setNe0(F.attn_dqf_on, e.attn_dqf);
     if (e.attn_seg) F.attn_seg = static_cast<std::uint32_t>(std::strtoul(e.attn_seg->c_str(), nullptr, 10)) / 256 * 256;
     setNe0(F.gdn_ba_on, e.gdn_ba);
@@ -512,6 +550,14 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     if (items)
         if (const Raw& v = e.attn_kgvar; v && !parseKgVar(*v))
             p.ignored.push_back(std::format("WHIRL_ATTN_KGVAR={} ignored: not auto, 0, 1 or 3 (the default {} stays)", *v, t.gfx1151 ? "0" : "auto"));
+    // v0252-blasst: the BLASST variables are fast-only (owner mode standard 2026-10-26; bug-fastonly semantics: the plan is
+    // untouched, one note per variable for the load log); "" and "0" are no request
+    if (items && p.mode != Mode::fast) {
+        const std::pair<const char*, const Raw*> sk[] = {{"ATTN_SKIP", &e.attn_skip}, {"ATTN_SKIP_MIN", &e.attn_skip_min}, {"ATTN_SKIP_PROBE", &e.attn_skip_probe}};
+        for (const auto& [n, v] : sk)
+            if (*v && !(*v)->empty() && **v != "0")
+                p.ignored.push_back(std::format("WHIRL_{}={} ignored: attention block skip (BLASST) is fast-only ({} never takes it)", n, **v, modeName(p.mode)));
+    }
     if (items) {
         if (const Raw& v = e.spec_sample; v && !v->empty())
             applyOverride(p, Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);

@@ -164,8 +164,14 @@ void Context::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u
     // v0252-c1port (C1): WHIRL_ATTN_KGVAR; v0252-c1acc: default auto on gfx1201 (ops::kAttnKgAuto), 0 on gfx1151
     static_assert(ops::kAttnKgVarAuto == numerics::kAttnKgVarAuto, "attn_kg_var auto: one value in numerics and ops");
     pf.attn_kg_var = nf().attn_kg_var;
+    // v0252-blasst (PLAN V1-70): the BLASST block skip and its count-only probe (fast only: the numerics plan keeps these
+    // off in precise / balance; the selector applies them from skip_min_keys keys on, gfx1201 kgk path only)
+    pf.skip_a = nf().attn_skip_a;
+    pf.skip_min_keys = nf().attn_skip_min;
+    pf.probe_a = {nf().attn_skip_pr0, nf().attn_skip_pr1, nf().attn_skip_pr2, nf().attn_skip_pr3};
     const ops::AttnPrefillPlan pl = ops::chooseAttnPrefill(pp, pf, k);
     const i32 H = I(cfg.n_head), HKV = I(cfg.n_head_kv), QS = I(2 * cfg.head_dim);
+    std::uint32_t probe_np = 0;  // v0252-blasst: NP of the probe launches (0: none in this plan)
     for (const ops::AttnStep& s : pl.steps) {
         switch (s.op) {
             case ops::AttnStep::Op::dq_rows:
@@ -185,12 +191,21 @@ void Context::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u
                 }
                 if (s.ranged)
                     hip::launch(s.f, s.grid, s.block, 0, stream, q, kv, out, H, HKV, QS, pos, I(n), scale, I(s.head0), I(s.r0), I(s.r1), dq_st_ml);
-                else
+                else if (s.skip)  // v0252-blasst: attn_kgk<np>_sk (+ the BLASST limit of this launch's key count)
+                    hip::launch(s.f, s.grid, s.block, 0, stream, q, kv, out, H, HKV, QS, pos, I(n), scale, I(s.head0), s.skip_lim);
+                else if (s.probe) {  // v0252-blasst: attn_kgk<np>_pr (attn_kgk's output + the counters of four limits)
+                    if (attn_probe == 0) attn_probe = allocZero(kAttnProbeBytes);  // only in a probe run (the load's allocations stay)
+                    hip::launch(s.f, s.grid, s.block, 0, stream, q, kv, out, H, HKV, QS, pos, I(n), scale, I(s.head0), s.probe_lim[0],
+                                s.probe_lim[1], s.probe_lim[2], s.probe_lim[3], attn_probe);
+                    probe_np = s.block.x / 64;
+                } else
                     hip::launch(s.f, s.grid, s.block, 0, stream, q, kv, out, H, HKV, QS, pos, I(n), scale, I(s.head0));
                 break;
             }
         }
     }
+    // v0252-blasst (R-M0): one log line per probed prefill attention (read back, printed, cleared; not a timed run)
+    if (probe_np != 0) attnProbeFlush(pos0 + n, n, probe_np, pf.probe_a);
 }
 
 }  // namespace whirl::qwen35

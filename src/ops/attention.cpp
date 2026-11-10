@@ -203,8 +203,14 @@ Function attnKgVariant(std::uint32_t var, const kernels::AttnKernels& k, std::ui
     }
 }
 
-// v0252-blasst test-first stub (commit 1): the BLASST limit is not implemented yet (returns 0, the tests fail)
-float attnSkipLimit(float, std::uint32_t, float) { return 0.0f; }
+// v0252-blasst (T0): BLASST skip limit in unscaled q.k units (attention.h); double inside so the f32 result is the rounded
+// exact value (the kernels compare mx >= m + limit in f32)
+float attnSkipLimit(float a, std::uint32_t n_keys, float scale) {
+    if (!(a > 0.0f) || n_keys == 0 || !(scale > 0.0f) || static_cast<double>(a) >= static_cast<double>(n_keys)) return -INFINITY;
+    constexpr double log2e = 1.4426950408889634074;
+    const double lim = (std::log2(static_cast<double>(a)) - std::log2(static_cast<double>(n_keys))) / (static_cast<double>(scale) * log2e);
+    return static_cast<float>(lim);
+}
 
 // v0252-c1acc (C-1): the auto table's var for (np, path); 0 for any (np, path) not in kAttnKgAuto
 std::uint32_t attnKgAutoVar(std::uint32_t np, KgPath path) {
@@ -341,7 +347,38 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
                 while (sp > 1 && (n_head / sp) % nps != 0) sp += 1;
                 if (n_head % sp != 0 || (n_head / sp) % nps != 0) sp = 1;
                 const u32 shp = n_head / sp;
-                for (u32 q = 0; q < sp; ++q) attn(kk, D((n + 15) / 16, shp / nps), D(64 * nps), q * shp, true, false, 0, 0);
+                // v0252-blasst (PLAN V1-70, fast only): from skip_min_keys keys on, the BLASST skip / probe variant of this
+                // attn_kgk<np> (same grid / block / head ranges); the limits are taken at this launch's key count (the last
+                // query's keys, TensorRT-LLM's threshold / kv length). Probe first: its output is attn_kgk's.
+                Function kf = kk;
+                bool skip = false, probe = false;
+                float lim = -INFINITY;
+                std::array<float, 4> plim{-INFINITY, -INFINITY, -INFINITY, -INFINITY};
+                if (rows >= f.skip_min_keys && (nps == 6 || nps == 4)) {
+                    const bool want_probe = f.probe_a[0] > 0.0f || f.probe_a[1] > 0.0f || f.probe_a[2] > 0.0f || f.probe_a[3] > 0.0f;
+                    const Function fpr = nps == 6 ? k.attn_kgk6_pr : k.attn_kgk4_pr;
+                    const Function fsk = nps == 6 ? k.attn_kgk6_sk : k.attn_kgk4_sk;
+                    if (want_probe && fpr != nullptr) {
+                        kf = fpr;
+                        probe = true;
+                        for (std::size_t t = 0; t < 4; ++t) plim[t] = attnSkipLimit(f.probe_a[t], rows, p.scale);
+                    } else if (!want_probe && f.skip_a > 0.0f && fsk != nullptr) {
+                        lim = attnSkipLimit(f.skip_a, rows, p.scale);
+                        skip = lim != -INFINITY;  // a >= keys (lambda >= 1): no skip, attn_kgk as without the flag
+                        if (skip) kf = fsk;
+                    }
+                }
+                for (u32 q = 0; q < sp; ++q) {
+                    attn(kf, D((n + 15) / 16, shp / nps), D(64 * nps), q * shp, true, false, 0, 0);
+                    if (skip) {
+                        st.back().skip = true;
+                        st.back().skip_lim = lim;
+                    }
+                    if (probe) {
+                        st.back().probe = true;
+                        st.back().probe_lim = plim;
+                    }
+                }
                 return pl;
             }
             for (u32 r0 = 0; r0 < rows; r0 += seg) {

@@ -409,6 +409,11 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         k.attn_kgk6 = L.opt("attn_kgk6");
         k.attn_kgk4 = L.opt("attn_kgk4");
         k.attn_kgk2 = L.opt("attn_kgk2");
+        // v0252-blasst (fast only): the BLASST skip / probe variants of attn_kgk (gfx1201; null in the gfx1151 object)
+        k.attn_kgk6_sk = L.opt("attn_kgk6_sk");
+        k.attn_kgk4_sk = L.opt("attn_kgk4_sk");
+        k.attn_kgk6_pr = L.opt("attn_kgk6_pr");
+        k.attn_kgk4_pr = L.opt("attn_kgk4_pr");
         if (kv == KvFormat::q8 || kv == KvFormat::q8h || kv == KvFormat::q4) {
             if (kv != KvFormat::q4) k.kv_dq_rows = L.opt("kv_dq_rows");
             k.kv_dq_rows_r = L.opt(kv == KvFormat::q4 ? "kv_dq_rows_r_q4" : "kv_dq_rows_r");

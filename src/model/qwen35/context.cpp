@@ -9,6 +9,10 @@
 #include "device/backend.h"
 
 #include <algorithm>
+#include <array>
+#include <cstdio>
+#include <format>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -37,6 +41,26 @@ DevPtr Context::allocZero(u64 bytes) {
     const DevPtr p = alloc(bytes);
     hip::memset(p, 0, static_cast<std::size_t>(bytes));
     return p;
+}
+
+// v0252-blasst (PLAN V1-70, R-M0): read back the attn_kgk<np>_pr counters of one prefill attention (per limit t: 18 u64 =
+// [0] tiles the BLASST skip would drop, [1] tiles walked, [2 + b] query rows by dropped-mass bin b; kernels/attn_kgv.hip),
+// print them as one line (the runner sums the lines of a request and takes the delta percentiles from the summed bins),
+// and clear the block. Stream-ordered readback, then a wait: a probe run is never a timed run.
+void Context::attnProbeFlush(std::uint32_t keys, std::uint32_t n, std::uint32_t np, const std::array<float, 4>& a) {
+    std::array<u64, kAttnProbeBytes / 8> c{};
+    hip::downloadAsync(c.data(), attn_probe, sizeof c, stream);
+    hip::streamSync(stream);
+    std::string line = std::format("attn-skip-probe seq={} keys={} n={} np={}", attn_probe_seq++, keys, n, np);
+    for (std::size_t t = 0; t < 4; ++t) {
+        if (!(a[t] > 0.0f)) continue;
+        const u64* p = c.data() + t * 18;
+        line += std::format(" | a={} tiles={} skip={} s={:.4f} hist=", a[t], p[1], p[0], p[1] != 0 ? static_cast<double>(p[0]) / static_cast<double>(p[1]) : 0.0);
+        for (std::size_t b = 0; b < 16; ++b) line += std::format("{}{}", b != 0 ? "," : "", p[2 + b]);
+    }
+    std::fprintf(stderr, "%s\n", line.c_str());
+    std::fflush(stderr);
+    hip::memset(attn_probe, 0, sizeof c);
 }
 
 void Context::freeAlloc(DevPtr p) {

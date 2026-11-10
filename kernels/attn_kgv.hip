@@ -266,10 +266,21 @@ KGV_ENTRY(attn_kgv2, 2, false)
 #ifndef WHIRL_KGK_INJECT
 #define WHIRL_KGK_INJECT 0
 #endif
-template <int NP>
+// v0252-blasst (PLAN V1-70, BLASST / skip softmax; fast mode only, progress/v0252-blasst.PLAN.md T1): the arguments of the
+// SK variants. SK 0 = attn_kgk exactly as before (sk unused: the code of the SK 0 instantiation is unchanged, per-symbol
+// objcheck); SK 1 = block skip with lim[0]; SK 2 = count-only probe of lim[0..3] (output = attn_kgk's) into probe.
+// lim is in the kernel's own units, the UNSCALED q.k (cexp = scale * log2e below): ops::attnSkipLimit(a, keys, scale) =
+// (log2 a - log2 keys) / (scale * log2 e), i.e. skip a tile when exp((mx - m) * scale) < a / keys; -inf = never.
+struct KgkSkip {
+    float lim[4];
+    unsigned long long *probe;  // SK 2: 4 x 18 counters (see the flush at the end of attn_kgk_impl)
+};
+template <int NP, int SK = 0>
 __device__ __forceinline__ void attn_kgk_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
-                                              int q_stride, const int *pos, int n_tok, float scale, int h0) {
+                                              int q_stride, const int *pos, int n_tok, float scale, int h0,
+                                              const KgkSkip &sk = KgkSkip{{-INFINITY, -INFINITY, -INFINITY, -INFINITY}, nullptr}) {
     static_assert(NP % 2 == 0, "attn_kgk: head pairs");
+    static_assert(SK >= 0 && SK <= 2, "attn_kgk: SK 0 (plain), 1 (skip), 2 (probe)");
     const int tb = kv.tab0;
     __shared__ float8 Sx[2][NP * 2][32];  // [tile parity][head of the block * 2 + key half][lane] (as attn_kg)
     __shared__ half8 Pb[2][NP][2][32];    // [tile parity][head of the block][key half][lane]
@@ -380,10 +391,64 @@ __device__ __forceinline__ void attn_kgk_impl(const float *q, const KvArgs &kv, 
             }
         }
     };
+    // v0252-blasst SK 1: pv with the skip marks. A head whose tile was skipped has alpha -1 in Ab (written by its PV wave
+    // for the whole wave: the decision is a ballot, so this ballot is all lanes or none): no rescale (its alpha is 1), none
+    // of its 16 WMMAs (o[j] unchanged), and when both heads of the pair skipped the tile, no V^T loads either (the PV wave
+    // loads V itself, global_load_tr: nothing to drain, unlike TensorRT-LLM's TMA pipeline). The decisions read from LDS
+    // are made scalar (readfirstlane of the ballot) so every branch around a WMMA is a scalar branch (EXEC stays full).
+    auto pvs = [&](int K0, int PB) {
+        float al[2];
+        bool skj[2];
+#pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            al[j] = Ab[PB][pr * 2 + j][lane];
+            skj[j] = __builtin_amdgcn_readfirstlane((int)(__builtin_amdgcn_ballot_w32(al[j] < 0.f) != 0)) != 0;
+        }
+        if (skj[0] && skj[1]) return;
+        const int dl_ = kv_delta(kv, tb, K0);
+        half8 pt2[2][2];
+#pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            pt2[j][0] = Pb[PB][pr * 2 + j][0][lane];
+            pt2[j][1] = Pb[PB][pr * 2 + j][1][lane];
+        }
+#pragma unroll
+        for (int j = 0; j < 2; ++j)
+            if (!skj[j] && __builtin_amdgcn_ballot_w32(al[j] != 1.f)) {
+#pragma unroll
+                for (int dt = 0; dt < DT; ++dt)
+#pragma unroll
+                    for (int v = 0; v < 8; ++v) o[j][dt][v] *= al[j];
+            }
+        const _Float16 *vb0 = Vc + (size_t)(min(K0 + vkey, n_keys - 1) + dl_) * rs + vdim;
+        const _Float16 *vb1 = Vc + (size_t)(min(K0 + 16 + vkey, n_keys - 1) + dl_) * rs + vdim;
+#pragma unroll
+        for (int dt = 0; dt < DT; ++dt) {
+            if (dt == 4) __builtin_amdgcn_sched_barrier(0);  // two batches of V loads (VGPRs)
+            const half8 a0 = kg_ld_tr(vb0 + dt * 16);
+            const half8 a1 = kg_ld_tr(vb1 + dt * 16);
+#pragma unroll
+            for (int j = 0; j < 2; ++j)
+                if (!skj[j]) {
+                    o[j][dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a0, pt2[j][0], o[j][dt]);
+                    o[j][dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a1, pt2[j][1], o[j][dt]);
+                }
+        }
+    };
+    // v0252-blasst SK 2 (probe): per threshold t the tiles this head would skip and the probability mass they carry, with
+    // the running scale of l (smass[t] * alpha + rsum of a would-skip tile), so delta_t = smass[t] / l at the end = the mass
+    // the skip variant drops over the full softmax denominator. m is the true running max: a tile the skip variant drops
+    // has mx < m + lim < m, so it never raises m - the decisions here are exactly SK 1's at that lim.
+    [[maybe_unused]] float smass[4] = {0.f, 0.f, 0.f, 0.f};
+    [[maybe_unused]] unsigned nskip[4] = {0u, 0u, 0u, 0u}, ntile = 0u;
     int kp = -1, par = 0;
     for (int k0 = 0; k0 < n_keys; k0 += FA_K, par ^= 1) {
         __syncthreads();  // publishes S^T of this tile and P^T / alpha of the previous one
-        if (kp >= 0) pv(kp, par ^ 1);
+        if constexpr (SK == 1) {
+            if (kp >= 0) pvs(kp, par ^ 1);
+        } else {
+            if (kp >= 0) pv(kp, par ^ 1);
+        }
         float8 sc[FA_K / 16];
         sc[0] = Sx[par][hl * 2 + 0][lane];
         sc[1] = Sx[par][hl * 2 + 1][lane];
@@ -405,6 +470,26 @@ __device__ __forceinline__ void attn_kgk_impl(const float *q, const KvArgs &kv, 
                 }
         }
         mx = fmaxf(mx, __shfl_xor(mx, 16, WARP));
+        if constexpr (SK == 1) {
+            // v0252-blasst: skip this tile for this head when every query of the wave has its tile max below m + lim
+            // (wave-uniform ballot; m = -inf on the first tile and lim = -inf both give m + lim = -inf: never skipped). A
+            // skipped tile changes nothing: mx < m + lim < m keeps m, its p count as 0 (l, o unchanged); the mark alpha = -1
+            // tells both PV waves of the pair (pvs) to leave this head out of the tile's P.V
+            if (__builtin_amdgcn_ballot_w32(mx >= m + sk.lim[0]) == 0) {
+                // buffer par was last read in the P.V of tile k0 - 2 * FA_K, before this tile's barrier
+                Ab[par][hl][lane] = -1.f;
+                kp = k0;
+                continue;
+            }
+        }
+        [[maybe_unused]] unsigned psk = 0u;  // SK 2: bit t = this tile would be skipped at lim[t]
+        if constexpr (SK == 2) {
+#pragma unroll
+            for (int t = 0; t < 4; ++t) psk |= (__builtin_amdgcn_ballot_w32(mx >= m + sk.lim[t]) == 0 ? 1u : 0u) << t;
+            ntile += 1u;
+#pragma unroll
+            for (int t = 0; t < 4; ++t) nskip[t] += (psk >> t) & 1u;
+        }
         const float m_new = fmaxf(m, mx);
         const float alpha = __builtin_amdgcn_exp2f((m - m_new) * cexp);
         float rsum = 0.f;
@@ -419,6 +504,10 @@ __device__ __forceinline__ void attn_kgk_impl(const float *q, const KvArgs &kv, 
             }
         rsum += __shfl_xor(rsum, 16, WARP);
         l = l * alpha + rsum;
+        if constexpr (SK == 2) {
+#pragma unroll
+            for (int t = 0; t < 4; ++t) smass[t] = smass[t] * alpha + (((psk >> t) & 1u) != 0u ? rsum : 0.f);
+        }
         m = m_new;
         // buffer par was last read in the P.V of tile k0 - 2 * FA_K, before this tile's barrier
         Pb[par][hl][0][lane] = pt[0];
@@ -428,7 +517,33 @@ __device__ __forceinline__ void attn_kgk_impl(const float *q, const KvArgs &kv, 
     }
     Lb[hl][lane] = l;
     __syncthreads();  // the last tile's P^T / alpha and every head's l
-    if (kp >= 0) pv(kp, par ^ 1);
+    if constexpr (SK == 1) {
+        if (kp >= 0) pvs(kp, par ^ 1);
+    } else {
+        if (kp >= 0) pv(kp, par ^ 1);
+    }
+    if constexpr (SK == 2) {
+        // v0252-blasst probe flush, once per wave (TensorRT-LLM SKIP_SOFTMAX_STAT flushes once per CTA, compute.h:540-546):
+        // counter block t (18 u64): [0] tiles this head would skip at lim[t], [1] tiles walked, [2 + b] query rows whose
+        // dropped mass delta = smass / l is in bin b: b 0 = delta < 1e-7 (incl. 0), b 1..15 = [10^(-7 + (b - 1) / 2),
+        // 10^(-7 + b / 2)) (15 also takes >= 1), so 1e-3 and 1e-2 are bin edges (the R-M0 rule). Lanes 16..31 hold the
+        // same queries as lanes 0..15; padding rows (my_q >= n_tok) are left out. u64: a 128k prompt walks ~6e9 tiles.
+        const bool row = lane < 16 && my_q < n_tok;
+#pragma unroll
+        for (int t = 0; t < 4; ++t) {
+            const float d = smass[t] / l;
+            const int b = !(d >= 1e-7f) ? 0 : min(15, 1 + (int)floorf((log2f(d) * 0.30102999566f + 7.f) * 2.f));
+            unsigned long long *pc = sk.probe + t * 18;
+            if (lane == 0) {
+                if (nskip[t] != 0u) atomicAdd(pc, (unsigned long long)nskip[t]);
+                atomicAdd(pc + 1, (unsigned long long)ntile);
+            }
+            for (int bb = 0; bb < 16; ++bb) {
+                const unsigned c = (unsigned)__builtin_popcount(__builtin_amdgcn_ballot_w32(row && b == bb));
+                if (lane == 0 && c != 0u) atomicAdd(pc + 2 + bb, (unsigned long long)c);
+            }
+        }
+    }
     if (my_q >= n_tok) return;
 #pragma unroll
     for (int j = 0; j < 2; ++j) {
@@ -456,3 +571,25 @@ KGK_ENTRY(attn_kgk6, 6)
 KGK_ENTRY(attn_kgk4, 4)
 KGK_ENTRY(attn_kgk2, 2)
 #undef KGK_ENTRY
+// v0252-blasst (PLAN V1-70, fast mode only): new entry points, the three above unchanged. attn_kgk<np>_sk = attn_kgk with
+// the BLASST block skip (one more argument: lim, ops::attnSkipLimit; lim = -inf is attn_kgk bit for bit, kt attnkgl SK0
+// rows); attn_kgk<np>_pr = attn_kgk (same output bits, kt PR rows) plus the count-only probe of four limits into a 4 x 18
+// u64 counter block (not timed: no waves-per-EU bound). Same grid / block as attn_kgk<np>; NP 6 (Swift) and 4 (Ornith).
+#define KGK_SK_ENTRY(NAME, NP)                                                                                       \
+    extern "C" __global__ void __launch_bounds__(64 * NP) __attribute__((amdgpu_waves_per_eu(6)))                   \
+        NAME(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos, int n_tok,  \
+             float scale, int h0, float lim) {                                                                       \
+        attn_kgk_impl<NP, 1>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0, KgkSkip{{lim, lim, lim, lim}, nullptr}); \
+    }
+#define KGK_PR_ENTRY(NAME, NP)                                                                                       \
+    extern "C" __global__ void __launch_bounds__(64 * NP)                                                            \
+        NAME(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos, int n_tok,  \
+             float scale, int h0, float lim0, float lim1, float lim2, float lim3, unsigned long long *probe) {       \
+        attn_kgk_impl<NP, 2>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0, KgkSkip{{lim0, lim1, lim2, lim3}, probe}); \
+    }
+KGK_SK_ENTRY(attn_kgk6_sk, 6)
+KGK_SK_ENTRY(attn_kgk4_sk, 4)
+KGK_PR_ENTRY(attn_kgk6_pr, 6)
+KGK_PR_ENTRY(attn_kgk4_pr, 4)
+#undef KGK_SK_ENTRY
+#undef KGK_PR_ENTRY
