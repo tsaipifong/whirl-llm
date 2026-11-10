@@ -51,6 +51,7 @@
 #include "gemv_hv.hip"             // precise gemvh candidates + tune table (v0252-c2port; LAST: no existing kernel moves)
 #include "gemv_hf.hip"             // precise gemvh on f32 input + the gemvh tile (v0252-c3port; after the shipped set)
 #include "moe_fused.hip"           // precise MoE decode: routed + shared gate/up + SwiGLU in one launch (v0252-c3port; LAST)
+#include "sample_argmax_mb.hip"     // multi-block verify argmax + F1 rank twin (v0252-f1arg; LAST: no existing kernel moves)
 #endif
 
 #if defined(__gfx1151__)
