@@ -588,6 +588,8 @@ void loadMisc(MiscKernels& k, const Loader& L) {
         {&KernelTable::topk_rows, "topk_rows"},
         {&KernelTable::draft_sample_rows, "draft_sample_rows"},
         {&KernelTable::argmax_rank_rows_to, "argmax_rank_rows_to"},  // v0252-f1
+        {&KernelTable::argmax_rows_to_mb, "argmax_rows_to_mb"},  // v0252-f1arg (gfx1201 only)
+        {&KernelTable::argmax_rank_rows_to_mb, "argmax_rank_rows_to_mb"},  // v0252-f1arg (gfx1201 only)
     };
     for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
     k.copy_rows_map = L.opt("copy_rows_map");

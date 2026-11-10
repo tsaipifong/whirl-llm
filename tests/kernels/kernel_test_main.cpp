@@ -52,7 +52,7 @@ int usage() {
         "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,moefuse,misc,dflash,gemvh,gemvhv,ws4,ws4g,vision,attnkgl] [--quick] [-v]\n"
         "                         [--q4 GGUF] [--mx GGUF] [--moe GGUF] [--moemx GGUF]\n"
         "  --require-all  a kernel missing from the code object fails unless the arch lacks it by design\n"
-        "  --bench gemv,gemvh,gemm,attn,moe,gdn,fdq [--jsonl FILE] [--ab HSACO] [--burst-idle S] [--bench-max-s S]\n"
+        "  --bench gemv,gemvh,gemm,attn,moe,gdn,fdq,ggemv,argmax [--jsonl FILE] [--ab HSACO] [--burst-idle S] [--bench-max-s S]\n"
         "          [--rot-mb N] [--rot-cap-mb N] [--moe-layers N] [--no-anchor]: kernel timing (kt::Bench) instead of tests\n"
         "          fdq: in-object A/B (ABBA) of the shipped dequant_f16_mxfp4 + gemm_c<i>_f16 pair vs gemmfq_<v>_mxfp4\n"
         "          [--fdq-n ROWS,...] (default 1024,1280,2048,4096) [--fdq-v c2,t2] (gfx1151 code object)\n"
@@ -101,7 +101,8 @@ int main(int argc, char** argv) {
                 std::string f;
                 while (std::getline(ss, f, ',')) {
                     if (!kt::benchFamilyKnown(f)) {
-                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe gdn fdq)\n", f.c_str());
+                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe gdn fdq ggemv argmax)\n",
+                                    f.c_str());
                         return usage();
                     }
                     bo.families.insert(f);

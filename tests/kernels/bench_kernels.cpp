@@ -18,6 +18,8 @@
 //         B bitwise == A on the full output first, then ABBA pairs; rows --fdq-n, slots --fdq-v (v0251-a3port)
 //   ggemv gemvq_nt<N>r2_mxfp4 vs gemvk_nt<N>v1..9_mxfp4 (gfx1151 verify GEMV, N = every gemvk width 2..8 of
 //         kt::ggemvBenchNts(), --bench-nt a subset; feat026-ggemv, v0251-a6bench)
+//   argmax in-object A/B (gfx1201): argmax_rows_to / argmax_rank_rows_to vs the multi-block twins *_mb, 248320 logits x
+//         1 / 2 / 3 / 4 / 8 verify rows, hot and cold input; B bitwise == A first and after the timing (v0252-f1arg)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
 // without a model the cells use synthetic MXFP4 blocks of the same shapes (cell names start with "synthetic.").
 
@@ -26,9 +28,11 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <numeric>
 
+#include "argmax_key.h"  // AM_WS_BYTES (family argmax, v0252-f1arg)
 #include "cpu_ref.h"
 #include "kt_bench.h"
 #include "kt_ggemv_widths.h"
@@ -49,6 +53,9 @@ constexpr int nk = 16, nv = 48, dk = 128, dv = 128, ch = 2 * nk * dk + nv * dv, 
 const float scale = 1.0f / std::sqrt(128.0f);
 constexpr float eps = 1e-6f;
 }  // namespace gd
+namespace amb {  // verify argmax (family argmax): vocabulary of both product models, stats stride, control words
+constexpr int n = 248320, stride = 32, words = 128;
+}  // namespace amb
 
 // ---------------------------------------------------------------- shared environment
 struct Env {
@@ -1294,9 +1301,179 @@ void benchFdq(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- argmax (v0252-f1arg): verify argmax, one block per row vs
+// multi-block. In-object A/B on the gfx1201 code object (runCellInObject): A = argmax_rows_to / argmax_rank_rows_to (one
+// 1024-thread block per row, kernels/shared/sample_pick_set_tokens.h), B = argmax_rows_to_mb / argmax_rank_rows_to_mb
+// (grid ceil(n / 4096) x rows, 256 threads, kernels/sample_argmax_mb.hip). Rows: the R9700 verify rows of the int0252
+// RGP captures (q7 9522: plain decode 1, Ornith precise / balance MTP 2, Ornith fast MTP 3, Swift MTP 4) and 8 (np 2
+// batched verify), at the vocabulary of both product models (248320, Swift-1.5 27B and Ornith-1.5-35B-A3B). The rank cells
+// give every row but the last (the bonus row) an MTP draft in the control area (the F1 layout of verifyEnqueueEx).
+// Two input states per shape: "hot" (one copy, read again every launch: in decode the LM head GEMV has just written the
+// logits, so they sit in L2 / Infinity Cache) and "cold" (copies rotated past the 64 MB Infinity Cache, kt rotation).
+// Output check: A vs the legacy CPU scan + the F1 rank rule (exact), then B bitwise == A (control words + stats) before
+// any timing, and once more after the timed pairs (workspace still zeroed; v0252-f1arg2). Rows kern.argmax.<kernel> (A / B)
+// and kern.argmax.<kernel>_mb.ab_ratio (B / A).
+void benchArgmax(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "argmax";
+    const hip::Function fm = c.fnOpt("argmax_rows_to_mb"), fr = c.fnOpt("argmax_rank_rows_to_mb");
+    if (!fm || !fr || !c.k.argmax_rank_rows_to) {
+        Result r;
+        r.name = "bench argmax: argmax_rows_to_mb / argmax_rank_rows_to_mb / argmax_rank_rows_to not in this code object";
+        r.pass = false;  // the family exists to time them (gfx1201): a missing kernel is a failure, never a silent skip
+        c.rep.add(r);
+        std::printf("   argmax: kernels missing (FAIL)\n");
+        return;
+    }
+    using amb::n;
+    using amb::stride;
+    using amb::words;
+    const unsigned tiles = static_cast<unsigned>(AM_TILES(n));  // the launchers' grid and block size: kernels/argmax_key.h
+    auto ws = std::make_shared<Buf>(static_cast<std::size_t>(AM_WS_BYTES));
+    ws->zero();
+    auto ctl = std::make_shared<Buf>(static_cast<std::size_t>(words) * 4);
+    auto st = std::make_shared<Buf>(static_cast<std::size_t>(3 * stride) * 4);
+    for (const int rows : {1, 2, 3, 4, 8}) {
+        const std::vector<float> x = c.randn(static_cast<std::size_t>(rows) * n, 3.f);
+        std::vector<std::uint8_t> raw(x.size() * 4);
+        std::memcpy(raw.data(), x.data(), raw.size());
+        DevCopies hot;
+        hot.b.emplace_back(raw);
+        const DevCopies cold = upload(e, raw);
+        // control area: argmax words [0, rows), draft words [64, 64 + rows - 1) (never overlapping: the kernels' contract)
+        std::vector<int> ctl0(static_cast<std::size_t>(words), -7);
+        wk::RowIdx dst, src;
+        for (int r = 0; r < 32; ++r) dst.v[r] = -1, src.v[r] = -1;
+        std::vector<int> drafts(static_cast<std::size_t>(rows), -1);
+        for (int r = 0; r < rows; ++r) {
+            dst.v[r] = r;
+            if (r + 1 < rows) {
+                drafts[static_cast<std::size_t>(r)] = (r * 7919 + 13) % n;  // any token: the scan reads every element either way
+                src.v[r] = 64 + r;
+                ctl0[static_cast<std::size_t>(64 + r)] = drafts[static_cast<std::size_t>(r)];
+            }
+        }
+        for (int rank = 0; rank < 2; ++rank) {
+            // the plain kernels never read the draft words: their cells keep no src (A and B write the same words)
+            const wk::RowIdx srcr = rank ? src : dst;
+            for (int cs = 0; cs < 2; ++cs) {
+                const DevCopies& xs = cs ? cold : hot;
+                const std::string ka = rank ? "argmax_rank_rows_to" : "argmax_rows_to";
+                Cell k;
+                k.ci = e.info("argmax", ka, std::string(cs ? "cold" : "hot") + ".rows" + std::to_string(rows) + ".n" + std::to_string(n),
+                              shapeStr(rows, n));
+                k.ci.settings = e.settings(static_cast<std::uint64_t>(xs.n()) * raw.size(), xs.n()) + ";input=" + (cs ? "cold" : "hot");
+                k.ci.bytes = static_cast<double>(raw.size());
+                k.kernel = ka;
+                k.kernel_b = ka + "_mb";
+                k.fa = rank ? c.k.argmax_rank_rows_to : c.k.argmax_rows_to;
+                k.call = [&c, &xs, ctl, st, dst, srcr, rows, rank](hip::Function f, std::uint64_t r) {
+                    if (rank)
+                        hip::launch(f, {static_cast<unsigned>(rows), 1, 1}, {1024, 1, 1}, 0, c.s, xs.at(r), amb::n, ctl->p(), dst, srcr, st->p(),
+                                    amb::stride);
+                    else
+                        hip::launch(f, {static_cast<unsigned>(rows), 1, 1}, {1024, 1, 1}, 0, c.s, xs.at(r), amb::n, ctl->p(), dst);
+                };
+                k.call_b = [&c, &xs, ctl, st, ws, dst, srcr, rows, rank, fm, fr, tiles](std::uint64_t r) {
+                    if (rank)
+                        hip::launch(fr, {tiles, static_cast<unsigned>(rows), 1}, {AM_THREADS, 1, 1}, 0, c.s, xs.at(r), amb::n, ctl->p(), dst, srcr,
+                                    st->p(), amb::stride, ws->p());
+                    else
+                        hip::launch(fm, {tiles, static_cast<unsigned>(rows), 1}, {AM_THREADS, 1, 1}, 0, c.s, xs.at(r), amb::n, ctl->p(), dst, ws->p());
+                };
+                // one clean call: control words + stats as bit copies in a float vector (exact compares only)
+                auto outBits = [&c, ctl, st]() {
+                    c.sync();
+                    std::vector<int> all = ctl->down<int>(static_cast<std::size_t>(amb::words));
+                    const auto sv = st->down<int>(static_cast<std::size_t>(3 * amb::stride));
+                    all.insert(all.end(), sv.begin(), sv.end());
+                    std::vector<float> f(all.size());
+                    std::memcpy(f.data(), all.data(), all.size() * 4);
+                    return f;
+                };
+                k.run = [&k, ctl, st, ctl0, outBits](hip::Function f) {
+                    ctl->up(ctl0);
+                    st->fill(0x55);
+                    k.call(f, 0);
+                    return outBits();
+                };
+                k.verify = [&x, drafts, rows, rank](const std::vector<float>& got) {
+                    std::vector<int> g(got.size());
+                    std::memcpy(g.data(), got.data(), got.size() * 4);
+                    std::size_t bad = 0;
+                    for (int r = 0; r < rows; ++r) {
+                        const float* row = x.data() + static_cast<std::size_t>(r) * n;
+                        float best = -std::numeric_limits<float>::infinity();
+                        int idx = 0;
+                        for (int i = 0; i < n; ++i)
+                            if (row[i] > best) best = row[i], idx = i;
+                        bad += g[static_cast<std::size_t>(r)] != idx;
+                        if (!rank) continue;
+                        const int d = drafts[static_cast<std::size_t>(r)];
+                        int rk = std::numeric_limits<int>::max();
+                        float ld = -std::numeric_limits<float>::infinity();
+                        if (d >= 0) {
+                            rk = 0;
+                            ld = row[d];
+                            for (int i = 0; i < n; ++i) rk += (row[i] > ld || (row[i] == ld && i < d)) ? 1 : 0;  // the F1 rule written out
+                        }
+                        int mb, lb;
+                        std::memcpy(&mb, &best, 4);
+                        std::memcpy(&lb, &ld, 4);
+                        bad += g[static_cast<std::size_t>(words + r)] != rk;
+                        bad += g[static_cast<std::size_t>(words + stride + r)] != mb;
+                        bad += g[static_cast<std::size_t>(words + 2 * stride + r)] != lb;
+                    }
+                    Result res;
+                    res.name = "vs the legacy CPU scan" + std::string(rank ? " + the F1 rank rule" : "") + " (" + std::to_string(rows) + " rows)";
+                    res.n = static_cast<std::size_t>(rows);
+                    res.mismatches = bad;
+                    res.pass = bad == 0;
+                    return res;
+                };
+                k.bitwise_b = [&k, ctl, st, ctl0, outBits, ws]() -> std::pair<std::size_t, std::size_t> {
+                    // the same starting words for A and B (control area ctl0 = -7 / drafts, stats 0x55555555): every word
+                    // either kernel writes holds a token / rank / logit that is not the fill, every other word must stay
+                    ctl->up(ctl0);
+                    st->fill(0x55);
+                    k.call(k.fa, 0);
+                    const std::vector<float> ya = outBits();
+                    ctl->up(ctl0);
+                    st->fill(0x55);
+                    k.call_b(0);
+                    const std::vector<float> yb = outBits();
+                    std::size_t bad = 0;
+                    for (std::size_t i = 0; i < ya.size(); ++i) bad += std::memcmp(&ya[i], &yb[i], 4) != 0;
+                    // the workspace must be zeroed again after B (the next launch relies on it)
+                    const auto w = ws->down<std::uint8_t>(static_cast<std::size_t>(AM_WS_BYTES));
+                    for (const std::uint8_t b : w) bad += b != 0;
+                    return {ya.size() + static_cast<std::size_t>(AM_WS_BYTES), bad};
+                };
+                runCell(e, k);
+                // REVIEW-v0252-f1arg B2 (v0252-f1arg2): after the timed ABBA pairs (A and B launched back to back with no
+                // host sync between them, B on one workspace) the workspace is zeroed and B still gives A's bits
+                {
+                    c.sync();
+                    const auto w = ws->down<std::uint8_t>(static_cast<std::size_t>(AM_WS_BYTES));
+                    std::size_t dirty = 0;
+                    for (const std::uint8_t b : w) dirty += b != 0;
+                    const auto [nb2, mb2] = k.bitwise_b();
+                    Result rp;
+                    rp.kind = Kind::invariant;
+                    rp.n = nb2 + static_cast<std::size_t>(AM_WS_BYTES);
+                    rp.mismatches = dirty + mb2;
+                    rp.pass = nb2 > 0 && rp.mismatches == 0;
+                    rp.name = "bench " + k.kernel_b + " " + k.ci.cell + ": after the timed pairs workspace zero and B output == A output";
+                    c.rep.add(rp);
+                }
+            }
+        }
+    }
+}
+
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "argmax"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -1347,7 +1524,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
         void (*fn)(Env&);
     };
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
-                      {"fdq", benchFdq}, {"ggemv", benchGGemv}};
+                      {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"argmax", benchArgmax}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

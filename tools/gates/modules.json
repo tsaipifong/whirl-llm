@@ -1250,7 +1250,7 @@
   "kernels.sample": {
      "id": "N5/N14",
      "desc": "kernel family sample: token tables, greedy / draft picks, 2-bit MTP draft head, sampling candidates, speculative sampling (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
-     "paths": ["kernels/sample_*.hip", "kernels/draft_d2.hip", "kernels/spec_sample.hip", "kernels/gfx1151/draft_pick.hip", "kernels/gfx1151/sample_cand.hip", "kernels/shared/draft_d2_requant_q6k_d2.h", "kernels/shared/sample_cand_topk_rows.h", "kernels/shared/sample_pick_set_tokens.h", "kernels/shared/block_argmax_psum.h"],
+     "paths": ["kernels/sample_*.hip", "kernels/draft_d2.hip", "kernels/spec_sample.hip", "kernels/gfx1151/draft_pick.hip", "kernels/gfx1151/sample_cand.hip", "kernels/shared/draft_d2_requant_q6k_d2.h", "kernels/shared/sample_cand_topk_rows.h", "kernels/shared/sample_pick_set_tokens.h", "kernels/shared/block_argmax_psum.h", "kernels/argmax_key.h"],
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "srv_mt_precise", "srv_balance", "seq_swift_precise"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_balance": 2, "seq_swift_precise": 2},

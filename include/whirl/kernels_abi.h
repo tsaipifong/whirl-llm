@@ -127,6 +127,12 @@
 //   argmax_rank_rows_to(x, n, int* out, RowIdx dst, RowIdx src, int* stats, int stride)  (optional; v0252-f1 relaxacc
 //            one-pass check) argmax_rows_to + per row with src.v[b] >= 0 the rank / max / logit of draft out[src.v[b]]:
 //            stats[b] rank (INT_MAX: no draft), ((float*)stats)[stride + b] max, ((float*)stats)[2 * stride + b] l_d
+//   argmax_rows_to_mb(x, n, int* out, RowIdx dst, AmWs* ws)  (optional, gfx1201 only; v0252-f1arg) grid (AM_TILES(n),
+//            rows <= 32), AM_THREADS threads (kernels/argmax_key.h; any gridDim.x >= 1 gives the same bits, slower):
+//            bitwise argmax_rows_to; ws = AM_WS_BYTES zeroed once, every launch leaves it zeroed, one per stream
+//   argmax_rank_rows_to_mb(x, n, int* out, RowIdx dst, RowIdx src, int* stats, int stride, AmWs* ws)  (optional, gfx1201
+//            only; v0252-f1arg) same grid / ws: bitwise argmax_rank_rows_to; no src word may be a dst word (another row's
+//            last block writes out[dst] while this row reads out[src]: the kCtlRows / kCtlDrafts static_assert below)
 //   argmax_prob(x, n, int* out_tok, float* out_prob)
 //   draft_pick(x, n, int* tok, float* prob, int* ctl, int r, int n_min, float p_min, const int* map)
 //   draft_pick_rows(x, n, int* ctl_all, RowIdx area, int r, int n_min, float p_min, const int* map)
@@ -289,6 +295,12 @@ inline constexpr int kCtlProbs = 32;   // [32, 48): draft probabilities (f32)
 inline constexpr int kCtlNd = 48;      // drafts kept this cycle
 inline constexpr int kCtlStop = 49;    // draft chain stopped
 inline constexpr int kCtlWords = 64;
+// A verify row's argmax word (sequence block + kCtlRows + r, r < kMaxSmallBatch) is never a draft word (sequence block +
+// kCtlDrafts + r, r < kMaxDrafts) of its own or another sequence's kCtlWords block (mtp_verify.cpp verifyBatchEnqueue /
+// relaxRankSrc / verifyEnqueueEx): argmax_rank_rows_to_mb's last block of one row writes out[dst] while another row's
+// blocks may still read their draft id out[src] (v0252-f1arg2, REVIEW-v0252-f1arg C3).
+static_assert(kCtlRows + kMaxSmallBatch <= kCtlDrafts && kCtlDrafts + kMaxDrafts <= kCtlWords,
+              "verify argmax words [kCtlRows, +kMaxSmallBatch) and draft words [kCtlDrafts, +kMaxDrafts) must not overlap");
 
 // Weight types with kernels (ggml type ids).
 enum class QType : int {
@@ -754,6 +766,7 @@ struct MiscKernels {
     F rmsnorm_x8t{}, silu_mul_x8t{}, silu_mul_x8ht{}, gated_norm_x8t{}, gated_norm_x8ht{};
     F topk_rows{};
     F argmax_rank_rows_to{};  // optional (v0252-f1 relaxacc one-pass check; null: relaxacc greedy keeps topk_rows)
+    F argmax_rows_to_mb{}, argmax_rank_rows_to_mb{};  // optional (v0252-f1arg multi-block twins, gfx1201 only)
 };
 
 struct KernelTable : MatmulKernels, AttnKernels, MoeKernels, DeltaNetKernels, MiscKernels {
