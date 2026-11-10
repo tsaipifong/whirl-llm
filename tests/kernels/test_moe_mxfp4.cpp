@@ -104,6 +104,60 @@ Result invariant(const std::string& name, std::size_t n, std::size_t bad) {
     return r;
 }
 
+// v0252-moedf16 (PLAN V1-76): the gfx1201 balance / fast MoE prefill stores the down projection's output moe_yd as f16 -
+// gemm8r_moeh / gemm8r_moe32h with W2 = null (one weight set, f16 epilogue) - and combines it with moe_combine4h.
+//   * f16 down == f16(the f32 gemm8r_moe down) bit for bit (the same expressions, one RNE rounding; every pos written);
+//   * moe_combine4h(f16 yd) vs an f64 combine of the f32 yd within one f16 rounding of every expert output (2^-11 rel
+//     each -> 2^-10 of the scale |x| + sum |w y| + |sg ysh|) + f32 noise; the f32 path (moe_combine) against the same
+//     reference at f32 tolerance; and the f16 values finite.
+// The first row fails before the change (no moe_combine4h in the gfx1201 code object).
+void moeYdhChecks(Ctx& c, const std::vector<int>& inv, unsigned tile_slots, int bn, const Buf& ddown, const Buf& rdown, std::uint64_t row_bytes,
+                  const Buf& x8, const Buf& sx, const Buf& tiles, const Buf& nt, const std::vector<float>& yr, const std::vector<float>& w, int n, int E,
+                  int F, int K) {
+    const std::string tag = " (tile " + std::to_string(bn) + ")";
+    c.rep.add(invariant("moe_combine4h in the gfx1201 code object (v0252-moedf16)", 1, c.k.moe_combine4h ? 0 : 1));
+    if (!c.k.moe_combine4h || E % 4 != 0) return;
+    const std::size_t pairs = static_cast<std::size_t>(n) * K, ne = pairs * static_cast<std::size_t>(E);
+    Buf yh(ne * 2);
+    yh.fill(0xff);
+    hip::launch(bn == 32 ? c.k.gemm8r_moe32h : c.k.gemm8r_moeh, {tile_slots * cdiv(E, wk::kMoeBm), 1, 1}, {256, 1, 1}, 0, c.s, ddown.p(), DevPtr{0}, row_bytes,
+                rdown.p(), DevPtr{0}, E, x8.p(), sx.p(), yh.p(), DevPtr{0}, F, tiles.p(), nt.p());
+    c.sync();
+    const auto yhv = yh.down<std::uint16_t>(ne);
+    std::vector<std::uint16_t> yr16(ne);
+    std::size_t nonfinite = 0;
+    for (std::size_t i = 0; i < ne; ++i) {
+        yr16[i] = f2h(yr[i]);
+        nonfinite += !std::isfinite(h2f(yhv[i]));
+    }
+    c.rep.add(cmpExact(std::string(bn == 32 ? "gemm8r_moe32h" : "gemm8r_moeh") + " W2=null (f16 moe_yd) == f16(gemm8r_moe down)" + tag, yhv, yr16, Kind::invariant));
+    c.rep.add(invariant("f16 moe_yd finite" + tag, ne, nonfinite));
+    // combine: x0 + sum_k w * yd + sg * ysh
+    const std::size_t nx = static_cast<std::size_t>(n) * E;
+    const std::vector<float> x0 = c.randn(nx), ysh = c.randn(nx), sg = c.randn(static_cast<std::size_t>(n));
+    Buf dinv(inv), dw(w), dsg(sg), dysh(ysh), dyr(yr), xa(x0), xb(x0);
+    hip::launch(c.k.moe_combine, {cdiv(E, 256), static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, xa.p(), dysh.p(), dsg.p(), dyr.p(), dinv.p(), dw.p(), E, K);
+    hip::launch(c.k.moe_combine4h, {cdiv(E, 1024), static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, xb.p(), dysh.p(), dsg.p(), yh.p(), dinv.p(), dw.p(), E, K);
+    c.sync();
+    std::vector<double> ref(nx), sc(nx);
+    for (int t = 0; t < n; ++t)
+        for (int col = 0; col < E; ++col) {
+            const std::size_t i = static_cast<std::size_t>(t) * E + col;
+            double acc = x0[i], a = std::fabs(x0[i]);
+            for (int k = 0; k < K; ++k) {
+                const std::size_t pk = static_cast<std::size_t>(t) * K + k;
+                const double v = static_cast<double>(w[pk]) * yr[static_cast<std::size_t>(inv[pk]) * E + col];
+                acc += v;
+                a += std::fabs(v);
+            }
+            const double s = static_cast<double>(sg[static_cast<std::size_t>(t)]) * ysh[i];
+            ref[i] = acc + s;
+            sc[i] = a + std::fabs(s);
+        }
+    c.rep.add(cmpTol("moe_combine (f32 moe_yd, precise path) vs f64 combine" + tag, xa.down<float>(nx), ref, sc, 1e-6, 1e-7));
+    c.rep.add(cmpTol("moe_combine4h (f16 moe_yd, balance / fast) vs f64 combine of the f32 yd" + tag, xb.down<float>(nx), ref, sc, std::ldexp(1.0, -10), 1e-6));
+}
+
 }  // namespace
 
 void testMoeMx(Ctx& c) {
@@ -435,6 +489,9 @@ void testMoeMx(Ctx& c) {
                     c.rep.add(cmpExact(std::string("gemm8r_moe") + (bn == 32 ? "32" : "") + " == gemm8_moe" + (bn == 32 ? "32" : "") + " (down projection, tile " +
                                            std::to_string(bn) + ")",
                                        yr.down<float>(static_cast<std::size_t>(pairs) * E), yy, Kind::invariant));
+                if (rbf)
+                    moeYdhChecks(c, rr.inv, static_cast<unsigned>(rr.tiles.size()), bn, ddown, rdown, mw.down.row_bytes, x8, sx, tiles, nt,
+                                 yr.down<float>(static_cast<std::size_t>(pairs) * E), hw, n, E, F, K);
                 if (vi == 0) {
                     a8 = x8.down<std::uint8_t>(static_cast<std::size_t>(pairs) * F);
                     asx = sx.down<float>(static_cast<std::size_t>(pairs));

@@ -939,7 +939,11 @@ static void testMoepDefault() {
                 const nu::Target t = target(c, model, false);
                 const nu::Flags f = fl(t, mode, {});
                 const bool on = std::string_view(c.name) == "8060s" && std::string_view(model) == "moe";
-                NCHECK(on ? f.moep_gu == 1 && f.moep_dn == 3 && f.moep_comb == 1 : f.moep_gu == 0 && f.moep_dn == 0 && f.moep_comb == 0,
+                // v0252-moedf16: the R9700 MoE MXFP4 balance / fast default is COMB 3 (f16 moe_yd on the fp8 kind), no moep
+                const bool ydh = std::string_view(c.name) == "r9700" && std::string_view(model) == "moe" && std::string_view(mode) != "precise";
+                NCHECK(on    ? f.moep_gu == 1 && f.moep_dn == 3 && f.moep_comb == 1
+                       : ydh ? f.moep_gu == 0 && f.moep_dn == 0 && f.moep_comb == 3
+                             : f.moep_gu == 0 && f.moep_dn == 0 && f.moep_comb == 0,
                        "moep default {} {} {}: gu {} dn {} comb {}", c.name, model, mode, f.moep_gu, f.moep_dn, f.moep_comb);
             }
     const nu::Target t8 = target(card("8060s"), "moe", false);
@@ -1014,6 +1018,48 @@ static void testMoepCombMode() {
     for (const char* mode : {"precise", "balance", "fast"}) {
         const nu::Plan d = planOf(mode, t8, {});
         NCHECK(d.flags.moep_gu == 1 && d.flags.moep_dn == 3 && d.flags.moep_comb == 1 && d.ignored.empty(), "B26-41 8060s moe {}: default plan changed", mode);
+    }
+}
+
+// v0252-moedf16 (PLAN V1-76): on the R9700 (gfx1201 code object) with MXFP4 routed experts, balance and fast default to
+// moep_comb 3 = the down projection's output moe_yd stored f16 + moe_combine4h (balance item h16, f16 intermediates);
+// precise stays 0 (f32 moe_yd, bitsKey unchanged), the 8060S plan and dense models unchanged. A/B: WHIRL_MOEP_COMB=0 (A, the
+// f32 path) / 3 (B); WHIRL_MOEP_COMB=3 in precise is refused (B26-41 form) and keeps 0; =5 in balance keeps the default 3.
+static void testMoeYdhDefault() {
+    auto planOf = [](const char* mode, const nu::Target& t, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    const nu::Target t97 = target(card("r9700"), "moe", false), t8 = target(card("8060s"), "moe", false);
+    const nu::Target s97 = target(card("r9700"), "swift", false);
+    for (const char* mode : {"balance", "fast"}) {
+        const nu::Plan d = planOf(mode, t97, {});
+        NCHECK(d.flags.moep_comb == 3 && d.flags.moep_gu == 0 && d.flags.moep_dn == 0 && d.ignored.empty(), "moedf16 r9700 moe {}: default comb 3 (got {})",
+               mode, d.flags.moep_comb);
+        const nu::Plan a = planOf(mode, t97, {{"MOEP_COMB", "0"}});
+        NCHECK(a.flags.moep_comb == 0 && a.ignored.empty() && a.bitsKey() != d.bitsKey(), "moedf16 r9700 moe {}: WHIRL_MOEP_COMB=0 = the A arm (f32 moe_yd)",
+               mode);
+        NCHECK(planOf(mode, t97, {{"MOEP_COMB", "3"}}).bitsKey() == d.bitsKey(), "moedf16 r9700 moe {}: WHIRL_MOEP_COMB=3 = the default", mode);
+        NCHECK(planOf(mode, s97, {}).flags.moep_comb == 0, "moedf16 r9700 swift {}: dense model unchanged", mode);
+    }
+    // balance: the fast-only 5 is refused back to the balance default 3
+    NCHECK(planOf("balance", t97, {{"MOEP_COMB", "5"}}).flags.moep_comb == 3, "moedf16 r9700 moe balance: COMB=5 refused -> 3");
+    // precise: f32 moe_yd, also with WHIRL_Q8DEC=1 and with WHIRL_MOEP_COMB=3 (refused)
+    for (const bool q8 : {false, true}) {
+        std::vector<std::pair<const char*, const char*>> ex;
+        if (q8) ex.emplace_back("Q8DEC", "1");
+        const nu::Plan p = planOf("precise", t97, ex);
+        NCHECK(p.flags.moep_comb == 0, "moedf16 r9700 moe precise q8dec={}: comb 0 (got {})", q8, p.flags.moep_comb);
+        ex.emplace_back("MOEP_COMB", "3");
+        const nu::Plan p3 = planOf("precise", t97, ex);
+        NCHECK(p3.flags.moep_comb == 0 && p3.bitsKey() == p.bitsKey() && p3.ignored.size() == 1, "moedf16 r9700 moe precise q8dec={}: COMB=3 refused", q8);
+    }
+    // the 8060S: unchanged in every mode (kMoepDefault 1 / 3 / 1)
+    for (const char* mode : {"precise", "balance", "fast"}) {
+        const nu::Plan d = planOf(mode, t8, {});
+        NCHECK(d.flags.moep_gu == 1 && d.flags.moep_dn == 3 && d.flags.moep_comb == 1, "moedf16 8060s moe {}: plan changed", mode);
     }
 }
 
@@ -1159,6 +1205,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testLoadRules();
     testMoepDefault();  // v0251-a7port (fails before the port: the plan has no gfx1151 default)
     testMoepCombMode();  // v0251-a7pol B26-41 (the refusal rows fail on cfce7ea)
+    testMoeYdhDefault();  // v0252-moedf16 (fails before the change: the R9700 balance / fast comb is 0)
     testRfuseDefault();  // v0251-a11port (fails before the port: the plan has no gfx1151 default)
     testKgVarFlag();  // v0252-c1port; v0252-c1acc auto default + invalid-value note (fails before c1acc)
     testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port); v0252-c3bdef (the R9700 MoE default rows fail before c3bdef)
