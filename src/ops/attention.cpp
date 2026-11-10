@@ -301,7 +301,7 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
             const u32 r1 = std::min(rows, r0 + seg), nr = r1 - r0;
             dqRange(r0, nr);
             if (r0 == 0 && r1 == rows) {  // all keys in one range: the plain f16 kernel
-                // v0252-strixc2: balance takes attn_sx<NP> on the same f16 copy (not bitwise; precise / fast never)
+                // v0252-strixc2 / strixf: balance and fast take attn_sx<NP> on the same f16 copy (q8 / q8h / q4 rows; not bitwise; precise never)
                 if (sx.f != nullptr) {
                     for (u32 q = 0; q < parts; ++q) attn(sx.f, sxGrid, D(256), q * hp, true, false, r0, r1);
                     break;
@@ -369,7 +369,7 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
     for (u32 q = 0; q < parts; ++q) {
         if (kg != nullptr)
             attn(kg, D((n + 15) / 16, hp / np), D(64 * np), q * hp, false, false, 0, 0);
-        else if (sx.f != nullptr && !p.kv_q8)  // v0252-strixc2: balance, f16 cache (in place of attn_kx / attn_prefill_wmma)
+        else if (sx.f != nullptr && !p.kv_q8)  // v0252-strixc2 / strixf: balance / fast, f16 cache (in place of attn_kx / attn_prefill_wmma)
             attn(sx.f, sxGrid, D(256), q * hp, false, false, 0, 0);
         else
             attn(kx ? k.attn_kx : k.attn_prefill_wmma, D((n + 127) / 128, hp), D(kx ? 512 : 256), q * hp, false, false, 0, 0);

@@ -423,13 +423,15 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
         if (e.gdn_strix_min)
             F.gdn_strix_min = static_cast<std::uint32_t>(std::max<unsigned long>(32, std::strtoul(e.gdn_strix_min->c_str(), nullptr, 10)));
     }
-    // v0252-strixc2 (PLAN V1-09): the gfx1151 balance prefill attention attn_sx (strix-llama.cpp fattn-rdna35: GQA-packed
-    // columns, split-D scores, lazy rescale; f32 scores / O / row sums, f16 P) - not bitwise, so balance only, under its
-    // item h16 (f16 intermediates); precise and fast never (fast keeps its own path). The device row decides
+    // v0252-strixc2 (PLAN V1-09): the gfx1151 prefill attention attn_sx (strix-llama.cpp fattn-rdna35: GQA-packed
+    // columns, split-D scores, lazy rescale; f32 scores / O / row sums, f16 P) - not bitwise, so never in precise; taken
+    // under its item h16 (f16 intermediates). v0252-strixf (PLAN V1-73): fast too (fast takes every balance item; fast
+    // without it would be slower than balance in long prefill). Fast KV: Swift q8h (as balance), Ornith q4 - both reach it
+    // on the KG-3 f16 copy while the keys fit dq_rows (ops::chooseAttnPrefill). The device row decides
     // (device::Profile::attn_sx_balance, like gdn_strix); ops::chooseAttnPrefill still needs the kernel and the shape.
     // Like h16 itself on this GPU ("MXFP4 models only"), only for models with MXFP4 tensors (the product models).
-    // WHIRL_ATTN_SX=0 turns it off (A/B arm); other values change nothing (loadOverrides notes them in precise / fast).
-    F.attn_sx = r.mode == Mode::balance && t.attn_sx_profile && t.has_mxfp4 && r.has(Item::h16) && !(e.attn_sx && *e.attn_sx == "0");
+    // WHIRL_ATTN_SX=0 turns it off (A/B arm); other values change nothing (loadOverrides notes them in precise).
+    F.attn_sx = r.mode != Mode::precise && t.attn_sx_profile && t.has_mxfp4 && r.has(Item::h16) && !(e.attn_sx && *e.attn_sx == "0");
 }
 
 // tune.cpp:939-982 on the item table (the per-item overrides, WHIRL_Q8DEC, relaxacc, noteSwitches) and the flags
@@ -517,11 +519,11 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     if (items)
         if (const Raw& v = e.attn_kgvar; v && !parseKgVar(*v))
             p.ignored.push_back(std::format("WHIRL_ATTN_KGVAR={} ignored: not auto, 0, 1 or 3 (the default {} stays)", *v, t.gfx1151 ? "0" : "auto"));
-    // v0252-strixc2: WHIRL_ATTN_SX only turns the balance attn_sx off ("0"); a non-"0" value in precise / fast is noted once
-    // (the flag stays off there: the kernel is not bitwise, and fast keeps its own path)
+    // v0252-strixc2 / strixf: WHIRL_ATTN_SX only turns the balance / fast attn_sx off ("0"); a non-"0" value in precise is
+    // noted once (the flag stays off there: the kernel is not bitwise)
     if (items)
-        if (const Raw& v = e.attn_sx; v && *v != "0" && p.mode != Mode::balance)
-            p.ignored.push_back(std::format("WHIRL_ATTN_SX={} ignored: the strix prefill attention is balance-only ({} never takes it)", *v,
+        if (const Raw& v = e.attn_sx; v && *v != "0" && p.mode == Mode::precise)
+            p.ignored.push_back(std::format("WHIRL_ATTN_SX={} ignored: the strix prefill attention is not bitwise ({} never takes it)", *v,
                                             modeName(p.mode)));
     if (items) {
         if (const Raw& v = e.spec_sample; v && !v->empty())

@@ -78,7 +78,8 @@ struct Profile {
     // then flip this to true (and widen ADR-0015)
     bool relax_rank_check;
     // v0252-strixc2 (PLAN V1-09): balance-mode prefill attention attn_sx<NP> (strix-llama.cpp fattn-rdna35, gfx1151 code
-    // object only; not bitwise, so the numerics plan takes it in balance only: numerics::Target::attn_sx_profile)
+    // object only; not bitwise, so the numerics plan takes it in balance and fast (v0252-strixf), never in precise:
+    // numerics::Target::attn_sx_profile; the field keeps its 0.2.5.2 name)
     bool attn_sx_balance;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
