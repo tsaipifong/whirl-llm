@@ -102,6 +102,12 @@ struct MockConfig {
     // v0252-e1p1b (E1): the mock has the E1 device-input path (ServerModel::e1InputsOk, with replay and the accept kernel);
     // false = a code object without set_rows_dp / rmsnorm_q8_rows_dv
     bool e1_inputs = true;
+    // v0252-e1p1c (E1 lookahead): every Nth specAccept (0 = never) decides ONE accepted draft fewer than the rule for its
+    // first device-decided sequence with at least one accepted draft, and stores every word of that shorter decision
+    // (ACC0 / ACC / CHOSEN / NPOS / NROW / NPEND): a device result that is in range and self-consistent but not the
+    // host's. gpu / gpu-zc follow it (an exact prefix is still exact: same text); check mode reports it - and a lookahead
+    // cycle that already consumed those words cannot be taken back (the engine fails the request)
+    std::uint32_t spec_acc_short = 0;
 };
 
 class MockModel final : public server::ServerModel {
@@ -224,6 +230,7 @@ public:
     void readSpecTab(SpecNextTab& t) override;
     std::uint64_t specAccepts() const { return spec_accepts_.load(); }
     std::uint64_t specCorrupted() const { return spec_corrupted_.load(); }  // feat026-acc-r1 (MockConfig::spec_acc_corrupt)
+    std::uint64_t specShorted() const { return spec_shorted_.load(); }      // v0252-e1p1c (MockConfig::spec_acc_short)
     std::uint64_t readCtlCalls() const { return readctl_calls_.load(); }
     std::uint64_t readCtlPinnedCalls() const { return readctl_pinned_calls_.load(); }
 
@@ -240,12 +247,17 @@ public:
         std::uint64_t npend_dev = 0;     // replays whose count came from the NPEND word
         std::uint64_t pos_dev = 0;       // accept sequences whose position came from the NPOS word
         std::uint64_t disagree = 0;      // a host copy (next, pos, pend) that differs from the control words
+        // v0252-e1p1c (E1 lookahead, WHIRL_E1=2): verify segments of a cycle submitted before the host read the cycle
+        // before it (VSeg::next == qwen35::tok_dev): the host's position is only an upper bound there - a device position
+        // above it counts in disagree
+        std::uint64_t ahead_segs = 0;
     };
     E1Counts e1Counts() const;
     std::uint64_t verifyCalls() const { return verify_calls_.load(); }
 
 private:
     std::atomic<std::uint64_t> e1_vsegs_{0}, e1_msegs_{0}, e1_padded_{0}, e1_npend_{0}, e1_pos_{0}, e1_disagree_{0}, verify_calls_{0};
+    std::atomic<std::uint64_t> e1_ahead_{0}, spec_shorted_{0};  // v0252-e1p1c
     SpecNextTab spec_tab_{};  // the next-cycle rows of the last specAccept (engine thread)
     std::atomic<std::uint64_t> spec_accepts_{0}, spec_corrupted_{0}, readctl_calls_{0}, readctl_pinned_calls_{0};
     void prefillRows(std::size_t n);

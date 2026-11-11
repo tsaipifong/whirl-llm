@@ -97,6 +97,17 @@ public:
         }
     }
 
+    // v0252-e1p1c (server.sample_buffers: the lookahead ring): the accept kernel as a recorder - the host pointer of every
+    // call and, when it is not null, spec_mark written to its first word (what a test then reads back through the ring)
+    bool spec_ok = false;
+    std::vector<std::int32_t*> spec_hosts;
+    std::int32_t spec_mark = 0;
+    bool specAcceptOk() const override { return spec_ok; }
+    void specAccept(const SpecAccArgs&, std::int32_t* host) override {
+        spec_hosts.push_back(host);
+        if (host != nullptr) host[0] = spec_mark;
+    }
+
     // vision calls ImageEmbeddings makes (counted)
     void setVisMap(std::uint32_t, const qwen35::VisMap* vm) override { last_vismap = vm; }
     void visRelease() override { ++vis_releases; }

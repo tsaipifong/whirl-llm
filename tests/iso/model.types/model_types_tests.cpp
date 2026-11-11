@@ -54,6 +54,10 @@ void testConstants() {
     ISO_CHECK(q::max_batch_default == 4096u && q::max_batch_limit == 16384u);
     ISO_CHECK(q::gdn_max_snap + 1 == q::gdn_max_seg && q::max_ng_drafts == q::gdn_max_snap);
     ISO_CHECK(q::ctl_drafts == q::ctl_rows + 16 && q::ctl_probs == q::ctl_drafts + 16 && q::ctl_stop < q::ctl_words);
+    // v0252-e1p1c (E1 lookahead): VSeg::next of a segment whose row 0 the host does not know - no token id (ids are
+    // below n_vocab), and a VSeg starts as a host segment
+    ISO_CHECK(q::tok_dev == 0xffffffffu && q::tok_dev == q::npend_dev);
+    ISO_CHECK(!q::VSeg{}.dev && q::VSeg{}.next == 0u && q::MSeg{}.e1_rows == 0u);
 }
 
 void testModelError() {

@@ -327,4 +327,62 @@ void testRulesD17() {
     }
 }
 
+// v0252-e1p1c (PLAN V1-93 P1c, the E1 one-cycle lookahead): the pure rules of the pipeline (src/spec/spec_rules.h, "E1
+// lookahead"). Each is pinned against its definition written out here (exhaustive small grids) and on hand cases.
+//   aheadPosBound     the position of the cycle after one in flight is at most pos + nd_fly + 1 (every draft kept)
+//   aheadBudgetOk     the budget drain rule: ahead only when the tokens left EXCEED the largest output of the cycles in
+//                     flight plus this cycle's (nd + 1): no lookahead cycle can then be cut by max_tokens, and the request
+//                     cannot end by max_tokens inside the window
+//   aheadBudgetLow    the device budget of that cycle: a lower bound of the tokens left when it runs, never below nd + 2
+//   aheadRingNext     two ring entries, alternating
+//   aheadWordsAgree   the words a submitted successor consumed (ACC / CHOSEN / NPOS / NPEND) against the host's decision
+void testRulesAhead() {
+    for (std::uint32_t pos : {0u, 1u, 77u, 4095u, 131071u})
+        for (std::uint32_t nd = 0; nd <= 15; ++nd) {
+            CHECK_EQ(sr::aheadPosBound(pos, nd), pos + nd + 1);
+            // the bound holds for every accept count of the in-flight cycle
+            for (std::uint32_t acc = 0; acc <= nd; ++acc) CHECK(pos + acc + 1 <= sr::aheadPosBound(pos, nd));
+        }
+    for (std::uint32_t max_tokens = 0; max_tokens <= 40; ++max_tokens)
+        for (std::uint32_t n_gen = 0; n_gen <= 42; ++n_gen)
+            for (std::uint32_t fly : {0u, 1u, 2u, 5u, 9u, 16u})
+                for (std::uint32_t nd = 0; nd <= 8; ++nd) {
+                    const std::uint64_t left = max_tokens > n_gen ? max_tokens - n_gen : 0;
+                    const bool want = left > static_cast<std::uint64_t>(fly) + nd + 1;
+                    CHECK_EQ(sr::aheadBudgetOk(max_tokens, n_gen, fly, nd), want);
+                    if (!want) continue;
+                    const std::uint32_t low = sr::aheadBudgetLow(max_tokens, n_gen, fly);
+                    CHECK_EQ(low, static_cast<std::uint32_t>(left - fly));
+                    CHECK(low >= nd + 2);  // the accept kernel cuts when acc + 1 > budget: acc + 1 <= nd + 1 < low
+                    // whatever the in-flight cycles emit (1 .. fly tokens when fly > 0), the true budget is >= low
+                    for (std::uint32_t out = fly > 0 ? 1u : 0u; out <= fly; ++out) CHECK(left - out >= low);
+                    // and the request does not end by max_tokens in this cycle: at least one token stays after nd + 1
+                    CHECK(left - fly > nd + 1);
+                }
+    // no overflow at the ends of the range; the device budget is capped like the synchronous one (1 << 30)
+    CHECK(sr::aheadBudgetOk(0xffffffffu, 0, 16, 15));
+    CHECK(!sr::aheadBudgetOk(0xffffffffu, 0xffffffffu, 0, 0));
+    CHECK(!sr::aheadBudgetOk(5, 0xffffffffu, 0xffffffffu, 0xffffffffu));
+    CHECK_EQ(sr::aheadBudgetLow(0xffffffffu, 0, 16), 1u << 30);
+    // hand cases (Ornith-like nd 1: two cycles emit at most 4 tokens; Swift-like nd 4: at most 10)
+    CHECK(!sr::aheadBudgetOk(4, 0, 2, 1));
+    CHECK(sr::aheadBudgetOk(5, 0, 2, 1));
+    CHECK(!sr::aheadBudgetOk(110, 100, 5, 4));
+    CHECK(sr::aheadBudgetOk(111, 100, 5, 4));
+    CHECK_EQ(sr::aheadBudgetLow(111, 100, 5), 6u);
+    CHECK(!sr::aheadBudgetOk(2, 0, 0, 1));  // the first cycle of a pipeline: more than its own output must be left
+    CHECK(sr::aheadBudgetOk(3, 0, 0, 1));
+    CHECK_EQ(sr::aheadRingNext(0), 1u);
+    CHECK_EQ(sr::aheadRingNext(1), 0u);
+    CHECK_EQ(sr::aheadRingNext(sr::aheadRingNext(0)), 0u);
+    // the consumed words: all four must equal the host's decision at position pos
+    CHECK(sr::aheadWordsAgree(2, 777, 103, 3, 100, 2, 777));
+    CHECK(!sr::aheadWordsAgree(1, 777, 103, 3, 100, 2, 777));  // ACC
+    CHECK(!sr::aheadWordsAgree(2, 778, 103, 3, 100, 2, 777));  // CHOSEN
+    CHECK(!sr::aheadWordsAgree(2, 777, 102, 3, 100, 2, 777));  // NPOS
+    CHECK(!sr::aheadWordsAgree(2, 777, 103, 2, 100, 2, 777));  // NPEND
+    CHECK(!sr::aheadWordsAgree(-1, 777, 103, 3, 100, 2, 777));
+    CHECK(sr::aheadWordsAgree(0, 5, 1, 1, 0, 0, 5));
+}
+
 }  // namespace r12b

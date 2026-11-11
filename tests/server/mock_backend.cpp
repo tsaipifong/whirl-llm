@@ -369,6 +369,7 @@ MockModel::E1Counts MockModel::e1Counts() const {
     c.npend_dev = e1_npend_.load();
     c.pos_dev = e1_pos_.load();
     c.disagree = e1_disagree_.load();
+    c.ahead_segs = e1_ahead_.load();  // v0252-e1p1c
     return c;
 }
 
@@ -632,7 +633,14 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
             if (!mc_.replay || !sg.drafts.empty()) throw std::runtime_error("BadBatch");  // as Context::verifyBatchEnqueue
             next = static_cast<std::uint32_t>(s.ctl[WHIRL_SA_CTL_CHOSEN]);
             pos = static_cast<std::uint32_t>(s.ctl[WHIRL_SA_CTL_NPOS]);
-            if (next != sg.next || pos != sg.pos) e1_disagree_ += 1;
+            if (sg.next == qwen35::tok_dev) {
+                // v0252-e1p1c (lookahead): the host has not read the cycle before this one - it knows no next token and
+                // only an upper bound of the position (the context check, the mapped pages)
+                if (pos > sg.pos) e1_disagree_ += 1;
+                e1_ahead_ += 1;
+            } else if (next != sg.next || pos != sg.pos) {
+                e1_disagree_ += 1;
+            }
             e1_vsegs_ += 1;
         }
         commitSeq(sg.seq);  // the kept rows of the previous verify reach the state
@@ -738,6 +746,21 @@ void MockModel::specAccept(const SpecAccArgs& a_in, std::int32_t* host) {
             std::int32_t* ctl = all.data() + static_cast<std::size_t>(a.seq[k]) * W;
             ctl[WHIRL_SA_CTL_ACC0] = ctl[WHIRL_SA_CTL_NDDEV] + 5;
             spec_corrupted_ += 1;
+            break;
+        }
+    }
+    // v0252-e1p1c (MockConfig::spec_acc_short): one accepted draft fewer, every word of the shorter decision stored
+    if (mc_.spec_acc_short > 0 && (spec_accepts_.load() + 1) % mc_.spec_acc_short == 0) {
+        for (int k = 0; k < a.n; ++k) {
+            std::int32_t* ctl = all.data() + static_cast<std::size_t>(a.seq[k]) * W;
+            if (!a.dev[k] || res[k].acc < 1) continue;
+            SpecAccResult r = res[k];
+            r.acc -= 1;
+            r.acc0 = r.acc;
+            r.chosen = ctl[WHIRL_SA_CTL_ROWS + r.acc];
+            r.flags = WHIRL_SA_F_DEV;
+            spec_store(a, k, r, ctl);
+            spec_shorted_ += 1;
             break;
         }
     }

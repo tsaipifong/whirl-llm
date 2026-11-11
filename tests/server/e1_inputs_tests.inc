@@ -17,6 +17,7 @@
 //                       concurrent requests, n-gram cycles and a sampled request keep the host inputs on those cycles - same
 //                       text as the reference / as E1=0, disagree 0
 //   e1_inputs_env       WHIRL_E1 in the env table and docs/usage.md, read through config.settings (settings::e1), parseE1
+//                       (v0252-e1p1c: the values are 0|1|2; 2 = the lookahead, tests/server/e1_ahead_tests.inc)
 // SPDX-License-Identifier: Apache-2.0
 
 namespace e1test {
@@ -204,8 +205,8 @@ void testE1InputsEnv() {
     const std::string sm = slurp("/src/server/server_main.cpp");
     const std::string rs = slurp("/src/config/run_settings.h");
     CHECK(!rel.empty() && !doc.empty() && !sm.empty() && !rs.empty());
-    CHECK(rel.find("\"E1=0|1\"") != std::string::npos);
-    CHECK(doc.find("`WHIRL_E1=0\\|1`") != std::string::npos);
+    CHECK(rel.find("\"E1=0|1|2\"") != std::string::npos);  // v0252-e1p1c: 2 = the one-cycle lookahead (e1_ahead_env)
+    CHECK(doc.find("`WHIRL_E1=0\\|1\\|2`") != std::string::npos);
     // the one read point (config.settings) and the one parser
     CHECK(rs.find("envGet(\"E1\")") != std::string::npos);
     CHECK(sm.find("settings::e1()") != std::string::npos && sm.find("parseE1(") != std::string::npos);
@@ -213,12 +214,12 @@ void testE1InputsEnv() {
 #else
     CHECK(false);  // whirl-server-tests is built with WHIRL_SOURCE_DIR (cmake/server.cmake): the source checks must run
 #endif
-    const std::pair<const char*, std::uint32_t> good[] = {{"0", 0}, {"1", 1}, {" 1 ", 1}, {"\t0", 0}};
+    const std::pair<const char*, std::uint32_t> good[] = {{"0", 0}, {"1", 1}, {" 1 ", 1}, {"\t0", 0}, {"2", 2}};
     for (const auto& [s, v] : good) {
         const auto r = parseE1(s);
         CHECK(r.has_value() && *r == v);
     }
-    for (const char* s : {"", "2", "-1", "on", "true", "01", "1x", "yes"}) {
+    for (const char* s : {"", "3", "-1", "on", "true", "01", "1x", "yes"}) {
         if (parseE1(s).has_value()) std::printf("  parseE1(\"%s\") accepted\n", s);
         CHECK(!parseE1(s).has_value());
     }

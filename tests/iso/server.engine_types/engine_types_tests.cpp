@@ -88,6 +88,13 @@ void testStateStarts() {
     ISO_CHECK(sp->prof == nullptr);
     ISO_CHECK(sp->n_cycles == 0u && sp->prev_nd == 0u && sp->policy_cycles == 0u);
     ISO_CHECK(sp->vrows == s::max_small_batch && sp->vrows == 16u);
+    // v0252-e1p1c (E1 lookahead): no cycle in flight, no forced synchronous cycle, no read yet
+    ISO_CHECK(sp->e1_fly == nullptr && !sp->e1_sync && sp->e1_t_read == s::TimePoint{});
+    // WHIRL_E1: 0 off, 1 the synchronous device-input cycle (P1b), 2 the lookahead (P1c); nothing else
+    ISO_CHECK(s::parseE1("0") == std::optional<std::uint32_t>(0u) && s::parseE1("1") == std::optional<std::uint32_t>(1u));
+    ISO_CHECK(s::parseE1("2") == std::optional<std::uint32_t>(2u) && s::parseE1(" 2	") == std::optional<std::uint32_t>(2u));
+    ISO_CHECK(!s::parseE1("3").has_value() && !s::parseE1("").has_value() && !s::parseE1("02").has_value());
+    ISO_CHECK(s::EngineOptions{}.e1 == 0u);
 
     s::FloorState f;
     ISO_CHECK(f.epoch == s::TimePoint{} && f.log_t == s::TimePoint{});

@@ -8593,6 +8593,8 @@ void testTierBridgeRestore() {
 
 }  // namespace
 
+#include "e1_ahead_tests.inc"  // v0252-e1p1c (E1 one-cycle lookahead, WHIRL_E1=2); after the helpers it uses
+
 // arch024 S10 (M8): thread ownership. FakeLoop is a thread that owns an EngineThread the way runLoop does (enter at the
 // start, leave at the end) and runs the calls given to it.
 int g_owner_expected = 0;  // violations a test causes on purpose (main compares each test's count with it)
@@ -9869,6 +9871,7 @@ int main(int argc, char** argv) {
         {"spec_rules_d4", r12b::testRulesD4},
         {"spec_rules_d6", r12b::testRulesD6},
         {"spec_rules_d8", r12b::testRulesD8},
+        {"spec_rules_ahead", r12b::testRulesAhead},  // v0252-e1p1c
         {"spec_rules_d14", r12b::testRulesD14},
         {"spec_rules_d16", r12b::testRulesD16},  // arch025-lane1
         {"spec_rules_d17", r12b::testRulesD17},
@@ -9908,6 +9911,12 @@ int main(int argc, char** argv) {
         {"e1_inputs_sync", testE1InputsSync},  // v0252-e1p1b (E1 device inputs)
         {"e1_inputs_fallback", testE1InputsFallback},
         {"e1_inputs_env", testE1InputsEnv},
+        {"e1_ahead_equal", testE1AheadEqual},  // v0252-e1p1c (E1 one-cycle lookahead)
+        {"e1_ahead_end", testE1AheadEnd},
+        {"e1_ahead_order", testE1AheadOrder},
+        {"e1_ahead_drain", testE1AheadDrain},
+        {"e1_ahead_fallback", testE1AheadFallback},
+        {"e1_ahead_env", testE1AheadEnv},
         {"fr_tool_truncated", testFrToolTruncated},
         {"fr_nonstream_disconnect", testFrNonStreamDisconnect},
         {"fr_pool_prefill", testFrPoolPrefill},
