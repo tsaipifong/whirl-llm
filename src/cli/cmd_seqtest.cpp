@@ -109,7 +109,9 @@ int cmdSeqtest(const Args& a) {
         m.reset();
     }
     const q::PSeg segs[2] = {{0, pa, 0, 0, pa.size(), std::nullopt}, {1, pb, 0, 0, pb.size(), std::nullopt}};
-    const bool segmented = m.canSegment() && pa.size() + pb.size() <= m.max_batch;
+    // v0252-precfix: the server's join rule (each chunk longer than segJoinMin())
+    const bool segmented =
+        m.canSegment() && pa.size() + pb.size() <= m.max_batch && std::min(pa.size(), pb.size()) > m.segJoinMin();
     u32 next[2];
     if (segmented) {
         m.prefillSegs(segs, false);

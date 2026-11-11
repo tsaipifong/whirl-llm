@@ -84,7 +84,7 @@ bool Context::canSegment() const {
 }
 
 // Several sequences' prefill chunks as one forward (each chunk longer than
-// max_small_batch). Logits of every segment that ends its prompt land in
+// segJoinMin(): max_small_batch, max_verify_rows for a MoE model in precise; v0252-precfix). Logits of every segment that ends its prompt land in
 // logits row k; with mtp, also the MTP rows and mtp_h of each sequence.
 void Context::prefillSegs(std::span<const PSeg> segs, bool with_mtp) {
     if (segs.empty() || segs.size() > max_small_batch) throw ModelError("BadBatch");
@@ -93,7 +93,7 @@ void Context::prefillSegs(std::span<const PSeg> segs, bool with_mtp) {
     PRows rows[max_small_batch];
     for (std::size_t kk = 0; kk < segs.size(); ++kk) {
         const PSeg& sg = segs[kk];
-        if (sg.n <= max_small_batch) throw ModelError("BadBatch");
+        if (sg.n <= segJoinMin()) throw ModelError("BadBatch");
         if (sg.pos0 + sg.off + sg.n > max_ctx) throw ModelError("ContextTooLong");
         rows[kk] = {sg.seq, total, static_cast<u32>(sg.n), sg.pos0 + static_cast<u32>(sg.off)};
         total += static_cast<u32>(sg.n);

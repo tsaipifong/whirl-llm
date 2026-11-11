@@ -447,6 +447,10 @@ AddStep "srv_precise_cli" $true (GateCmd $SW "basic" "precise" ($ssdOff + @("--c
 AddStep "srv_mt_precise" $true (GateCmd $SW "mt_cache_precise" "" $ssdOff) $gateRule
 # the same for the MoE product model (REVIEW-022 F5: the precise cache-hit guarantee is documented for every model)
 AddStep "srv_mt_precise_moe" $true (GateCmd $MX "mt_cache_precise" "" $ssdOff) $gateRule
+# v0252-precfix (PLAN V1-85): the basic concurrency checks ("N concurrent requests == each alone", "same seed under load")
+# on the MoE product model in precise: a 17..32-row chunk joined into a segmented prefill forward changed its bits
+# (v0.2.0..v0.2.5.1; srv_precise_cli runs basic on Swift only)
+AddStep "srv_precise_moe" $true (GateCmd $MX "basic" "precise" $ssdOff) $gateRule
 AddStep "srv_fs_swift" $true (GateCmd $SW "fast_stream" "" $ssdOff) $gateRule
 AddStep "srv_fs_moe" $true (GateCmd $MX "fast_stream" "" $ssdOff) $gateRule
 # the cache suites run their own SSD dirs under --work (deleted after the step)

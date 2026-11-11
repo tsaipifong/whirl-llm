@@ -84,8 +84,7 @@ inline constexpr bool moepWide(std::uint32_t n, std::uint32_t K, std::uint32_t R
 // else max_small_batch (the server's join rule since v0.1.0, docs/guide/en/server.md). One rule for the server
 // (engine_prefill.cpp), the model (Context::prefillSegs), golden and seqtest: change it together with chooseMoe's pl.small.
 inline constexpr std::uint32_t moeSegJoinMin(bool prec_dec, std::uint32_t max_small_batch, std::uint32_t max_verify_rows) {
-    (void)prec_dec, (void)max_verify_rows;
-    return max_small_batch;  // STUB (test-first commit): the server's rule as of int0252; the fix commit returns the real bound
+    return prec_dec && max_verify_rows > max_small_batch ? max_verify_rows : max_small_batch;
 }
 // v0251-a7port: the plan's moep flags (numerics::Flags moep_gu / moep_dn = variant index + 1, 0 = off; moep_comb) ->
 // MoeFlags (index, -1 = off); qwen35::Context::moeBlock's assembly, pinned on the CPU (tests/ops/ops_moe_cases.inc)
