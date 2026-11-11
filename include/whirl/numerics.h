@@ -91,6 +91,8 @@ struct EnvValues {
     Raw attn_kgvar;
     // v0252-c3port (feat026-moedec): moe_fuse / gemvh_f32 (WHIRL_MOE_FUSE / WHIRL_GEMVH_F32)
     Raw moe_fuse, gemvh_f32;
+    // v0252-ws4r97b (PLAN V1-87 phase 2): attn_ws4r (WHIRL_ATTN_WS4R, the gfx1201 attn_ws4r variant; class B)
+    Raw attn_ws4r;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -98,7 +100,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 36;
+    static constexpr std::size_t n_fields = 37;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -258,6 +260,11 @@ struct ItemState {
 // variant per NP x KV path), 0 on the gfx1151 one (no attn_kg there); WHIRL_ATTN_KGVAR = "auto" or a whole decimal 0 / 1 /
 // 3 (parseKgVar) overrides it in every mode; any other value keeps the default and Plan::ignored carries one note. Still
 // in bitsKey (C-4, conservative: the default change re-keys the gfx1201 KV tiers once).
+// v0252-ws4r97b (PLAN V1-87 phase 2): attn_ws4r = kAttnWs4rAuto on every card (device::Profile::attn_ws4r_q8 / _f16 pick the
+// gfx1201 attn_ws4r variant per KV format; gfx1151 rows 0); WHIRL_ATTN_WS4R = "auto" or a whole decimal 0 / 1 / 2
+// (parseWs4r) overrides it in every mode, class B (bit-identical to attn_wsplit1 / 2, kt ws4r); any other value keeps auto
+// with one Plan::ignored note. In bitsKey like every flag (the new field re-keys the KV tiers of both cards once). Not in
+// the S0b-2 dump (the launch log pins the kernel).
 // v0252-c3port (feat026-moedec, gfx1201 precise decode): moe_fuse (WHIRL_MOE_FUSE: ops::chooseMoeFuse, the fused
 // routed + shared gate/up + SwiGLU launch) and gemvh_f32 (WHIRL_GEMVH_F32: ops::gemvhF32, gemvh on the f32 input):
 // bitwise switches, the loader's envFlag rule ("0" off, any other value on), class B (no +overrides label, never lossy);
@@ -297,6 +304,7 @@ struct ItemState {
     X(U, attn_seg, 0, "attn_seg")                                \
     X(B, attn_kg_on, true, "attn_kg_on")                         \
     X(U, attn_kg_var, 0, "")                                     \
+    X(U, attn_ws4r, 255, "")                                     \
     X(B, ffn_h16, false, "ffn_h16")                              \
     X(B, h16_dq, false, "h16_dq")                                \
     X(B, g8t, false, "g8t")                                      \
@@ -388,6 +396,11 @@ inline constexpr std::uint32_t kAttnKgVarAuto = 255;
 // v0252-c1acc: WHIRL_ATTN_KGVAR -> "auto" = kAttnKgVarAuto, a whole decimal 0 / 1 / 3 = that var; anything else
 // (2, 4, "", "x", "3x", "-1") = std::nullopt (invalid: the default stays and plan() notes it in Plan::ignored)
 std::optional<std::uint32_t> parseKgVar(std::string_view s);
+// v0252-ws4r97b (PLAN V1-87 phase 2): attn_ws4r "auto" (= ops::kAttnWs4rAuto): device::Profile::attn_ws4r_q8 / _f16 decide
+inline constexpr std::uint32_t kAttnWs4rAuto = 255;
+// v0252-ws4r97b: WHIRL_ATTN_WS4R -> "auto" = kAttnWs4rAuto, a whole decimal 0 / 1 / 2 = off / plain / b; anything else
+// (3, 255, "", "x", "2b", "-1") = std::nullopt (invalid: auto stays and plan() notes it in Plan::ignored)
+std::optional<std::uint32_t> parseWs4r(std::string_view s);
 // arch025-N2b-r2: the five flags every load decides (Model::load, before loadOrTune; before N2b loader.cpp:537-540 and
 // :730): fp8_prefill = the item fp8; moe_fp8 = WHIRL_MOE_FP8 (r.env) else the item moefp8; moe_mxw / moe_wide / moe_rbf =
 // WHIRL_MOE_MXW / _WIDE / _RBF else true / false / true. WHIRL_FP8 is not applied here (plan() applies it in loadOrTune, as

@@ -702,6 +702,7 @@ void testFastOnlyOverrides() {
         {"ATTN_KGVAR", 'B'},  // v0252-c1port: attn_kgv / attn_kgk, designed bit-identical to attn_kg (kt attn, golden)
         // v0252-c3port (feat026-moedec): fused precise MoE decode / gemvh on f32 input, bit-identical (kt moefuse, golden)
         {"MOE_FUSE", 'B'},   {"GEMVH_F32", 'B'},
+        {"ATTN_WS4R", 'B'},  // v0252-ws4r97b: gfx1201 attn_ws4r1 / 2[b], bit-identical to attn_wsplit1 / 2 (kt ws4r, golden)
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -1113,6 +1114,54 @@ static void testKgVarFlag() {
 // does not move). gemvh_f32 stays off everywhere (C3 screen: Swift -10 %). WHIRL_MOE_FUSE=0 / =1 still win both ways and
 // change only the moe_fuse flag; the default is not an override (no +overrides, never lossy). The R9700 MoE default rows
 // fail before c3bdef (default off).
+// v0252-ws4r97b (PLAN V1-87 phase 2): WHIRL_ATTN_WS4R is a load-time variable of class B (an EnvValues field: the gfx1201
+// attn_ws4r1 / attn_ws4r2 kernels are bit-identical to attn_wsplit1 / attn_wsplit2, kt ws4r). The flag attn_ws4r is
+// kAttnWs4rAuto (255) on every card, model and mode: device::Profile::attn_ws4r_q8 / _f16 decide (gfx1201 q8 -> b, f16 ->
+// plain; gfx1151 off). auto and a whole decimal 0 / 1 / 2 override it (0 = attn_wsplit, 1 = plain, 2 = b) and change
+// only that flag (no +overrides, never lossy); any other value keeps auto with exactly one Plan::ignored note. Fails
+// before phase 2 (the test-first stub parseWs4r accepts nothing).
+static void testWs4rFlag() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    const std::uint32_t A = nu::kAttnWs4rAuto;
+    NCHECK(A == 255, "kAttnWs4rAuto {}", A);
+    const std::pair<const char*, std::uint32_t> valid[] = {{"0", 0}, {"1", 1}, {"2", 2}, {"02", 2}, {"auto", A}};
+    const char* const invalid[] = {"3", "255", "", "x", "-1", "2b", "AUTO", " 1", "b"};
+    for (const auto& [v, want] : valid) NCHECK(nu::parseWs4r(v) == want, "parseWs4r('{}')", v);
+    for (const char* v : invalid) NCHECK(!nu::parseWs4r(v).has_value(), "parseWs4r('{}') must be invalid", v);
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const nu::Plan d = pl(t, mode, {});
+                NCHECK(d.flags.attn_ws4r == A, "attn_ws4r default {} {} {}: {} (want auto)", c.name, model, mode, d.flags.attn_ws4r);
+                NCHECK(!d.lossy_override && d.ignored.empty(), "attn_ws4r default {} {} {}: the default is not an override", c.name, model, mode);
+                for (const auto& [v, want] : valid) {
+                    const nu::Plan p = pl(t, mode, {{"ATTN_WS4R", v}});
+                    NCHECK(p.flags.attn_ws4r == want, "attn_ws4r {} {} {}: WHIRL_ATTN_WS4R='{}' -> {} (want {})", c.name, model, mode, v, p.flags.attn_ws4r,
+                           want);
+                    nu::Plan a = d;
+                    a.flags.attn_ws4r = want;
+                    NCHECK(a.bitsKey() == p.bitsKey() && nu::logLine(p) == nu::logLine(d) && p.overrides == d.overrides &&
+                               p.lossy_override == d.lossy_override && p.ignored.empty(),
+                           "attn_ws4r {} {} {}: WHIRL_ATTN_WS4R='{}' changes only the attn_ws4r flag", c.name, model, mode, v);
+                }
+                for (const char* v : invalid) {
+                    const nu::Plan p = pl(t, mode, {{"ATTN_WS4R", v}});
+                    NCHECK(p.flags.attn_ws4r == A, "attn_ws4r {} {} {}: invalid WHIRL_ATTN_WS4R='{}' -> {} (want auto)", c.name, model, mode, v,
+                           p.flags.attn_ws4r);
+                    std::size_t notes = 0;
+                    for (const std::string& n : p.ignored) notes += n.rfind(std::string("WHIRL_ATTN_WS4R=") + v + " ignored", 0) == 0;
+                    NCHECK(notes == 1 && p.ignored.size() == 1 && p.bitsKey() == d.bitsKey() && p.overrides == d.overrides,
+                           "attn_ws4r {} {} {}: invalid WHIRL_ATTN_WS4R='{}': one Plan::ignored note, nothing else changes", c.name, model, mode, v);
+                }
+            }
+}
+
 static void testMoedecDefault() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -1161,6 +1210,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testMoepCombMode();  // v0251-a7pol B26-41 (the refusal rows fail on cfce7ea)
     testRfuseDefault();  // v0251-a11port (fails before the port: the plan has no gfx1151 default)
     testKgVarFlag();  // v0252-c1port; v0252-c1acc auto default + invalid-value note (fails before c1acc)
+    testWs4rFlag();  // v0252-ws4r97b (fails before phase 2: the stub parseWs4r accepts nothing)
     testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port); v0252-c3bdef (the R9700 MoE default rows fail before c3bdef)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)

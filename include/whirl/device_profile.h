@@ -53,6 +53,12 @@ struct Profile {
     std::uint8_t fq_grp_dense, fq_grp_moe;
     // q4 KV decode through attn_dq4: the smallest split count with the same key partition (FAST-8S-1)
     bool attn_dq4_dynamic_splits;
+    // v0252-ws4r97b (PLAN V1-87 phase 2): the 4-wave pipelined decode / verify attention attn_ws4r1 / attn_ws4r2
+    // (kernels/attn_ws4r.hip, gfx1201 object only) in place of attn_wsplit1 / attn_wsplit2 after ops::chooseAttnDecode's
+    // wsplit choice (same arguments, groups, grid, 128 threads and partial bits: kt ws4r), per KV format: q8 = q8 / q8h
+    // (the _q8 kernels), f16 = f16. 0 = attn_wsplit (off), 1 = plain (LDS-scoped fence + s_barrier), 2 = b (inline-asm
+    // s_wait_dscnt 0 + s_barrier_signal / wait). WHIRL_ATTN_WS4R=0 / 1 / 2 overrides both (numerics flag attn_ws4r).
+    std::uint8_t attn_ws4r_q8, attn_ws4r_f16;
     // ---- tuning (src/model/tune.cpp)
     bool tune_fast;                 // each kernel timed once per shape, slow candidates rejected early
     // tune cache file name suffix (table revision). A change to what the tuner times on this family (candidates, slots,
@@ -105,6 +111,11 @@ inline constexpr Profile k_profile_gfx1201{
     // group here too, so the split rule gives the 256 grid's partitions: bitwise the same output). Measured R9700 Ornith
     // fast chat +9.68 % (v0252-n2 Part S, KB v0252-n2:s-speed-r9700-ornith)
     .attn_dq4_dynamic_splits = true,
+    // v0252-ws4r97b: the R9700 kt verdict (q7 9525u, scratch/v0252_ws4r97/kt/20261111-1236/results.txt, 4 ABBA rounds in
+    // one object, every cell bitwise): q8 B/A 0.716 (64k) / 0.715 (128k) one row, 0.63 at 4 rows -> b; f16 0.97 one row,
+    // 0.82 at 4 rows -> plain (b 0.974 / 0.972 at 64k / 128k vs plain 0.969 / 0.965)
+    .attn_ws4r_q8 = 2,
+    .attn_ws4r_f16 = 1,
     .tune_fast = false,
     .tune_cache_suffix = "",
     .tune_time_hint = "2 minutes (a few seconds for MXFP4 models)",
@@ -143,6 +154,8 @@ inline constexpr Profile k_profile_gfx1151{
     .fq_grp_dense = 2,
     .fq_grp_moe = 1,
     .attn_dq4_dynamic_splits = true,
+    .attn_ws4r_q8 = 0,  // v0252-ws4r97b: the gfx1151 object has no attn_ws4r (attn_ws4 / attn_ws4g there)
+    .attn_ws4r_f16 = 0,
     .tune_fast = true,
     .tune_cache_suffix = "-gfx1151r3",  // r3: gemmfq in the dequant family (v0251-a3key; tests/model testTuneCacheKey)
     .tune_time_hint = "8 minutes on the Radeon 8060S (less for MXFP4 models)",

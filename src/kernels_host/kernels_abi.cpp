@@ -395,6 +395,14 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
     k.attn_ws4 = L.opt(std::string("attn_ws4") + kvs);  // gfx1151 only (no q8v variant)
     if (kv == KvFormat::f16 || kv == KvFormat::q8 || kv == KvFormat::q8h)  // gfx1151 only (f16 / int8 K/V)
         for (int cg = 1; cg <= 3; ++cg) k.attn_ws4g[cg - 1] = L.opt(std::string("attn_ws4g") + std::to_string(cg) + (kv == KvFormat::f16 ? "" : "_q8"));
+    // v0252-ws4r97b: gfx1201 attn_ws4r (f16 and the int8 K/V layout of q8 / q8h only; no q8v / q4 variant)
+    if (kv == KvFormat::f16 || kv == KvFormat::q8 || kv == KvFormat::q8h) {
+        const std::string s = kv == KvFormat::f16 ? "" : "_q8";
+        k.attn_ws4r1[0] = L.opt("attn_ws4r1" + s);
+        k.attn_ws4r1[1] = L.opt("attn_ws4r1b" + s);
+        k.attn_ws4r2[0] = L.opt("attn_ws4r2" + s);
+        k.attn_ws4r2[1] = L.opt("attn_ws4r2b" + s);
+    }
     {
         // q8 and q8h share the int8 K/V layout, so both use the _q8 variants.
         const std::string s = kvs;

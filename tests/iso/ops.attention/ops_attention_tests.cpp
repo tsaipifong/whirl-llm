@@ -9,6 +9,7 @@
 int main(int argc, char** argv) {
     return iso::run("ops.attention",
                     {{"attn_decode", testAttnDecode},
+                     {"attn_decode_ws4r", testAttnDecodeWs4r},  // v0252-ws4r97b
                      {"dq4_partition", testDq4Partition},  // v0252-n2
                      {"attn_prefill", testAttnPrefill},
                      {"attn_kgvar", testAttnKgVariant},  // v0252-c1port
