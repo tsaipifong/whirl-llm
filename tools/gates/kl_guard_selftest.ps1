@@ -24,10 +24,11 @@ $guard = Join-Path $repo "tools\klgate\kl_guard.ps1"
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("whirl-klguard-selftest-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 $bin = Join-Path $tmp "bin"
 New-Item -ItemType Directory -Force $bin | Out-Null
-foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test", "whirl-tests", "whirl-model-tests", "whirl-cache-tests",
-               "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests",
-               "whirl-pins", "whirl-startup-replay", "whirl-sampling-tests",
-               "whirl-bench-out-tests", "whirl-kt-bench-tests", "whirl-stage-bench-tests", "whirl-kt-seed-tests") { [System.IO.File]::WriteAllText((Join-Path $bin "$n.exe"), "fake $n") }
+# v0252-b4fix (PLAN V1-98): the fake build is release_gate.ps1's own registered exe list (-ListExes), never a hand copy
+# (ktrng's kt-seed and moedf16b's kt-f16tie each broke this selftest through one; fake_build_lists_check.ps1 guards it)
+$gateExes = @(& (Get-Process -Id $PID).Path -NoProfile -File $gate -ListExes 2>&1 | ForEach-Object { "$_" })
+if ($LASTEXITCODE -ne 0 -or $gateExes.Count -lt 5 -or $gateExes -notcontains "whirl-pins") { Write-Host "kl guard selftest: release_gate.ps1 -ListExes failed (exit $LASTEXITCODE): $($gateExes -join ' | ')"; exit 2 }
+foreach ($n in $gateExes) { [System.IO.File]::WriteAllText((Join-Path $bin "$n.exe"), "fake $n") }
 $sw = Join-Path $tmp "Swift-fake.gguf"; [System.IO.File]::WriteAllText($sw, "swift")
 $mx = Join-Path $tmp "Ornith-fake.gguf"; [System.IO.File]::WriteAllText($mx, "moe")
 $sha = (Get-FileHash -Algorithm SHA256 (Join-Path $bin "whirl.exe")).Hash.ToLower()

@@ -2369,7 +2369,13 @@ void testPrefillSchedule() {
     CHECK_EQ(prefillExecFor(16384, 4096), std::size_t{3072});  // gfx1201: unchanged
     CHECK_EQ(prefillExecFor(prefillExecDefault(whirl::device::k_profile_gfx1201, false), 4096), std::size_t{2048});
     CHECK_EQ(prefillExecFor(prefillExecDefault(whirl::device::k_profile_gfx1201, false), 2048), std::size_t{1024});
-    CHECK_EQ(prefillExecFor(prefillExecDefault(whirl::device::k_profile_gfx1201, true), 4096), std::size_t{2048});  // gfx1201 MoE: unchanged
+    // v0252-b4fix (PLAN V1-98): the two lines above are the non-fill form (gfx1201 before v0252-ch4k). Since ch4k the
+    // gfx1201 profile fills (prefill_fill_batch) and MoE asks 4096 rows: the product's forward (sched::prefillExec ==
+    // prefillExecFor(..., profile.prefill_fill_batch)) is 4096 at batch 4096; dense keeps 2048 (at batch 2048 too, fill).
+    // This line said 2048 "unchanged" without the fill flag and failed on 18cd8e1 (got 3072).
+    CHECK_EQ(prefillExecFor(prefillExecDefault(whirl::device::k_profile_gfx1201, true), 4096, whirl::device::k_profile_gfx1201.prefill_fill_batch), std::size_t{4096});  // gfx1201 MoE (ch4k)
+    CHECK_EQ(prefillExecFor(prefillExecDefault(whirl::device::k_profile_gfx1201, false), 4096, whirl::device::k_profile_gfx1201.prefill_fill_batch), std::size_t{2048});  // gfx1201 dense
+    CHECK_EQ(prefillExecFor(prefillExecDefault(whirl::device::k_profile_gfx1201, false), 2048, whirl::device::k_profile_gfx1201.prefill_fill_batch), std::size_t{2048});
     // SRV-PP-DENSE: gfx1151 dense keeps 2-chunk forwards (4096 lost 13% at 128k), MoE fills the batch
     CHECK_EQ(prefillExecDefault(whirl::device::k_profile_gfx1151, false), std::size_t{2048});
     CHECK_EQ(prefillExecDefault(whirl::device::k_profile_gfx1151, true), std::size_t{4096});

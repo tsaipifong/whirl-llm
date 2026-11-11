@@ -92,6 +92,7 @@ param(
     [string]$Tag = "",
     [switch]$InjectFail,
     [switch]$List,
+    [switch]$ListExes,           # v0252-b4fix (PLAN V1-98): print the registered exe names ($exe: the setup check's list), one per line, exit 0
     [string]$LaunchLog = "",
     [string[]]$Module = @(),
     [string]$ModulesFile = "",
@@ -145,6 +146,12 @@ foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test"
 # rel025-c5bench: the measure-tools CPU unit tests (cmake/server.cmake: whirl-bench-out-tests, whirl-kt-bench-tests,
 # whirl-stage-bench-tests). Registered, so a build without them is a setup error, as for every exe above.
 foreach ($n in "whirl-bench-out-tests", "whirl-kt-bench-tests", "whirl-stage-bench-tests", "whirl-kt-seed-tests", "whirl-kt-f16tie-tests") { $exe[$n] = Join-Path $Build "$n.exe" }
+# v0252-b4fix (PLAN V1-98): -ListExes prints the names of $exe (every exe the setup check below requires: "release gate
+# setup: missing ...") and exits 0, before any step, model or build check. The selftests that run this gate on a fake
+# build (gate_flow_selftest.ps1, kl_guard_selftest.ps1, module_gate_test.ps1) make their fake exes from this list, so an
+# exe registered here is in their fake builds with no second edit (ktrng's kt-seed and moedf16b's kt-f16tie broke all
+# three through hand-copied lists; tools/gates/fake_build_lists_check.ps1 now checks that no hand copy comes back).
+if ($ListExes) { $exe.Keys | Sort-Object | ForEach-Object { Write-Output $_ }; exit 0 }
 
 # ---------------------------------------------------------------------------------------------------
 # step table: name, gpu, command (array: exe + args), rule (scriptblock over the output lines + exit code)
