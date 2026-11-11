@@ -88,12 +88,12 @@ std::optional<bool> requiredKernelAbsentOk(const std::string& arch, const std::s
         {"gfx1201", {"moe gemm_moegu", "moemx gemm_moegu", "moef gemm_moegu", "moef moe_gu_f_f32", "moef moe_gu_f_f16", "ws4 attn_ws4",
                      "ws4g attn_ws4g"}},
         // gfx1151 (full 8060S run, INT-RC4F): no fp8 path, no gfx1201 precise MoE prefill GEMMs, no precise
-        // MoE expert kernel for f32 / f16 experts; no DeltaNet replay kernels and no gdn_step_norm_v0 (the
+        // MoE expert kernel for f32 / f16 experts; no gfx1201 4-wave attention attn_ws4r* (v0252-ws4r97); no DeltaNet replay kernels and no gdn_step_norm_v0 (the
         // gfx1151 fused_decode.hip has neither: verify takes the snapshot path); no moe_mxfp4.hip (MXFP4
         // expert decode with int8-dot / fp8 prefill experts: the WMMA int8 / fp8 family gfx1151 lacks)
         {"gfx1151", {"fp8 ", "moe gemmr_moe", "moemx gemmr_moe", "moef gemmr_moe", "moef moe_gu_f_f32", "moef moe_gu_f_f16",
                      "gdn gdn_conv_l2 replay", "gdn gdn_step_norm replay", "gdn gdn_step_norm == gdn_step_norm_v0",
-                     "moemx moe_gu_mxfp4w", "moemx gemm8_moe"}},
+                     "moemx moe_gu_mxfp4w", "moemx gemm8_moe", "ws4r attn_ws4r"}},
     };
     for (const auto& [a, keys] : lists) {
         if (arch.rfind(a, 0) != 0) continue;
