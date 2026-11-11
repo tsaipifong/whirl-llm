@@ -260,6 +260,7 @@ void testSpecAccept() {
             const bool stored = ctl[WHIRL_SA_CTL_ACC] == r.acc && ctl[WHIRL_SA_CTL_ACC0] == r.acc0 && ctl[WHIRL_SA_CTL_CHOSEN] == r.chosen &&
                                 ctl[WHIRL_SA_CTL_NDDEV] == r.nd_dev && ctl[WHIRL_SA_CTL_FLAGS] == r.flags &&
                                 ctl[WHIRL_SA_CTL_NPOS] == a.pos[k] + r.acc + 1 && ctl[WHIRL_SA_CTL_NROW] == a.row0[k] + r.acc &&
+                                ctl[WHIRL_SA_CTL_NPEND] == r.acc + 1 && r.pos == a.pos[k] &&  // v0252-e1p1b
                                 std::memcmp(low, ctl, sizeof(low)) == 0;  // words < 50 untouched
             if (!stored) bad += 1;
             res[k] = r;
@@ -291,6 +292,52 @@ void testSpecAccept() {
     CHECK(n_eos > 100);
     CHECK(n_budget > 100);
     CHECK(n_full > 100);
+    // v0252-e1p1b (E1): a.pos[k] < 0 takes the position from the NPOS word of the sequence's last accept (read before
+    // spec_store writes the new one), NPEND = acc + 1, and a host-decided sequence (spec_copy_one) resolves it the same way
+    {
+        SpecAccArgs a{};
+        a.n = 2;
+        a.n_vocab = 1000;
+        a.stop0 = 998;
+        a.stop1 = 999;
+        std::vector<std::int32_t> cc(2 * 64, 0);
+        for (int k = 0; k < 2; ++k) {
+            a.seq[k] = k;
+            a.nd[k] = 3;
+            a.dev[k] = k == 0 ? 1 : 0;
+            a.eos[k] = 1;
+            a.budget[k] = 100;
+            a.pos[k] = -1;
+            a.row0[k] = 4 * k;
+        }
+        std::int32_t* c0 = cc.data();
+        std::int32_t* c1 = cc.data() + 64;
+        for (int r = 0; r < 3; ++r) c0[16 + r] = 100 + r;
+        c0[0] = 100;
+        c0[1] = 101;
+        c0[2] = 7;  // drafts 0 and 1 accepted, the trunk's token 7 after them
+        c0[48] = 3;
+        c0[WHIRL_SA_CTL_NPOS] = 5000;
+        c1[0] = 42;
+        c1[WHIRL_SA_CTL_NPOS] = 6000;
+        const SpecAccResult r0 = spec_accept_one(a, 0, c0);
+        const SpecAccResult r1 = spec_copy_one(a, 1, c1);
+        CHECK(r0.pos == 5000 && r0.acc == 2 && r0.chosen == 7);
+        CHECK(r1.pos == 6000 && r1.acc == 0 && r1.chosen == 42 && r1.flags == 0);
+        spec_store(a, 0, r0, c0);
+        spec_store(a, 1, r1, c1);
+        CHECK(c0[WHIRL_SA_CTL_NPOS] == 5003 && c0[WHIRL_SA_CTL_NPEND] == 3 && c1[WHIRL_SA_CTL_NPOS] == 6001 && c1[WHIRL_SA_CTL_NPEND] == 1);
+        const SpecAccResult res2[2] = {r0, r1};
+        SpecNextTab t{};
+        spec_next_rows(a, cc.data(), res2, &t);
+        CHECK(t.n_mtp == 4 && t.mtp_pos[0] == 5001 && t.mtp_pos[2] == 5003 && t.ver_pos[0] == 5003 && t.mtp_pos[3] == 6001 &&
+              t.ver_pos[1] == 6001 && t.ver_tok[0] == 7 && t.ver_tok[1] == 42);
+        // by value (a.pos >= 0) the NPOS word is not read
+        a.pos[0] = 70;
+        c0[WHIRL_SA_CTL_NPOS] = -9;
+        CHECK(spec_accept_one(a, 0, c0).pos == 70);
+    }
+    static_assert(WHIRL_SA_CTL_NPEND == 57 && WHIRL_SA_CTL_NPEND < WHIRL_SA_CTL_WORDS);
     // the kernel argument the launch copies: no padding, the expected size
     static_assert(sizeof(SpecAccArgs) == (4 + 9 * 16 + 16 * 15) * 4);
     static_assert(std::has_unique_object_representations_v<SpecAccArgs>);

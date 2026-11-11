@@ -32,7 +32,7 @@ int main() {
     // the names of the fams[] table in kernel_test_main.cpp
     const char* fams[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "moefuse", "misc", "attnbench",
                           "gemvh", "gemvhbench", "gemvhv", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk", "attnkgl",
-                          "specacc", "specaccz"};  // v0252-e1p1
+                          "specacc", "specaccz", "e1in"};  // v0252-e1p1, v0252-e1p1b
     std::set<std::uint64_t> seeds;
     for (const char* f : fams) seeds.insert(kt::familySeed(f));
     check("every family has a distinct seed", seeds.size() == sizeof(fams) / sizeof(fams[0]));

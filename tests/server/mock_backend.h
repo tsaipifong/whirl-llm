@@ -99,6 +99,9 @@ struct MockConfig {
     // feat026-acc-r1: every Nth specAccept (0 = never) writes an out-of-range accept count (nd + 5) for its first
     // device-decided sequence, like a broken device result: modes 2/3 must fall back to the host, mode 4 must report it
     std::uint32_t spec_acc_corrupt = 0;
+    // v0252-e1p1b (E1): the mock has the E1 device-input path (ServerModel::e1InputsOk, with replay and the accept kernel);
+    // false = a code object without set_rows_dp / rmsnorm_q8_rows_dv
+    bool e1_inputs = true;
 };
 
 class MockModel final : public server::ServerModel {
@@ -224,7 +227,25 @@ public:
     std::uint64_t readCtlCalls() const { return readctl_calls_.load(); }
     std::uint64_t readCtlPinnedCalls() const { return readctl_pinned_calls_.load(); }
 
+    // ---- v0252-e1p1b (E1 next-cycle inputs on the device; WHIRL_E1). The mock reads a device input the way the model's
+    // kernels do: VSeg::dev -> row 0 = the CHOSEN word, position = the NPOS word (sg.next / sg.pos are only compared with
+    // them: a host copy that differs counts in disagree - in the synchronous P1b cycle they must agree); MSeg::e1_rows -> step
+    // 0's rows = the last verify's argmax words at pend_pos + j, the chain continues from row ACC (pend must be empty);
+    // setPending(s, qwen35::npend_dev) -> the replay count is the NPEND word; SpecAccArgs::pos < 0 -> the NPOS word.
+    bool e1InputsOk() const override { return mc_.e1_inputs && mc_.replay && mc_.spec_acc_kernel; }
+    struct E1Counts {
+        std::uint64_t verify_segs = 0;   // verify segments with dev
+        std::uint64_t mtp_segs = 0;      // MTP step-0 segments with e1_rows
+        std::uint64_t padded_rows = 0;   // step-0 rows past the accepted count (draft-area rows of a padded step 0)
+        std::uint64_t npend_dev = 0;     // replays whose count came from the NPEND word
+        std::uint64_t pos_dev = 0;       // accept sequences whose position came from the NPOS word
+        std::uint64_t disagree = 0;      // a host copy (next, pos, pend) that differs from the control words
+    };
+    E1Counts e1Counts() const;
+    std::uint64_t verifyCalls() const { return verify_calls_.load(); }
+
 private:
+    std::atomic<std::uint64_t> e1_vsegs_{0}, e1_msegs_{0}, e1_padded_{0}, e1_npend_{0}, e1_pos_{0}, e1_disagree_{0}, verify_calls_{0};
     SpecNextTab spec_tab_{};  // the next-cycle rows of the last specAccept (engine thread)
     std::atomic<std::uint64_t> spec_accepts_{0}, spec_corrupted_{0}, readctl_calls_{0}, readctl_pinned_calls_{0};
     void prefillRows(std::size_t n);

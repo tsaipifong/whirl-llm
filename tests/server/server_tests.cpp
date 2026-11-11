@@ -56,6 +56,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <regex>  // v0252-e1p1b-fix: spec_acc_tests.inc reads the spec-acc stats line fields by their labels
 #include <set>
 #include <sstream>
 #include <string>
@@ -4663,6 +4664,8 @@ void testSampling() {
 
 // v0252-e1p1 (PLAN V1-93 P1a): WHIRL_SPEC_ACC, the device accept decision (port of feat026-acc / feat026-acc-r1)
 #include "spec_acc_tests.inc"
+// v0252-e1p1b (PLAN V1-93 P1b): WHIRL_E1, the next cycle's inputs on the device (synchronous cycle)
+#include "e1_inputs_tests.inc"
 
 // stop strings and end-of-turn
 void testStopAndEos() {
@@ -9902,6 +9905,9 @@ int main(int argc, char** argv) {
         {"spec_acc_reads", testSpecAccReads},
         {"spec_acc_r1_counters", testSpecAccR1Counters},
         {"spec_acc_r1_env", testSpecAccR1Env},
+        {"e1_inputs_sync", testE1InputsSync},  // v0252-e1p1b (E1 device inputs)
+        {"e1_inputs_fallback", testE1InputsFallback},
+        {"e1_inputs_env", testE1InputsEnv},
         {"fr_tool_truncated", testFrToolTruncated},
         {"fr_nonstream_disconnect", testFrNonStreamDisconnect},
         {"fr_pool_prefill", testFrPoolPrefill},

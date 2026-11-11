@@ -49,7 +49,7 @@ std::string envOr(const char* name) {
 
 int usage() {
     std::printf(
-        "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,moefuse,misc,dflash,gemvh,gemvhv,ws4,ws4g,vision,attnkgl,specacc,specaccz] [--quick] [-v]\n"
+        "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,moefuse,misc,dflash,gemvh,gemvhv,ws4,ws4g,vision,attnkgl,specacc,specaccz,e1in] [--quick] [-v]\n"
         "  specaccz (gpu-zc: the kernel writes pinned host memory through the host pointer) runs only when named\n"
         "                         [--q4 GGUF] [--mx GGUF] [--moe GGUF] [--moemx GGUF]\n"
         "  --require-all  a kernel missing from the code object fails unless the arch lacks it by design\n"
@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
     }
     const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "moefuse", "misc", "attnbench",
                                "gemvh", "gemvhbench", "gemvhv", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk", "attnkgl",
-                               "specacc", "specaccz"};  // = fams below
+                               "specacc", "specaccz", "e1in"};  // = fams below
     const bool bench = !bo.families.empty();
     if ((!bo.ggemv_nt.empty() || !bo.ggemv_v.empty()) && bo.families.count("ggemv") == 0) {
         std::printf("whirl-kernel-test: --bench-nt / --bench-v need --bench ggemv\n");
@@ -279,7 +279,8 @@ int main(int argc, char** argv) {
                         {"ws4g", kt::testAttnWs4g}, {"ws4gbench", kt::benchAttnWs4g},
                         {"vision", kt::testVision}, {"gemvk", kt::testGemvk},  // gemvk: v0251-a6port
                         {"attnkgl", kt::testAttnKgLong},  // attnkgl: v0252-c1acc (on request)
-                        {"specacc", kt::testSpecAcc}, {"specaccz", kt::testSpecAccZc}};  // v0252-e1p1 (specaccz on request)
+                        {"specacc", kt::testSpecAcc}, {"specaccz", kt::testSpecAccZc},  // v0252-e1p1 (specaccz on request)
+                        {"e1in", kt::testE1Inputs}};  // v0252-e1p1b (E1 device inputs, test_e1_inputs.cpp)
     if (bench) {
         const auto t0 = std::chrono::steady_clock::now();
         try {

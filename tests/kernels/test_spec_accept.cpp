@@ -52,9 +52,8 @@ Want reference(const SpecAccArgs& a, const std::vector<int>& ctl_in, int areas) 
     w.ctl = ctl_in;
     for (int k = 0; k < a.n; ++k) {
         int* cw = w.ctl.data() + a.seq[k] * kW;
-        SpecAccResult r{};
-        if (a.dev[k]) r = spec_accept_one(a, k, cw);
-        else r.chosen = cw[WHIRL_SA_CTL_ROWS];
+        // v0252-e1p1b: a host-decided sequence through spec_copy_one (its position is resolved like a decided one's)
+        const SpecAccResult r = a.dev[k] ? spec_accept_one(a, k, cw) : spec_copy_one(a, k, cw);
         spec_store(a, k, r, cw);
         w.res[k] = r;
     }
