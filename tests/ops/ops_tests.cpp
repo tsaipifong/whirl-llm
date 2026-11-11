@@ -233,6 +233,7 @@ int main() {
     testOpsGemmFq();  // v0251-a3port
     testGemvhF32();   // v0252-c3port (fails before the port: gemvhF32 is a stub)
     testAttnDecode();
+    testAttnDecodeWs4r();  // v0252-ws4r97b (fails before phase 2: stub profile rows 0, chooseAttnDecode never swaps)
     testDq4Partition();  // v0252-n2 (feat027-dq4r9700 764af36)
     testAttnPrefill();
     testAttnKgVariant();  // v0252-c1port (fails before the port: the stub has no variant, chooseAttnPrefill never asks)

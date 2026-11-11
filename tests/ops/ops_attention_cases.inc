@@ -150,6 +150,159 @@ void testAttnDecode() {
     CHECK(ops::awPer(1, 64) == 64 && ops::awPer(4096, 64) == 64 && ops::awPer(4097, 64) == 128);
 }
 
+// v0252-ws4r97b (PLAN V1-87 phase 2): the gfx1201 4-wave pipelined decode / verify attention attn_ws4r1 / attn_ws4r2
+// (kernels/attn_ws4r.hip; kt ws4r: bitwise == attn_wsplit1 / attn_wsplit2 for any grouping, R9700 q7 9525u 13:32) takes
+// the place of attn_wsplit1 / attn_wsplit2 AFTER the wsplit choice: same kind, groups, grid, 128 threads, split count and
+// combine - only the kernel changes. Which variant per KV format is a device-profile row (kt verdict q8=KEEP-b f16=KEEP-plain:
+// gfx1201 q8 / q8h -> 2 "b", f16 -> 1 "plain"; gfx1151 0 = off, its object has none); WHIRL_ATTN_WS4R (flag attn_ws4r:
+// auto / 0 / 1 / 2) overrides both rows. Fails before phase 2 (the stub profile rows are 0 and chooseAttnDecode never
+// swaps).
+kn::KernelTable ws4rTable(kn::KernelTable k, bool q8) {
+    const std::string s = q8 ? "_q8" : "";
+    k.attn_wsplit1 = tag("attn_wsplit1" + s);
+    k.attn_wsplit2 = tag("attn_wsplit2" + s);
+    k.attn_ws4r1[0] = tag("attn_ws4r1" + s);
+    k.attn_ws4r1[1] = tag("attn_ws4r1b" + s);
+    k.attn_ws4r2[0] = tag("attn_ws4r2" + s);
+    k.attn_ws4r2[1] = tag("attn_ws4r2b" + s);
+    return k;
+}
+// everything but the kernel is the plan without the swap
+bool samePlanButKernel(const ops::AttnDecodePlan& a, const ops::AttnDecodePlan& b) {
+    bool same = a.kind == b.kind && a.grid.x == b.grid.x && a.grid.y == b.grid.y && a.grid.z == b.grid.z && a.block.x == b.block.x &&
+                a.block.y == b.block.y && a.n_split == b.n_split && a.combine_q8 == b.combine_q8 && a.combine_grid.x == b.combine_grid.x &&
+                a.combine_grid.y == b.combine_grid.y && a.combine_block.x == b.combine_block.x;
+    for (std::uint32_t g = 0; g < a.grid.z && g < static_cast<std::uint32_t>(kn::kMaxVerifyRows); ++g)
+        same = same && a.groups.first[g] == b.groups.first[g] && a.groups.count[g] == b.groups.count[g];
+    return same;
+}
+
+void testAttnDecodeWs4r() {
+    namespace dv = whirl::device;
+    const auto& p97 = dv::k_profile_gfx1201;
+    const auto& p8s = dv::k_profile_gfx1151;
+    // (0) the profile rows (kt verdict): gfx1201 q8 / q8h -> b, f16 -> plain; gfx1151 off
+    CHECK(p97.attn_ws4r_q8 == 2 && p97.attn_ws4r_f16 == 1);
+    CHECK(p8s.attn_ws4r_q8 == 0 && p8s.attn_ws4r_f16 == 0);
+    CHECK(ops::kAttnWs4rAuto == 255);
+    // (1) attnWs4rFor: auto -> the profile row; 1 plain, 2 b, anything else none; CG from `wide`
+    {
+        const kn::KernelTable k = ws4rTable(attnTable(false, false, true, true), true);
+        CHECK(nameOf(ops::attnWs4rFor(ops::kAttnWs4rAuto, 2, false, k)) == "attn_ws4r1b_q8");
+        CHECK(nameOf(ops::attnWs4rFor(ops::kAttnWs4rAuto, 1, true, k)) == "attn_ws4r2_q8");
+        CHECK(nameOf(ops::attnWs4rFor(ops::kAttnWs4rAuto, 0, false, k)) == "null");
+        CHECK(nameOf(ops::attnWs4rFor(1, 0, false, k)) == "attn_ws4r1_q8" && nameOf(ops::attnWs4rFor(2, 0, true, k)) == "attn_ws4r2b_q8");
+        CHECK(nameOf(ops::attnWs4rFor(0, 2, false, k)) == "null" && nameOf(ops::attnWs4rFor(0, 1, true, k)) == "null");
+        for (const std::uint32_t v : {3u, 4u, 254u, 256u}) CHECK(nameOf(ops::attnWs4rFor(v, 2, false, k)) == "null");
+        // a table without the kernels (the gfx1151 object, a gfx1201 object before phase 1): none
+        const kn::KernelTable k0 = attnTable(false, false, true, true);
+        CHECK(nameOf(ops::attnWs4rFor(2, 2, false, k0)) == "null" && nameOf(ops::attnWs4rFor(1, 1, true, k0)) == "null");
+    }
+    ops::AttnDecodeProblem p;
+    p.n = 1;
+    p.head_dim = 256;
+    p.n_head = 24;
+    p.n_head_kv = 4;  // Swift: GQA group 6
+    p.max_ctx = 131072;
+    p.o_on_gemv = true;
+    const std::int32_t pos[4] = {70000, 70001, 70002, 70003}, base[4] = {0, 0, 0, 0};
+    auto rows = [&](ops::AttnDecodeProblem q, std::uint32_t n) {
+        q.n = n;
+        q.rows_known = n > 1;
+        q.row_pos = n > 1 ? std::span<const std::int32_t>(pos, n) : std::span<const std::int32_t>{};
+        q.row_base = n > 1 ? std::span<const std::int32_t>(base, n) : std::span<const std::int32_t>{};
+        return q;
+    };
+    ops::AttnDecodeFlags fa;  // default: auto
+    ops::AttnDecodeFlags f0 = fa, f1 = fa, f2 = fa;
+    f0.attn_ws4r = 0;
+    f1.attn_ws4r = 1;
+    f2.attn_ws4r = 2;
+    CHECK(fa.attn_ws4r == ops::kAttnWs4rAuto);
+    // (2) Swift balance (q8h KV) on the R9700: decode row -> attn_ws4r1b_q8, a 4-row MTP verify (attn_wsplit2 group of 4) ->
+    // attn_ws4r2b_q8; the rest of the plan is the attn_wsplit plan (WHIRL_ATTN_WS4R=0)
+    const kn::KernelTable kq = ws4rTable(attnTable(false, false, true, true), true);
+    {
+        ops::AttnDecodeProblem q = rows(p, 1);
+        q.kv_q8 = true;
+        const auto a = ops::chooseAttnDecode(q, fa, kq, kq.caps, p97), o = ops::chooseAttnDecode(q, f0, kq, kq.caps, p97);
+        CHECK(nameOf(a.f) == "attn_ws4r1b_q8" && nameOf(o.f) == "attn_wsplit1_q8");
+        CHECK(a.kind == ops::AttnDecodeKind::wsplit && a.block.x == 128 && a.grid.x == 4 && a.grid.y == 64 && a.grid.z == 1);
+        CHECK(samePlanButKernel(a, o));
+        q = rows(q, 4);
+        const auto av = ops::chooseAttnDecode(q, fa, kq, kq.caps, p97), ov = ops::chooseAttnDecode(q, f0, kq, kq.caps, p97);
+        CHECK(nameOf(av.f) == "attn_ws4r2b_q8" && nameOf(ov.f) == "attn_wsplit2_q8" && av.groups.count[0] == 4 && av.grid.z == 1);
+        CHECK(samePlanButKernel(av, ov));
+        // the override picks the variant on either row: 1 plain, 2 b, 0 off
+        CHECK(nameOf(ops::chooseAttnDecode(q, f1, kq, kq.caps, p97).f) == "attn_ws4r2_q8");
+        CHECK(nameOf(ops::chooseAttnDecode(q, f2, kq, kq.caps, p97).f) == "attn_ws4r2b_q8");
+        // without attn_wide the 4 rows are groups of 2 on attn_wsplit1 -> attn_ws4r1b_q8, same groups
+        ops::AttnDecodeFlags fn = fa, fn0 = f0;
+        fn.attn_wide = fn0.attn_wide = false;
+        const auto an = ops::chooseAttnDecode(q, fn, kq, kq.caps, p97), on = ops::chooseAttnDecode(q, fn0, kq, kq.caps, p97);
+        CHECK(nameOf(an.f) == "attn_ws4r1b_q8" && nameOf(on.f) == "attn_wsplit1_q8" && an.grid.z == 2 && samePlanButKernel(an, on));
+        // a draft window (MTP at 64k+) keeps the same plan too
+        ops::AttnDecodeProblem qw = q;
+        qw.win = (16384 / 64) | ((65536 / 1024) << 16);
+        CHECK(samePlanButKernel(ops::chooseAttnDecode(qw, fa, kq, kq.caps, p97), ops::chooseAttnDecode(qw, f0, kq, kq.caps, p97)));
+        // a profile row decides, not the kernel set: a row with 0 keeps attn_wsplit under the auto flag
+        dv::Profile poff = p97;
+        poff.attn_ws4r_q8 = 0;
+        CHECK(nameOf(ops::chooseAttnDecode(q, fa, kq, kq.caps, poff).f) == "attn_wsplit2_q8");
+        // dbg_flags bit 2 (attn_split) is untouched
+        ops::AttnDecodeFlags fd = fa;
+        fd.dbg_flags = 2;
+        CHECK(nameOf(ops::chooseAttnDecode(q, fd, kq, kq.caps, p97).f) == "attn_split");
+    }
+    // (3) Swift / Ornith precise (f16 KV) on the R9700: plain
+    const kn::KernelTable kf = ws4rTable(attnTable(false, false, false, true), false);
+    for (const std::uint32_t nkv : {4u, 2u}) {
+        ops::AttnDecodeProblem q = rows(p, 1);
+        q.n_head = nkv == 4 ? 24 : 16;
+        q.n_head_kv = nkv;
+        const auto a = ops::chooseAttnDecode(q, fa, kf, kf.caps, p97), o = ops::chooseAttnDecode(q, f0, kf, kf.caps, p97);
+        CHECK(nameOf(a.f) == "attn_ws4r1" && nameOf(o.f) == "attn_wsplit1" && samePlanButKernel(a, o));
+        q = rows(q, 4);
+        const auto av = ops::chooseAttnDecode(q, fa, kf, kf.caps, p97), ov = ops::chooseAttnDecode(q, f0, kf, kf.caps, p97);
+        CHECK(nameOf(av.f) == "attn_ws4r2" && nameOf(ov.f) == "attn_wsplit2" && samePlanButKernel(av, ov));
+        CHECK(nameOf(ops::chooseAttnDecode(q, f2, kf, kf.caps, p97).f) == "attn_ws4r2b");
+    }
+    // (4) q4 KV (fast): attn_dq4 stays; with attn_dq4 off the q4 attn_wsplit is never swapped (no q4 ws4r)
+    {
+        ops::AttnDecodeProblem q = rows(p, 4);
+        q.kv_q4 = true;
+        ops::AttnDecodeFlags fq = fa;
+        fq.fd_splits = 256;
+        CHECK(nameOf(ops::chooseAttnDecode(q, fq, kq, kq.caps, p97).f) == "attn_dq4");
+        fq.attn_dq4 = false;
+        const std::string n4 = nameOf(ops::chooseAttnDecode(q, fq, kq, kq.caps, p97).f);
+        CHECK(n4 == "attn_wsplit2_q8" || n4 == "attn_wsplit1_q8");
+        fq.attn_ws4r = 2;
+        CHECK(nameOf(ops::chooseAttnDecode(q, fq, kq, kq.caps, p97).f).rfind("attn_wsplit", 0) == 0);
+    }
+    // (5) the 8060S: its plan is the same with or without ws4r kernels in the table, under every flag value (row 0; the
+    // gfx1151 object has none) - attn_ws4 / attn_ws4g / attn_wsplit1 as before
+    for (const bool q8 : {false, true}) {
+        const kn::KernelTable k8 = attnTable(true, true, false, false), k8r = ws4rTable(k8, q8);
+        kn::KernelTable k8b = k8;
+        k8b.attn_wsplit1 = k8r.attn_wsplit1;
+        k8b.attn_wsplit2 = k8r.attn_wsplit2;
+        for (const std::uint32_t n : {1u, 4u}) {
+            ops::AttnDecodeProblem q = rows(p, n);
+            q.max_ctx = 32768;
+            q.kv_q8 = q8;
+            for (const bool ws4 : {true, false}) {
+                ops::AttnDecodeFlags g = fa;
+                g.attn_ws4 = ws4;
+                const auto want = ops::chooseAttnDecode(q, g, k8b, k8b.caps, p8s);
+                const auto got = ops::chooseAttnDecode(q, g, k8r, k8r.caps, p8s);
+                CHECK(nameOf(got.f) == nameOf(want.f) && samePlanButKernel(got, want));
+                CHECK(nameOf(got.f).rfind("attn_ws4r", 0) != 0);
+            }
+        }
+    }
+}
+
 // v0252-n2 (taken over from feat027-dq4r9700 764af36, tests/ops/ops_tests.cpp, where it was written and mutation-checked
 // against the pre-0.2.5 tree; never merged): host model of attn_dq4's split ranges, written from the kernel source
 // (kernels/shared/attn_dq4.h + attn_dq_nw.h, one copy for both families: dq_per, DQ_NW 8, DQ_MAXS 128, the MTP

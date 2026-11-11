@@ -106,6 +106,8 @@ void Context::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         af.fd_splits = fd_splits;
         af.dbg_flags = nf().dbg_flags;
         af.prec_dec = nf().prec_dec;
+        // v0252-ws4r97b (PLAN V1-87 phase 2): WHIRL_ATTN_WS4R; default auto = device::Profile::attn_ws4r_q8 / _f16
+        // (test-first stub: not wired yet)
         const ops::AttnDecodePlan pl = ops::chooseAttnDecode(ap, af, k, k.caps, device::profile(arch));
         if (pl.kind == ops::AttnDecodeKind::split)
             hip::launch(pl.f, pl.grid, pl.block, 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv), I(hd), I(2 * hd), pos_buf,
