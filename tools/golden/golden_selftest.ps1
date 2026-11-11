@@ -49,7 +49,8 @@ function KlRep([string]$name, [bool]$pass, [string]$sha, [int]$positions = 3, [s
            kl_limit = 0.005; top1 = $(if ($Miss) { 0.968 } else { 0.985 }); top1_limit = 0.97; zero_rows = 0; pass = -not $Miss },
         @{ model = "dense"; prompt = "code"; mode = "fast"; length = 8192; rule = "dense-length"; kl_mean = 0.012; kl_limit = 0.03
            top1 = 0.95; top1_limit = 0.93; zero_rows = 0; pass = $true })
-    @{ exe_sha256 = $sha; device = "default"; pass = $pass; summary = "selftest"; modes = @("balance", "fast"); positions = $positions
+    # v0252-b3gate: device "r9700" (= gfx1201, golden.ps1 default -Arch); since V1-59 kl_guard.ps1 refuses device "default" without a recorded arch
+    @{ exe_sha256 = $sha; device = "r9700"; pass = $pass; summary = "selftest"; modes = @("balance", "fast"); positions = $positions
        lengths = @(8192, 32768, 98304, 131072); models = @{ dense = "fake-model.gguf" }; cases = $cases; mode_args = @{}
        errors = @(if ($Errors) { "dense_code_balance: exit 3 (log x.log)" })
        numerics = @{ dense_code_balance = "numerics: balance - enabled: fp8, h16, kvq8 (q8h KV (int8 + f16 scale / 32, Hadamard-rotated q/k)), specsample (temperature > 0: race sampler); skipped: moefp8 (dense model); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)" }
@@ -248,7 +249,7 @@ try {
     New-Item -ItemType Directory -Force $imgs | Out-Null
     [System.IO.File]::WriteAllBytes((Join-Path $imgs "shapes.png"), [byte[]](1..10))
     $klBoth = Join-Path $tmp "kl_both.json"
-    @{ exe_sha256 = $fakeSha; device = "default"; pass = $true; summary = "selftest"; modes = @("balance", "fast"); positions = 3
+    @{ exe_sha256 = $fakeSha; device = "r9700"; pass = $true; summary = "selftest"; modes = @("balance", "fast"); positions = 3
        lengths = @(8192, 32768, 98304, 131072); models = @{ dense = "fake-model.gguf"; swift = "fake-swift.gguf" } } |
         ConvertTo-Json -Depth 4 | Set-Content $klBoth
     function RunDefault([string]$root, [string]$mm) {
