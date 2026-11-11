@@ -60,6 +60,19 @@ class Dispatch:
     mem_bytes: float = 0.0  # attributed bytes moved over the dispatch window
     mem_gbps: float = 0.0  # attributed memory bandwidth (GB/s); 0.0 => unavailable
 
+    # --- v2 (WHIRL v0252-rgpfix, 2026-11-10): new columns, the ones above keep their meaning ---------------
+    # Waves are attributed by each engine's own stream order (struct/sqtt_decode.py, v2), idle is the time with
+    # no wave of ANY dispatch alive on ANY engine. None = no v2 decode (old records.json) or no wave attributed.
+    ts_v2_us: float | None = None  # first attributed wave start
+    end_v2_us: float | None = None  # last attributed wave end
+    dur_v2_us: float | None = None  # end_v2 - ts_v2 (RGP "Duration")
+    busy_v2_us: float | None = None  # union of the dispatch's own wave intervals (RGP "Work duration")
+    waves_v2: int = 0  # waves attributed by v2
+    launch_v2_us: float | None = None  # earliest initiator time over all engines
+    idle_before_v2_us: float | None = None  # GPU-idle window(s) that end at one of this dispatch's waves
+    idle_after_v2_us: float | None = None  # GPU-idle window(s) that start at one of this dispatch's wave ends
+    attr_v2: str = ""  # "ord" (engine stream order) | "fallback" (nearest SE0 initiator) | "" (no wave)
+
     @property
     def is_artifact(self) -> bool:
         """True when no real occupancy waves were attributed to this dispatch, so
@@ -125,6 +138,9 @@ class Trace:
     events: list[Event] = field(default_factory=list)
     occupancy: list[OccupancySample] = field(default_factory=list)
     curves: list[Curve] = field(default_factory=list)  # SPM counter curves
+    # WHIRL v0252-rgpfix: GPU idle windows (no wave alive on any engine), None without a v2 decode:
+    # [{start_us, end_us, dur_us, prev_pc, next_pc, prev_kernel, next_kernel, prev, next}] (prev / next: Dispatch)
+    idle_windows: list | None = None
 
     def wall_span_us(self) -> float:
         ts = [d.ts_us for d in self.dispatches] + [

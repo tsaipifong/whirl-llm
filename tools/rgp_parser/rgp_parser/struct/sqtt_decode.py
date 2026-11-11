@@ -516,11 +516,18 @@ class CSRegister:
 def parse_se(blob, se_index, collect_de):
     """One shader-engine parse pass.
 
-    Returns (dispatches, events, realtime, occupancy). ``dispatches``/``events``/
+    Returns (dispatches, events, realtime, occupancy, inits). ``dispatches``/``events``/
     ``realtime`` are only populated when ``collect_de`` is set (they are global
     and read from SE0 only, mirroring the C++ parse loop). ``occupancy`` is always
-    collected: a list of [time, start, cu, simd, wid, me, pipe, pc] in the exact
-    delivery order (synthetic pre-capture starts pushed to the front).
+    collected: a list of [time, start, cu, simd, wid, me, pipe, pc, ordinal] in the
+    exact delivery order (synthetic pre-capture starts pushed to the front).
+
+    WHIRL v0252-rgpfix (2026-11-10): ``inits`` = this engine's own dispatch
+    initiators [(time, me, pipe, pc)] in stream order (every engine logs the
+    COMPUTE_DISPATCH_INITIATOR write when IT gets to the dispatch), and ``ordinal``
+    of a wave start = how many initiators of its (me, pipe) this engine had logged
+    before it, minus one (-1 = none / not a fresh wave start). decode() uses them
+    for the v2 wave -> dispatch attribution; nothing of the original output reads them.
     """
     v12 = peek_tt_version(blob) >= 4
     gen = TokenGen12(blob) if v12 else TokenGen(blob)
@@ -530,6 +537,8 @@ def parse_se(blob, se_index, collect_de):
     occ = __import__("collections").deque()
     disps = []
     events = []
+    inits = []
+    init_n = {}  # (me & 1, pipe & 3) -> initiators seen on this engine
     tt_version = 0
 
     while gen.next_valid():
@@ -579,18 +588,19 @@ def parse_se(blob, se_index, collect_de):
                 is_resr = (0b1111001100 >> (count - 66)) & 1
                 if is_save:
                     if loc in running:
-                        occ.append([t, 0, sacu, simd, wid, me, pipe, running[loc]])
+                        occ.append([t, 0, sacu, simd, wid, me, pipe, running[loc], -1])
                         saved[loc] = running[loc]
                 elif is_resr:
                     addr = saved.pop(loc, 0)
                     running[loc] = addr
-                    occ.append([t, 1, sacu, simd, wid, me, pipe, addr])
+                    occ.append([t, 1, sacu, simd, wid, me, pipe, addr, -1])
                 continue
             if gen.packetlost and loc in running:
-                occ.append([t - 1, 0, sacu, simd, wid, 0, 0, 0])
+                occ.append([t - 1, 0, sacu, simd, wid, 0, 0, 0, -1])
             wave_addr = cs.wave_start_pc(me, pipe)
             running[loc] = wave_addr
-            occ.append([t, 1, sacu, simd, wid, me, pipe, wave_addr])
+            occ.append([t, 1, sacu, simd, wid, me, pipe, wave_addr,
+                        init_n.get(((me & 1), (pipe & 3)), 0) - 1])
 
         elif typ == WAVE_END:
             sa = (c >> 8) & 1
@@ -603,8 +613,8 @@ def parse_se(blob, se_index, collect_de):
                 startpc = running.pop(loc)
             else:
                 startpc = 0
-                occ.appendleft([0, 1, sacu, simd, wid, 0, 0, 0])
-            occ.append([t, 0, sacu, simd, wid, 0, 0, startpc])
+                occ.appendleft([0, 1, sacu, simd, wid, 0, 0, 0, -1])
+            occ.append([t, 0, sacu, simd, wid, 0, 0, startpc, -1])
 
         elif typ == REG:
             regaddr = (c >> 16) & 0xFFFF
@@ -625,10 +635,14 @@ def parse_se(blob, se_index, collect_de):
         elif typ == REG_INIT:
             rtype = (c >> 18) & 3
             data = (c >> 20) & MASK32
-            if rtype == 2 and (data & 1) == 1 and collect_de:
+            if rtype == 2 and (data & 1) == 1:
                 me = (c >> 16) & 3
                 pipe = (c >> 14) & 3
-                disps.append(cs.populate_dispatch(t, me, pipe, se_index))
+                q = ((me & 1), (pipe & 3))
+                init_n[q] = init_n.get(q, 0) + 1
+                inits.append((t, me, pipe, cs.wave_start_pc(me, pipe)))
+                if collect_de:
+                    disps.append(cs.populate_dispatch(t, me, pipe, se_index))
 
         elif typ == EVENT:
             eid = (c >> 18) & 0x3F
@@ -650,22 +664,27 @@ def parse_se(blob, se_index, collect_de):
                 events.append((EV_PACKET_LOSS, t, 0, 0, 0, 0))
                 gen.packetlost = False
 
-    return disps, events, gen.realtime, list(occ)
+    return disps, events, gen.realtime, list(occ), inits
 
 
 def decode(blobs, wave_size=32):
     """Decode one SQTT blob per shader engine into raw records.
 
     Returns a dict of raw decode records:
-    ``rt_freq, rt0, wave_size, dispatches, events, occupancy``.
+    ``rt_freq, rt0, wave_size, dispatches, events, occupancy`` and (WHIRL
+    v0252-rgpfix) ``idle`` (GPU idle windows) and ``attrib`` (v2 attribution note).
     """
     import bisect
+    import heapq
+    from array import array
 
-    disps, ev_raw, rts, occ0 = parse_se(blobs[0], 0, True)
+    disps, ev_raw, rts, occ0, inits0 = parse_se(blobs[0], 0, True)
     occ_all = [occ0]
+    inits_all = [inits0]
     for i in range(1, len(blobs)):
-        _, _, _, occ_i = parse_se(blobs[i], i, False)
+        _, _, _, occ_i, inits_i = parse_se(blobs[i], i, False)
         occ_all.append(occ_i)
+        inits_all.append(inits_i)
 
     rt_freq = 100_000_000  # RGP capture: decoder emits no RT_FREQUENCY -> fallback
 
@@ -676,6 +695,87 @@ def decode(blobs, wave_size=32):
         d["min_start"] = INF
         d["max_end"] = 0
 
+    # --- wall-clock mapping (moved before the pairing for v2; values unchanged) --
+    rts_sorted = sorted(rts, key=lambda r: r[0])
+    rt_sh = [r[0] for r in rts_sorted]
+
+    def sc_to_rt(sc):
+        if not rts_sorted:
+            return float(sc)
+        if sc <= rts_sorted[0][0]:
+            return float(rts_sorted[0][1])
+        if sc >= rts_sorted[-1][0]:
+            return float(rts_sorted[-1][1])
+        j = bisect.bisect_left(rt_sh, sc)
+        a = rts_sorted[j - 1]
+        b = rts_sorted[j]
+        f = (sc - a[0]) / max(1, b[0] - a[0])
+        return a[1] + f * (b[1] - a[1])
+
+    sc0 = INF
+    for d in disps:
+        if d["t"] < sc0:
+            sc0 = d["t"]
+    for e in ev_raw:
+        if e[1] < sc0:
+            sc0 = e[1]
+    if sc0 == INF:
+        sc0 = 0
+    rt0 = sc_to_rt(sc0)
+    US = 1e6 / rt_freq
+
+    def to_us(sc):
+        return (sc_to_rt(sc) - rt0) * US
+
+    # --- v2 wave -> dispatch attribution (WHIRL v0252-rgpfix) ----------------
+    # Every engine logs a dispatch's initiator when IT gets to the dispatch, and a
+    # wave start belongs to the dispatch its own engine initiated last (stream
+    # order). Engine k's initiators are matched to SE0's dispatch list per queue by
+    # ordinal after aligning the PC sequences; an engine / queue whose sequence does
+    # not align falls back to the nearest same-PC SE0 initiator (a wave may start up
+    # to V2_FALLBACK_LEAD_US before SE0 logs its dispatch). No exp_waves cap.
+    q_disp = {}
+    for j, d in enumerate(disps):
+        q_disp.setdefault(_v2_qk(d["me"], d["pipe"]), []).append(j)
+    v2_align = {}
+    init2 = [d["t"] for d in disps]
+    se_notes = []
+    for se, ins in enumerate(inits_all):
+        per_q = {}
+        for t_i, me_i, pipe_i, pc_i in ins:
+            per_q.setdefault(_v2_qk(me_i, pipe_i), []).append((t_i, pc_i))
+        for q, lst in per_q.items():
+            ref = q_disp.get(q, [])
+            off, rate = _v2_align([p for _, p in lst], [disps[j]["pc"] for j in ref])
+            v2_align[(se, q)] = off
+            se_notes.append(f"se{se} q{q}: {len(lst)}/{len(ref)} initiators, "
+                            + (f"offset {off} match {rate:.4f}" if off is not None else f"NOT aligned (best {rate:.4f})"))
+            if off is not None:
+                for n, (t_i, _p) in enumerate(lst):
+                    m = n + off
+                    if 0 <= m < len(ref) and t_i < init2[ref[m]]:
+                        init2[ref[m]] = t_i
+    inst = {}
+    for j, d in enumerate(disps):
+        inst.setdefault((d["pc"], _v2_qk(d["me"], d["pipe"])), []).append(j)
+    inst_t = {k: [disps[j]["t"] for j in v] for k, v in inst.items()}
+
+    def v2_fallback(ws, pc, q):
+        lst = inst.get((pc, q))
+        if not lst:
+            return -1
+        ts = inst_t[(pc, q)]
+        k = bisect.bisect_right(ts, ws)
+        if k < len(ts):
+            dn = to_us(ts[k]) - to_us(ws)
+            if dn <= V2_FALLBACK_LEAD_US and (k == 0 or dn < to_us(ws) - to_us(ts[k - 1])):
+                return lst[k]
+        return lst[k - 1] if k > 0 else -1
+
+    w2_ws, w2_we, w2_pc, w2_own = array("q"), array("q"), array("q"), array("l")
+    w2_n = {"ord": 0, "fallback": 0, "unattributed": 0}
+    d_fb = set()
+
     # --- phase 2: pair occupancy waves per hw slot + build per-SE band ------
     slot_pend = {}
     pipe_waves = {}
@@ -683,22 +783,43 @@ def decode(blobs, wave_size=32):
     for se, occ in enumerate(occ_all):
         oe = occ_ev[se]
         for rec in occ:
-            time, start, cu, simd, wid, me, pipe, pc = rec
+            time, start, cu, simd, wid, me, pipe, pc, ordv = rec
             sk = (se << 24) | ((cu & 0x7F) << 16) | ((simd & 0xF) << 8) | (wid & 0xFF)
             oe.append((time, 1 if start else -1))
             if start:
-                slot_pend[sk] = (time, pc, me, pipe)
+                slot_pend[sk] = (time, pc, me, pipe, ordv)
             else:
                 p = slot_pend.pop(sk, None)
                 if p is None:
                     continue
-                st, ppc, pme, ppipe = p
+                st, ppc, pme, ppipe, pord = p
                 key = (ppc << 8) | (((pme & 7) << 4) | (ppipe & 0xF))
                 lst = pipe_waves.get(key)
                 if lst is None:
                     pipe_waves[key] = [(st, time)]
                 else:
                     lst.append((st, time))
+                # v2 owner of this wave
+                q = _v2_qk(pme, ppipe)
+                off = v2_align.get((se, q))
+                own = -1
+                if off is not None:
+                    ql = q_disp.get(q)
+                    m = pord + off
+                    if pord >= 0 and ql is not None and 0 <= m < len(ql):
+                        own = ql[m]
+                        w2_n["ord"] += 1
+                else:
+                    own = v2_fallback(st, ppc, q)
+                    if own >= 0:
+                        w2_n["fallback"] += 1
+                        d_fb.add(own)
+                if own < 0:
+                    w2_n["unattributed"] += 1
+                w2_ws.append(st)
+                w2_we.append(time)
+                w2_pc.append(ppc)
+                w2_own.append(own)
 
     # --- exp_waves from RGP markers (USERDATA_2/3), per (me,pipe) ------------
     # Reassemble the type-15 marker dwords in capture
@@ -773,43 +894,82 @@ def decode(blobs, wave_size=32):
             if we > d["max_end"]:
                 d["max_end"] = we
 
-    # --- wall-clock mapping -------------------------------------------------
-    rts_sorted = sorted(rts, key=lambda r: r[0])
-    rt_sh = [r[0] for r in rts_sorted]
+    # --- v2 per-dispatch aggregates: first start, last end, union of own waves --
+    n_d = len(disps)
+    nw = len(w2_own)
+    cnt = array("l", bytes(4 * (n_d + 2)))  # bucket b = owner + 1 (0 = unattributed)
+    for o in w2_own:
+        cnt[o + 2] += 1
+    for b in range(1, n_d + 2):
+        cnt[b] += cnt[b - 1]  # cnt[b] = first position of bucket b
+    perm = array("l", bytes(4 * nw))
+    pos = array("l", cnt)
+    for i in range(nw):
+        b = w2_own[i] + 1
+        perm[pos[b]] = i
+        pos[b] += 1
+    v2 = []
+    for j in range(n_d):
+        lo, hi = cnt[j + 1], cnt[j + 2]
+        if hi <= lo:
+            v2.append(None)
+            continue
+        idx = sorted(perm[lo:hi], key=w2_ws.__getitem__)
+        busy = 0.0
+        a0 = w2_ws[idx[0]]
+        b0 = w2_we[idx[0]]
+        last = b0
+        for i in idx[1:]:
+            s, e = w2_ws[i], w2_we[i]
+            if s > b0:
+                busy += to_us(b0) - to_us(a0)
+                a0, b0 = s, e
+            elif e > b0:
+                b0 = e
+            if e > last:
+                last = e
+        busy += to_us(b0) - to_us(a0)
+        v2.append((w2_ws[idx[0]], last, busy, hi - lo))
 
-    def sc_to_rt(sc):
-        if not rts_sorted:
-            return float(sc)
-        if sc <= rts_sorted[0][0]:
-            return float(rts_sorted[0][1])
-        if sc >= rts_sorted[-1][0]:
-            return float(rts_sorted[-1][1])
-        j = bisect.bisect_left(rt_sh, sc)
-        a = rts_sorted[j - 1]
-        b = rts_sorted[j]
-        f = (sc - a[0]) / max(1, b[0] - a[0])
-        return a[1] + f * (b[1] - a[1])
-
-    sc0 = INF
-    for d in disps:
-        if d["t"] < sc0:
-            sc0 = d["t"]
-    for e in ev_raw:
-        if e[1] < sc0:
-            sc0 = e[1]
-    if sc0 == INF:
-        sc0 = 0
-    rt0 = sc_to_rt(sc0)
-    US = 1e6 / rt_freq
-
-    def to_us(sc):
-        return (sc_to_rt(sc) - rt0) * US
+    # --- v2 GPU idle windows: no wave of any dispatch alive on any engine ------
+    for oe in occ_ev:
+        oe.sort()
+    win = []
+    alive = 0
+    zero_at = None
+    n_neg = 0
+    for t_e, dlt in heapq.merge(*occ_ev):
+        if dlt > 0 and alive <= 0 and zero_at is not None and t_e > zero_at:
+            win.append((zero_at, t_e))
+        alive += dlt
+        if alive < 0:
+            n_neg += 1
+            alive = 0
+        if alive == 0:
+            zero_at = t_e
+    a_set = {a for a, _ in win}
+    b_set = {b for _, b in win}
+    prev_w, next_w = {}, {}
+    for i in range(nw):
+        e = w2_we[i]
+        if e in a_set and (e not in prev_w or prev_w[e][0] < 0):
+            prev_w[e] = (w2_own[i], w2_pc[i])
+        s = w2_ws[i]
+        if s in b_set and (s not in next_w or next_w[s][0] < 0):
+            next_w[s] = (w2_own[i], w2_pc[i])
+    idle = []
+    for a, b in win:
+        pj, ppc = prev_w.get(a, (-1, 0))
+        nj, npc = next_w.get(b, (-1, 0))
+        idle.append({"a": round(to_us(a), 4), "b": round(to_us(b), 4), "prev": pj, "next": nj,
+                     "prev_pc": "0x%x" % ppc, "next_pc": "0x%x" % npc})
 
     out_disp = []
-    for d in disps:
+    for j, d in enumerate(disps):
         has = d["wf"] > 0 and d["min_start"] != INF
         ws = d["min_start"] if has else d["t"]
         dur = round(to_us(d["max_end"]) - to_us(d["min_start"]), 4) if has else -1.0
+        a2 = v2[j]
         out_disp.append(
             {
                 "se": d["se"],
@@ -826,8 +986,27 @@ def decode(blobs, wave_size=32):
                 "lds": d["lds"],
                 "wg": d["wg"],
                 "pc": "0x%x" % d["pc"],
+                # v2 (WHIRL v0252-rgpfix): j = index into this list (idle "prev" / "next")
+                "j": j,
+                "ts2": round(to_us(a2[0]), 4) if a2 else None,
+                "end2": round(to_us(a2[1]), 4) if a2 else None,
+                "busy2": round(a2[2], 4) if a2 else 0.0,
+                "wf2": a2[3] if a2 else 0,
+                "init2": round(to_us(init2[j]), 4),
+                "attr2": ("fallback" if j in d_fb else "ord") if a2 else "",
             }
         )
+    attrib = {
+        "version": V2_VERSION,
+        "engines": se_notes,
+        "waves_ord": w2_n["ord"],
+        "waves_fallback": w2_n["fallback"],
+        "waves_unattributed": w2_n["unattributed"],
+        "pc_mismatch": sum(1 for i in range(nw) if w2_own[i] >= 0 and w2_pc[i] != disps[w2_own[i]]["pc"]),
+        "fallback_lead_us": V2_FALLBACK_LEAD_US,
+        "idle_windows": len(idle),
+        "alive_below_zero": n_neg,
+    }
 
     out_ev = []
     for seq, e in enumerate(ev_raw):
@@ -854,7 +1033,44 @@ def decode(blobs, wave_size=32):
         "dispatches": out_disp,
         "events": out_ev,
         "occupancy": out_occ,
+        "idle": idle,
+        "attrib": attrib,
     }
+
+
+# --- v2 attribution helpers (WHIRL v0252-rgpfix, 2026-11-10) ---------------------
+V2_VERSION = "whirl-rgpfix-1 (2026-11-10): per-engine stream-order wave attribution, union busy, all-engine idle"
+# A workgroup may start before SE0 logs its dispatch's initiator (SE0 logs it when SE0
+# itself drains): 34 us seen on the R9700 (Ornith fast MTP argmax, q7 9522). The
+# fallback gives a wave to the NEXT same-PC dispatch only within this lead.
+V2_FALLBACK_LEAD_US = 100.0
+
+
+def _v2_qk(me, pipe):
+    return ((me & 1) << 2) | (pipe & 3)
+
+
+def _v2_align(pcs, ref, max_off=4, min_rate=0.98):
+    """Offset o with pcs[n] == ref[n + o] for (nearly) every n: one engine's initiator
+    PC sequence against SE0's dispatch PCs on the same queue. (None, best rate) when
+    no offset in [-max_off, max_off] matches at least min_rate of the overlap."""
+    best = None
+    for off in sorted(range(-max_off, max_off + 1), key=abs):
+        lo = max(0, -off)
+        hi = min(len(pcs), len(ref) - off)
+        over = hi - lo
+        if over <= 0:
+            continue
+        m = sum(1 for n in range(lo, hi) if pcs[n] == ref[n + off])
+        rate = m / over
+        if best is None or rate > best[1]:
+            best = (off, rate, over)
+    if best is None:
+        return None, 0.0
+    off, rate, over = best
+    if rate >= min_rate and over >= max(1, min(len(pcs), len(ref)) - 2 * max_off):
+        return off, rate
+    return None, rate
 
 
 def _occupancy_band(occ_ev, n_se, to_us):

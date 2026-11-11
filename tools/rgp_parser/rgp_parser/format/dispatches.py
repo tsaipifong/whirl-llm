@@ -39,7 +39,21 @@ FIELDS = [
     "bound_class",
     "bound_reason",
     "mem_gbps",
+    # v2 (WHIRL v0252-rgpfix 2026-11-10; appended, the columns above keep their meaning). Empty = no v2 decode.
+    "ts_v2_us",
+    "end_v2_us",
+    "dur_v2_us",
+    "busy_v2_us",
+    "waves_v2",
+    "launch_v2_us",
+    "idle_before_v2_us",
+    "idle_after_v2_us",
+    "attr_v2",
 ]
+
+
+def _r4(x):
+    return "" if x is None else round(x, 4)
 
 
 def write(trace: Trace, path: str) -> None:
@@ -77,5 +91,14 @@ def write(trace: Trace, path: str) -> None:
                     "bound_class": d.bound_class,
                     "bound_reason": d.bound_reason,
                     "mem_gbps": d.mem_gbps,
+                    "ts_v2_us": _r4(d.ts_v2_us),
+                    "end_v2_us": _r4(d.end_v2_us),
+                    "dur_v2_us": _r4(d.dur_v2_us),
+                    "busy_v2_us": _r4(d.busy_v2_us),
+                    "waves_v2": d.waves_v2 if d.busy_v2_us is not None else "",
+                    "launch_v2_us": _r4(d.launch_v2_us),
+                    "idle_before_v2_us": _r4(d.idle_before_v2_us),
+                    "idle_after_v2_us": _r4(d.idle_after_v2_us),
+                    "attr_v2": d.attr_v2,
                 }
             )

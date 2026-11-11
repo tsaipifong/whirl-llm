@@ -24,6 +24,12 @@ from .struct import coload, spm, sqtt
 from .struct.codeobject import load_code_objects, load_code_objects_hashed
 from .struct.rdf import RdfFile
 
+# Output schema version (WHIRL). v1 = vendored hip-ep columns (+ gfx12 token path, RGP97-TIME 2026-10-16);
+# v2 = WHIRL v0252-rgpfix 2026-11-10: the *_v2 dispatch columns and the _idle.csv windows are added, every older
+# column keeps its meaning (dur_us is still min(wave span, next-launch gap); gap_before_us is still "start minus
+# the previous dispatch's end in start order").
+PARSER_VERSION = "whirl-rgp-2 (v0252-rgpfix 2026-11-10)"
+
 # ---- RGP SQTT markers (reassembled from USERDATA_2 + USERDATA_3) --------------
 # RGP streams markers 2 dwords/packet into USERDATA_2/3; the patched decoder surfaces
 # each as EVENT type 15, payload = the 32-bit regdata, seq = capture order.
@@ -213,6 +219,8 @@ def build_trace(
     dispatches: list[Dispatch] = []
     barriers: list[Barrier] = []
     wave_sizes: set[int] = set()
+    has_v2 = rec.idle is not None
+    by_j: dict[int, Dispatch] = {}  # v2: decoder index -> Dispatch
     for me, pipe in queues:
         ds = sorted(
             [
@@ -249,6 +257,8 @@ def build_trace(
                 threads = occ_wf * WAVE
                 wf = occ_wf
                 csrc = "occupancy (approx; marker grid unavailable)"
+            v2 = has_v2 and d.get("j") is not None
+            ts2, end2 = (d.get("ts2"), d.get("end2")) if v2 else (None, None)
             dispatches.append(
                 Dispatch(
                     pc=pc,
@@ -270,8 +280,19 @@ def build_trace(
                     occupancy_wavefronts=occ_wf,
                     counts_source=csrc,
                     duration_note="min(occupancy wave-span, next-launch gap); approx",
+                    ts_v2_us=ts2,
+                    end_v2_us=end2,
+                    dur_v2_us=round(end2 - ts2, 4) if ts2 is not None and end2 is not None else None,
+                    busy_v2_us=float(d.get("busy2", 0.0)) if v2 else None,
+                    waves_v2=int(d.get("wf2", 0)) if v2 else 0,
+                    launch_v2_us=d.get("init2") if v2 else None,
+                    idle_before_v2_us=0.0 if v2 else None,
+                    idle_after_v2_us=0.0 if v2 else None,
+                    attr_v2=str(d.get("attr2", "")) if v2 else "",
                 )
             )
+            if v2:
+                by_j[int(d["j"])] = dispatches[-1]
         if mbar:
             for b in mbar:
                 barriers.append(
@@ -284,6 +305,32 @@ def build_trace(
                         args=b["args"],
                     )
                 )
+
+    # --- v2 GPU idle windows (WHIRL v0252-rgpfix): no wave alive on any engine ---------------------------
+    idle_windows = None
+    if has_v2:
+        idle_windows = []
+        for w in rec.idle:
+            pd, nd = by_j.get(int(w.get("prev", -1))), by_j.get(int(w.get("next", -1)))
+            dur_w = float(w["b"]) - float(w["a"])
+            if pd is not None:
+                pd.idle_after_v2_us += dur_w
+            if nd is not None:
+                nd.idle_before_v2_us += dur_w
+            ppc, npc = int(w.get("prev_pc", "0x0"), 16), int(w.get("next_pc", "0x0"), 16)
+            idle_windows.append(
+                {
+                    "start_us": float(w["a"]),
+                    "end_us": float(w["b"]),
+                    "dur_us": round(dur_w, 4),
+                    "prev_pc": ppc,
+                    "next_pc": npc,
+                    "prev_kernel": pd.name if pd is not None else names.get(ppc, hex(ppc)),
+                    "next_kernel": nd.name if nd is not None else names.get(npc, hex(npc)),
+                    "prev": pd,
+                    "next": nd,
+                }
+            )
 
     events = [
         Event(
@@ -449,6 +496,8 @@ def build_trace(
             ),
             "wave_sizes": sorted(wave_sizes) or [WAVE],
             "clock": f"GPU timestamp {rt_freq / 1e6:.0f} MHz",
+            "parser_version": PARSER_VERSION,
+            "attribution_v2": rec.attrib if has_v2 else "none (no v2 decode in this source)",
         },
     )
 
@@ -459,4 +508,5 @@ def build_trace(
         events=events,
         occupancy=occupancy,
         curves=curves,
+        idle_windows=idle_windows,
     )

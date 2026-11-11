@@ -11,7 +11,7 @@ writer and the filename suffix appended to the output base (e.g. base ``sample``
 
 from __future__ import annotations
 
-from . import chrome, dispatches, operators, summary
+from . import chrome, dispatches, idle, operators, summary
 
 WRITERS = {
     "summary": (summary.write, "_summary.json"),  # also writes _summary.md
@@ -19,6 +19,7 @@ WRITERS = {
     "families": (operators.write_families, "_families.csv"),
     "dispatches": (dispatches.write, "_dispatches.csv"),
     "trace": (chrome.write, "_trace.json"),
+    "idle": (idle.write, "_idle.csv"),  # WHIRL v0252-rgpfix: GPU idle windows (v2)
 }
 
-__all__ = ["WRITERS", "chrome", "dispatches", "operators", "summary"]
+__all__ = ["WRITERS", "chrome", "dispatches", "idle", "operators", "summary"]

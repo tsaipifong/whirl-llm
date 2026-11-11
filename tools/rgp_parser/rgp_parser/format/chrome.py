@@ -79,6 +79,12 @@ def write(trace: Trace, path: str) -> None:
                 args["counts_source"] = d.counts_source
             if d.duration_note:
                 args["duration_note"] = d.duration_note
+            if d.busy_v2_us is not None:  # WHIRL v0252-rgpfix: v2 columns (added keys only)
+                args["busy_v2_us"] = round(d.busy_v2_us, 3)
+                args["dur_v2_us"] = None if d.dur_v2_us is None else round(d.dur_v2_us, 3)
+                args["ts_v2_us"] = None if d.ts_v2_us is None else round(d.ts_v2_us, 4)
+                args["waves_v2"] = d.waves_v2
+                args["idle_before_v2_us"] = round(d.idle_before_v2_us or 0.0, 3)
             items.append(
                 {
                     "name": d.name,

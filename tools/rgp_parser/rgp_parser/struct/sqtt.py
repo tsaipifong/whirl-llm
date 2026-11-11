@@ -35,6 +35,10 @@ class DecodedRecords:
     dispatches: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
     occupancy: list[dict] = field(default_factory=list)
+    # WHIRL v0252-rgpfix: GPU idle windows [{a, b, prev, next, prev_pc, next_pc}] (us, indices into
+    # ``dispatches``) and the v2 attribution note; None when the source had no v2 decode (old records.json).
+    idle: list[dict] | None = None
+    attrib: dict = field(default_factory=dict)
 
 
 def extract_blobs(rdf: RdfFile) -> list[bytes]:
@@ -54,6 +58,8 @@ def load_records(path: str) -> DecodedRecords:
         dispatches=r.get("dispatches", []),
         events=r.get("events", []),
         occupancy=r.get("occupancy", []),
+        idle=r.get("idle"),
+        attrib=r.get("attrib", {}),
     )
 
 
@@ -81,4 +87,6 @@ def decode_tokens(blobs: list[bytes], *, wave_size: int = 32) -> DecodedRecords:
         dispatches=r["dispatches"],
         events=r["events"],
         occupancy=r["occupancy"],
+        idle=r.get("idle"),
+        attrib=r.get("attrib", {}),
     )

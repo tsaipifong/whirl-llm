@@ -152,6 +152,21 @@ Given output base `sample`, this emits:
 | `sample_families.csv` | per-**op-family** rollup (GEMM tile variants and every instance of an op collapsed by `family/dtype/tile`) |
 | `sample_dispatches.csv` | one row per dispatch (drill-down) + idle gaps, occupancy, bound class/reason |
 | `sample_trace.json` | Perfetto/`chrome://tracing` timeline (human) |
+| `sample_idle.csv` | (WHIRL v2) GPU idle windows: no wave of any dispatch alive on any shader engine, with the dispatch that ended last before and the one that started first after |
+
+**WHIRL v2 columns (output version `whirl-rgp-2`, v0252-rgpfix 2026-11-10).** The original columns keep their
+meaning, including two known pitfalls: `dur_us` = min(wave span, next-launch gap), and `gap_before_us` = start minus the
+end of the previous dispatch in start order (time under an overlapped long kernel counts as idle). The original wave
+-> dispatch attribution also uses SE0's initiator time, which SE0 logs only when SE0 itself drains; workgroups on other
+engines can start earlier and are then given to the previous instance of the kernel (spans of a whole decode cycle;
+`dur_us` then books the following host window as kernel time). Use the appended columns for kernel time and idle:
+`ts_v2_us` / `end_v2_us` / `dur_v2_us` (first wave start / last wave end / RGP "Duration"), `busy_v2_us` (union of
+the dispatch's own wave intervals, RGP "Work duration"), `waves_v2`, `launch_v2_us` (earliest initiator over all
+engines), `idle_before_v2_us` / `idle_after_v2_us` (GPU-idle windows of `sample_idle.csv` that end at / start from this
+dispatch's waves) and `attr_v2` (`ord` = attributed by each engine's own initiator order, `fallback` = nearest SE0
+initiator, used when an engine's initiator sequence does not align with SE0's). `summary.json` carries
+`parser_version` and `attribution_v2` (per-engine alignment, waves attributed / unattributed, PC mismatches).
+Tests: `python -I test_rgpfix.py` (synthetic gfx12 SQTT streams through the real decoder).
 
 The base may include a directory (`out/sample`); any extension is ignored.
 

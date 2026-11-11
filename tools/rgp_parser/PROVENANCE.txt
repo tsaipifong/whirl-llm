@@ -3,3 +3,8 @@ modified 2026-10-16 (WHIRL RGP97-TIME): struct/sqtt_decode.py gains a gfx12 (RDN
 ported from ROCm/rocm-systems projects/rocprof-trace-decoder source/gfx12/{gfx12token.cpp,gfx12parser.h,gfx12token.h}
 (MIT): gfx12 lookup-table overrides, 64-bit TIMESTAMP (rt@7 pl@8 time52@12), WAVE_START_EXT 8-bit extension, no lookahead,
 gfx12 wstart/wend field layouts. Selected per stream from the leading HEADER token; gfx11 (version 3) path unchanged.
+modified 2026-11-10 (WHIRL v0252-rgpfix, output version whirl-rgp-2): struct/sqtt_decode.py records every shader engine's
+own dispatch initiators and each wave's initiator ordinal, and decode() adds a v2 wave -> dispatch attribution (engine
+stream order, PC-aligned to SE0; fallback nearest SE0 initiator), per-dispatch union busy time and GPU idle windows (no
+wave alive on any engine); build.py / model.py / format/* append *_v2 columns, format/idle.py writes <base>_idle.csv,
+summary.json gets parser_version + attribution_v2; every original output value is unchanged. test_rgpfix.py is new.

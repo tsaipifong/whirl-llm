@@ -78,6 +78,19 @@ def build(trace: Trace, top_n: int = TOP_N) -> dict:
         else 0.0,
         "total_idle_us": total_idle,
         "overhead_us": overhead_us,
+        # WHIRL v0252-rgpfix: schema version + v2 idle (no wave alive on any engine; total_idle_us above is the
+        # old per-queue sum of idle_after_us and keeps its meaning)
+        "parser_version": trace.meta.extra.get("parser_version", ""),
+        "attribution_v2": trace.meta.extra.get("attribution_v2", ""),
+        "gpu_idle_v2_us": round(sum(w["dur_us"] for w in trace.idle_windows), 3)
+        if trace.idle_windows is not None
+        else None,
+        "idle_windows_v2_gt50us": [
+            sum(1 for w in trace.idle_windows if w["dur_us"] > 50.0),
+            round(sum(w["dur_us"] for w in trace.idle_windows if w["dur_us"] > 50.0), 3),
+        ]
+        if trace.idle_windows is not None
+        else None,
         "distinct_kernels": len(ops),
         "distinct_families": len(fams),
         "bottleneck_classes": _bottleneck_rollup(trace),
