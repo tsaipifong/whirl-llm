@@ -101,6 +101,7 @@ public:
         // (check) and disagreeing (check only); device results out of range in gpu / gpu-zc, decided on the host instead
         // (feat026-acc-r1: a different event from a disagreement); next-cycle row tables compared / disagreeing
         std::uint64_t acc_dev = 0, acc_checked = 0, acc_mismatch = 0, acc_fallback = 0, tab_checked = 0, tab_mismatch = 0;
+        std::uint64_t acc_e1 = 0;  // v0252-e1p1b (WHIRL_E1): slot cycles that took their inputs from the device
     };
 
     virtual ~EngineApi() = default;

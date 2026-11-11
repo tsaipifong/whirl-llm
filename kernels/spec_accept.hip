@@ -6,7 +6,8 @@
 //
 // spec_accept_rows runs right after the verify's argmax (one block, thread k = sequence k):
 //  - greedy exact sequences (a.dev[k]): accepted count, next token, EOS / max_tokens cuts (spec_accept_one, the host path
-//    in kernels/spec_accept.h) into the result words 50 .. 56 of the sequence's control area;
+//    in kernels/spec_accept.h) into the result words 50 .. 57 of the sequence's control area (v0252-e1p1b: 57 = NPEND, the
+//    next verify's DeltaNet replay rows; a.pos[k] < 0 = the position is the NPOS word of the sequence's last accept);
 //  - tab (may be null): the next cycle's MTP step-0 rows and verify row 0 (spec_next_rows) in a device SpecNextTab, for the
 //    host-free cycle (E1 P1b / P1c);
 //  - host (may be null): the control areas of the verify's sequences copied into pinned host memory (zero copy; same layout
@@ -19,16 +20,8 @@ extern "C" __global__ void __launch_bounds__(64) spec_accept_rows(int *ctl_all, 
     const int k = threadIdx.x;
     if (k < a.n) {
         int *ctl = ctl_all + a.seq[k] * WHIRL_SA_CTL_WORDS;
-        SpecAccResult r;
-        if (a.dev[k]) {
-            r = spec_accept_one(a, k, ctl);
-        } else {
-            r.acc0 = 0;
-            r.acc = 0;
-            r.chosen = ctl[WHIRL_SA_CTL_ROWS];
-            r.nd_dev = 0;
-            r.flags = 0;
-        }
+        // v0252-e1p1b: both read the position (a.pos[k] < 0: the NPOS word) before spec_store overwrites it
+        const SpecAccResult r = a.dev[k] ? spec_accept_one(a, k, ctl) : spec_copy_one(a, k, ctl);
         spec_store(a, k, r, ctl);
         res[k] = r;
     }

@@ -79,7 +79,9 @@ struct GdnSeg {
     // pend (conv: raw input rows [row][ch]; delta rule: [row][head][k 128 | v 128
     // | decay | beta]); the first npend rows kept by the previous verify are
     // applied to the state first and the state is written once (the new base),
-    // then the new rows run without writing state or snapshots
+    // then the new rows run without writing state or snapshots. v0252-e1p1b (E1):
+    // npend < 0 = the count is the int at snap[0] (the sequence's NPEND control
+    // word; snap[] is unused in replay mode) - gfx1201 fused_decode.hip gdn_npend
     float *pend;
     int npend, pad_;
 };

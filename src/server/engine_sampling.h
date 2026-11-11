@@ -27,6 +27,7 @@ constexpr std::uint32_t max_rows = qwen35::max_verify_rows;
 // per-request "spec-acc stats" line). Main thread only.
 struct SpecAccStats {
     std::uint64_t dev = 0, fallback = 0, checked = 0, mismatch = 0, tab_checked = 0, tab_mismatch = 0;
+    std::uint64_t e1 = 0;  // v0252-e1p1b (WHIRL_E1): slot cycles that took their inputs from the device (VSeg::dev)
 };
 
 // The members in their former Engine order (samp_dev_ .. ctl_host_): ~Engine destroys them at the same point and in

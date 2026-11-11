@@ -103,6 +103,9 @@ struct SpecCycle::Cycle {
     SpecNextTab tab{};
     std::uint32_t tab_n = 0;
     bool tab_ok = true;
+    // v0252-e1p1b (E1, WHIRL_E1; layoutBatch): this cycle is an E1 cycle - its slot takes the device inputs the last cycle
+    // left (Slot::e1_rows > 0) and its accept leaves the next cycle's on the device (acceptSlot)
+    bool e1 = false;
 };
 
 // relaxacc (fast) applies to MTP drafts only: one rule for every site below (FR-DFL P2-3)
@@ -303,6 +306,12 @@ void SpecCycle::layoutBatch(Cycle& cy) {
     cy.pa = std::min<std::size_t>(cy.A, gdn_max_seg);
     cy.p = spec_.prof.get();
     if (cy.p && cy.p->events) m_.profileStart(0, cy.pa);
+    // v0252-e1p1b (E1, PLAN V1-93 P1b; WHIRL_E1): one greedy exact MTP slot (no relaxacc, no n-gram / DFlash2 drafts, no
+    // image), DeltaNet replay mode, no profiling events. Engine::allocState kept opt_.e1 only with the model's E1 path and a
+    // device accept mode. Any other cycle: host inputs as before (a slot's device inputs are then not used, and its accept
+    // takes them back to the host: acceptSlot)
+    cy.e1 = opt_.e1 != 0 && opt_.use_mtp && cy.A == 1 && cy.n_mtp == 1 && !opt_.use_dflash && m_.gdnReplay() && !(cy.p && cy.p->events) &&
+            cy.act[0]->greedy && !relaxes(cy, 0) && (cy.act[0]->job == nullptr || cy.act[0]->job->vis == nullptr);
     // MTP steps r >= 1 run on the MTP slots with more than r drafts: MTP slots
     // sorted by draft count (descending) at the front of the batch
     {
@@ -317,7 +326,9 @@ void SpecCycle::layoutBatch(Cycle& cy) {
         }
         for (std::size_t q = 0; q < cy.n_mtp; ++q) {
             Slot& s = *cy.act_mtp[ord[q]];
-            cy.msegs[q] = MSeg{s.id, std::span<const std::uint32_t>(s.pend.data(), s.n_pend), s.pend_pos, s.pos};
+            // v0252-e1p1b (E1): the device inputs - step 0 runs the last verify's nd + 1 rows from its argmax words (no pend)
+            if (cy.e1 && s.e1_rows > 0) cy.msegs[q] = MSeg{s.id, {}, s.pend_pos, s.pos, s.e1_rows};
+            else cy.msegs[q] = MSeg{s.id, std::span<const std::uint32_t>(s.pend.data(), s.n_pend), s.pend_pos, s.pos};
         }
         for (std::size_t r = 0; r <= qwen35::max_drafts; ++r) {
             std::size_t c = 0;
@@ -344,6 +355,9 @@ void SpecCycle::layoutBatch(Cycle& cy) {
             cy.vsegs[k] = VSeg{sl.id, sl.next, cy.nd_of[k], sl.pos,
                             cy.ng_n[k] > 0 ? std::span<const std::uint32_t>(cy.ng_d[k].data(), cy.ng_n[k])
                                         : std::span<const std::uint32_t>()};
+            // v0252-e1p1b (E1): row 0 and the positions from the slot's control words (sl.next / sl.pos stay the host's copy:
+            // the model reads neither, pos bounds its context check)
+            cy.vsegs[k].dev = cy.e1 && sl.e1_rows > 0;
             cy.row_of[k] = row;
             cy.snap_of[k] = snap;
             row += cy.nd_of[k] + 1;
@@ -395,9 +409,11 @@ void SpecCycle::enqueueVerify(Cycle& cy) {
         } reset{m_, draft};
         const std::uint32_t vrows = spec_.vrows;
         std::size_t groups = 0, rows_all = 0;
+        // step 0's rows of a segment (v0252-e1p1b: an E1 segment's padded rows)
+        const auto rows0 = [](const MSeg& ms) { return ms.e1_rows > 0 ? static_cast<std::size_t>(ms.e1_rows) : ms.pend.size(); };
         for (std::size_t b = 0, e = 0; b < cy.A; b = e) {
             std::size_t rows = 0;
-            while (e < cy.A && (e == b || rows + cy.msegs[e].pend.size() <= vrows)) rows += cy.msegs[e++].pend.size();
+            while (e < cy.A && (e == b || rows + rows0(cy.msegs[e]) <= vrows)) rows += rows0(cy.msegs[e++]);
             m_.mtpBatchStepEx(std::span<const MSeg>(cy.msegs.data() + b, e - b), 0, draft);
             // steps r >= 1: the group's MTP slots with more than r drafts (sorted by draft count, at the front of msegs)
             for (std::uint32_t r = 1; draft && r < cy.nd_max && b < cy.n_step[r]; ++r)
@@ -456,7 +472,8 @@ void SpecCycle::sampleRows(Cycle& cy) {
             aa.eos[k] = sl.ignore_eos ? 0 : 1;
             const std::uint32_t budget = sl.max_tokens > sl.n_gen ? sl.max_tokens - sl.n_gen : 0;
             aa.budget[k] = static_cast<int>(std::min<std::uint32_t>(budget, 1u << 30));
-            aa.pos[k] = static_cast<int>(sl.pos);
+            // v0252-e1p1b (E1): a slot on device inputs verifies at the NPOS word its last accept wrote (-1)
+            aa.pos[k] = cy.e1 && sl.e1_rows > 0 ? -1 : static_cast<int>(sl.pos);
             aa.row0[k] = static_cast<int>(cy.row_of[k]);
             for (std::uint32_t r = 0; r < cy.ng_n[k] && r < static_cast<std::uint32_t>(WHIRL_SA_MAX_ND); ++r)
                 aa.lit_d[k][r] = static_cast<int>(cy.ng_d[k][r]);
@@ -555,6 +572,10 @@ void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& a
     // v0252-e1p1 (feat026-acc port): decided on the device (the host path runs only for WHIRL_SPEC_ACC=check, to compare)
     const bool dev_k = cy.acc_dev && cy.aa.dev[k] != 0;
     bool dev_use = dev_k && !cy.acc_check;
+    // v0252-e1p1b (E1): the device result is one the host agrees with (gpu / gpu-zc: in range; check: equal) - only then
+    // may the next cycle take its inputs from the control words
+    bool dev_good = dev_k;
+    if (cy.vsegs[k].dev) sb_.accStats().e1 += 1;  // this cycle took the slot's inputs from the device
     const std::uint32_t row0 = cy.row_of[k];
     const std::uint32_t nd_k = cy.nd_of[k];
     const bool is_ng = cy.ng_n[k] > 0;  // literal drafts (n-gram or DFlash2)
@@ -576,6 +597,7 @@ void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& a
                 logW("spec-acc fallback | slot {} | device result out of range (acc {}/{}, nd {}); host decides", sl.id, a0, a1, nd_dev);
             sb_.accStats().fallback += 1;
             dev_use = false;
+            dev_good = false;
         }
     }
     // draft acceptance (src/sampling/acceptor.h): greedy / relaxacc greedy, or the sampler's draw at every
@@ -641,16 +663,22 @@ void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& a
                           static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_CHOSEN]) == chosen &&
                           static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_NDDEV]) == nd_dev &&
                           static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_NPOS]) == sl.pos + acc + 1 &&
-                          static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_NROW]) == row0 + acc;
+                          static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_NROW]) == row0 + acc &&
+                          static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_NPEND]) == acc + 1;  // v0252-e1p1b
         if (!same) {
             if (as.mismatch == 0)
                 logW("spec-acc check | slot {} | device acc {}/{} chosen {} nd {} vs host acc {}/{} chosen {} nd {}", sl.id, ctl[WHIRL_SA_CTL_ACC0],
                      ctl[WHIRL_SA_CTL_ACC], ctl[WHIRL_SA_CTL_CHOSEN], ctl[WHIRL_SA_CTL_NDDEV], acc_pre, acc, chosen, nd_dev);
             as.mismatch += 1;
+            dev_good = false;
         }
     }
+    // v0252-e1p1b (E1): an E1 cycle with a good device result leaves the next cycle's inputs on the device - the replay
+    // count is the NPEND word (qwen35::npend_dev), the hidden rows of all nd + 1 verify rows are kept below, e1_rows says so
+    const bool e1_next = cy.e1 && dev_good && m_.gdnReplay();
     // the verify ran nd + 1 rows of this slot: keep acc + 1 of them
-    if (m_.gdnReplay()) m_.setPending(sl.id, acc + 1);
+    if (e1_next) m_.setPending(sl.id, qwen35::npend_dev);
+    else if (m_.gdnReplay()) m_.setPending(sl.id, acc + 1);
     else if (acc < nd_k) m_.restoreSeqSnapshot(sl.id, cy.snap_of[k] + acc);
     // DFlash2 context: the kept rows' features (whatever drafted them; rejected rows never enter)
     dc_.dflIngest(sl, cy.rows, row0, acc + 1, sl.pos);
@@ -662,8 +690,9 @@ void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& a
         if (!sl.done) sl.done = emit(ct_, sl, dr[r]);
     if (!sl.done) sl.done = emit(ct_, sl, chosen);
     bst_.tokens += sl.n_gen - n_before;
+    // (v0252-e1p1b, E1: all nd + 1 rows - the next MTP step 0 runs them padded; rows 0 .. acc are the same)
     if (opt_.use_mtp)
-        ops_.copyAsync(m_.seqHid(sl.id), m_.hn() + static_cast<std::uint64_t>(row0) * cy.E * 4, (acc + 1) * cy.E * 4,
+        ops_.copyAsync(m_.seqHid(sl.id), m_.hn() + static_cast<std::uint64_t>(row0) * cy.E * 4, ((e1_next ? nd_k : acc) + 1) * cy.E * 4,
                        m_.stream());
     for (std::uint32_t r = 0; r < acc; ++r) sl.pend[r] = dr[r];
     sl.pend[acc] = chosen;
@@ -673,6 +702,7 @@ void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& a
     sl.pos += acc + 1;
     sl.last_acc = acc;
     sl.last_row = row0 + acc;
+    sl.e1_rows = e1_next ? nd_k + 1 : 0;  // v0252-e1p1b
     sl.logits_ok = true;
     if (cy.acc_check && cy.acc_all_dev) {
         // v0252-e1p1 (WHIRL_SPEC_ACC=check, every slot decided on the device): this slot's rows of the device's next-cycle

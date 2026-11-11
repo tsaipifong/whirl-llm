@@ -101,12 +101,13 @@
    ]
   },
   "kernels.sample": {
-   "desc": "token tables, greedy / draft picks, 2-bit MTP draft head, sampling candidates, speculative sampling, the device draft accept decision (spec_accept_rows, v0252-e1p1)",
+   "desc": "token tables, greedy / draft picks, 2-bit MTP draft head, sampling candidates, speculative sampling, the device draft accept decision (spec_accept_rows, v0252-e1p1), the E1 device-input row tables (set_rows_dp / rmsnorm_q8_rows_dv, v0252-e1p1b)",
    "paths": [
     "kernels/sample_*.hip",
     "kernels/draft_d2.hip",
     "kernels/spec_sample.hip",
     "kernels/spec_accept.hip",
+    "kernels/e1_inputs.hip",
     "kernels/gfx1151/draft_pick.hip",
     "kernels/gfx1151/sample_cand.hip"
    ],

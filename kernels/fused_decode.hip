@@ -13,6 +13,18 @@
 #include "shared/fused_decode_rmsnorm_q8.h"  // also in the gfx1151 set (kernels/gfx1151/fused_decode.hip)
 // struct GdnSegs: kernels/kernel_args.h
 
+// Replay mode (pend != null): the rows the previous verify kept, applied first. npend >= 0: that count (by value, as
+// before). v0252-e1p1b (E1, PLAN V1-93 P1b): npend < 0 = the count is the int at snap[0] - the sequence's NPEND control word,
+// written by spec_accept_rows (acc + 1; kernels/spec_accept.h), so the next cycle's verify needs no host value. In replay
+// mode the snapshot pointers are otherwise unused, and the snapshot stores below run only without pend. A device count is
+// clamped to [0, 16] (a verify segment has at most max_small_batch = 16 rows; GDN_MR staging).
+__device__ __forceinline__ int gdn_npend(const GdnSeg &sg) {
+    if (sg.pend == nullptr) return 0;
+    if (sg.npend >= 0) return sg.npend;
+    const int v = *(const int *)sg.snap[0];
+    return v < 0 ? 0 : (v > 16 ? 16 : v);
+}
+
 // Causal conv step (d_conv = 4) + SiLU for 128 channels per block, then L2
 // norm when the block is a q/k head (block < n_qk_heads). blockDim = 128.
 // grid.y = segment.
@@ -27,13 +39,14 @@ __device__ __forceinline__ void gdn_conv_l2_impl(const float *xin, const float *
     float h0 = 0.f, h1 = 0.f, h2 = 0.f;
     float4 wv = make_float4(0.f, 0.f, 0.f, 0.f);
     float *pend = sg.pend;
+    const int npend = gdn_npend(sg);  // v0252-e1p1b: by value or from the device word
     if (act) {
         h0 = state[c];
         h1 = state[(size_t)ch + c];
         h2 = state[(size_t)2 * ch + c];
         wv = *(const float4 *)(w + (size_t)c * 4);
-        if (pend != nullptr && sg.npend > 0) {
-            for (int t = 0; t < sg.npend; ++t) {
+        if (pend != nullptr && npend > 0) {
+            for (int t = 0; t < npend; ++t) {
                 h0 = h1;
                 h1 = h2;
                 h2 = pend[(size_t)t * ch + c];
@@ -54,7 +67,7 @@ __device__ __forceinline__ void gdn_conv_l2_impl(const float *xin, const float *
             h0 = h1;
             h1 = h2;
             h2 = xn;
-            float *sp = t < GDN_MAX_SNAP ? sg.snap[t] : nullptr;
+            float *sp = t < GDN_MAX_SNAP && pend == nullptr ? sg.snap[t] : nullptr;  // v0252-e1p1b: snapshots only without pend
             if (sp != nullptr) {
                 sp[c] = h0;
                 sp[(size_t)ch + c] = h1;
@@ -104,9 +117,10 @@ extern "C" __global__ void __launch_bounds__(512)
     for (int e = 0; e < PER; ++e) S[e] = Sg[(size_t)(qi * PER + e) * DV + j];
     float *pend = sgm.pend;
     constexpr int PW = DK + DV + 2; // pend row width per head
-    if (pend != nullptr && sgm.npend > 0) {
+    const int npend = gdn_npend(sgm);  // v0252-e1p1b: by value or from the device word
+    if (pend != nullptr && npend > 0) {
         // the rows the previous verify kept: the same state update as below
-        for (int tl = 0; tl < sgm.npend; ++tl) {
+        for (int tl = 0; tl < npend; ++tl) {
             const float *pr = pend + ((size_t)tl * n_v_heads + h) * PW;
             __syncthreads();
             if (threadIdx.x < DK) ks[threadIdx.x] = pr[threadIdx.x];
@@ -169,7 +183,7 @@ extern "C" __global__ void __launch_bounds__(512)
             S[e] += ks[qi * PER + e] * delta;
             o += S[e] * qs[qi * PER + e];
         }
-        float *sp = tl < GDN_MAX_SNAP ? sgm.snap[tl] : nullptr;
+        float *sp = tl < GDN_MAX_SNAP && pend == nullptr ? sgm.snap[tl] : nullptr;  // v0252-e1p1b: snapshots only without pend
         if (sp != nullptr) {
             float *Ss = sp + (size_t)h * DK * DV;
 #pragma unroll
@@ -229,7 +243,7 @@ extern "C" __global__ void __launch_bounds__(512)
     for (int e = 0; e < PER; ++e) S[e] = Sg[(size_t)(qi * PER + e) * DV + j];
     float *pend = sgm.pend;
     constexpr int PW = DK + DV + 2;  // pend row width per head
-    const int np = pend != nullptr ? sgm.npend : 0;
+    const int np = gdn_npend(sgm);  // v0252-e1p1b: by value (0 without pend) or from the device word
     if (np > 0) {
         // the rows the previous verify kept: the same state update as below
         for (int i = threadIdx.x; i < np * DK; i += blockDim.x) {
@@ -316,7 +330,7 @@ extern "C" __global__ void __launch_bounds__(512)
                 o += S[e] * qs[tl][qi * PER + e];
             }
             const int ta = c0 + tl;
-            float *sp = ta < GDN_MAX_SNAP ? sgm.snap[ta] : nullptr;
+            float *sp = ta < GDN_MAX_SNAP && pend == nullptr ? sgm.snap[ta] : nullptr;  // v0252-e1p1b: snapshots only without pend
             if (sp != nullptr) {
                 float *Ss = sp + (size_t)h * DK * DV;
 #pragma unroll

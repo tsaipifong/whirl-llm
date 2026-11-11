@@ -72,6 +72,7 @@ public:
 
     // ---- sequences
     virtual void selectSeq(std::uint32_t s) = 0;
+    // rows == qwen35::npend_dev (v0252-e1p1b, E1): the count is the sequence's ctl_npend control word (e1InputsOk models)
     virtual void setPending(std::uint32_t s, std::uint32_t rows) = 0;
     virtual void restoreSeqSnapshot(std::uint32_t s, std::uint32_t set) = 0;
     virtual void reset() = 0;
@@ -113,6 +114,11 @@ public:
     // Defaults: no device accept (the engine keeps the host path; specAccept is never called when specAcceptOk() is false).
     virtual void readCtlPinned(std::span<std::int32_t> dst) { readCtl(dst); }
     virtual bool specAcceptOk() const { return false; }
+    // ---- v0252-e1p1b (E1, WHIRL_E1; PLAN V1-93 P1b): the next cycle's inputs from the control words the accept kernel
+    // wrote (qwen35::ctl_acc / ctl_chosen / ctl_npos / ctl_npend) instead of host values: VSeg::dev, MSeg::e1_rows,
+    // setPending(s, qwen35::npend_dev) and SpecAccArgs::pos < 0. e1InputsOk: the model supports it (the device-input
+    // kernels, the accept kernel, DeltaNet replay mode). Default: no (the engine never takes the E1 path then).
+    virtual bool e1InputsOk() const { return false; }
     virtual void specAccept(const SpecAccArgs& /*a*/, std::int32_t* /*host*/) {}
     virtual void readSpecTab(SpecNextTab& /*t*/) {}
     // speculative sampling of MTP drafts (numerics item specsample): per sequence, set before the

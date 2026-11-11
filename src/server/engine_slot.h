@@ -71,6 +71,10 @@ struct SlotData : SlotPrefix, SlotTier {
     std::uint32_t pend_pos = 0;
     std::uint32_t last_acc = 0;
     std::uint32_t last_row = 0;
+    // v0252-e1p1b (E1, WHIRL_E1): > 0 = the slot's last decode cycle left the next cycle's inputs on the device (the accept
+    // kernel's control words, the replay count, the hidden rows of all e1_rows = nd + 1 verify rows): an E1 cycle may take
+    // them (MSeg::e1_rows, VSeg::dev); 0 = host inputs (set by acceptSlot, cleared by the prefill of a request)
+    std::uint32_t e1_rows = 0;
     bool logits_ok = false;
     float acc_ema = 0;
     qwen35::DraftAccept dacc;

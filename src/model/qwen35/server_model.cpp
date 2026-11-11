@@ -21,6 +21,10 @@ static_assert(WHIRL_SA_CTL_ROWS == whirl::kernels::kCtlRows && WHIRL_SA_CTL_DRAF
               WHIRL_SA_CTL_ACC > whirl::kernels::kCtlStop && WHIRL_SA_CTL_ACC0 < whirl::kernels::kCtlWords &&
               WHIRL_SA_MAX_SEG == whirl::kernels::kGdnMaxSeg && WHIRL_SA_MAX_ND == whirl::kernels::kGdnMaxSnap &&
               WHIRL_SA_MAX_ROWS == whirl::kernels::kMaxVerifyRows);
+// v0252-e1p1b (E1): the words the model's E1 launches read (whirl/model_types.h ctl_*) are the ones the accept kernel writes
+static_assert(whirl::qwen35::ctl_acc == WHIRL_SA_CTL_ACC && whirl::qwen35::ctl_chosen == WHIRL_SA_CTL_CHOSEN &&
+              whirl::qwen35::ctl_npos == WHIRL_SA_CTL_NPOS && whirl::qwen35::ctl_npend == WHIRL_SA_CTL_NPEND &&
+              WHIRL_SA_CTL_NPEND < whirl::kernels::kCtlWords);
 
 namespace whirl::server {
 
@@ -121,6 +125,10 @@ public:
         hip::streamSync(m_.stream);
     }
     bool specAcceptOk() const override { return m_.k.spec_accept_rows != nullptr; }
+    // v0252-e1p1b (E1): the device-input kernels and the accept kernel, DeltaNet replay mode (gfx1151: snapshot mode, no)
+    bool e1InputsOk() const override {
+        return m_.k.set_rows_dp != nullptr && m_.k.rmsnorm_q8_rows_dv != nullptr && m_.k.spec_accept_rows != nullptr && m_.gdn_replay;
+    }
     void specAccept(const SpecAccArgs& a, std::int32_t* host) override;
     void readSpecTab(SpecNextTab& t) override;
     bool draftSampleOk() const override { return m_.draftSampleOk(); }

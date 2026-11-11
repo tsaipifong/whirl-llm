@@ -61,3 +61,5 @@
 #include "dflash.hip"                // DFlash2 drafter: dynamic conv, top-k, selector lattice / walk, attention
                                      // (both kernel sets: plain f32 code, h2f from either common.hip)
 #include "spec_accept.hip"           // feat026-acc device accept decision (both kernel sets; v0252-e1p1: LAST, no kernel moves)
+#include "e1_inputs.hip"             // E1 next-cycle inputs on the device: set_rows_dp, rmsnorm_q8_rows_dv (both kernel sets;
+                                     // v0252-e1p1b: LAST, no kernel moves)

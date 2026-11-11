@@ -29,7 +29,7 @@
 #define WHIRL_SA_CTL_ROWS 0      // [0, 16) trunk argmax per verify row
 #define WHIRL_SA_CTL_DRAFTS 16   // [16, 32) MTP drafts
 #define WHIRL_SA_CTL_ND 48       // MTP drafts kept by the device p-min cutoff
-// results of spec_accept_rows (words 50 .. 63 were unused)
+// results of spec_accept_rows (words 50 .. 63 were unused; 50 .. 57 now)
 #define WHIRL_SA_CTL_ACC 50      // accepted drafts (after the EOS / budget cuts)
 #define WHIRL_SA_CTL_CHOSEN 51   // token after them
 #define WHIRL_SA_CTL_NDDEV 52    // drafts compared (MTP: min(nd, kept by p-min); literal: nd)
@@ -37,6 +37,9 @@
 #define WHIRL_SA_CTL_NPOS 54     // next cycle's verify position (pos + acc + 1)
 #define WHIRL_SA_CTL_NROW 55     // last kept verify row (row0 + acc): its hidden feeds the MTP head
 #define WHIRL_SA_CTL_ACC0 56     // accepted drafts before the EOS / budget cuts (what the acceptance models see)
+// v0252-e1p1b (E1, PLAN V1-93 step P1b): the DeltaNet replay rows of the sequence's next verify / commitSeq (acc + 1); the
+// E1 path's GDN kernels read it through GdnSeg npend < 0 (kernels/kernel_args.h), and P1c can zero it (end of a request)
+#define WHIRL_SA_CTL_NPEND 57
 #define WHIRL_SA_CTL_WORDS 64
 
 #define WHIRL_SA_F_DEV 1         // decided on the device (greedy exact)
@@ -58,7 +61,9 @@ struct SpecAccArgs {
     int dev[WHIRL_SA_MAX_SEG];     // 1: greedy exact (decide); 0: the host decides (sampling, relaxacc): copy only
     int eos[WHIRL_SA_MAX_SEG];     // 1: cut at end-of-turn drafts (request without ignore_eos)
     int budget[WHIRL_SA_MAX_SEG];  // max_tokens - n_gen (0: no cut, as the host)
-    int pos[WHIRL_SA_MAX_SEG];     // verify position of `next`
+    // verify position of `next`; < 0 (E1, v0252-e1p1b): the NPOS word the sequence's last spec_accept_rows wrote (the
+    // position stays on the device: spec_pos)
+    int pos[WHIRL_SA_MAX_SEG];
     int row0[WHIRL_SA_MAX_SEG];    // first verify row of the sequence
     int kvbase[WHIRL_SA_MAX_SEG];  // KV region base (RowTab.base)
     int lit_d[WHIRL_SA_MAX_SEG][WHIRL_SA_MAX_ND];
@@ -70,6 +75,7 @@ struct SpecAccResult {
     int chosen;
     int nd_dev;
     int flags;
+    int pos;   // v0252-e1p1b: the verify position of `next` (spec_pos: a.pos[k], or the NPOS word when that is < 0)
 };
 
 // the next cycle's rows, as Context::mtpBatchStepEx (step 0) and verifyBatchEnqueue (row 0) build them
@@ -89,9 +95,26 @@ WHIRL_SA_HD inline unsigned spec_draft(const SpecAccArgs& a, int k, const int* c
     return a.lit[k] ? (unsigned)a.lit_d[k][r] : (unsigned)ctl[WHIRL_SA_CTL_DRAFTS + r];
 }
 
+// v0252-e1p1b (E1): the verify position of sequence k - by value, or (a.pos[k] < 0) the NPOS word of its last accept,
+// read before this accept's spec_store overwrites it
+WHIRL_SA_HD inline int spec_pos(const SpecAccArgs& a, int k, const int* ctl) { return a.pos[k] >= 0 ? a.pos[k] : ctl[WHIRL_SA_CTL_NPOS]; }
+
+// a sequence the host decides (sampling, relaxacc: a.dev[k] == 0): nothing accepted here, the words are only copied
+WHIRL_SA_HD inline SpecAccResult spec_copy_one(const SpecAccArgs& a, int k, const int* ctl) {
+    SpecAccResult o;
+    o.acc0 = 0;
+    o.acc = 0;
+    o.chosen = ctl[WHIRL_SA_CTL_ROWS];
+    o.nd_dev = 0;
+    o.flags = 0;
+    o.pos = spec_pos(a, k, ctl);
+    return o;
+}
+
 // greedy exact accept of sequence k (ctl: its 64 control words after the verify argmax)
 WHIRL_SA_HD inline SpecAccResult spec_accept_one(const SpecAccArgs& a, int k, const int* ctl) {
     SpecAccResult o;
+    o.pos = spec_pos(a, k, ctl);
     const int nd_k = a.nd[k];
     int nd_dev = nd_k;
     if (!a.lit[k]) {
@@ -138,25 +161,26 @@ WHIRL_SA_HD inline void spec_next_rows(const SpecAccArgs& a, const int* ctl_all,
         for (int j = 0; j <= acc && n < WHIRL_SA_MAX_ROWS; ++j) {
             const unsigned tok = j < acc ? spec_draft(a, k, ctl, j) : (unsigned)res[k].chosen;
             t->mtp_tok[n] = spec_lookup(a, tok);
-            t->mtp_pos[n] = a.pos[k] + 1 + j;
+            t->mtp_pos[n] = res[k].pos + 1 + j;
             t->mtp_base[n] = a.kvbase[k];
             ++n;
         }
         t->mtp_last[k] = n - 1;
         t->ver_tok[k] = spec_lookup(a, (unsigned)res[k].chosen);
-        t->ver_pos[k] = a.pos[k] + acc + 1;
+        t->ver_pos[k] = res[k].pos + acc + 1;
         t->ver_base[k] = a.kvbase[k];
     }
     t->n_mtp = n;
 }
 
-// result words of sequence k into its control area
+// result words of sequence k into its control area (v0252-e1p1b: the position r.pos resolved by spec_pos, and NPEND)
 WHIRL_SA_HD inline void spec_store(const SpecAccArgs& a, int k, const SpecAccResult& r, int* ctl) {
     ctl[WHIRL_SA_CTL_ACC] = r.acc;
     ctl[WHIRL_SA_CTL_CHOSEN] = r.chosen;
     ctl[WHIRL_SA_CTL_NDDEV] = r.nd_dev;
     ctl[WHIRL_SA_CTL_FLAGS] = r.flags;
-    ctl[WHIRL_SA_CTL_NPOS] = a.pos[k] + r.acc + 1;
+    ctl[WHIRL_SA_CTL_NPOS] = r.pos + r.acc + 1;
     ctl[WHIRL_SA_CTL_NROW] = a.row0[k] + r.acc;
     ctl[WHIRL_SA_CTL_ACC0] = r.acc0;
+    ctl[WHIRL_SA_CTL_NPEND] = r.acc + 1;
 }

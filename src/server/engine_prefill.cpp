@@ -330,6 +330,7 @@ void PrefillPhase::finishPrefill(Slot& sl) {
     sl.pend_pos = N;
     sl.last_acc = 0;
     sl.last_row = 0;
+    sl.e1_rows = 0;  // v0252-e1p1b: the first decode cycle takes host inputs (the prefill's pend row)
     sl.logits_ok = true;
     sl.td0 = Clock::now();
     sl.last_log_t = sl.td0;

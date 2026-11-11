@@ -46,6 +46,18 @@ void Context::setStateCapture(u32 row, std::span<const DevPtr> conv, std::span<c
     ck_cap_row = row;
 }
 
+// v0252-e1p1b (E1, PLAN V1-93 P1b): the replay count of sequence s (replay mode; context.h). npend_dev: the kernels read
+// it from the sequence's ctl_npend word (GdnSeg npend < 0 = the int at snap[0], unused in replay mode; kernel_args.h)
+void Context::replayCount(GdnSeg& g, std::uint32_t s) const {
+    const Seq& sq = seqs[s];
+    if (sq.npend == npend_dev) {
+        g.npend = -1;
+        g.snap[0] = ctlWord(s, ctl_npend);
+        return;
+    }
+    g.npend = static_cast<i32>(sq.npend);
+}
+
 GdnSegs Context::gdnSegsBatch(const BatchPlan& bp, std::size_t i, bool conv) const {
     GdnSegs segs;
     i32 row = 0;
@@ -57,7 +69,7 @@ GdnSegs Context::gdnSegsBatch(const BatchPlan& bp, std::size_t i, bool conv) con
         segs.s[kk].nrows = static_cast<i32>(sg.nd + 1);
         if (gdn_replay) {
             segs.s[kk].pend = pendPtr(sq, i, conv);
-            segs.s[kk].npend = static_cast<i32>(sq.npend);
+            replayCount(segs.s[kk], sg.seq);  // v0252-e1p1b: by value or the sequence's ctl_npend word
             row += static_cast<i32>(sg.nd + 1);
             continue;
         }

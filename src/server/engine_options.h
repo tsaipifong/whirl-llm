@@ -39,6 +39,15 @@ inline std::optional<std::uint32_t> parseSpecAcc(std::string_view v) {
     return std::nullopt;
 }
 
+// v0252-e1p1b (E1, PLAN V1-93 P1b): WHIRL_E1 values: "0" / "1" (surrounding blanks ignored); anything else nullopt
+// (server_main warns and uses 0).
+inline std::optional<std::uint32_t> parseE1(std::string_view v) {
+    while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
+    if (v == "0" || v == "1") return static_cast<std::uint32_t>(v[0] - '0');
+    return std::nullopt;
+}
+
 struct EngineOptions {
     std::string model_name;
     std::string model_file;  // GGUF file name without directory (GET /props model_path)
@@ -90,6 +99,13 @@ struct EngineOptions {
     // counts, next token, next-cycle rows; the host result is used). The reply is the same in every mode (exact greedy
     // acceptance; sampling / relaxacc slots always decide on the host). SampleBuffers::readCycleCtl.
     std::uint32_t spec_acc = 0;
+    // v0252-e1p1b (E1, PLAN V1-93 P1b; WHIRL_E1): 1 = a decode cycle that qualifies (one greedy exact MTP slot, DeltaNet
+    // replay mode, no image / DFlash2 / profiling events) takes its inputs from the control words the last cycle's accept
+    // kernel wrote (next token, positions, MTP step-0 rows, draft-head row, replay count), and leaves the next cycle's
+    // there. Still one cycle at a time (P1c pipelines it); needs the device accept (Engine::allocState raises spec_acc to
+    // 2 = gpu when it is host / pinned) and the model's E1 kernels (ServerModel::e1InputsOk; else off with a warning).
+    // The reply is the same as with 0.
+    std::uint32_t e1 = 0;
     // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)
     std::uint32_t slot_drafts = 0;
     bool trace_nd = false;

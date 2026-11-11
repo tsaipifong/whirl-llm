@@ -85,8 +85,8 @@ void SlotEnd::finishJob(Slot& sl) {
     if (opt_.spec_acc >= 2) {
         const SpecAccStats& as = sb_.accCounts();
         logI("req {} | slot {} | spec-acc stats | {}: decided on the device {}, out of range (host decided) {}; check: "
-             "compared {}, disagree {}; next-cycle rows: compared {}, disagree {}",
-             job.id, sl.id, specAccName(opt_.spec_acc), as.dev, as.fallback, as.checked, as.mismatch, as.tab_checked, as.tab_mismatch);
+             "compared {}, disagree {}; next-cycle rows: compared {}, disagree {}; E1 device-input cycles {}",
+             job.id, sl.id, specAccName(opt_.spec_acc), as.dev, as.fallback, as.checked, as.mismatch, as.tab_checked, as.tab_mismatch, as.e1);
     }
     // (whatever the draft source: with DFlash2 drafts it must stay 0, FR-DFL P2-3)
     if (opt_.relax.on && (opt_.use_mtp || opt_.use_dflash))
