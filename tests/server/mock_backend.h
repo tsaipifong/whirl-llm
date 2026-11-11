@@ -23,6 +23,7 @@
 #include "server/backend.h"
 #include "device/null_backend.h"
 #include "whirl/tokenizer.h"
+#include "../../kernels/spec_accept.h"  // v0252-e1p1: SpecAccArgs / SpecNextTab (MockModel::specAccept runs the header)
 
 #include <atomic>
 #include <cstdint>
@@ -92,6 +93,12 @@ struct MockConfig {
     // v0252-f1: the model supports the relaxacc one-pass check (setRelaxRank; the verify writes each MTP draft's full-row
     // rank / row max / logit like argmax_rank_rows_to); false = the engine keeps topkRows (as a model without the kernel)
     bool relax_rank = false;
+    // v0252-e1p1 (feat026-acc port): the mock has the device accept kernel (specAccept runs kernels/spec_accept.h on the
+    // host, as spec_accept_rows does on the GPU); false = a code object without spec_accept_rows
+    bool spec_acc_kernel = true;
+    // feat026-acc-r1: every Nth specAccept (0 = never) writes an out-of-range accept count (nd + 5) for its first
+    // device-decided sequence, like a broken device result: modes 2/3 must fall back to the host, mode 4 must report it
+    std::uint32_t spec_acc_corrupt = 0;
 };
 
 class MockModel final : public server::ServerModel {
@@ -204,8 +211,22 @@ public:
     std::uint64_t topkCalls() const { return topk_calls_.load(); }
     std::uint64_t rankVerifies() const { return rank_verifies_.load(); }
     std::uint64_t rankRows() const { return rank_rows_.load(); }
+    // v0252-e1p1 (feat026-acc port, WHIRL_SPEC_ACC): the device accept kernel, run on the host with the same code
+    // (kernels/spec_accept.h): result words 50 .. 56 of each control area, the next-cycle rows, and (host != null) the
+    // verify's control areas written into host (the gpu-zc zero-copy write). readCtlPinned: the pinned read (counted
+    // apart from readCtl, so a test sees which read a cycle used; gpu-zc must use neither)
+    void readCtlPinned(std::span<std::int32_t> dst) override;
+    bool specAcceptOk() const override { return mc_.spec_acc_kernel; }
+    void specAccept(const SpecAccArgs& a, std::int32_t* host) override;
+    void readSpecTab(SpecNextTab& t) override;
+    std::uint64_t specAccepts() const { return spec_accepts_.load(); }
+    std::uint64_t specCorrupted() const { return spec_corrupted_.load(); }  // feat026-acc-r1 (MockConfig::spec_acc_corrupt)
+    std::uint64_t readCtlCalls() const { return readctl_calls_.load(); }
+    std::uint64_t readCtlPinnedCalls() const { return readctl_pinned_calls_.load(); }
 
 private:
+    SpecNextTab spec_tab_{};  // the next-cycle rows of the last specAccept (engine thread)
+    std::atomic<std::uint64_t> spec_accepts_{0}, spec_corrupted_{0}, readctl_calls_{0}, readctl_pinned_calls_{0};
     void prefillRows(std::size_t n);
     struct State {
         std::uint64_t h = 0;   // recurrent hash

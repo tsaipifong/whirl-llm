@@ -246,6 +246,11 @@ void moeGuChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& 
 void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& down, int R, int K);
 void testMisc(Ctx& c);
 void testDflash(Ctx& c);
+// v0252-e1p1 (feat026-acc port; test_spec_accept.cpp): "specacc" = spec_accept_rows bit for bit vs kernels/spec_accept.h as
+// WHIRL_SPEC_ACC gpu / check launch it (hand case + random cycles); "specaccz" (on request) = the gpu-zc zero-copy write
+// into hip::hostMalloc memory through the host pointer
+void testSpecAcc(Ctx& c);
+void testSpecAccZc(Ctx& c);
 
 inline unsigned cdiv(std::uint64_t a, std::uint64_t b) { return static_cast<unsigned>((a + b - 1) / b); }
 

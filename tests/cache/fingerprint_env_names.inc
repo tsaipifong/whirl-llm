@@ -119,6 +119,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_SERVE_CKPTS",  // src/server/server_main.cpp
     "WHIRL_SLOT_DRAFTS",  // src/server/server_main.cpp
     "WHIRL_SNAP_SETS",  // src/server/server_main.cpp
+    "WHIRL_SPEC_ACC",  // src/config/run_settings.h (v0252-e1p1, feat026-acc: hashed, as in feat026-acc-r1 - conservative; the reply does not depend on it)
     "WHIRL_SPEC_SAMPLE",  // src/common/numerics.cpp
     "WHIRL_SYS_CKPTS",  // src/server/server_main.cpp
     "WHIRL_SYS_MIN",  // src/cli/common.cpp

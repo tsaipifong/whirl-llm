@@ -122,6 +122,8 @@ add_executable(whirl-server-tests
   ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp)
 target_include_directories(whirl-server-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/server)
 target_link_libraries(whirl-server-tests PRIVATE whirl_server_core whirl_device_null)
+# v0252-e1p1: spec_acc_r1_env reads the env table / docs / server_main sources (as whirl-cache-tests does)
+target_compile_definitions(whirl-server-tests PRIVATE WHIRL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 if(MSVC)
   # arch025 (2026-10-29): server_tests.cpp passed the COFF section limit in the ASan build (cpu_asan: C1128 "compile with
   # /bigobj"). llama.cpp sets /bigobj on every MSVC C/C++ TU (CMakeLists.txt:88-89); here only this test target, so the

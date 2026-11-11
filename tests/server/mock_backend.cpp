@@ -647,9 +647,57 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
 }
 
 void MockModel::readCtl(std::span<std::int32_t> dst) {
+    readctl_calls_ += 1;
     for (std::size_t s = 0; s < seqs_.size() && (s + 1) * qwen35::ctl_words <= dst.size(); ++s)
         std::memcpy(dst.data() + s * qwen35::ctl_words, seqs_[s].ctl.data(), qwen35::ctl_words * 4);
 }
+
+// v0252-e1p1 (feat026-acc port): the pinned read is the same copy (counted apart)
+void MockModel::readCtlPinned(std::span<std::int32_t> dst) {
+    readctl_pinned_calls_ += 1;
+    for (std::size_t s = 0; s < seqs_.size() && (s + 1) * qwen35::ctl_words <= dst.size(); ++s)
+        std::memcpy(dst.data() + s * qwen35::ctl_words, seqs_[s].ctl.data(), qwen35::ctl_words * 4);
+}
+
+// v0252-e1p1 (feat026-acc port, 4ac9da6): what spec_accept_rows does on the device, with the same header code
+void MockModel::specAccept(const SpecAccArgs& a_in, std::int32_t* host) {
+    SpecAccArgs a = a_in;
+    if (a.n <= 0 || a.n > WHIRL_SA_MAX_SEG) throw std::runtime_error("BadBatch");
+    a.n_vocab = static_cast<int>(cfg_.n_vocab);
+    const std::size_t W = qwen35::ctl_words;
+    std::vector<std::int32_t> all(seqs_.size() * W);
+    for (std::size_t s = 0; s < seqs_.size(); ++s) std::memcpy(all.data() + s * W, seqs_[s].ctl.data(), W * 4);
+    SpecAccResult res[WHIRL_SA_MAX_SEG];
+    for (int k = 0; k < a.n; ++k) {
+        if (a.seq[k] < 0 || static_cast<std::size_t>(a.seq[k]) >= seqs_.size() || a.nd[k] < 0 || a.nd[k] > WHIRL_SA_MAX_ND)
+            throw std::runtime_error("BadBatch");
+        a.kvbase[k] = 0;
+        std::int32_t* ctl = all.data() + static_cast<std::size_t>(a.seq[k]) * W;
+        SpecAccResult r{};
+        if (a.dev[k]) r = spec_accept_one(a, k, ctl);
+        else r.chosen = ctl[WHIRL_SA_CTL_ROWS];
+        spec_store(a, k, r, ctl);
+        res[k] = r;
+    }
+    spec_next_rows(a, all.data(), res, &spec_tab_);
+    if (mc_.spec_acc_corrupt > 0 && (spec_accepts_.load() + 1) % mc_.spec_acc_corrupt == 0) {
+        for (int k = 0; k < a.n; ++k) {
+            if (!a.dev[k]) continue;
+            std::int32_t* ctl = all.data() + static_cast<std::size_t>(a.seq[k]) * W;
+            ctl[WHIRL_SA_CTL_ACC0] = ctl[WHIRL_SA_CTL_NDDEV] + 5;
+            spec_corrupted_ += 1;
+            break;
+        }
+    }
+    for (int k = 0; k < a.n; ++k) {
+        const std::size_t s = static_cast<std::size_t>(a.seq[k]);
+        std::memcpy(seqs_[s].ctl.data(), all.data() + s * W, W * 4);
+        if (host != nullptr) std::memcpy(host + s * W, all.data() + s * W, W * 4);
+    }
+    spec_accepts_ += 1;
+}
+
+void MockModel::readSpecTab(SpecNextTab& t) { t = spec_tab_; }
 
 void MockModel::mtpEnqueue(server::DevPtr, std::span<const std::uint32_t>, std::uint32_t) { h_rows_.clear(); }
 

@@ -49,8 +49,10 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <fstream>  // v0252-e1p1: spec_acc_tests.inc reads the env table / docs / server_main sources
 #include <functional>
 #include <future>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -4658,6 +4660,9 @@ void testSampling() {
     for (const auto& g : got) CHECK_EQ(g, a);
     CHECK_EQ(srv.model().poison(), 0u);
 }
+
+// v0252-e1p1 (PLAN V1-93 P1a): WHIRL_SPEC_ACC, the device accept decision (port of feat026-acc / feat026-acc-r1)
+#include "spec_acc_tests.inc"
 
 // stop strings and end-of-turn
 void testStopAndEos() {
@@ -9893,6 +9898,10 @@ int main(int argc, char** argv) {
         {"supersede_compress", testSupersedeCompressCuts},
         {"sampling", testSampling},
         {"stop_eos", testStopAndEos},
+        {"spec_acc_modes", testSpecAccModes},  // v0252-e1p1 (feat026-acc port)
+        {"spec_acc_reads", testSpecAccReads},
+        {"spec_acc_r1_counters", testSpecAccR1Counters},
+        {"spec_acc_r1_env", testSpecAccR1Env},
         {"fr_tool_truncated", testFrToolTruncated},
         {"fr_nonstream_disconnect", testFrNonStreamDisconnect},
         {"fr_pool_prefill", testFrPoolPrefill},
