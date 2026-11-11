@@ -60,6 +60,9 @@
 //   add_inplace(a, b, n); silu_mul(a, b, n); silu_mul_q8(g, u, xq, xd, n)
 //   silu_mul_x8 / x16 / x8t(const float* g, const float* u, u8* q, sx, ncols)
 //   silu_mul_x8h / x16h / x8ht(const f16* g, const f16* u, u8* q, sx, ncols)
+//   silu_mul_x8w / x8w4 (optional, v0252-silu, gfx1201)(const f16* g, const f16* u, u8* q, sx, ncols, nrows): the values
+//            of silu_mul_x8h (bitwise) with one wave32 per row; grid ceil(nrows / 8) x 256 threads (x8w) or
+//            ceil(nrows / 4) x 128 (x8w4); ncols must pass siluWShapeOk
 //   gated_norm_x8 / x16 / x8t(o, const float* z, w, u8* q, sx, n_heads, eps)
 //   gated_norm_x8h / x16h / x8ht(o, const f16* z, w, u8* q, sx, n_heads, eps)
 //   rope_neox(float* x, const int* pos, int head_stride, int tok_stride,
@@ -252,6 +255,10 @@ inline constexpr int kGemmrMoeBk = 64;
 inline constexpr bool gemmrMoeShapeOk(std::uint32_t E, std::uint32_t F) {
     return E > 0 && F > 0 && E % kGemmrMoeBk == 0 && F % kGemmrMoeBk == 0;
 }
+// v0252-silu (gfx1201, optional): silu_mul_x8w / silu_mul_x8w4 - 16 values per lane per chunk, 2 chunks of 32 lanes
+inline constexpr int kSiluWMaxF = 1024;
+inline constexpr int siluWRowsPerBlock(bool w4) { return w4 ? 4 : 8; }
+inline constexpr bool siluWShapeOk(std::uint32_t F) { return F > 0 && F % 16 == 0 && F <= static_cast<std::uint32_t>(kSiluWMaxF); }
 inline constexpr int kMoeBn32 = 32;                                        // gemm_moe32_* token tile
 // feat026-moep variants (kernels/gfx1151/moe_prefill_mt.hip MOEPGU_ENTRY / MOEPDN_ENTRY; keep in step).
 struct MoepGuVariant {
@@ -754,6 +761,7 @@ struct MiscKernels {
     F rmsnorm_x8t{}, silu_mul_x8t{}, silu_mul_x8ht{}, gated_norm_x8t{}, gated_norm_x8ht{};
     F topk_rows{};
     F argmax_rank_rows_to{};  // optional (v0252-f1 relaxacc one-pass check; null: relaxacc greedy keeps topk_rows)
+    F silu_mul_x8w{}, silu_mul_x8w4{};  // optional (v0252-silu, gfx1201): silu_mul_x8h for short rows, one wave per row
 };
 
 struct KernelTable : MatmulKernels, AttnKernels, MoeKernels, DeltaNetKernels, MiscKernels {

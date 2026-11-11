@@ -234,6 +234,16 @@ void testMoeF(Ctx& c);  // "moef": precise MoE decode experts moe_gu_f_* / moe_d
 // v0252-c3port "moefuse" (test_moe_fused.cpp): gfx1201 fused precise MoE decode moe_gus*_f_mxfp4 == moe_gu_f + silu_mul and
 // f32_to_f16 + gemvh x2 + silu_mul + f32_to_f16, gemvhf_<T> == f32_to_f16 + gemvh_<T> (bitwise); presence rows per arch
 void testMoeFused(Ctx& c);
+// v0252-silu "silu" (test_silu_w.cpp): gfx1201 silu_mul_x8w / silu_mul_x8w4 == silu_mul_x8h (fp8 rows and row scales
+// bitwise, rows past nrows untouched; random, edge-value and real Ornith g / u), presence rows per arch. The real g / u
+// (WHIRL_KT_SILU_RT dumps, gemm8r_moeh on Ornith weights) are shared with the bench family "silu" (bench_kernels.cpp)
+void testSiluW(Ctx& c);
+struct SiluGu {
+    int n = 0, pairs = 0, F = 0, fwd = -1, bn = 0;  // tokens, rows (n x K), F, forward index in the dump, token tile
+    std::vector<std::uint16_t> g, u;                 // f16 bits, [pairs][F]
+};
+std::vector<std::string> siluDumpPaths();
+bool siluRealGu(Ctx& c, const std::string& path, int layer, SiluGu& out, std::string& why);
 // v0251-a11port (called by testMoeMx, family "moemx"): fused router moe_router_fused_i* == moe_logits_f32 + moe_topk
 // (bitwise) and vs CPU, presence rows (every code object + host table; v0252-c5port adds gfx1201) (test_moe_router.cpp)
 void testMoeRouter(Ctx& c);
