@@ -92,6 +92,9 @@ struct MockConfig {
     // v0252-f1: the model supports the relaxacc one-pass check (setRelaxRank; the verify writes each MTP draft's full-row
     // rank / row max / logit like argmax_rank_rows_to); false = the engine keeps topkRows (as a model without the kernel)
     bool relax_rank = false;
+    // v0252-precfix: ServerModel::segJoinMin (the real model: 16, or 32 for a MoE model in precise). A prefillSegs segment
+    // of <= seg_join_min rows counts in segSmall() (the real Context::prefillSegs throws BadBatch for it after the fix)
+    std::uint32_t seg_join_min = qwen35::max_small_batch;
 };
 
 class MockModel final : public server::ServerModel {
@@ -159,6 +162,12 @@ public:
                   server::DevPtr vals, server::DevPtr stats) override;
 
     std::uint32_t verifyRows() const override { return mc_.verify_rows; }
+    // v0252-precfix: the join bound, the prefillSegs calls so far, the segments of <= segJoinMin() rows among them, and the
+    // smallest segment seen (0 = none)
+    std::uint32_t segJoinMin() const override { return mc_.seg_join_min; }
+    std::uint64_t segForwards() const { return seg_forwards_.load(); }
+    std::uint64_t segSmall() const { return seg_small_.load(); }
+    std::uint32_t minSegRows() const { return min_seg_rows_.load(); }
     // v0252-btl: the batched MTP step's contract, as the real model has it (Context::mtpBatchStepEx): r = 0 takes at most
     // verifyRows() pend rows in all (and max_small_batch per segment), else BatchTooLarge; a step r >= 1 reads, for its
     // segment kk, the head row kk the step just before it wrote for the same sequence at r - 1 (the model's h rows; any
@@ -280,6 +289,8 @@ private:
     mutable std::atomic<std::uint64_t> poison_{0};
     std::atomic<std::uint32_t> resizes_{0};
     std::atomic<std::uint32_t> max_pf_rows_{0};
+    std::atomic<std::uint64_t> seg_forwards_{0}, seg_small_{0};  // v0252-precfix (engine thread writes, the test reads)
+    std::atomic<std::uint32_t> min_seg_rows_{0};
     std::atomic<std::uint32_t> max_seg_nd_{0};
     // v0252-btl: the MTP step accounting of the current decode cycle (engine thread) and its results (read by the test)
     struct HeadRow {

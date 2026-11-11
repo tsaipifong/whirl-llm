@@ -275,6 +275,36 @@ void testOpsMoeFuse(ops::MoeProblem mp, const kn::KernelTable& k97, const kn::Ke
     CHECK(ops::chooseMoeFuse(p, true, pl, only16).use);
 }
 
+// v0252-precfix (PLAN V1-85; KB v0252-precconc:moe-segjoin-window): R9700 2026-11-11 hostwait proof, Ornith precise server
+// gate basic: "5 concurrent requests == each alone (cold)" and "same seed under load (4 concurrent)" FAIL, deterministic; the
+// slot whose prompt was prefilled alone matched, the slots of the segmented prefill forward differed. Cause: since 92aa626
+// precise MoE gives every forward of <= max_verify_rows (32) rows the f32 decode experts, but the server let chunks of
+// > max_small_batch (16) rows join a segmented forward (> 32 rows: the f16 grouped GEMM). A chunk that may join (more than
+// moeSegJoinMin rows) must take the same MoE bit class alone as in the smallest segmented forward it can be part of
+// (itself + another chunk of moeSegJoinMin + 1 rows), in every mode, on both code objects (gfx1201, gfx1151 tables).
+void testOpsMoeSegJoin(ops::MoeProblem p, const kn::KernelTable& k97, const kn::KernelTable& k8) {
+    CHECK_EQ(ops::moeSegJoinMin(false, 16, 32), 16u);  // balance / fast: the decode experts stop at 16 rows in a prefill forward
+    CHECK_EQ(ops::moeSegJoinMin(true, 16, 32), 32u);   // precise: they serve up to max_verify_rows (92aa626)
+    CHECK_EQ(ops::moeSegJoinMin(true, 16, 16), 16u);   // no wider precise range: the server's rule
+    for (const bool precise : {false, true}) {
+        ops::MoeFlags f;
+        f.prec_dec = precise;
+        f.moe_fp8 = !precise;  // balance / fast prefill: MXFP4 x fp8 (numerics plan); precise: f16
+        const std::uint32_t jmin = ops::moeSegJoinMin(f.prec_dec, f.max_small_batch, f.max_verify_rows);
+        for (const kn::KernelTable* k : {&k97, &k8}) {
+            std::uint32_t bad = 0;
+            for (std::uint32_t n = jmin + 1; n <= 2 * f.max_verify_rows + 1; ++n) {
+                p.n = n;
+                const ops::MoePlan alone = ops::chooseMoe(p, f, *k, k->silu_mul_x8h);
+                p.n = n + jmin + 1;
+                const ops::MoePlan joined = ops::chooseMoe(p, f, *k, k->silu_mul_x8h);
+                if (alone.small != joined.small || alone.bits != joined.bits) ++bad;
+            }
+            CHECK_EQ(bad, 0u);
+        }
+    }
+}
+
 void testOpsMoe() {
     ops::MoeProblem p;  // Ornith-like: E 2048, 8 of 256 experts, F 512, all MXFP4 with row exponents
     p.E = 2048;
@@ -537,6 +567,7 @@ void testOpsMoe() {
     }
     testOpsMoeRouter(p, k97, k8);
     testOpsMoeFuse(p, k97, k8);  // v0252-c3port (fails before the port: chooseMoeFuse is a stub)
+    testOpsMoeSegJoin(p, k97, k8);  // v0252-precfix (fails before the fix: moeSegJoinMin is a stub returning 16)
 }
 
 }  // namespace

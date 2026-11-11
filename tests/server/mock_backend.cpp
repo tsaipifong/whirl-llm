@@ -454,6 +454,13 @@ void MockModel::prefillSegs(std::span<const server::PSeg> segs, bool with_mtp) {
     std::size_t rows = 0;
     for (const server::PSeg& sg : segs) rows += sg.n;
     prefillRows(rows);
+    // v0252-precfix: the join accounting (segJoinMin)
+    seg_forwards_ += 1;
+    for (const server::PSeg& sg : segs) {
+        const auto n = static_cast<std::uint32_t>(sg.n);
+        if (n <= segJoinMin()) seg_small_ += 1;
+        if (min_seg_rows_.load() == 0 || n < min_seg_rows_.load()) min_seg_rows_.store(n);
+    }
     cap_.clear();
     (void)takeCapture(rows, false);
     std::uint32_t r0 = 0;
