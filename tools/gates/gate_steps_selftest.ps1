@@ -247,6 +247,12 @@ try {
     $fo = @(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "gate_flow_selftest.ps1") -Work (Join-Path $Work "flow") 2>&1 | ForEach-Object { "$_" }); $fc = $LASTEXITCODE
     $fo | Where-Object { $_ -match "^(ok|BAD) " } | ForEach-Object { Write-Host "     flow: $_" }
     Check "gate flow selftest (heavy-CPU lock, retry / FLAKY, -Strict)" ($fc -eq 0 -and ($fo[-1] -match "^gate flow selftest: ([1-9]\d*)/\1 as expected$")) "exit ${fc}: $($fo | Select-Object -Last 3)"
+    # ---- 8. v0252-b3gate: every exe release_gate.ps1 registers is in the fake build of each selftest that runs the gate
+    # on a fake build (gate_flow_selftest, kl_guard_selftest, module_gate_test); ktrng's whirl-kt-seed-tests broke all three
+    $ko = @(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "fake_build_lists_check.ps1") -SelfTest 2>&1 | ForEach-Object { "$_" }); $kc = $LASTEXITCODE
+    Check "fake build lists check: its planted cases" ($kc -eq 0 -and ($ko[-1] -match "^fake build lists selftest: ([1-9]\d*)/\1 as expected$")) "exit ${kc}: $($ko | Select-Object -Last 3)"
+    $ko = @(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "fake_build_lists_check.ps1") 2>&1 | ForEach-Object { "$_" }); $kc = $LASTEXITCODE
+    Check "fake build lists: every registered exe is in the selftests' fake builds" ($kc -eq 0 -and ($ko[-1] -match "^fake build lists check: ok ")) "exit ${kc}: $($ko -join ' | ')"
 } finally {
     foreach ($v in $envKeep.Keys) { SetEnvOrRemove $v $envKeep[$v] }
     Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
