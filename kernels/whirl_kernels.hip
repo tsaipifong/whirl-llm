@@ -51,6 +51,7 @@
 #include "gemv_hv.hip"             // precise gemvh candidates + tune table (v0252-c2port; LAST: no existing kernel moves)
 #include "gemv_hf.hip"             // precise gemvh on f32 input + the gemvh tile (v0252-c3port; after the shipped set)
 #include "moe_fused.hip"           // precise MoE decode: routed + shared gate/up + SwiGLU in one launch (v0252-c3port; LAST)
+#include "moe_silu_w.hip"          // silu_mul_x8h for short rows, one wave per row (v0252-silu; LAST: no existing kernel moves)
 #endif
 
 #if defined(__gfx1151__)
