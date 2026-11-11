@@ -28,7 +28,11 @@ from .struct.rdf import RdfFile
 # v2 = WHIRL v0252-rgpfix 2026-11-10: the *_v2 dispatch columns and the _idle.csv windows are added, every older
 # column keeps its meaning (dur_us is still min(wave span, next-launch gap); gap_before_us is still "start minus
 # the previous dispatch's end in start order").
-PARSER_VERSION = "whirl-rgp-2 (v0252-rgpfix 2026-11-10)"
+# v3 = WHIRL v0252-rgpse 2026-11-11 (PLAN V1-96): the *_v2 columns, _idle.csv and attribution_v2 are computed with every
+# shader engine's ticks converted through ITS OWN realtime stamps (v2 used SE0's for all engines; the engines' ticks
+# drift apart by up to ~300 us per 60 ms capture); attribution_v2 gains "clock" and "host_wait_edges". The legacy
+# columns stay bit-identical (SE0 mapping, upstream semantics) and must not be used for cross-engine idle / spans.
+PARSER_VERSION = "whirl-rgp-3 (v0252-rgpse 2026-11-11)"
 
 # ---- RGP SQTT markers (reassembled from USERDATA_2 + USERDATA_3) --------------
 # RGP streams markers 2 dwords/packet into USERDATA_2/3; the patched decoder surfaces

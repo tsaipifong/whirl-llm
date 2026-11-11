@@ -8,3 +8,9 @@ own dispatch initiators and each wave's initiator ordinal, and decode() adds a v
 stream order, PC-aligned to SE0; fallback nearest SE0 initiator), per-dispatch union busy time and GPU idle windows (no
 wave alive on any engine); build.py / model.py / format/* append *_v2 columns, format/idle.py writes <base>_idle.csv,
 summary.json gets parser_version + attribution_v2; every original output value is unchanged. test_rgpfix.py is new.
+modified 2026-11-11 (WHIRL v0252-rgpse, PLAN V1-96, output version whirl-rgp-3): decode() converts every shader engine's
+ticks through that engine's OWN realtime (TIMESTAMP rt=1) pairs for all v2 quantities (*_v2 columns, _idle.csv windows,
+init / fallback times) instead of SE0's pairs for every engine (inherited from upstream; the engines' accumulated
+shader ticks drift apart by up to ~300 us per 60 ms R9700 capture, review v0252-rgpreview F1). attribution_v2 gains
+"clock" (per-engine stamp counts) and "host_wait_edges" (first wave per engine after each > 50 us idle window: spread).
+Legacy columns keep the SE0 mapping and stay bit-identical. test_rgpfix.py gains (g) and (h).

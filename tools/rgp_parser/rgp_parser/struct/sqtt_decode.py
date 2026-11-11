@@ -681,10 +681,12 @@ def decode(blobs, wave_size=32):
     disps, ev_raw, rts, occ0, inits0 = parse_se(blobs[0], 0, True)
     occ_all = [occ0]
     inits_all = [inits0]
+    rts_all = [rts]
     for i in range(1, len(blobs)):
-        _, _, _, occ_i, inits_i = parse_se(blobs[i], i, False)
+        _, _, rts_i, occ_i, inits_i = parse_se(blobs[i], i, False)
         occ_all.append(occ_i)
         inits_all.append(inits_i)
+        rts_all.append(rts_i)
 
     rt_freq = 100_000_000  # RGP capture: decoder emits no RT_FREQUENCY -> fallback
 
@@ -727,6 +729,53 @@ def decode(blobs, wave_size=32):
     def to_us(sc):
         return (sc_to_rt(sc) - rt0) * US
 
+    # --- v2 time base (WHIRL v0252-rgpse, PLAN V1-96): each engine on its OWN realtime stamps -------------
+    # An engine's shader-clock "tick" is its own running sum of TIME / TIMESTAMP deltas (TokenGen._time*), so the
+    # engines' ticks drift apart (R9700 captures: up to ~300 us by the end of a 60 ms capture); only the realtime
+    # TIMESTAMPs (rt=1, 100 MHz) are a common clock. Every v2 quantity (ts2 / end2 / busy2 / init2, the fallback lead,
+    # the idle windows) is therefore computed on realtime values, each engine through its own (tick, realtime) pairs.
+    # The legacy columns above (ts / dur / launch_ts / wavefronts / band / events) keep the upstream SE0 mapping
+    # (to_us) so they stay bit-identical; they are biased across engines and are not used for idle / span analyses.
+    def _mk_rt(pairs):
+        ps = sorted(pairs)
+        xs, ys = [], []
+        for sc, rv in ps:  # keep (tick, realtime) strictly increasing -> monotone mapping (stream order kept)
+            if xs and (sc <= xs[-1] or rv <= ys[-1]):
+                continue
+            xs.append(sc)
+            ys.append(float(rv))
+        if len(xs) < 2:
+            return None, len(xs)
+        n = len(xs)
+
+        def f(sc):
+            j = bisect.bisect_left(xs, sc)
+            if j <= 0:
+                j = 1  # before the first stamp: extend the first segment
+            elif j >= n:
+                j = n - 1  # after the last stamp: extend the last segment
+            x0, x1 = xs[j - 1], xs[j]
+            return ys[j - 1] + (sc - x0) * (ys[j] - ys[j - 1]) / (x1 - x0)
+        return f, n
+
+    rt_of = []
+    clock_notes = []
+    f0, n0 = _mk_rt(rts_all[0])
+    if f0 is None:  # no realtime stamps at all (synthetic streams): ticks ARE the clock, as in sc_to_rt
+        f0 = float
+    for se, pairs in enumerate(rts_all):
+        f, n = _mk_rt(pairs) if se else (f0, n0)
+        if f is None:
+            f = f0
+            clock_notes.append(f"se{se}: {n} realtime stamps -> SE0 mapping")
+        else:
+            clock_notes.append(f"se{se}: own clock, {n} realtime stamps")
+        rt_of.append(f)
+    rt0v = float(rt0)  # the legacy origin, so ts2 and ts share their zero
+
+    def rt_us(r):  # realtime value -> us since the legacy origin (same origin as to_us)
+        return (r - rt0v) * US
+
     # --- v2 wave -> dispatch attribution (WHIRL v0252-rgpfix) ----------------
     # Every engine logs a dispatch's initiator when IT gets to the dispatch, and a
     # wave start belongs to the dispatch its own engine initiated last (stream
@@ -738,12 +787,13 @@ def decode(blobs, wave_size=32):
     for j, d in enumerate(disps):
         q_disp.setdefault(_v2_qk(d["me"], d["pipe"]), []).append(j)
     v2_align = {}
-    init2 = [d["t"] for d in disps]
+    init2 = [rt_of[0](d["t"]) for d in disps]  # realtime (v0252-rgpse)
     se_notes = []
     for se, ins in enumerate(inits_all):
         per_q = {}
+        f_se = rt_of[se]
         for t_i, me_i, pipe_i, pc_i in ins:
-            per_q.setdefault(_v2_qk(me_i, pipe_i), []).append((t_i, pc_i))
+            per_q.setdefault(_v2_qk(me_i, pipe_i), []).append((f_se(t_i), pc_i))
         for q, lst in per_q.items():
             ref = q_disp.get(q, [])
             off, rate = _v2_align([p for _, p in lst], [disps[j]["pc"] for j in ref])
@@ -758,21 +808,22 @@ def decode(blobs, wave_size=32):
     inst = {}
     for j, d in enumerate(disps):
         inst.setdefault((d["pc"], _v2_qk(d["me"], d["pipe"])), []).append(j)
-    inst_t = {k: [disps[j]["t"] for j in v] for k, v in inst.items()}
+    inst_t = {k: [rt_of[0](disps[j]["t"]) for j in v] for k, v in inst.items()}  # realtime (v0252-rgpse)
 
-    def v2_fallback(ws, pc, q):
+    def v2_fallback(ws, pc, q):  # ws: realtime of the wave start (its own engine's clock)
         lst = inst.get((pc, q))
         if not lst:
             return -1
         ts = inst_t[(pc, q)]
         k = bisect.bisect_right(ts, ws)
         if k < len(ts):
-            dn = to_us(ts[k]) - to_us(ws)
-            if dn <= V2_FALLBACK_LEAD_US and (k == 0 or dn < to_us(ws) - to_us(ts[k - 1])):
+            dn = (ts[k] - ws) * US
+            if dn <= V2_FALLBACK_LEAD_US and (k == 0 or dn < (ws - ts[k - 1]) * US):
                 return lst[k]
         return lst[k - 1] if k > 0 else -1
 
-    w2_ws, w2_we, w2_pc, w2_own = array("q"), array("q"), array("q"), array("l")
+    # v2 wave start / end in realtime of the wave's own engine (v0252-rgpse; were SE0-mapped ticks)
+    w2_ws, w2_we, w2_pc, w2_own = array("d"), array("d"), array("q"), array("l")
     w2_n = {"ord": 0, "fallback": 0, "unattributed": 0}
     d_fb = set()
 
@@ -782,6 +833,7 @@ def decode(blobs, wave_size=32):
     occ_ev = [[] for _ in blobs]
     for se, occ in enumerate(occ_all):
         oe = occ_ev[se]
+        f_se = rt_of[se]
         for rec in occ:
             time, start, cu, simd, wid, me, pipe, pc, ordv = rec
             sk = (se << 24) | ((cu & 0x7F) << 16) | ((simd & 0xF) << 8) | (wid & 0xFF)
@@ -803,6 +855,7 @@ def decode(blobs, wave_size=32):
                 q = _v2_qk(pme, ppipe)
                 off = v2_align.get((se, q))
                 own = -1
+                st_rt = f_se(st)
                 if off is not None:
                     ql = q_disp.get(q)
                     m = pord + off
@@ -810,14 +863,14 @@ def decode(blobs, wave_size=32):
                         own = ql[m]
                         w2_n["ord"] += 1
                 else:
-                    own = v2_fallback(st, ppc, q)
+                    own = v2_fallback(st_rt, ppc, q)
                     if own >= 0:
                         w2_n["fallback"] += 1
                         d_fb.add(own)
                 if own < 0:
                     w2_n["unattributed"] += 1
-                w2_ws.append(st)
-                w2_we.append(time)
+                w2_ws.append(st_rt)
+                w2_we.append(f_se(time))
                 w2_pc.append(ppc)
                 w2_own.append(own)
 
@@ -922,25 +975,39 @@ def decode(blobs, wave_size=32):
         for i in idx[1:]:
             s, e = w2_ws[i], w2_we[i]
             if s > b0:
-                busy += to_us(b0) - to_us(a0)
+                busy += (b0 - a0) * US
                 a0, b0 = s, e
             elif e > b0:
                 b0 = e
             if e > last:
                 last = e
-        busy += to_us(b0) - to_us(a0)
+        busy += (b0 - a0) * US
         v2.append((w2_ws[idx[0]], last, busy, hi - lo))
 
     # --- v2 GPU idle windows: no wave of any dispatch alive on any engine ------
     for oe in occ_ev:
         oe.sort()
+
+    def _rt_stream(oe, f, se):  # engine se's sorted events on realtime; f is monotone, so the order is kept
+        for t_e, dlt in oe:
+            yield f(t_e), dlt, se
+
     win = []
     alive = 0
     zero_at = None
     n_neg = 0
-    for t_e, dlt in heapq.merge(*occ_ev):
+    # host-wait edge check (v0252-rgpse): after every idle window > EDGE_MIN_US, the first wave start on each engine.
+    # With one common clock these agree to the launch skew (us); SE0-mapped ticks spread them by the drift.
+    edges = []
+    cur_edge = None
+    for t_e, dlt, se in heapq.merge(*(_rt_stream(oe, rt_of[k], k) for k, oe in enumerate(occ_ev))):
         if dlt > 0 and alive <= 0 and zero_at is not None and t_e > zero_at:
             win.append((zero_at, t_e))
+            if (t_e - zero_at) * US > EDGE_MIN_US:
+                cur_edge = {}
+                edges.append(cur_edge)
+        if dlt > 0 and cur_edge is not None and se not in cur_edge:
+            cur_edge[se] = t_e
         alive += dlt
         if alive < 0:
             n_neg += 1
@@ -961,8 +1028,18 @@ def decode(blobs, wave_size=32):
     for a, b in win:
         pj, ppc = prev_w.get(a, (-1, 0))
         nj, npc = next_w.get(b, (-1, 0))
-        idle.append({"a": round(to_us(a), 4), "b": round(to_us(b), 4), "prev": pj, "next": nj,
+        idle.append({"a": round(rt_us(a), 4), "b": round(rt_us(b), 4), "prev": pj, "next": nj,
                      "prev_pc": "0x%x" % ppc, "next_pc": "0x%x" % npc})
+    n_eng = len(blobs)
+    spreads = sorted((max(e.values()) - min(e.values())) * US for e in edges if len(e) == n_eng)
+    host_wait_edges = {
+        "min_window_us": EDGE_MIN_US,
+        "windows": len(edges),
+        "windows_all_engines": len(spreads),
+        "spread_us_p50": round(spreads[len(spreads) // 2], 4) if spreads else None,
+        "spread_us_p90": round(spreads[min(len(spreads) - 1, int(0.9 * len(spreads)))], 4) if spreads else None,
+        "spread_us_max": round(spreads[-1], 4) if spreads else None,
+    }
 
     out_disp = []
     for j, d in enumerate(disps):
@@ -988,11 +1065,11 @@ def decode(blobs, wave_size=32):
                 "pc": "0x%x" % d["pc"],
                 # v2 (WHIRL v0252-rgpfix): j = index into this list (idle "prev" / "next")
                 "j": j,
-                "ts2": round(to_us(a2[0]), 4) if a2 else None,
-                "end2": round(to_us(a2[1]), 4) if a2 else None,
+                "ts2": round(rt_us(a2[0]), 4) if a2 else None,
+                "end2": round(rt_us(a2[1]), 4) if a2 else None,
                 "busy2": round(a2[2], 4) if a2 else 0.0,
                 "wf2": a2[3] if a2 else 0,
-                "init2": round(to_us(init2[j]), 4),
+                "init2": round(rt_us(init2[j]), 4),
                 "attr2": ("fallback" if j in d_fb else "ord") if a2 else "",
             }
         )
@@ -1006,6 +1083,8 @@ def decode(blobs, wave_size=32):
         "fallback_lead_us": V2_FALLBACK_LEAD_US,
         "idle_windows": len(idle),
         "alive_below_zero": n_neg,
+        "clock": clock_notes,
+        "host_wait_edges": host_wait_edges,
     }
 
     out_ev = []
@@ -1039,11 +1118,15 @@ def decode(blobs, wave_size=32):
 
 
 # --- v2 attribution helpers (WHIRL v0252-rgpfix, 2026-11-10) ---------------------
-V2_VERSION = "whirl-rgpfix-1 (2026-11-10): per-engine stream-order wave attribution, union busy, all-engine idle"
-# A workgroup may start before SE0 logs its dispatch's initiator (SE0 logs it when SE0
-# itself drains): 34 us seen on the R9700 (Ornith fast MTP argmax, q7 9522). The
-# fallback gives a wave to the NEXT same-PC dispatch only within this lead.
+V2_VERSION = ("whirl-rgpse-2 (2026-11-11): per-engine stream-order wave attribution, union busy, all-engine idle; "
+              "every engine's ticks converted with its own realtime stamps")
+# Fallback (an engine / queue whose initiator sequence does not align with SE0's; never taken on the 9 R9700 kgap97
+# captures, waves_fallback 0): a wave goes to the NEXT same-PC SE0 dispatch only if that initiator is at most this far
+# after the wave start (both on realtime). The "34 us lead" once quoted for this value (v0252-rgpfix) was the
+# cross-engine clock drift of the SE0 mapping (review v0252-rgpreview F2), not a real early start; the value is kept.
 V2_FALLBACK_LEAD_US = 100.0
+# host_wait_edges (v0252-rgpse): idle windows longer than this count as host waits for the per-engine edge check.
+EDGE_MIN_US = 50.0
 
 
 def _v2_qk(me, pipe):
