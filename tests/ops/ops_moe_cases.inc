@@ -303,6 +303,8 @@ void testOpsMoeSegJoin(ops::MoeProblem p, const kn::KernelTable& k97, const kn::
             CHECK_EQ(bad, 0u);
         }
     }
+}
+
 // v0252-moedf16 (PLAN V1-76): on the gfx1201 fp8 MoE prefill (balance / fast), COMB 3 (the balance item f16
 // intermediates) stores the down projection's output moe_yd as f16 - the down launch is gemm8r_moeh / gemm8r_moe32h with
 // W2 = null (one GEMM, f16 epilogue) - and combines it with moe_combine4h (grid (E / 1024, n)). Precise (prec_dec, or the
