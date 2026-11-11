@@ -207,7 +207,8 @@
 //   balance (item f16 intermediates) / fast candidates, never in precise (acceptance: task accuracy):
 //   gemm_moepdh_<v>_mxfp4(W, rb, rows_e, X, f16* Y, ncols, tiles, n_tiles): Y stored as f16
 //   gemm_moepdhc_<v>_mxfp4: gemm_moepdc arguments with f16* Y (fused combine reads f16)
-//   moe_combine4h(x, ysh, sg, const f16* yd, inv, w, C, K): moe_combine4 over f16 yd
+//   moe_combine4h(x, ysh, sg, const f16* yd, inv, w, C, K): moe_combine4 over f16 yd (v0252-moedf16: also in the
+//            gfx1201 object, kernels/moe_combine_h.hip, after gemm8r_moeh / gemm8r_moe32h with W2 = null writing f16 yd)
 //   gemm_moepda_<v>_mxfp4(W, rb, rows_e, X, ncols, tiles, n_tiles, perm, w, x, K): x += w * y by f32
 //            atomics (no yd; order varies run to run); the shared expert added before by moe_combine4, K = 0
 
