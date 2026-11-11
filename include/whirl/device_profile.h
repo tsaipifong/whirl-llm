@@ -114,8 +114,8 @@ inline constexpr Profile k_profile_gfx1201{
     // v0252-ws4r97b: the R9700 kt verdict (q7 9525u, scratch/v0252_ws4r97/kt/20261111-1236/results.txt, 4 ABBA rounds in
     // one object, every cell bitwise): q8 B/A 0.716 (64k) / 0.715 (128k) one row, 0.63 at 4 rows -> b; f16 0.97 one row,
     // 0.82 at 4 rows -> plain (b 0.974 / 0.972 at 64k / 128k vs plain 0.969 / 0.965)
-    .attn_ws4r_q8 = 0,  // test-first stub (phase 2 sets 2 / 1)
-    .attn_ws4r_f16 = 0,
+    .attn_ws4r_q8 = 2,
+    .attn_ws4r_f16 = 1,
     .tune_fast = false,
     .tune_cache_suffix = "",
     .tune_time_hint = "2 minutes (a few seconds for MXFP4 models)",

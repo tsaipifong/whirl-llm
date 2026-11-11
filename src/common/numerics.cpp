@@ -407,7 +407,9 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     // v0252-ws4r97b (PLAN V1-87 phase 2): the gfx1201 attn_ws4r variant (class B, every mode): auto on every card (the device
     // profile rows decide: gfx1201 q8 / q8h -> b, f16 -> plain; gfx1151 off); WHIRL_ATTN_WS4R = auto / 0 / 1 / 2 overrides it,
     // any other value keeps auto (loadOverrides notes it once in Plan::ignored)
-    F.attn_ws4r = kAttnWs4rAuto;  // test-first stub: WHIRL_ATTN_WS4R not read yet
+    F.attn_ws4r = kAttnWs4rAuto;
+    if (e.attn_ws4r)
+        if (const std::optional<std::uint32_t> v = parseWs4r(*e.attn_ws4r)) F.attn_ws4r = *v;
     setNe0(F.attn_dqf_on, e.attn_dqf);
     if (e.attn_seg) F.attn_seg = static_cast<std::uint32_t>(std::strtoul(e.attn_seg->c_str(), nullptr, 10)) / 256 * 256;
     setNe0(F.gdn_ba_on, e.gdn_ba);
@@ -515,7 +517,9 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
         if (const Raw& v = e.attn_kgvar; v && !parseKgVar(*v))
             p.ignored.push_back(std::format("WHIRL_ATTN_KGVAR={} ignored: not auto, 0, 1 or 3 (the default {} stays)", *v, t.gfx1151 ? "0" : "auto"));
     // v0252-ws4r97b: an invalid WHIRL_ATTN_WS4R is reported once (auto stays)
-    // (test-first stub: no note yet)
+    if (items)
+        if (const Raw& v = e.attn_ws4r; v && !parseWs4r(*v))
+            p.ignored.push_back(std::format("WHIRL_ATTN_WS4R={} ignored: not auto, 0, 1 or 2 (auto stays)", *v));
     if (items) {
         if (const Raw& v = e.spec_sample; v && !v->empty())
             applyOverride(p, Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
@@ -589,8 +593,15 @@ std::optional<std::uint32_t> parseKgVar(std::string_view s) {
 
 // v0252-ws4r97b: WHIRL_ATTN_WS4R values (numerics.h)
 std::optional<std::uint32_t> parseWs4r(std::string_view s) {
-    (void)s;
-    return std::nullopt;  // test-first stub
+    if (s == "auto") return kAttnWs4rAuto;
+    if (s.empty() || s.size() > 8) return std::nullopt;
+    std::uint32_t v = 0;
+    for (const char ch : s) {
+        if (ch < '0' || ch > '9') return std::nullopt;
+        v = v * 10 + static_cast<std::uint32_t>(ch - '0');
+    }
+    if (v <= 2) return v;
+    return std::nullopt;
 }
 
 // loader.cpp:537-540 and :730 before arch025-N2b (envFlag = flagOr)

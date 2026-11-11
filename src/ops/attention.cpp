@@ -178,7 +178,8 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
         // -> plain; WHIRL_ATTN_WS4R overrides), the 4-wave pipelined attn_ws4r1 / attn_ws4r2 runs in place of the
         // attn_wsplit1 / attn_wsplit2 just chosen: same arguments, groups, grid, 128 threads and partial bits (kt ws4r,
         // R9700 q7 9525u: 216 bitwise rows, any grouping); nothing else in the plan changes. Never for q4 KV (no variant).
-        // (test-first stub: no swap yet)
+        if (!dq4 && !p.kv_q4)
+            if (const Function r = attnWs4rFor(f.attn_ws4r, p.kv_q8 ? prof.attn_ws4r_q8 : prof.attn_ws4r_f16, wide, k)) pl.f = r;
         pl.grid = D(p.n_head_kv, n_split, ng);
         pl.block = D(dq4 ? 256 : 128);
     } else {
@@ -194,8 +195,9 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
 
 // v0252-ws4r97b: attention.h. 1 / 2 index the table's [plain, b] pair of the CG the wsplit choice took.
 Function attnWs4rFor(std::uint32_t flag, std::uint8_t row, bool wide, const kernels::AttnKernels& k) {
-    (void)flag, (void)row, (void)wide, (void)k;
-    return nullptr;  // test-first stub
+    const std::uint32_t var = flag == kAttnWs4rAuto ? row : flag;
+    if (var != 1 && var != 2) return nullptr;
+    return (wide ? k.attn_ws4r2 : k.attn_ws4r1)[var - 1];
 }
 
 // v0252-c1port (C1, feat026-attnkg97 / -97k): the f16 attn_kg variant for NP query heads per block. Exhaustive in np

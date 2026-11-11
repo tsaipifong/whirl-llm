@@ -91,6 +91,7 @@ void Context::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         ap.n_head_kv = cfg.n_head_kv;
         ap.max_ctx = max_ctx;
         ap.kv_q4 = kvIs4bit(kv_fmt);
+        ap.kv_q8 = kv_fmt == KvFormat::q8 || kv_fmt == KvFormat::q8h;  // v0252-ws4r97b: the _q8 kernels' formats
         ap.rows_known = row_n == n;
         if (ap.rows_known) {
             ap.row_pos = std::span<const i32>(row_pos.data(), n);
@@ -107,7 +108,8 @@ void Context::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         af.dbg_flags = nf().dbg_flags;
         af.prec_dec = nf().prec_dec;
         // v0252-ws4r97b (PLAN V1-87 phase 2): WHIRL_ATTN_WS4R; default auto = device::Profile::attn_ws4r_q8 / _f16
-        // (test-first stub: not wired yet)
+        static_assert(ops::kAttnWs4rAuto == numerics::kAttnWs4rAuto, "attn_ws4r auto: one value in numerics and ops");
+        af.attn_ws4r = nf().attn_ws4r;
         const ops::AttnDecodePlan pl = ops::chooseAttnDecode(ap, af, k, k.caps, device::profile(arch));
         if (pl.kind == ops::AttnDecodeKind::split)
             hip::launch(pl.f, pl.grid, pl.block, 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv), I(hd), I(2 * hd), pos_buf,
