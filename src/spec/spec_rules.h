@@ -104,4 +104,38 @@ inline float synthCycleMs(float a, float rows, float slope, std::uint32_t steps)
     return 100.0f * (a + slope * (rows - a) + 0.03f * static_cast<float>(steps));
 }
 
+// ---- E1 one-cycle lookahead (v0252-e1p1c, PLAN V1-93 P1c; server only: SpecCycle::aheadCycle / aheadBuild). A decode
+// cycle with nd drafts emits 1 .. nd + 1 tokens and moves the sequence by as many positions; the host knows which only
+// after it has read the cycle. The rules below are what it may assume about a cycle it has not read.
+
+// Position of the cycle after one in flight at `pos` with nd_fly drafts: at most this (every draft kept).
+inline std::uint32_t aheadPosBound(std::uint32_t pos, std::uint32_t nd_fly) { return pos + nd_fly + 1; }
+
+// The budget drain rule. A cycle with nd drafts may be submitted before the host has read the cycles in flight
+// (fly_out = their largest output in tokens; 0 = none in flight) only while the tokens left after the cycles the host
+// HAS read exceed fly_out + nd + 1: then no max_tokens cut can fall into that cycle and the request cannot end by
+// max_tokens in it - the last cycles of a request run synchronously, as without the lookahead.
+inline bool aheadBudgetOk(std::uint32_t max_tokens, std::uint32_t n_gen, std::uint32_t fly_out, std::uint32_t nd) {
+    const std::uint64_t left = max_tokens > n_gen ? max_tokens - n_gen : 0;
+    return left > static_cast<std::uint64_t>(fly_out) + nd + 1;
+}
+
+// The device budget (SpecAccArgs::budget) of a cycle aheadBudgetOk allowed: a lower bound of the tokens left when it
+// runs (>= nd + 2, so the accept kernel never cuts), capped like the synchronous cycle's (1 << 30).
+inline std::uint32_t aheadBudgetLow(std::uint32_t max_tokens, std::uint32_t n_gen, std::uint32_t fly_out) {
+    const std::uint64_t left = max_tokens > n_gen ? max_tokens - n_gen : 0;
+    return static_cast<std::uint32_t>(std::min<std::uint64_t>(left > fly_out ? left - fly_out : 0, 1u << 30));
+}
+
+// The lookahead ring has two entries: the cycle after the one in entry e writes the other.
+inline std::uint32_t aheadRingNext(std::uint32_t e) { return (e ^ 1u) & 1u; }
+
+// The control words a submitted next cycle consumed (ACC, CHOSEN, NPOS, NPEND of the accept kernel) against the host's
+// own decision for the cycle at `pos`: `acc` drafts kept, then `chosen`.
+inline bool aheadWordsAgree(std::int32_t acc_w, std::int32_t chosen_w, std::int32_t npos_w, std::int32_t npend_w, std::uint32_t pos,
+                            std::uint32_t acc, std::uint32_t chosen) {
+    return acc_w >= 0 && static_cast<std::uint32_t>(acc_w) == acc && static_cast<std::uint32_t>(chosen_w) == chosen &&
+           static_cast<std::uint32_t>(npos_w) == pos + acc + 1 && static_cast<std::uint32_t>(npend_w) == acc + 1;
+}
+
 }  // namespace whirl::spec::rules

@@ -68,6 +68,9 @@ constexpr std::uint32_t ctl_npend = 57;   // the DeltaNet replay rows of the nex
 // ServerModel::setPending / Model::setPending rows value (E1): the replay count is the sequence's ctl_npend word, read by the
 // kernels (GdnSeg npend < 0, the word at snap[0]); the host does not know it
 constexpr std::uint32_t npend_dev = 0xffffffffu;
+// VSeg::next of a dev segment whose row 0 the host does not know (E1 lookahead, v0252-e1p1c: the cycle is submitted before
+// the host has read the cycle before it). The model never reads `next` of a dev segment; this is no token id.
+constexpr std::uint32_t tok_dev = 0xffffffffu;
 
 // ---------------------------------------------------------------------------
 // configuration
@@ -144,7 +147,8 @@ struct VSeg {
     std::uint32_t seq = 0, next = 0, nd = 0, pos = 0;
     std::span<const std::uint32_t> drafts = {};  // empty: drafts from the control area (MTP)
     // v0252-e1p1b (E1): row 0's token is the sequence's ctl_chosen word and row r sits at its ctl_npos word + r (the last
-    // spec_accept_rows of the sequence); `next` is not read, `pos` only bounds the context check. MTP drafts only, no image.
+    // spec_accept_rows of the sequence); `next` is not read (tok_dev when the host does not know it: the E1 lookahead),
+    // `pos` only bounds the context check (the lookahead passes an upper bound). MTP drafts only, no image.
     bool dev = false;
 };
 // One sequence's prefill chunk in a segmented prefill.

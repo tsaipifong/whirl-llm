@@ -39,12 +39,12 @@ inline std::optional<std::uint32_t> parseSpecAcc(std::string_view v) {
     return std::nullopt;
 }
 
-// v0252-e1p1b (E1, PLAN V1-93 P1b): WHIRL_E1 values: "0" / "1" (surrounding blanks ignored); anything else nullopt
-// (server_main warns and uses 0).
+// v0252-e1p1b (E1, PLAN V1-93 P1b): WHIRL_E1 values: "0" / "1" / "2" (v0252-e1p1c: 2 = the one-cycle lookahead;
+// surrounding blanks ignored); anything else nullopt (server_main warns and uses 0).
 inline std::optional<std::uint32_t> parseE1(std::string_view v) {
     while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
     while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
-    if (v == "0" || v == "1") return static_cast<std::uint32_t>(v[0] - '0');
+    if (v == "0" || v == "1" || v == "2") return static_cast<std::uint32_t>(v[0] - '0');
     return std::nullopt;
 }
 
@@ -105,6 +105,11 @@ struct EngineOptions {
     // there. Still one cycle at a time (P1c pipelines it); needs the device accept (Engine::allocState raises spec_acc to
     // 2 = gpu when it is host / pinned) and the model's E1 kernels (ServerModel::e1InputsOk; else off with a warning).
     // The reply is the same as with 0.
+    // v0252-e1p1c (PLAN V1-93 P1c): 2 = the one-cycle lookahead on top of 1 - the next cycle of that request is submitted
+    // before the host has read the last one (SpecCycle::aheadCycle; the host reads each cycle from a ring of two pinned
+    // control-word areas the accept kernel writes, so Engine::allocState raises spec_acc to 3 = gpu-zc unless it is 4 =
+    // check). A cycle that does not qualify, the last cycles before max_tokens and every cycle while another request is
+    // active run as with 1. The reply is the same as with 0.
     std::uint32_t e1 = 0;
     // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)
     std::uint32_t slot_drafts = 0;

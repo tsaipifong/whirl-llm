@@ -23,6 +23,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -61,6 +62,22 @@ public:
     void finishCycle(Cycle& cy);
     void splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m);
     std::uint32_t draftCap(std::uint32_t A);
+    // ---- v0252-e1p1c (PLAN V1-93 P1c): the E1 one-cycle lookahead (EngineOptions::e1 == 2), decodeCycle's first step.
+    // aheadCycle: true = this call's cycle went through the lookahead ring - the cycle in flight (SpecState::e1_fly; at
+    // the start of a pipeline the slot's next cycle, built here) is read and accepted AFTER the cycle behind it was
+    // submitted when the drain rules allow one; false = nothing is in flight and no pipeline starts: decodeCycle runs
+    // the synchronous cycle. aheadBuild: one cycle of slot sl built and submitted through the ring (MTP steps, verify,
+    // the accept kernel into the ring entry, the hidden-row copies, one event) behind the cycle `fly` (null: the host
+    // knows the slot's position exactly) - null when a drain rule says no (nothing was submitted).
+    bool aheadCycle(std::span<Slot* const> act_in);
+    std::shared_ptr<Cycle> aheadBuild(Slot& sl, const Cycle* fly);
+    // ---- v0252-e1p1c-fix: the decode accept's startup and report halves (bodies verbatim from Engine::allocState /
+    // Engine::stats, which the engine cut keeps at <= 30 lines: core_shapes startup / report). specAccSetup (once, from
+    // Engine::allocState after SampleBuffers::alloc): WHIRL_E1 / WHIRL_SPEC_ACC as asked -> as available
+    // (EngineOptions::e1 / spec_acc), SampleBuffers::allocSpecAcc / allocAhead, the "decode: WHIRL_..." startup lines.
+    // specAccReport (Engine::stats): the device-accept / E1 / lookahead counters into the stats.
+    void specAccSetup();
+    void specAccReport(EngineApi::Stats& s) const;
 
 private:
     // slot_end, called by name from the bodies above

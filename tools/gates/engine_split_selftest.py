@@ -33,6 +33,12 @@ def arg(name, default=None):
     return a[a.index(name) + 1] if name in a else default
 
 
+# v0252-e1p1c-fix (2026-11-12): the folders of a base that a FIXTURE / mutant tree copies. kernels/ joined src/ and include/:
+# since v0252-e1p1 (P1a, e8bdedf) src/server/engine_decode.cpp includes "../../kernels/spec_accept.h" (the accept decision
+# shared with the device kernel), so a tree without kernels/ had a clang error in that TU - B0f failed and 200 of 234 cases
+# were INVALID ("the mutant does not compile") on the first run of the step on that branch. A base without the folder is
+# copied without it (the isdir test at both uses).
+TREE_DIRS = ("src", "include", "kernels")
 bases = [sys.argv[i + 1] for i, x in enumerate(sys.argv) if x == "--base"] or [REPO]
 WORK = arg("--work", os.path.join(REPO, "build", "engine_split_selftest"))
 JOBS = int(arg("--jobs", "8"))
@@ -842,7 +848,7 @@ def one(job):
     d = os.path.join(WORK, wdir)
     if os.path.isdir(d): shutil.rmtree(d)
     os.makedirs(d)
-    for sub in ("src", "include"):
+    for sub in TREE_DIRS:
         if os.path.isdir(os.path.join(base, sub)):
             shutil.copytree(os.path.join(base, sub), os.path.join(d, sub))
     if fx: apply_fixture(os.path.join(d, "src"))   # arch025-engclose: the pre-S10 shapes (FIXTURE)
@@ -1039,7 +1045,7 @@ def main():
     # s7st: every anchor role must exist once in the first base and sit in the module its rule needs (one line per role)
     f0 = os.path.join(WORK, "F0")   # arch025-engclose: the first base + the FIXTURE (roles live there; B0f below)
     if os.path.isdir(f0): shutil.rmtree(f0)
-    for sub_ in ("src", "include"):
+    for sub_ in TREE_DIRS:
         if os.path.isdir(os.path.join(bases[0], sub_)): shutil.copytree(os.path.join(bases[0], sub_), os.path.join(f0, sub_))
     apply_fixture(os.path.join(f0, "src"))
     bad = check_roles(os.path.join(f0, "src"), json.load(open(CUT, encoding="utf-8")))

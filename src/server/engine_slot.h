@@ -75,6 +75,11 @@ struct SlotData : SlotPrefix, SlotTier {
     // kernel's control words, the replay count, the hidden rows of all e1_rows = nd + 1 verify rows): an E1 cycle may take
     // them (MSeg::e1_rows, VSeg::dev); 0 = host inputs (set by acceptSlot, cleared by the prefill of a request)
     std::uint32_t e1_rows = 0;
+    // v0252-e1p1c (E1 lookahead): != 0 = the slot's last decode cycle was read through the lookahead ring. Its hidden rows
+    // are kept at this address (SampleBuffers::aheadHid; row r at + r * n_embd * 4) while the model's MTP-input and logits
+    // rows may already hold a later cycle: the gen-end checkpoint takes its hidden row from here and saves no logits row
+    // (SlotEnd::finishJob). 0 after a synchronous cycle and after a prefill
+    std::uint64_t e1_hid = 0;
     bool logits_ok = false;
     float acc_ema = 0;
     qwen35::DraftAccept dacc;

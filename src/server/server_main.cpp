@@ -996,10 +996,10 @@ void ServerRun::makeEngine() {
         if (const std::optional<std::uint32_t> m = parseSpecAcc(*sa)) eo.spec_acc = *m;
         else logW("WHIRL_SPEC_ACC={} is not one of 0..4 / host, pinned, gpu, gpu-zc, check; using 0 (host)", *sa);
     }
-    // v0252-e1p1b (E1): WHIRL_E1 0 (default) / 1 (EngineOptions::e1); a bad value warns and runs 0
+    // v0252-e1p1b (E1): WHIRL_E1 0 (default) / 1 / 2 (EngineOptions::e1; v0252-e1p1c: 2 = one cycle ahead); a bad value warns and runs 0
     if (const std::optional<std::string> e1 = settings::e1()) {
         if (const std::optional<std::uint32_t> m = parseE1(*e1)) eo.e1 = *m;
-        else logW("WHIRL_E1={} is not 0 or 1; using 0", *e1);
+        else logW("WHIRL_E1={} is not 0, 1 or 2; using 0", *e1);
     }
     if (lm.use_dflash) {
         // MTP-only settings: the per-slot MTP draft allocation, the draft-head vocabulary subset and

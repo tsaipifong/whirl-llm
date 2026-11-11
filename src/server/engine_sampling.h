@@ -11,6 +11,7 @@
 #include "sampling/sampler.h"
 #include "whirl/model_types.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -28,6 +29,9 @@ constexpr std::uint32_t max_rows = qwen35::max_verify_rows;
 struct SpecAccStats {
     std::uint64_t dev = 0, fallback = 0, checked = 0, mismatch = 0, tab_checked = 0, tab_mismatch = 0;
     std::uint64_t e1 = 0;  // v0252-e1p1b (WHIRL_E1): slot cycles that took their inputs from the device (VSeg::dev)
+    // v0252-e1p1c (WHIRL_E1=2, the lookahead): cycles read through the ring; of those, the ones submitted before the cycle
+    // before them was read; submitted cycles dropped because the request ended at the cycle before them
+    std::uint64_t ring = 0, ahead = 0, discard = 0;
 };
 
 // The members in their former Engine order (samp_dev_ .. ctl_host_): ~Engine destroys them at the same point and in
@@ -85,6 +89,25 @@ public:
     SpecAccStats& accStats() { return acc_stats_; }
     const SpecAccStats& accCounts() const { return acc_stats_; }
 
+    // ---- v0252-e1p1c (E1 one-cycle lookahead, WHIRL_E1=2; SpecCycle::aheadCycle / aheadBuild) ----
+    // The ring: two entries, each `parallel` control areas in pinned host memory (readCtl's layout), one event and the
+    // hidden rows of one cycle (`rows` rows) in device memory. Cycle n writes entry n % 2, so the host can read cycle n
+    // after cycle n + 1 was submitted - and after it finished.
+    // allocAhead (Engine::allocState, after allocSpecAcc): false without a device accept mode (nothing allocated).
+    bool allocAhead(std::uint32_t parallel, std::uint32_t rows);
+    bool aheadOk() const { return static_cast<bool>(ring_pin_); }
+    // The submit side of entry e, right after the cycle's verify was enqueued: the accept kernel decides and writes the
+    // control areas into the entry (zero copy: no D2H copy command, E1 rule R-c); the cycle's `rows` hidden rows from
+    // verify row row0 go to the entry's keep and to sequence seq's MTP input (the next cycle's step 0 reads them); ONE
+    // event is recorded behind all of it (R-b).
+    void aheadSubmit(std::uint32_t e, const SpecAccArgs& aa, std::uint32_t seq, std::uint32_t row0, std::uint32_t rows);
+    // The host's one wait of the cycle in entry e: its event only (a cycle submitted after it goes on running; no event
+    // query, no stream sync, no download: R-a / R-e), then the entry's control words (valid until the entry is submitted
+    // again).
+    const std::int32_t* aheadWait(std::uint32_t e);
+    // entry e's kept hidden rows (row r at + r * n_embd * 4)
+    DevPtr aheadHid(std::uint32_t e) const;
+
 private:
     void loadRow(std::uint32_t gr);
 
@@ -102,6 +125,13 @@ private:
     // every member before them keeps its place (tests/pins/engine_member_order.txt audit row)
     device::PinnedBuf ctl_pin_;
     SpecAccStats acc_stats_;
+    // v0252-e1p1c (the lookahead ring; last, as above): the two control-word areas, the two hidden-row keeps (one device
+    // buffer), the two events, the sizes of one entry and the accept mode allocSpecAcc returned
+    device::PinnedBuf ring_pin_;
+    device::DevBuf ring_hid_;
+    std::array<device::EventH, 2> ring_ev_;
+    std::uint64_t ring_words_ = 0, ring_hid_bytes_ = 0;
+    std::uint32_t acc_mode_ = 0;
 };
 
 }  // namespace whirl::server
