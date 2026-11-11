@@ -25,6 +25,9 @@
 # Time cap (the 2x rule; measured times in progress\arch025-Q135.HANDOFF.md): over -CapMin the step's own process tree is killed
 # and the step FAILS. Environment: WHIRL_PYTHON (python), WHIRL_KERNELS_FROM (HIP code objects for a new build dir, e.g. the gated
 # build\Release of this tree), WHIRL_QUIET_WAIT (a local script build_cfg.bat runs before compiling); release_gate sets them.
+# v0252-b3gate2: the quiet wait runs BEFORE the cap clock (capped_run.ps1), not inside it: a QUIET_WANTED deferral inside the
+# 7-min cpu_tsa cap was the b3 "TIMEOUT after 7 min" (quiet_wait.log 2026-11-11 07:37 / 07:44 / 08:52); the child then gets
+# WHIRL_QUIET_SKIP=1 so build_cfg.bat does not wait again inside the cap. A build that overruns the cap still FAILS.
 # Exit 0 only with the ok verdict.
 #
 # -Mode (arch025-procopt3, PLAN 9.33; default WHIRL_SAFETY_MODE, else clean). Every verdict line says which mode ran:
@@ -52,6 +55,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $here = $PSScriptRoot
+. (Join-Path $PSScriptRoot "capped_run.ps1")
 $repo = (Resolve-Path (Join-Path $here "..\..")).Path
 $py = if ($env:WHIRL_PYTHON) { $env:WHIRL_PYTHON } else { "python" }
 $env:WHIRL_PYTHON = $py
@@ -114,17 +118,10 @@ function DepsCheck([string]$b) {
 }
 
 function RunCapped([string]$bat, [string[]]$batArgs, [int]$capMin, [string]$what) {
-    # cmd /c "<bat> args": the bat writes its own logs; this only waits with a cap and kills its own tree on overrun
-    $q = @($batArgs | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $p = Start-Process -FilePath "cmd.exe" -ArgumentList "/d /c `"`"$bat`" $q`"" -NoNewWindow -PassThru
-    $ms = [int64]$capMin * 60000
-    if (-not $p.WaitForExit($ms)) {
-        & taskkill.exe /T /F /PID $p.Id *> $null
-        Write-Host "$what`: TIMEOUT after $capMin min (cap): process tree $($p.Id) killed"
-        return $false
-    }
-    Write-Host "$what`: finished in $([math]::Round(((Get-Date) - $t0).TotalMinutes, 1)) min, exit $($p.ExitCode)"
-    return $true
+    # v0252-b3gate2: quiet wait first (uncapped), then the bat under the cap with WHIRL_QUIET_SKIP=1 (capped_run.ps1,
+    # test_capped_run.ps1 in the selftest kind); kills its own tree on overrun
+    $r = Invoke-CappedRun -Bat $bat -BatArgs $batArgs -CapSec ($capMin * 60) -What $what -Who "safety step $Kind ($what, before the cap)"
+    return [bool]$r.ok
 }
 
 function Rc([string]$f) {
@@ -144,6 +141,12 @@ if ($Kind -eq "selftest") {
         Write-Output "$($t -join ' ' -replace [regex]::Escape($repo), '<repo>'): exit $c"
         if ($c -ne 0) { $bad++ }
     }
+    # v0252-b3gate2: the capped run (quiet wait outside the cap, real overruns still fail); about 15 s, no build
+    $co = @(& pwsh -NoProfile -File (Join-Path $here "test_capped_run.ps1") 2>&1 | ForEach-Object { "$_" })
+    $cc = $LASTEXITCODE
+    $co | Select-Object -Last 3 | ForEach-Object { "   $_" }
+    Write-Output "test_capped_run.ps1: exit $cc"
+    if ($cc -ne 0 -or -not ($co -match "^capped run test: ok")) { $bad++ }
     # arch025-Q3: the real-compiler block AND pass proof of the /analyze baseline gate (3 one-TU cl /analyze compiles, seconds):
     # baseline-only TU PASS, 3 planted keys NEW -> FAIL, a 2nd warning of a baselined key NEW x1 -> FAIL. Output in build-analyze
     # (/build-*/ is ignored by git); needs only cl.
@@ -153,7 +156,7 @@ if ($Kind -eq "selftest") {
     $fo | Select-Object -Last 3 | ForEach-Object { "   $_" }
     Write-Output "analyze_fault.bat (clean PASS / new FAIL / same key FAIL): PROOF rc=$fc"
     if ($fc -ne 0) { $bad++ }
-    Write-Output "cpu safety selftest: $(if ($bad -eq 0) { 'ok' } else { "FAIL ($bad of $($tests.Count + 1))" })"
+    Write-Output "cpu safety selftest: $(if ($bad -eq 0) { 'ok' } else { "FAIL ($bad of $($tests.Count + 2))" })"
     exit $(if ($bad -eq 0) { 0 } else { 1 })
 }
 
