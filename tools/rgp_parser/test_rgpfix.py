@@ -24,6 +24,10 @@ with a wrong VALUE.
   (d) existing columns unchanged (pinned from the unfixed parser on the same streams) -> test_d_old_columns_pinned
   (e) error 1 when only SE0 logs initiators (fallback)     -> test_e_fallback_without_engine_initiators
   (f) busy = union of the dispatch's own waves             -> test_f_busy_is_union_of_own_waves
+  (g) v0252-rgpse (PLAN V1-96): every engine's ticks converted with its OWN realtime stamps, not SE0's (engines' shader
+      ticks drift apart; review v0252-rgpreview F1, minimal repro scratch\\v0252_rgpreview\\indep_test.py probe)
+                                                           -> test_g_each_engine_on_its_own_clock (+10 %, -7 %, control)
+  (h) the reviewer's own F1 probe (decode() fed per-engine records, SE1 tick base +100 us) -> test_h_reviewer_probe_f1
 Run (exit 0 = all pass):
   C:\\ClaudeWorkspace\\tools\\rgp_parser\\.venv\\Scripts\\python.exe -I tools\\rgp_parser\\test_rgpfix.py
 """
@@ -48,10 +52,13 @@ class Enc:
     """LSB-first gfx12 SQTT token writer for the tokens the parser reads (HEADER, TIMESTAMP, REG, REG_INIT,
     WAVE_START, WAVE_END). Time only moves through TIMESTAMP tokens (rt=0: the decoder adds the 52-bit value)."""
 
-    def __init__(self):
+    def __init__(self, tick_rate=1.0, stamps=False):
         self.v = 0
         self.n = 0
         self.t = 0
+        self.tick_rate = tick_rate  # this engine's shader ticks per true us, relative to US (v0252-rgpse: != 1 = drift)
+        self.stamps = stamps  # write a realtime TIMESTAMP (true time, 100 MHz) at every new time (v0252-rgpse)
+        self.last_rt = -1
         self._put(0b0010001 | (4 << 7), 64)  # HEADER, version 4 = gfx12 (RDNA4)
 
     def _put(self, val, length):
@@ -59,12 +66,16 @@ class Enc:
         self.n += length
 
     def at(self, us):
-        sc = int(round((us + T0) * US))
+        sc = int(round((T0 + us * self.tick_rate) * US))
         if sc < self.t:
             raise ValueError("events of one engine must be written in time order")
         if sc > self.t:
             self._put(0b0000001 | ((sc - self.t) << 12), 64)  # TIMESTAMP rt=0 pl=0
             self.t = sc
+        rt = int(round((T0 + us) * US))
+        if self.stamps and rt > self.last_rt:
+            self._put(0b0000001 | (1 << 7) | (rt << 12), 64)  # TIMESTAMP rt=1 pl=0: realtime value (true time)
+            self.last_rt = rt
 
     def reg(self, cs, addr, data):
         self._put(0b1001 | (PIPE << 7) | (ME << 9) | (cs << 15) | (addr << 16) | ((data & MASK32) << 32), 64)
@@ -97,10 +108,10 @@ class Enc:
         return self.v.to_bytes((self.n + 7) // 8, "little")
 
 
-def stream(events):
+def stream(events, tick_rate=1.0, stamps=False):
     """events: [(time_us, kind, arg)] of ONE engine, already in that engine's order. kind: marker(grid) / pgm(pc) /
-    init / ws(slot) / we(slot)."""
-    e = Enc()
+    init / ws(slot) / we(slot). tick_rate / stamps: see Enc (scenario g)."""
+    e = Enc(tick_rate, stamps)
     for t, kind, arg in events:
         e.at(t)
         if kind == "marker":
@@ -150,7 +161,7 @@ PC_G, PC_R = 0x10000, 0x20000  # decode cycle: a "GEMV" (2 workgroups) then an "
 PC_L, PC_S1, PC_S2, PC_N, PC_M = 0x40000, 0x50000, 0x60000, 0x70000, 0x80000
 
 
-def scenario_a(engine_inits=True):
+def scenario_a(engine_inits=True, se1_tick_rate=None):
     """Three decode cycles, 1000 us apart. G_k: initiator seen by both engines at B (GPU idle before), one workgroup
     per engine (se0 1..100, se1 1..60). R_k: se1 drains first, logs R's initiator at B+61 and starts its workgroup
     there (61..140); se0 logs the initiator only at B+101 (when ITS G wave ended) and runs 101..180. True idle:
@@ -166,6 +177,8 @@ def scenario_a(engine_inits=True):
             (b + 61, "ws", (0, 1, 0, 1)), (b + 140, "we", (0, 1, 0, 1))]
         se0 += [(b + 101, "marker", 2), (b + 101, "pgm", PC_R), (b + 101, "init", None), (b + 101, "ws", (0, 0, 0, 1)),
                 (b + 180, "we", (0, 0, 0, 1))]
+    if se1_tick_rate is not None:  # scenario g: both engines carry realtime stamps, se1's shader ticks drift
+        return [stream(se0, 1.0, True), stream(se1, se1_tick_rate, True)]
     return [stream(se0), stream(se1)]
 
 
@@ -345,9 +358,92 @@ def test_f_busy_is_union_of_own_waves():
     check(durs == [20.0], f"one idle window of 20 us inside U ({src}: {durs})")
 
 
+def edge_spread(trace):
+    a = trace.meta.extra.get("attribution_v2")
+    return a.get("host_wait_edges") if isinstance(a, dict) else None
+
+
+def test_g_each_engine_on_its_own_clock(rate=1.1, label="se1 shader ticks run 10 % fast"):
+    """v0252-rgpse (PLAN V1-96, review v0252-rgpreview F1): each engine's SQTT shader ticks are its own accumulated
+    deltas and drift against the other engines (R9700 captures: up to ~300 us by the end of a 60 ms capture); only the
+    realtime TIMESTAMPs are a common clock. Scenario a with realtime stamps on both engines and se1's ticks running at
+    `rate`: every v2 quantity must equal the true one (each engine converted with ITS OWN realtime pairs), and the
+    first wave after each host wait must start at the same time on every engine."""
+    print(f"(g) each engine converted with its own realtime stamps ({label})")
+    t = trace_of(scenario_a(se1_tick_rate=rate))
+    r, g = by_pc(t, PC_R), by_pc(t, PC_G)
+    for k, d in enumerate(r):
+        name, v = kernel_time(d)
+        check(near(v, 119.0), f"R{k} kernel time = union 61..180 = 119 us (field {name} = {v})")
+        name, v = wave_extent(d)
+        check(near(v, 119.0), f"R{k} first start -> last end = 119 us (field {name} = {v})")
+        v = getattr(d, "launch_v2_us", None)
+        check(near(v, 1000.0 * k + 61.0), f"R{k} first initiator on any engine = {1000 * k + 61} us (launch_v2_us = {v})")
+    for k in (1, 2):
+        name, v = idle_before(g[k])
+        check(near(v, 821.0), f"GPU idle before G{k} (host round trip) = 821 us (field {name} = {v})")
+    src, w = idle_windows(t, 50.0)
+    durs = sorted(round(x["dur_us"], 3) for x in w)
+    check(len(durs) == 2 and all(near(x, 821.0) for x in durs), f"two idle windows > 50 us of 821 us ({src}: {durs})")
+    e = edge_spread(t)
+    mx = e.get("spread_us_max") if isinstance(e, dict) else None
+    check(isinstance(e, dict) and e.get("windows") == 2 and mx is not None and mx <= 0.05,
+          f"first wave after each host wait starts together on every engine (attribution_v2.host_wait_edges = {e})")
+
+
+def test_h_reviewer_probe_f1():
+    """The reviewer's minimal F1 repro (scratch\\v0252_rgpreview\\indep_test.py, probe section; written independently of
+    this file's encoder): decode() fed per-engine records directly. SE0 initiators G@0 P@100 G@1000 P@1100, SE1 G@0 P@60
+    G@1000 P@1050; SE0 waves G 0-90, P 100-200, G 1000-1090, P 1100-1200; SE1 waves G 0-40, P 60-150, G 1000-1040,
+    P 1050-1130 (true us). SE1's tick base runs +100 us ahead of SE0's and its realtime pairs say so. Truth: one idle
+    window 200 -> 1000 (800 us), P#1 span 60 -> 200 (140 us)."""
+    print("(h) reviewer's F1 probe: SE1 tick base +100 us, own realtime pairs")
+    from rgp_parser.struct import sqtt_decode as sd
+    G, P, U = 0x2000, 0x1000, 100
+
+    def build_se(inits, waves, s):
+        ev = [(t * U + s, 0, pc) for t, pc in inits]
+        for k, (a, b, pc) in enumerate(waves):
+            ev += [(a * U + s, 1, (k, pc)), (b * U + s, 2, (k, pc))]
+        ev.sort(key=lambda x: (x[0], x[1]))
+        occ, ins, n = [], [], 0
+        for tick, kind, pl in ev:
+            if kind == 0:
+                n += 1
+                ins.append((tick, ME, PIPE, pl))
+            else:
+                k, pc = pl
+                occ.append([tick, 1, k, 0, 0, ME, PIPE, pc, n - 1] if kind == 1 else [tick, 0, k, 0, 0, 0, 0, pc, -1])
+        return occ, ins, [(int(x * U) + s, int(x * U)) for x in range(0, 1301, 50)]
+
+    i0 = [(0, G), (100, P), (1000, G), (1100, P)]
+    o0, n0, r0 = build_se(i0, [(0, 90, G), (100, 200, P), (1000, 1090, G), (1100, 1200, P)], 0)
+    o1, n1, r1 = build_se([(0, G), (60, P), (1000, G), (1050, P)],
+                          [(0, 40, G), (60, 150, P), (1000, 1040, G), (1050, 1130, P)], 100 * U)
+    disps = [{"se": 0, "me": ME, "pipe": PIPE, "t": t * U, "pc": pc, "vgpr": 16, "sgpr": 128, "lds": 0, "wg": 32,
+              "flags": 0} for t, pc in i0]
+    recs = [(disps, [], r0, o0, n0), ([], [], r1, o1, n1)]
+    orig = sd.parse_se
+    sd.parse_se = lambda blob, se_index, collect_de: recs[se_index]
+    try:
+        r = sd.decode([b"", b""], wave_size=32)
+    finally:
+        sd.parse_se = orig
+    big = [w for w in r["idle"] if w["b"] - w["a"] > 50]
+    ln = round(big[0]["b"] - big[0]["a"], 4) if len(big) == 1 else None
+    check(near(ln, 800.0), f"one GPU idle window of 800 us (got {[round(w['b'] - w['a'], 4) for w in big]})")
+    d1 = r["dispatches"][1]
+    sp = round(d1["end2"] - d1["ts2"], 4) if d1.get("end2") is not None else None
+    check(near(sp, 140.0), f"P#1 first start -> last end 140 us (got {sp})")
+    check(near(d1.get("busy2"), 140.0), f"P#1 busy (union) 140 us (got {d1.get('busy2')})")
+
+
 def main():
     for f in (test_a_cross_cycle_kernel_time, test_b_overlap_is_not_idle, test_c_host_gap_between_cycles,
-              test_d_old_columns_pinned, test_e_fallback_without_engine_initiators, test_f_busy_is_union_of_own_waves):
+              test_d_old_columns_pinned, test_e_fallback_without_engine_initiators, test_f_busy_is_union_of_own_waves,
+              test_g_each_engine_on_its_own_clock, lambda: test_g_each_engine_on_its_own_clock(0.93, "se1 7 % slow"),
+              lambda: test_g_each_engine_on_its_own_clock(1.0, "control: no drift, stamps on"),
+              test_h_reviewer_probe_f1):
         f()
     print(f"RESULT {'PASS' if not FAILS else 'FAIL'}: {len(FAILS)} failed check(s)")
     return 1 if FAILS else 0
