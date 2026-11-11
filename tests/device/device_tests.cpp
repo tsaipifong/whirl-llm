@@ -177,7 +177,8 @@ void testProfiles() {
     CHECK(a.relax_rank_check && b.relax_rank_check);  // v0252-f1flip (ADR-0015 Rev 1): F1's one-pass check on both GPUs
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
-    CHECK(a.prefill_exec_moe == 2048 && !a.prefill_fill_batch && a.vision_attn_threads == 128);
+    // v0252-ch4k2 (PLAN V1-75): gfx1201 MoE 4096-row forwards in the fill form, as gfx1151 (v0252-ch4k timed A/B)
+    CHECK(a.prefill_exec_moe == 4096 && a.prefill_fill_batch && a.vision_attn_threads == 128);
     const std::array<std::uint8_t, 17> ra = {1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
     CHECK(a.gemv_r == ra);
     // Radeon 8060S (gfx1151): UMA iGPU

@@ -53,7 +53,7 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | `WHIRL_MTP_BATCH_DRAFTS=d1,d2,…` | 依 decode 中 slot 數決定的草稿上限 |
 | `WHIRL_GATHER_MS` | 新請求的突發收集視窗（預設 30，0 = 關閉） |
 | `WHIRL_DECODE_MIN_TPS` | decode 保底速度（= `--decode-min-tps`，預設 20，0 = 關閉） |
-| `WHIRL_PREFILL_CHUNK` | 每次合併 prefill forward 的最大列數（1024 的倍數，預設 2048；Radeon 8060S 上 MoE 模型為 4096 = prefill batch；一次前向不超過 batch） |
+| `WHIRL_PREFILL_CHUNK` | 每次合併 prefill forward 的最大列數（1024 的倍數，預設 2048；Radeon 8060S 與 R9700 上 MoE 模型為 4096 = prefill batch；一次前向不超過 batch） |
 | `WHIRL_SYS_MIN`、`WHIRL_SYS_CKPTS`、`WHIRL_SYS_LCP=0` | system prompt 檢查點門檻（2048）、VRAM 中的數量（2）、停用 `prefix` 檢查點 |
 | `WHIRL_KV_TIER_MIN` | 各層的最小項目大小（2048 tokens） |
 | `WHIRL_TIMING_RESET=0` | 跨請求保留 MTP 計時表（不建議） |

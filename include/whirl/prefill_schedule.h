@@ -38,14 +38,17 @@ inline std::size_t prefillChunkLen(std::size_t remaining) {
 // 2048 (SRV-PP-DENSE, server, 2 rounds): 4096 cost Qwen3.8-27B 3.5% / 5% / 8% / 13% at 32k / 64k / 96k /
 // 128k (128k 248.0 vs 284.6 tok/s), while MoE 64k / 96k gain 3.0% / 4.3%, so the 8060S default is per
 // model. No extra memory either way (the prefill buffers are sized for the batch). Same bits (whole-chunk
-// grouping, section 7 of docs/guide/en/kv-and-caching.md; seqtest gates it). gfx1201 keeps 2048 until measured there.
-// (the 8060S MoE value is device::Profile::prefill_exec_moe)
+// grouping, section 7 of docs/guide/en/kv-and-caching.md; seqtest gates it). gfx1201 (R9700) MoE models 4096 in the
+// same fill form since v0252-ch4k (PLAN V1-75): Ornith timed e2e A/B, 4096-row vs 2048-row forwards, pp 8k / 32k
+// precise +8.47 / +6.94 %, balance +8.24 / +6.44 % (128k +3.21 %), fast +8.02 / +6.55 %, 2k +-0, precise output bitwise
+// the same (scratch/v0252_ch4k/gpu/20261111-0310/summary.md); gfx1201 dense stays 2048 (not measured there).
+// (the per-arch MoE value is device::Profile::prefill_exec_moe)
 inline constexpr std::size_t prefill_exec_default = 2048;
 inline constexpr std::size_t prefillExecDefault(const device::Profile& p, bool moe) { return moe ? p.prefill_exec_moe : prefill_exec_default; }
 
 // EngineOptions::prefill_exec for a prefill batch: whole schedule chunks, and a forward (+ the merged
 // tail) must fit the batch; never below one chunk (the batch is >= prefill_chunk + prefill_merge,
-// vram::min_prefill_batch). fill (gfx1151, SRV-PP): whole chunks up to the batch itself; the forward
+// vram::min_prefill_batch). fill (gfx1151 SRV-PP, gfx1201 v0252-ch4k): whole chunks up to the batch itself; the forward
 // is then capped at the batch by execLen max_rows (a merged tail that does not fit after `exec` rows
 // runs as the next forward). `requested`: WHIRL_PREFILL_CHUNK, default prefillExecDefault.
 inline std::size_t prefillExecFor(std::size_t requested, std::uint32_t max_batch, bool fill = false) {

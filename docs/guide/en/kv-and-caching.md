@@ -364,8 +364,8 @@ Ornith-1.5-35B-A3B MXFP4, precise / balance / fast, 9,500-token prompt; `whirl s
   remainder of up to 1280 rows merged into the last chunk, forced splits at the system boundary
   B >= 2048, the think-open split and image ends; `include/whirl/prefill_schedule.h`). Every forward
   the engine runs ends at a schedule point: forwards of 1 chunk (decode floor engaged), 2 chunks
-  (default; `WHIRL_PREFILL_CHUNK=2048`), 3 or 4 chunks (4 = the Radeon 8060S default for MoE models since SRV-PP: Ornith MoE 128k
-  983 -> 1018 tok/s; dense models keep 2 there, SRV-PP-DENSE: 4 was slower for the dense 27B at 128k; a forward
+  (default; `WHIRL_PREFILL_CHUNK=2048`), 3 or 4 chunks (4 = the MoE default on the Radeon 8060S since SRV-PP and on the R9700 since 0.2.5.2: Ornith MoE 128k
+  983 -> 1018 tok/s on the 8060S; dense models keep 2, SRV-PP-DENSE: 4 was slower for the dense 27B at 128k; a forward
   never exceeds the prefill batch), with or without the TAIL-CK
   tail checkpoint (which stops merging there), all give the same last-row logits bits. Checkpoints
   are kept and reused only at schedule points (`onSchedule`), so a resume from the tail checkpoint,
