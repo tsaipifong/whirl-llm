@@ -51,6 +51,7 @@
 #include "gemv_hv.hip"             // precise gemvh candidates + tune table (v0252-c2port; LAST: no existing kernel moves)
 #include "gemv_hf.hip"             // precise gemvh on f32 input + the gemvh tile (v0252-c3port; after the shipped set)
 #include "moe_fused.hip"           // precise MoE decode: routed + shared gate/up + SwiGLU in one launch (v0252-c3port; LAST)
+#include "attn_ws4r.hip"           // 4-wave pipelined decode / verify attention == attn_wsplit1 / 2 (v0252-ws4r97; LAST: no kernel moves)
 #endif
 
 #if defined(__gfx1151__)
