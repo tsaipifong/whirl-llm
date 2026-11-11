@@ -80,10 +80,11 @@ foreach ($r in $rows) {
 # Fake build: every exe is a copy of whoami.exe (exits non-zero at once on unknown options): the step fails, fast, CPU.
 $fb = Join-Path $Work "fakebuild"; New-Item -ItemType Directory -Force $fb | Out-Null
 $who = Join-Path $env:SystemRoot "System32\whoami.exe"
-foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test", "whirl-tests", "whirl-model-tests", "whirl-cache-tests",
-               "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests",
-               "whirl-pins", "whirl-startup-replay", "whirl-sampling-tests",
-               "whirl-bench-out-tests", "whirl-kt-bench-tests", "whirl-stage-bench-tests", "whirl-kt-seed-tests") {
+# v0252-b4fix (PLAN V1-98): the fake build is release_gate.ps1's own registered exe list (-ListExes), never a hand copy
+# (ktrng's kt-seed and moedf16b's kt-f16tie each broke this selftest through one; fake_build_lists_check.ps1 guards it)
+$gateExes = @(& $pwsh -NoProfile -File $Gate -ListExes 2>&1 | ForEach-Object { "$_" })
+if ($LASTEXITCODE -ne 0 -or $gateExes.Count -lt 5 -or $gateExes -notcontains "whirl-pins") { Write-Host "module gate test: release_gate.ps1 -ListExes failed (exit $LASTEXITCODE): $($gateExes -join ' | ')"; exit 2 }
+foreach ($n in $gateExes) {
     Copy-Item $who (Join-Path $fb "$n.exe") -Force
 }
 $dm = Join-Path $Work "dummy.gguf"; "x" | Set-Content $dm
