@@ -1294,9 +1294,175 @@ void benchFdq(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- fdq97 (v0252-fdq97): gfx1201 in-object pair vs fused A/B
+// A = the gfx1201 precise prefill pair of an MXFP4 dequant choice (ops::chooseGemmF16 at >= 512 rows): dequant_f16_mxfp4
+// into an f16 scratch, then gemmh_f16 on it. B = gemmfq97_<v>_mxfp4 (kt.h kFq97Variants; kt only in phase 1) on the raw
+// weights, or v = hq: gemmhq_mxfp4 (the existing decode-at-fetch twin, gemm_fp8t.hip, WHIRL_GEMMHQ=1). B must be bitwise
+// == A on the full output (bitwise_b), then ABBA pairs in one process (Bench::runAB). Rows --fdq-n (default 2048, 8192,
+// 32768: a gfx1201 prefill forward is 2048 rows at every prompt length, prefill_schedule.h prefill_exec_default; 8192 /
+// 32768 = whole-prompt forwards), variants --fdq-v (default s1,s0,d1,hq). Weights: one tensor of every distinct MXFP4
+// shape of Swift's dense layers (--mx; blk.<L>.{attn_qkv, attn_gate, ssm_out, ffn_gate, ffn_up, ffn_down, attn_q, attn_k,
+// attn_v, attn_output}); the stdout line "fdq97 shape <rows>x<cols> count <k> first <tensor>" gives the number of model
+// tensors of that shape (the time weights of the item's judge). Without --mx: synthetic MXFP4 at the Swift ffn shapes.
+void benchFdq97(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "fdq97";
+    if (c.mod.arch() != hip::Arch::gfx1201) {
+        c.rep.skip("fdq97", "bench fdq97", "gemmfq97 is gfx1201-only (absent by design)");
+        return;
+    }
+    const int ti = static_cast<int>(QType::mxfp4);
+    const hip::Function dq = c.k.dequant_f16[ti], gh = c.k.gemmh_f16;
+    if (!dq || !gh) {
+        Result r;
+        r.name = "bench fdq97: dequant_f16_mxfp4 / gemmh_f16 missing from the gfx1201 code object";
+        r.pass = false;
+        c.rep.add(r);
+        return;
+    }
+    struct FqB {
+        std::string v, kname;
+        hip::Function f;
+    };
+    std::vector<std::string> want = e.o.fdq_v;
+    if (want.empty()) {
+        for (const char* v : kFq97Variants) want.push_back(v);
+        want.push_back("hq");
+    }
+    std::vector<FqB> slots;
+    for (const std::string& v : want) {
+        bool known = v == "hq";
+        for (const char* kv : kFq97Variants) known = known || v == kv;
+        const std::string kn = v == "hq" ? std::string("gemmhq_mxfp4") : "gemmfq97_" + v + "_mxfp4";
+        const hip::Function f = known ? c.fnOpt(kn) : nullptr;
+        if (!f) {  // a missing or unknown B is a failure, never a silent skip (the family exists to time it)
+            Result r;
+            r.name = known ? "bench fdq97: " + kn + " not in this code object" : "bench fdq97: --fdq-v " + v + " is neither a kFq97Variants name nor hq";
+            r.pass = false;
+            c.rep.add(r);
+            std::printf("   %s (FAIL)\n", r.name.c_str());
+            continue;
+        }
+        slots.push_back({v, kn, f});
+    }
+    if (slots.empty()) return;
+    const std::vector<int> ns = !e.o.fdq_n.empty() ? e.o.fdq_n : std::vector<int>{2048, 8192, 32768};
+    struct FqW {
+        std::string label, tensor;
+        HostMat m;
+    };
+    std::vector<FqW> ws;
+    if (const whirl::gguf::File* f = c.models.mx.empty() ? nullptr : c.open(c.models.mx)) {
+        const char* names[] = {"attn_qkv", "attn_gate", "ssm_out", "ffn_gate", "ffn_up", "ffn_down", "attn_q", "attn_k", "attn_v", "attn_output"};
+        std::map<std::pair<std::uint64_t, std::uint64_t>, std::pair<int, std::string>> shapes;  // (rows, cols) -> (count, first)
+        for (int L = 0; L < 256; ++L)
+            for (const char* nm : names) {
+                const std::string tn = "blk." + std::to_string(L) + "." + nm + ".weight";
+                const whirl::gguf::TensorInfo* t = f->tensor(tn);
+                if (!t || t->type != whirl::gguf::GgmlType::mxfp4 || t->n_dims != 2) continue;
+                auto& s = shapes[{t->ne[1], t->ne[0]}];
+                if (s.first++ == 0) s.second = tn;
+            }
+        for (const auto& [rc, cf] : shapes) {
+            std::printf("   fdq97 shape %llux%llu count %d first %s\n", static_cast<unsigned long long>(rc.first),
+                        static_cast<unsigned long long>(rc.second), cf.first, cf.second.c_str());
+            ws.push_back({"swift", cf.second, loadMat(*f, cf.second)});
+        }
+    }
+    if (ws.empty()) {
+        std::printf("   fdq97: no --mx model, synthetic MXFP4 at the Swift ffn shapes\n");
+        ws.push_back({"synthetic", "ffn_gate", randomMat(c, QType::mxfp4, 17408, 5120)});
+        ws.push_back({"synthetic", "ffn_down", randomMat(c, QType::mxfp4, 5120, 17408)});
+    }
+    for (const FqW& fw : ws) {
+        const HostMat& m = fw.m;
+        const int ncols = m.ncols, nrows = m.nrows;
+        if (ncols % 256 != 0 || m.row_bytes != static_cast<std::uint64_t>(ncols) / 256 * 136) {
+            Result r;
+            r.name = "bench fdq97 " + fw.tensor + ": not WHIRL's MXFP4 repack layout";
+            r.pass = false;
+            c.rep.add(r);
+            continue;
+        }
+        const DevCopies wc = upload(e, m.data);
+        const std::uint64_t rb = m.row_bytes;
+        auto w16 = std::make_shared<Buf>(static_cast<std::size_t>(nrows) * ncols * 2);
+        const std::uint64_t groups = static_cast<std::uint64_t>(ncols / 8) * nrows;
+        const std::string a_name = "dequant_f16_mxfp4+gemmh_f16";
+        const int cr = std::min(nrows, 64), ct = 8;
+        for (const int n : ns) {
+            if (n < 1) continue;
+            const std::vector<float> x = c.randn(static_cast<std::size_t>(n) * ncols);
+            std::vector<std::uint16_t> xh(x.size());
+            for (std::size_t i = 0; i < x.size(); ++i) xh[i] = f2h(x[i]);
+            Buf x16(xh), y(static_cast<std::size_t>(n) * nrows * 4);
+            for (const FqB& sb : slots) {
+                const hip::Function fb = sb.f;
+                Cell k;
+                k.ci = e.info("fdq97", a_name, fw.label + "." + shortName(fw.tensor) + ".n" + std::to_string(n) + "." + sb.v,
+                              shapeStr(nrows, ncols));
+                k.ci.settings = e.settings(static_cast<std::uint64_t>(wc.n()) * m.data.size(), wc.n());
+                k.ci.flops = 2.0 * n * nrows * ncols;
+                k.kernel = a_name;
+                k.kernel_b = sb.kname;
+                k.fa = gh;
+                k.call = [&c, &wc, &x16, &y, w16, dq, groups, rb, ncols, nrows, n](hip::Function f, std::uint64_t r) {
+                    hip::launch(dq, {static_cast<unsigned>(std::min<std::uint64_t>((groups + 255) / 256, 65535)), 1, 1}, {256, 1, 1}, 0, c.s, wc.at(r),
+                                rb, w16->p(), ncols, nrows);
+                    hip::launch(f, {cdiv(n, 256), cdiv(nrows, 128), 1}, {256, 1, 1}, 0, c.s, w16->p(), x16.p(), y.p(), ncols, nrows, n, 0);
+                };
+                k.call_b = [&c, &wc, &x16, &y, fb, rb, ncols, nrows, n](std::uint64_t r) {
+                    hip::launch(fb, {cdiv(n, 256), cdiv(nrows, 128), 1}, {256, 1, 1}, 0, c.s, wc.at(r), rb, x16.p(), y.p(), ncols, nrows, n, 0);
+                };
+                k.run = [&c, &k, &y, n, nrows, cr, ct](hip::Function f) {
+                    y.fill(0xff);
+                    k.call(f, 0);
+                    c.sync();
+                    std::vector<float> got;  // rows [0, cr) of tokens [0, ct): read only those (n = 32768: Y is 2.3 GB)
+                    for (int t = 0; t < ct && t < n; ++t) {
+                        std::vector<float> row(static_cast<std::size_t>(cr));
+                        hip::download(row.data(), y.p() + static_cast<std::uint64_t>(t) * static_cast<std::uint64_t>(nrows) * 4, row.size() * 4);
+                        got.insert(got.end(), row.begin(), row.end());
+                    }
+                    return got;
+                };
+                k.verify = [&m, &xh, cr, ct, ncols, n](const std::vector<float>& got) {
+                    const int tt = std::min(ct, n);
+                    std::vector<float> wf(static_cast<std::size_t>(cr) * ncols);
+                    std::vector<std::uint16_t> wh(static_cast<std::size_t>(ncols));
+                    for (int r = 0; r < cr; ++r) {
+                        ref::dequantRowF16(m.type, m.data.data() + static_cast<std::size_t>(r) * m.row_bytes, ncols, wh.data());
+                        for (int q = 0; q < ncols; ++q) wf[static_cast<std::size_t>(r) * ncols + q] = h2f(wh[static_cast<std::size_t>(q)]);
+                    }
+                    std::vector<float> xf(static_cast<std::size_t>(tt) * ncols);
+                    for (std::size_t i = 0; i < xf.size(); ++i) xf[i] = h2f(xh[i]);
+                    std::vector<double> ry, rs;
+                    ref::gemvF64(wf, cr, ncols, xf.data(), tt, ncols, ry, rs);
+                    return cmpTol("vs CPU (" + std::to_string(cr) + " rows x " + std::to_string(tt) + " tokens)", got, ry, rs, 1e-4, 1e-6);
+                };
+                k.bitwise_b = [&c, &k, &y, n, nrows]() -> std::pair<std::size_t, std::size_t> {
+                    const std::size_t cnt = static_cast<std::size_t>(n) * nrows;
+                    y.fill(0xff);
+                    k.call(k.fa, 0);
+                    c.sync();
+                    const std::vector<float> ya = y.down<float>(cnt);
+                    y.fill(0x7f);  // a different fill: an output B never writes cannot match A by accident
+                    k.call_b(0);
+                    c.sync();
+                    const std::vector<float> yb = y.down<float>(cnt);
+                    std::size_t bad = 0;
+                    for (std::size_t i = 0; i < cnt; ++i) bad += std::memcmp(&ya[i], &yb[i], 4) != 0;
+                    return {cnt, bad};
+                };
+                runCell(e, k);
+            }
+        }
+    }
+}
+
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "fdq97"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -1347,7 +1513,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
         void (*fn)(Env&);
     };
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
-                      {"fdq", benchFdq}, {"ggemv", benchGGemv}};
+                      {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"fdq97", benchFdq97}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

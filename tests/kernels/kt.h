@@ -265,5 +265,10 @@ inline constexpr FqProto kFqProto[] = {{"t2g4", 1}, {"t2g8", 1}, {"t2g16", 1}, {
 // KB v0252-8sbvalu:gemmfq-valu-levers) are NOT in the shipped gfx1151 object: unused kernels move the object layout
 // (KB v0252-8sbal:e2e-raster-g8). Their source stays in git history (d185546) and research\b8s. kt gemm checks absence.
 inline constexpr const char* kFqRetired[] = {"t2l", "t2s", "t2ls", "t2lsp", "t2g8ls", "c2g8ls", "w5ls"};
+// v0252-fdq97 (PLAN V1-89 phase 1): the gfx1201 fused-dequant MXFP4 prefill GEMM variants gemmfq97_<v>_mxfp4
+// (kernels/gemm_fq97.hip; kt only, no host selection): test_gemm.cpp testGemmFq97 (bitwise == dequant_f16_mxfp4 +
+// gemmh_f16) and bench_kernels.cpp benchFdq97 (--bench fdq97). kFq97Primary is the variant the item's kt job pre-registered.
+inline constexpr const char* kFq97Variants[] = {"s1", "s0", "d1"};
+inline constexpr const char* kFq97Primary = "s1";
 
 }  // namespace kt

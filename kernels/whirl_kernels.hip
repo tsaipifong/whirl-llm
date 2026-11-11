@@ -51,6 +51,7 @@
 #include "gemv_hv.hip"             // precise gemvh candidates + tune table (v0252-c2port; LAST: no existing kernel moves)
 #include "gemv_hf.hip"             // precise gemvh on f32 input + the gemvh tile (v0252-c3port; after the shipped set)
 #include "moe_fused.hip"           // precise MoE decode: routed + shared gate/up + SwiGLU in one launch (v0252-c3port; LAST)
+#include "gemm_fq97.hip"           // fused-dequant MXFP4 prefill GEMM gemmfq97_<v>_mxfp4, kt only (v0252-fdq97 phase 1; LAST)
 #endif
 
 #if defined(__gfx1151__)

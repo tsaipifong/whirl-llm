@@ -12,7 +12,9 @@
 
 #include "cpu_ref.h"
 
+#include <cstdlib>
 #include <functional>
+#include <utility>
 
 namespace kt {
 
@@ -146,6 +148,160 @@ void testGemmFlush(Ctx& c, const std::vector<HostMat>& mats) {
         r.pass = bad == 0 && checked > 0;
         if (!first_bad.empty()) r.note = "first " + first_bad;
         c.rep.add(r);
+    }
+}
+
+// v0252-fdq97 (PLAN V1-89 phase 1): the gfx1201 fused-dequant MXFP4 prefill GEMMs gemmfq97_<v>_mxfp4 (kt.h kFq97Variants;
+// kt only, no host selection yet) == dequant_f16_mxfp4 + gemmh_f16, the gfx1201 precise pair of an MXFP4 dequant choice
+// (ops::chooseGemmF16 at >= 512 rows), BITWISE on the whole output, plain and accumulate onto a random base. Written from
+// that contract before the kernel (the test-first object holds a zero-writing stub: every bitwise row must fail there).
+// Cases (each for every variant in the object):
+//   rand   randomMat (E8M0 118..126: the injected decode), 1000 rows (partial last row tile) / 997 rows (the per-element
+//          epilogue), 768 / 2560 columns, n = 17 / 700 / 1100 (partial token tiles)
+//   efin   block E8M0 = (r + 3 b) % 141: every value 0..140 (zero scale <= 103 incl. 103 = 2^-25 rounding to 0, subnormal
+//          scale 104..112, the injected range 104..128 and both edges, the LUT fallback 129..140 with large weights)
+//   einf   block E8M0 = 141 + (r + b) % 115: 141..255 (f16 overflow of large codes, inf scale from 144, 255)
+//   xspec  rand weights, f16 activations with quiet / signalling / negative NaN, +-inf, +-subnormals, -0 every 997th value
+//   model  Swift blk.0 ffn_gate rows 0..999 and ffn_down rows 0..511 (real exponents; with --mx), n = 300
+// WHIRL_KT_FQ97_MUT=<k> runs gemmfq97_m<k>_mxfp4 (objects built with -DWHIRL_FQ97_MUTANTS=1) in the primary's rows: the
+// RED controls of the item's GPU job (every mutant must fail at least one bitwise row).
+void testGemmFq97(Ctx& c) {
+    const bool g1201 = c.mod.arch() == hip::Arch::gfx1201;
+    const int ti = static_cast<int>(QType::mxfp4);
+    std::string mut;
+    if (const char* e = std::getenv("WHIRL_KT_FQ97_MUT"); e != nullptr && *e != 0) mut = e;
+    struct V {
+        std::string kname;
+        hip::Function f;
+    };
+    std::vector<V> vs;
+    for (const char* v : kFq97Variants) {
+        const std::string kn = std::string("gemmfq97_") + v + "_mxfp4";
+        const hip::Function f = c.fnOpt(kn);
+        Result r;
+        r.kind = Kind::invariant;
+        r.n = 1;
+        if (g1201) {
+            r.name = kn + " in the gfx1201 code object";
+            r.pass = f != nullptr;
+            if (!r.pass) r.note = "missing from the code object";
+        } else {
+            r.name = kn + " absent from this non-gfx1201 code object";
+            r.pass = f == nullptr;
+        }
+        r.mismatches = r.pass ? 0 : 1;
+        c.rep.add(r);
+        if (!f || !g1201) continue;
+        if (!mut.empty() && std::string(v) == kFq97Primary) {
+            const std::string mk = "gemmfq97_m" + mut + "_mxfp4";
+            const hip::Function fm = c.fnOpt(mk);
+            Result rm;
+            rm.kind = Kind::invariant;
+            rm.n = 1;
+            rm.name = mk + " (WHIRL_KT_FQ97_MUT RED control) present, run in place of " + kn;
+            rm.pass = fm != nullptr;
+            rm.mismatches = rm.pass ? 0 : 1;
+            if (!rm.pass) rm.note = "absent: build the object with -DWHIRL_FQ97_MUTANTS=1";
+            c.rep.add(rm);
+            if (fm) vs.push_back({mk, fm});
+            continue;
+        }
+        vs.push_back({kn, f});
+    }
+    if (!g1201) {
+        c.rep.skip("gemm", "gemmfq97_*_mxfp4 == dequant_f16_mxfp4 + gemmh_f16", "gemmfq97 is gfx1201-only (absent by design)");
+        return;
+    }
+    const hip::Function dq = c.k.dequant_f16[ti];
+    {
+        Result r;
+        r.kind = Kind::invariant;
+        r.n = 1;
+        r.name = "gemmfq97 reference pair dequant_f16_mxfp4 + gemmh_f16 in the gfx1201 code object";
+        r.pass = dq != nullptr && c.k.gemmh_f16 != nullptr;
+        r.mismatches = r.pass ? 0 : 1;
+        c.rep.add(r);
+        if (!r.pass || vs.empty()) return;
+    }
+    // rows r, blocks b of 32 values: E8M0 byte = base + (r + mulb * b) % mod
+    auto withExp = [](HostMat m, int base, int mod, int mulb) {
+        for (int r = 0; r < m.nrows; ++r)
+            for (int sb = 0; sb < m.ncols / 256; ++sb)
+                for (int i = 0; i < 8; ++i)
+                    m.data[static_cast<std::size_t>(r) * m.row_bytes + static_cast<std::size_t>(sb) * 136 + static_cast<std::size_t>(i)] =
+                        static_cast<std::uint8_t>(base + (r + mulb * (sb * 8 + i)) % mod);
+        return m;
+    };
+    auto runCase = [&](const std::string& label, const HostMat& m, int n, const std::vector<std::uint16_t>* xin) {
+        const int nr = m.nrows, nc = m.ncols;
+        if (nc % 256 != 0 || m.row_bytes != static_cast<std::uint64_t>(nc) / 256 * 136) {
+            Result r;
+            r.name = "gemmfq97 case " + label + ": not WHIRL's MXFP4 repack layout";
+            r.pass = false;
+            c.rep.add(r);
+            return;
+        }
+        Buf w(m.data), w16(static_cast<std::size_t>(nr) * nc * 2);
+        const std::uint64_t groups = static_cast<std::uint64_t>(nc / 8) * nr;
+        hip::launch(dq, {static_cast<unsigned>(std::min<std::uint64_t>(cdiv(groups, 256), 65535)), 1, 1}, {256, 1, 1}, 0, c.s, w.p(),
+                    m.row_bytes, w16.p(), nc, nr);
+        const std::vector<std::uint16_t> xh = xin ? *xin : toHalf(c.randn(static_cast<std::size_t>(n) * nc));
+        Buf x16(xh);
+        const std::vector<float> y0 = c.randn(static_cast<std::size_t>(n) * nr);  // accumulate base
+        const std::size_t cnt = static_cast<std::size_t>(n) * nr;
+        auto runRef = [&](int accumulate) {
+            Buf y(cnt * 4);
+            if (accumulate) y.up(y0); else y.fill(0xff);
+            hip::launch(c.k.gemmh_f16, {cdiv(n, 256), cdiv(nr, 128), 1}, {256, 1, 1}, 0, c.s, w16.p(), x16.p(), y.p(), nc, nr, n,
+                        accumulate);
+            c.sync();
+            return y.down<float>(cnt);
+        };
+        const std::vector<float> ref0 = runRef(0), ref1 = runRef(1);
+        for (const V& v : vs)
+            for (int accumulate = 0; accumulate < 2; ++accumulate) {
+                Buf y(cnt * 4);
+                if (accumulate) y.up(y0); else y.fill(0x7f);  // not the reference's fill: an unwritten output cannot match
+                hip::launch(v.f, {cdiv(n, 256), cdiv(nr, 128), 1}, {256, 1, 1}, 0, c.s, w.p(), m.row_bytes, x16.p(), y.p(), nc, nr, n,
+                            accumulate);
+                c.sync();
+                c.rep.add(cmpExact(v.kname + " == dequant_f16_mxfp4 + gemmh_f16 (" + label + ", " + std::to_string(nr) + "x" +
+                                       std::to_string(nc) + ", n=" + std::to_string(n) + (accumulate ? ", accumulate)" : ")"),
+                                   y.down<float>(cnt), accumulate ? ref1 : ref0, Kind::invariant));
+            }
+    };
+    // rand: tails of rows / tokens and both epilogue paths
+    {
+        const HostMat m1 = randomMat(c, QType::mxfp4, 1000, 768);
+        for (int n : c.quick ? std::vector<int>{17, 700} : std::vector<int>{17, 700, 1100}) runCase("rand", m1, n, nullptr);
+        const HostMat m2 = randomMat(c, QType::mxfp4, 997, 2560);
+        for (int n : c.quick ? std::vector<int>{17} : std::vector<int>{17, 700}) runCase("rand", m2, n, nullptr);
+    }
+    // efin / einf: every E8M0 value
+    {
+        const HostMat ef = withExp(randomMat(c, QType::mxfp4, 1000, 768), 0, 141, 3);
+        runCase("efin E8M0 0..140", ef, 700, nullptr);
+        runCase("efin E8M0 0..140", withExp(randomMat(c, QType::mxfp4, 997, 768), 0, 141, 3), 17, nullptr);
+        runCase("einf E8M0 141..255", withExp(randomMat(c, QType::mxfp4, 1000, 768), 141, 115, 1), 700, nullptr);
+    }
+    // xspec: special f16 activations
+    {
+        const int n = 300, nc = 768;
+        std::vector<std::uint16_t> xh = toHalf(c.randn(static_cast<std::size_t>(n) * nc));
+        const std::uint16_t sp[] = {0x7E00, 0x7C01, 0xFE00, 0x7C00, 0xFC00, 0x0001, 0x8001, 0x03FF, 0x83FF, 0x8000, 0x0400, 0x7BFF};
+        for (std::size_t i = 0; i < xh.size(); i += 997) xh[i] = sp[(i / 997) % (sizeof(sp) / sizeof(sp[0]))];
+        runCase("xspec NaN/inf/subnormal/-0 activations", randomMat(c, QType::mxfp4, 1000, nc), n, &xh);
+    }
+    // model: Swift's real MXFP4 blocks
+    if (const whirl::gguf::File* f = c.models.mx.empty() ? nullptr : c.open(c.models.mx)) {
+        const std::pair<const char*, int> picks[] = {{"blk.0.ffn_gate.weight", 1000}, {"blk.0.ffn_down.weight", 512}};
+        for (const auto& [tn, rows] : picks) {
+            if (!f->tensor(tn)) continue;
+            const HostMat m = loadMat(*f, tn, 0, rows);
+            if (m.type == QType::mxfp4) runCase(std::string("model swift ") + tn, m, 300, nullptr);
+        }
+    } else {
+        c.rep.skip("gemm", "gemmfq97 model rows (Swift blk.0 ffn_gate / ffn_down)", "no --mx model given");
     }
 }
 
@@ -707,6 +863,7 @@ void testGemm(Ctx& c) {
             c.rep.add(r);
         }
     }
+    testGemmFq97(c);  // v0252-fdq97: LAST, so the family's earlier rows keep their random inputs (kt_seed.h stream)
 }
 
 }  // namespace kt

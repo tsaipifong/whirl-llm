@@ -56,6 +56,8 @@ int usage() {
         "          [--rot-mb N] [--rot-cap-mb N] [--moe-layers N] [--no-anchor]: kernel timing (kt::Bench) instead of tests\n"
         "          fdq: in-object A/B (ABBA) of the shipped dequant_f16_mxfp4 + gemm_c<i>_f16 pair vs gemmfq_<v>_mxfp4\n"
         "          [--fdq-n ROWS,...] (default 1024,1280,2048,4096) [--fdq-v c2,t2] (gfx1151 code object)\n"
+        "          fdq97: the same for gfx1201: dequant_f16_mxfp4 + gemmh_f16 vs gemmfq97_<v>_mxfp4 / gemmhq_mxfp4 (v = hq),\n"
+        "          --fdq-n (default 2048,8192,32768) --fdq-v (default s1,s0,d1,hq) (v0252-fdq97, kt only)\n"
         "          [--bench-nt 5,6]: ggemv widths, a subset of the gemvk table (--list-bench-nt prints it and exits 0)\n"
         "          [--bench-v 7]: ggemv: only these gemvk variants (1..9) next to the production kernel\n"
         "  --device  index, gfx arch, name substring, r9700 or 8060s (default: WHIRL_DEVICE, else the\n"

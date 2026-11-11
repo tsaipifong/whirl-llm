@@ -205,12 +205,14 @@ struct BenchOpts {
     std::vector<int> ggemv_v;            // --bench-v: gemvk variants 1..9 timed next to production (v0251-a6port); empty = all
     std::string state = "burst";         // declared power state (DESIGN (d))
     // family fdq (v0251-a3port): rows per cell (--fdq-n, default 1024,1280,2048,4096) and gemmfq slots (--fdq-v,
-    // default c2,t2 = kernels::kGemmFqNames); A = the shipped dequant_f16_mxfp4 + gemm_c<i>_f16 pair, B = the slot
+    // default c2,t2 = kernels::kGemmFqNames); A = the shipped dequant_f16_mxfp4 + gemm_c<i>_f16 pair, B = the slot.
+    // family fdq97 (v0252-fdq97, gfx1201) reads the same two options: default rows 2048,8192,32768, variants
+    // kt.h kFq97Variants + hq (gemmhq_mxfp4); A = dequant_f16_mxfp4 + gemmh_f16
     std::vector<int> fdq_n;
     std::vector<std::string> fdq_v;
     std::string tool_ver, code_hash, code_hash_b, gpu_arch, gpu_pci;
 };
-extern const char* const kBenchFamilies[8];
+extern const char* const kBenchFamilies[9];
 bool benchFamilyKnown(const std::string& f);
 struct Ctx;
 void runBench(Ctx& c, const BenchOpts& o);
