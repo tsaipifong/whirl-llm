@@ -4,6 +4,7 @@
 #include "engine_sampling.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace whirl::server {
 
@@ -100,5 +101,34 @@ float SampleBuffers::logitAt(std::uint32_t gr, std::uint32_t t) {
 }
 
 std::uint32_t SampleBuffers::nVocab() const { return m_.cfg().n_vocab; }
+
+// v0252-e1p1 (feat026-acc port: Engine::allocState's pinned block and Engine::readCycleCtl of feat026-acc-p25 4ac9da6,
+// here with the control words they read; the engine logs the mode)
+std::uint32_t SampleBuffers::allocSpecAcc(std::uint32_t parallel, std::uint32_t mode) {
+    if (mode == 0 || mode > 4) return 0;
+    const std::uint64_t cb = static_cast<std::uint64_t>(parallel) * qwen35::ctl_words * 4;
+    ctl_pin_ = device::PinnedBuf::alloc(ops_, cb);
+    std::memset(ctl_pin_.get(), 0, cb);
+    // the device accept needs the kernel (else the pinned read + the host accept)
+    if (mode >= 2 && !m_.specAcceptOk()) mode = 1;
+    return mode;
+}
+
+const std::int32_t* SampleBuffers::readCycleCtl(std::uint32_t mode, std::size_t words, const SpecAccArgs* aa) {
+    if (mode == 0 || !ctl_pin_) {
+        m_.readCtl(std::span<std::int32_t>(ctl_host_.data(), std::min(words, ctl_host_.size())));
+        return ctl_host_.data();
+    }
+    auto* pin = static_cast<std::int32_t*>(ctl_pin_.get());
+    if (aa != nullptr && mode == 3) {
+        // zero copy: the kernel writes the verify's control words into the pinned buffer; the host only waits for it
+        m_.specAccept(*aa, pin);
+        ops_.streamSync(m_.stream());
+        return pin;
+    }
+    if (aa != nullptr) m_.specAccept(*aa, nullptr);
+    m_.readCtlPinned(std::span<std::int32_t>(pin, std::min<std::size_t>(words, ctl_pin_.bytes() / 4)));
+    return pin;
+}
 
 }  // namespace whirl::server

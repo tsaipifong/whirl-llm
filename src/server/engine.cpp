@@ -120,6 +120,15 @@ void Engine::allocState() {
     for (Spe& s : ps_.spes()) ck_.init(s.ck, false);
     // sampling buffers
     sb_.alloc(opt_.parallel, opt_.relax.on, opt_.relax.on ? opt_.relax.topk() : 0);
+    // v0252-e1p1 (feat026-acc port, WHIRL_SPEC_ACC >= 1): pinned control words; a device mode without the model's accept
+    // kernel falls back to the pinned read + host accept (said once here)
+    if (opt_.spec_acc != 0) {
+        const std::uint32_t want = opt_.spec_acc;
+        opt_.spec_acc = sb_.allocSpecAcc(opt_.parallel, want);
+        if (want >= 2 && want <= 4 && opt_.spec_acc == 1)
+            logW("WHIRL_SPEC_ACC={}: no spec_accept_rows kernel; pinned read + host accept", want);
+        if (opt_.spec_acc != 0) logI("decode: WHIRL_SPEC_ACC={} ({})", opt_.spec_acc, specAccName(opt_.spec_acc));
+    }
     if (opt_.relax.on) {
         logI("decode: relaxed draft acceptance (relaxacc, fast): greedy top-{} with p >= {:.2f} p_max; sampling typical "
              "acceptance eps {:.2f} delta {:.2f} - output differs from exact speculative decoding",
@@ -207,6 +216,14 @@ Engine::Stats Engine::stats() const {
     s.dfl_accepted = bst_.dfl_accepted;
     s.dfl_cold = bst_.dfl_cold;
     s.dfl_gap = bst_.dfl_gap;
+    // v0252-e1p1 (feat026-acc port)
+    const SpecAccStats& as = sb_.accCounts();
+    s.acc_dev = as.dev;
+    s.acc_checked = as.checked;
+    s.acc_mismatch = as.mismatch;
+    s.acc_fallback = as.fallback;
+    s.tab_checked = as.tab_checked;
+    s.tab_mismatch = as.tab_mismatch;
     return s;
 }
 

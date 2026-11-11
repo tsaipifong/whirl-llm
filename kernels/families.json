@@ -101,11 +101,12 @@
    ]
   },
   "kernels.sample": {
-   "desc": "token tables, greedy / draft picks, 2-bit MTP draft head, sampling candidates, speculative sampling",
+   "desc": "token tables, greedy / draft picks, 2-bit MTP draft head, sampling candidates, speculative sampling, the device draft accept decision (spec_accept_rows, v0252-e1p1)",
    "paths": [
     "kernels/sample_*.hip",
     "kernels/draft_d2.hip",
     "kernels/spec_sample.hip",
+    "kernels/spec_accept.hip",
     "kernels/gfx1151/draft_pick.hip",
     "kernels/gfx1151/sample_cand.hip"
    ],

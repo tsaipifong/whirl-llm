@@ -22,6 +22,7 @@
 # | jq_, jq_.slots_ (S10; slots_ new: JobQueue's reference to Engine's slots_) | JobQueue (the former members q_mutex_ .. loop_calls_ and tier_wake_ / wake_seq_, verbatim, in that order; private slots_ reference last) | each member's own (Mutex, condition_variable, deque<Job*>, atomics, vector<function<void()>>; the rest trivial) | the group sits where q_mutex_ was (S10); flattened as jq_.<member>; ids_ / rcx_ now after it, tier_wake_ / wake_seq_ inside it (rows above) | the queue members keep their relative order; no destructor reads ids_ / rcx_; nothing waits on q_cond_ or holds q_mutex_ at ~Engine (stop() and the loop's return come first, C3) |
 # | q_mutex_ / queue_ / n_active_ references of Engine (S10, removed in S16 health) | reference members | none | removed: health reads them through jq_.jqHealth (arch025-engclose) | references, no destructor; the members they named are jq_'s |
 # | se_, pf_, cyc_, ss_, tg_, sch_ (new in S11 .. S15b in that order) | SlotEnd, PrefillPhase, SpecCycle, SlotStart, TierGlue, Scheduler: references only (core.shared members, placed state, jq_ and the components declared before them) | trivial (references only; layout static_asserts follow with their iso manifests) | added last, in this order, after vw_ | destroyed first (sch_ first); no destructor reads them, they own nothing; every member before them keeps its order and offset class |
+# | sb_.ctl_pin_, sb_.acc_stats_ (new in v0252-e1p1) | feat026-acc port (WHIRL_SPEC_ACC): device::PinnedBuf (pinned host memory, allocated only for WHIRL_SPEC_ACC >= 1), SpecAccStats (6 uint64 counters) | ctl_pin_ frees its pinned host memory through the Backend (ops_, which outlives Engine; nothing waits on it: the decode cycle synced the stream before reading it), acc_stats_ trivial | added last in SampleBuffers, after ctl_host_ | destroyed before ctl_host_ / every older SampleBuffers member (memory only, no destructor reads them); every member before them keeps its order and offset |
 # Stored callbacks that capture `this` (review3 C4): today they capture Engine; after the split they capture a
 # component (sc_ / dc_ / tg_), which is declared after vis_ and destroyed FIRST, while tb_ / the Tier outlive it.
 # | callback | stored in | captures (today -> after split) | lifetime rule |
@@ -64,6 +65,8 @@ sb_.row_host_
 sb_.in_cands_
 sb_.cands_scratch_
 sb_.ctl_host_
+sb_.ctl_pin_
+sb_.acc_stats_
 spec_on_
 conv_bytes_
 ssm_bytes_

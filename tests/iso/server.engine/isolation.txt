@@ -146,6 +146,8 @@ hdr       src/tier/evict_policy.h
 hdr       src/tier/idle_flush.h
 hdr       src/tier/kv_tier.h
 hdr       src/tokenizer/unicode_tables.inc
+# v0252-e1p1 (feat026-acc port): engine_decode.cpp fills the device accept arguments (SpecAccArgs, plain C, no other include)
+hdr       kernels/spec_accept.h
 # test program
 testsrc   tests/iso/server.engine/engine_tests.cpp
 testhdr   tests/iso/iso_test.h

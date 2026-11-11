@@ -25,6 +25,11 @@
 #include <string>
 #include <vector>
 
+// v0252-e1p1 (feat026-acc port): the device accept decision's argument and next-rows types (kernels/spec_accept.h, shared
+// with the kernel spec_accept_rows); only names here - the engine's decode cycle and the backends include the header
+struct SpecAccArgs;
+struct SpecNextTab;
+
 namespace whirl::server {
 
 using device::DevPtr;
@@ -99,6 +104,17 @@ public:
     // verify row; sampling::RelaxRows rank layout). One-shot. false: not supported (the engine keeps topkRows).
     virtual bool setRelaxRank(DevPtr stats, std::uint32_t seg_mask, std::uint32_t stride) { (void)stats, (void)seg_mask, (void)stride; return false; }
     virtual void readCtl(std::span<std::int32_t> dst) = 0;
+    // ---- v0252-e1p1 (feat026-acc port; WHIRL_SPEC_ACC, kernels/spec_accept.h). readCtlPinned: dst is pinned host memory
+    // (an async copy on the model stream + a stream sync instead of the staged pageable copy). specAccept: the accept
+    // decision of the verify just enqueued, on the device, into the result words 50 .. 56 of each control area (and the
+    // next cycle's rows); host != null (pinned host memory, readCtl's layout): the verify's control areas are written there
+    // too, visible once the model stream is synced (device::Backend::streamSync(stream())). readSpecTab: the next cycle's
+    // rows of the last specAccept (blocking; WHIRL_SPEC_ACC=check and tests; t untouched when there is none).
+    // Defaults: no device accept (the engine keeps the host path; specAccept is never called when specAcceptOk() is false).
+    virtual void readCtlPinned(std::span<std::int32_t> dst) { readCtl(dst); }
+    virtual bool specAcceptOk() const { return false; }
+    virtual void specAccept(const SpecAccArgs& /*a*/, std::int32_t* /*host*/) {}
+    virtual void readSpecTab(SpecNextTab& /*t*/) {}
     // speculative sampling of MTP drafts (numerics item specsample): per sequence, set before the
     // draft steps of a cycle. Race coupling (whirl/spec_sample.h): the device draws draft r as
     // argmin E/q and the host draws the target as argmin E/p with the same E, accepting on an exact

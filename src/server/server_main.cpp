@@ -990,6 +990,12 @@ void ServerRun::makeEngine() {
     eo.ngram_force = settings::ngramForce(false);
     // WHIRL_SLOT_DRAFTS: 0 / unset uniform, 1 marginal-gain swaps, 2 cost-model allocation
     if (const std::optional<std::uint32_t> sd = settings::slotDrafts()) eo.slot_drafts = *sd;  // (config.settings, arch025-lane1 leg 8)
+    // v0252-e1p1 (feat026-acc port): WHIRL_SPEC_ACC 0 host (default), 1 pinned, 2 gpu, 3 gpu-zc, 4 check, or those names
+    // (EngineOptions::spec_acc); a bad value warns and runs host (FR-SRV P3-10: never a startup failure)
+    if (const std::optional<std::string> sa = settings::specAcc()) {
+        if (const std::optional<std::uint32_t> m = parseSpecAcc(*sa)) eo.spec_acc = *m;
+        else logW("WHIRL_SPEC_ACC={} is not one of 0..4 / host, pinned, gpu, gpu-zc, check; using 0 (host)", *sa);
+    }
     if (lm.use_dflash) {
         // MTP-only settings: the per-slot MTP draft allocation, the draft-head vocabulary subset and
         // the MTP draft attention window have nothing to act on without the MTP block (qwen35::dflashMtpOnly, module

@@ -134,6 +134,10 @@
 //   draft_sample_rows(x, n, int* ctl_all, RowIdx area, int r, const int* map, DSampArgs a, int* qbuf)
 //            (optional) after draft_pick_rows: rows with a.on draw draft r from the filtered draft
 //            distribution q and write q to qbuf + a.qoff (whirl/spec_sample.h layout)
+//   spec_accept_rows(int* ctl_all, SpecAccArgs a, int* host, SpecNextTab* tab)   (optional; kernels/spec_accept.h,
+//            feat026-acc ported by v0252-e1p1): after the verify's argmax, the accept decision of its greedy sequences
+//            into control words 50 .. 56, the next cycle's rows into tab (may be null), the verify's control areas
+//            into pinned host memory at host (may be null: WHIRL_SPEC_ACC=gpu-zc); one block of 64 threads
 //   set_tokens(ids, pos, dev_src, Tok16 toks, n, n_host, pos0)
 //   set_rows(ids, pos, kvbase, dev_src, RowTab tab, n)
 //   topk_rows(x, n, K, float inv_t, int* ids, float* vals, float* stats)
@@ -754,6 +758,7 @@ struct MiscKernels {
     F rmsnorm_x8t{}, silu_mul_x8t{}, silu_mul_x8ht{}, gated_norm_x8t{}, gated_norm_x8ht{};
     F topk_rows{};
     F argmax_rank_rows_to{};  // optional (v0252-f1 relaxacc one-pass check; null: relaxacc greedy keeps topk_rows)
+    F spec_accept_rows{};     // optional (feat026-acc, ported by v0252-e1p1; null: the host makes the accept decision)
 };
 
 struct KernelTable : MatmulKernels, AttnKernels, MoeKernels, DeltaNetKernels, MiscKernels {

@@ -81,6 +81,13 @@ void SlotEnd::finishJob(Slot& sl) {
              sl.cycles > 0 ? static_cast<double>(sl.accepted + sl.cycles) / sl.cycles : 0.0, sl.cycles);
         if (opt_.ngram) logI("req {} | slot {} | n-gram drafts in {} of {} cycles", job.id, sl.id, sl.ng_cycles, sl.cycles);
     }
+    // v0252-e1p1 (feat026-acc-r1 review C5, ported): engine totals since start, the two failure kinds apart
+    if (opt_.spec_acc >= 2) {
+        const SpecAccStats& as = sb_.accCounts();
+        logI("req {} | slot {} | spec-acc stats | {}: decided on the device {}, out of range (host decided) {}; check: "
+             "compared {}, disagree {}; next-cycle rows: compared {}, disagree {}",
+             job.id, sl.id, specAccName(opt_.spec_acc), as.dev, as.fallback, as.checked, as.mismatch, as.tab_checked, as.tab_mismatch);
+    }
     // (whatever the draft source: with DFlash2 drafts it must stay 0, FR-DFL P2-3)
     if (opt_.relax.on && (opt_.use_mtp || opt_.use_dflash))
         logI("req {} | slot {} | relaxacc: {} of {} accepted drafts kept by the relaxed rule (greedy: mean ln p_max/p_kept {:.3f})",

@@ -125,6 +125,9 @@ inline std::optional<std::uint32_t> visCkptMin(const Warn& warn) { return envU32
 // WHIRL_SLOT_DRAFTS: unset nullopt; "2" = 2 (cost-model allocation), "0" = 0 (uniform), any other text 1 (marginal-gain swaps).
 std::optional<std::uint32_t> parseSlotDrafts(const std::optional<std::string>& v);
 inline std::optional<std::uint32_t> slotDrafts() { return parseSlotDrafts(envGet("SLOT_DRAFTS")); }
+// v0252-e1p1 (feat026-acc port): WHIRL_SPEC_ACC as text; whirl-server parses it with server::parseSpecAcc (the names
+// host / pinned / gpu / gpu-zc / check or 0..4; a bad value warns there and runs host)
+inline std::optional<std::string> specAcc() { return envGet("SPEC_ACC"); }
 // WHIRL_GATHER_MS: std::stod (a leading number counts); unset or unreadable nullopt (the engine's default stays).
 std::optional<double> parseGatherMs(const std::optional<std::string>& v);
 inline std::optional<double> gatherMs() { return parseGatherMs(envGet("GATHER_MS")); }

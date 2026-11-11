@@ -13,9 +13,31 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 
 namespace whirl::server {
+
+// v0252-e1p1 (port of feat026-acc-r1 c797b27: parseSpecAcc / specAccName, engine.{h,cpp} there): WHIRL_SPEC_ACC values.
+// 0..4 or the names host / pinned / gpu / gpu-zc / check (case-insensitive, surrounding blanks ignored; gpu_zc and zc =
+// gpu-zc). Anything else: nullopt (server_main warns and uses 0 = host). specAccName: the name of a mode ("?" outside
+// 0..4); one table for the parser, the startup log line and the per-request stats line.
+inline constexpr std::array<const char*, 5> spec_acc_names{"host", "pinned", "gpu", "gpu-zc", "check"};
+
+inline const char* specAccName(std::uint32_t mode) { return mode < spec_acc_names.size() ? spec_acc_names[mode] : "?"; }
+
+inline std::optional<std::uint32_t> parseSpecAcc(std::string_view v) {
+    while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
+    if (v.size() == 1 && v[0] >= '0' && v[0] <= '4') return static_cast<std::uint32_t>(v[0] - '0');
+    std::string s(v);
+    for (char& c : s) c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    if (s == "gpu_zc" || s == "zc") return 3u;
+    for (std::uint32_t m = 0; m < spec_acc_names.size(); ++m)
+        if (s == spec_acc_names[m]) return m;
+    return std::nullopt;
+}
 
 struct EngineOptions {
     std::string model_name;
@@ -61,6 +83,13 @@ struct EngineOptions {
     float ngram_slope = 0.015f;
     std::uint32_t ngram_max = 0;
     bool ngram_force = false;
+    // v0252-e1p1 (feat026-acc port, WHIRL_SPEC_ACC): how a decode cycle reads the verify's control words and where the
+    // greedy accept decision is made. 0 host (pageable readCtl, host path: as before), 1 pinned (async copy into pinned
+    // memory + stream sync), 2 gpu (spec_accept_rows decides greedy exact slots; pinned read), 3 gpu-zc (the kernel writes
+    // the control words into pinned memory: no copy), 4 check (gpu, and the host path runs too and must agree: accept
+    // counts, next token, next-cycle rows; the host result is used). The reply is the same in every mode (exact greedy
+    // acceptance; sampling / relaxacc slots always decide on the host). SampleBuffers::readCycleCtl.
+    std::uint32_t spec_acc = 0;
     // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)
     std::uint32_t slot_drafts = 0;
     bool trace_nd = false;
