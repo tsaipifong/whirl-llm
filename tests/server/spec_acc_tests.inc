@@ -150,11 +150,55 @@ void testSpecAccReads() {
     }
 }
 
+// v0252-e1p1b-fix: the per-request "spec-acc stats |" lines, each field read by its LABEL. The check field is
+// "; check: compared N, disagree M;". The bare needle "disagree 0;" used before also matched the next-cycle rows field as
+// soon as another field followed it (P1b appended "; E1 device-input cycles N", src/server/engine_end.cpp): every
+// check-mode line then counted as "no check disagreement" (spec_acc_r1_counters failed at "ck0 < nst") and in modes 2/3 a
+// check disagreement could no longer fail the test. A pure function of the lines, so the reader is checked on literal lines.
+struct SpecAccLines {
+    std::size_t stats = 0;  // "spec-acc stats |" lines
+    std::size_t fb0 = 0;    // ... whose "out of range (host decided)" field is 0
+    std::size_t ck = 0;     // ... with a readable check field
+    std::size_t ck0 = 0;    // ... whose check field shows 0 disagreements
+};
+SpecAccLines specAccLines(const std::vector<std::string>& lines) {
+    static const std::regex check_field(R"(; check: compared \d+, disagree (\d+);)");
+    SpecAccLines r;
+    for (const std::string& l : lines) {
+        if (l.find("spec-acc stats |") == std::string::npos) continue;
+        r.stats += 1;
+        if (l.find("out of range (host decided) 0;") != std::string::npos) r.fb0 += 1;
+        std::smatch m;
+        if (!std::regex_search(l, m, check_field)) continue;
+        r.ck += 1;
+        if (m[1].str() == "0") r.ck0 += 1;
+    }
+    return r;
+}
+
 // mode 2 / 3 / 4 with a corrupted device result (MockConfig::spec_acc_corrupt: every Nth specAccept writes an
 // out-of-range accept count for its first device-decided sequence): the text stays the greedy reference in every mode
 // (the host decides); modes 2/3 count it as an out-of-range fallback and warn "spec-acc fallback |", never as a
 // disagreement; mode 4 counts a disagreement and warns "spec-acc check |", never a fallback.
 void testSpecAccR1Counters() {
+    // the line reader on literal lines written from the engine's format (hand-counted): a check-mode line with check
+    // disagreements and a 0 in the rows field (the bare "disagree 0;" counted it as none), the reverse, the P1a line (rows
+    // field last) and a line without the check field
+    {
+        const SpecAccLines f = specAccLines(
+            {"req 1 | slot 0 | spec-acc stats | check: decided on the device 0, out of range (host decided) 0; check: compared 32, "
+             "disagree 10; next-cycle rows: compared 32, disagree 0; E1 device-input cycles 0",
+             "req 2 | slot 1 | spec-acc stats | gpu: decided on the device 41, out of range (host decided) 20; check: compared 0, "
+             "disagree 0; next-cycle rows: compared 0, disagree 7; E1 device-input cycles 3",
+             "req 3 | slot 2 | spec-acc stats | check: decided on the device 0, out of range (host decided) 0; check: compared 98, "
+             "disagree 0; next-cycle rows: compared 98, disagree 5",
+             "req 4 | slot 3 | spec-acc stats | gpu: decided on the device 9, out of range (host decided) 0; next-cycle rows: "
+             "compared 0, disagree 0; E1 device-input cycles 0"});
+        CHECK_EQ(f.stats, 4u);
+        CHECK_EQ(f.ck, 3u);
+        CHECK_EQ(f.ck0, 2u);
+        CHECK_EQ(f.fb0, 3u);
+    }
     for (std::uint32_t mode : {2u, 3u, 4u}) {
         ServerSetup su = baseSetup();
         su.mc.pool_tokens = 131072;
@@ -189,10 +233,17 @@ void testSpecAccR1Counters() {
             CHECK(es.acc_mismatch <= srv.model().specCorrupted());
         }
         // one stats line per finished request, with the two counters apart (the line may be written after the reply is
-        // sent, so the last request's line may still be on its way: at least n_req - 1 lines, at most n_req)
-        const std::size_t nst = g_log.count("spec-acc stats |");
+        // sent, so the last request's line may still be on its way: at least n_req - 1 lines, at most n_req); every count
+        // from one snapshot of the log, each field read by its label (specAccLines)
+        std::vector<std::string> snap;
+        {
+            std::lock_guard<std::mutex> lk(g_log.mu);
+            snap = g_log.lines;
+        }
+        const SpecAccLines al = specAccLines(snap);
+        const std::size_t nst = al.stats, fb0 = al.fb0, ck0 = al.ck0;
         CHECK(nst + 1 >= n_req && nst <= n_req);
-        const std::size_t fb0 = g_log.count("out of range (host decided) 0;"), ck0 = g_log.count("disagree 0;");
+        CHECK_EQ(al.ck, nst);  // every line has the labelled check field: a renamed field fails here, never reads as 0
         if (mode == 2 || mode == 3) {
             CHECK(fb0 < nst);    // some line shows a fallback
             CHECK_EQ(ck0, nst);  // and never a check disagreement
