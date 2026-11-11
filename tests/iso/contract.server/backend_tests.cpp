@@ -35,6 +35,7 @@ void testOptionalHookDefaults() {
     ISO_CHECK(!m.visRowsAllocated());
     ISO_CHECK(std::strcmp(m.profileClassName(0), "?") == 0);
     ISO_CHECK(m.verifyRows() == whirl::qwen35::max_small_batch);
+    ISO_CHECK(m.segJoinMin() == whirl::qwen35::max_small_batch);  // v0252-precfix: the join rule since v0.1.0
     ISO_CHECK(m.dflashMaxDrafts() == 0 && m.captureN() == 0 && m.dflashRing() == 0);
     // v0252-n10: a model without the in-forward state capture never takes the tail checkpoint inside a forward
     ISO_CHECK(!m.stateCaptureOk(2058, 1024));

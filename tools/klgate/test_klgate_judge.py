@@ -291,5 +291,60 @@ class GpuArch(unittest.TestCase):
         self.assertEqual(klgate.gpu_arch("no_such_file.log"), "")
 
 
+# v0252-moedf16b (PLAN V1-76): an A/B arm's env switch must reach the runs. clean_env() drops every WHIRL_* of the shell
+# (a stray switch would test another config), so the 11-11 06:36 job (q7 9525m) set WHIRL_MOEP_COMB=0 for arm A in vain:
+# both arms ran the default and printed identical KL (0.011962 / 97.40 % ...). --env NAME=VALUE (repeat) is the one way in.
+class ArmEnv(unittest.TestCase):
+    def test_parser_takes_env(self):
+        a = klgate.build_parser().parse_args(["--exe", "x", "--model", "m=p", "--corpus", "c", "--env", "WHIRL_MOEP_COMB=0",
+                                              "--env", "WHIRL_X=1"])
+        self.assertEqual(klgate.parse_env(a.env), {"WHIRL_MOEP_COMB": "0", "WHIRL_X": "1"})
+        self.assertEqual(klgate.parse_env(klgate.build_parser().parse_args(["--exe", "x", "--model", "m=p", "--corpus", "c"]).env), {})
+
+    def test_bad_env_refused(self):
+        for bad in (["WHIRL_MOEP_COMB"], ["=0"], ["PATH=x"], ["WHIRL_A=1", "WHIRL_A=2"]):
+            with self.assertRaises(ValueError, msg=bad):
+                klgate.parse_env(bad)
+
+    def test_every_run_of_the_arm_gets_it(self):
+        e = {"WHIRL_MOEP_COMB": "0"}
+        self.assertEqual(klgate.run_env("precise", e), e)
+        self.assertEqual(klgate.run_env("balance", e), e)
+        self.assertEqual(klgate.run_env("fast", e), e)
+        self.assertEqual(klgate.run_env("noise", e), {"WHIRL_MOEP_COMB": "0", "WHIRL_GDN_SEQ": "1"})
+        self.assertIsNone(klgate.run_env("balance", {}))
+        self.assertEqual(klgate.run_env("noise", {}), {"WHIRL_GDN_SEQ": "1"})
+
+    def test_reaches_the_process_and_strays_still_dropped(self):
+        seen = {}
+
+        def fake_run(args, env=None, **kw):
+            seen.update(env)
+
+            class R:
+                returncode = 0
+            return R()
+        saved_run, saved_env = klgate.subprocess.run, dict(os.environ)
+        klgate.subprocess.run = fake_run
+        os.environ["WHIRL_STRAY"] = "1"
+        os.environ.pop("WHIRL_MOEP_COMB", None)
+        logf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_armenv_test.log")
+        self.addCleanup(lambda: os.path.exists(logf) and os.remove(logf))
+        try:
+            klgate.run_dump("exe", "m", "p", "balance", [8], 8, "d", logf, [], "", klgate.run_env("balance", {"WHIRL_MOEP_COMB": "0"}))
+        finally:
+            klgate.subprocess.run = saved_run
+            os.environ.clear()
+            os.environ.update(saved_env)
+        self.assertEqual(seen.get("WHIRL_MOEP_COMB"), "0")
+        self.assertNotIn("WHIRL_STRAY", seen)
+
+    def test_report_with_env_never_passes(self):
+        self.assertTrue(klgate.report_passes(0, {}, {}))
+        self.assertFalse(klgate.report_passes(0, {}, {"WHIRL_MOEP_COMB": "0"}))
+        self.assertFalse(klgate.report_passes(0, {"balance": "--balance=x"}, {}))
+        self.assertFalse(klgate.report_passes(1, {}, {}))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

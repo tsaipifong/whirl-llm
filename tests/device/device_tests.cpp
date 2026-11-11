@@ -177,7 +177,8 @@ void testProfiles() {
     CHECK(a.relax_rank_check && b.relax_rank_check);  // v0252-f1flip (ADR-0015 Rev 1): F1's one-pass check on both GPUs
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
-    CHECK(a.prefill_exec_moe == 2048 && !a.prefill_fill_batch && a.vision_attn_threads == 128);
+    // v0252-ch4k2 (PLAN V1-75): gfx1201 MoE 4096-row forwards in the fill form, as gfx1151 (v0252-ch4k timed A/B)
+    CHECK(a.prefill_exec_moe == 4096 && a.prefill_fill_batch && a.vision_attn_threads == 128);
     const std::array<std::uint8_t, 17> ra = {1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
     CHECK(a.gemv_r == ra);
     // Radeon 8060S (gfx1151): UMA iGPU
@@ -206,6 +207,10 @@ void testProfiles() {
     // v0252-n10: the TAIL-CK checkpoint inside the prefill forward on the R9700 only (0.2.5.2 leaves the 8060S as 0.2.5.1)
     CHECK(a.tail_ck_in_forward);
     CHECK(!b.tail_ck_in_forward);
+    // v0252-ws4r97b (PLAN V1-87 phase 2): attn_ws4r in place of attn_wsplit per KV format (0 off, 1 plain, 2 b): the R9700
+    // kt verdict q8=KEEP-b f16=KEEP-plain (q7 9525u); the 8060S off (its object has no attn_ws4r; attn_ws4 / ws4g there)
+    CHECK(a.attn_ws4r_q8 == 2 && a.attn_ws4r_f16 == 1);
+    CHECK(b.attn_ws4r_q8 == 0 && b.attn_ws4r_f16 == 0);
     // constexpr: the field reads fold like the arch comparisons they replaced
     static_assert(d::profile(Arch::gfx1151).prefill_exec_moe == 4096 && !d::profile(Arch::gfx1201).tune_fast);
     // REVIEW-ARCH3 P3-3: a value with no row throws instead of getting the gfx1201 row (a new enumerator without a

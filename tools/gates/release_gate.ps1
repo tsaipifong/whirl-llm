@@ -144,7 +144,7 @@ foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test"
                "whirl-pins", "whirl-startup-replay", "whirl-sampling-tests") { $exe[$n] = Join-Path $Build "$n.exe" }
 # rel025-c5bench: the measure-tools CPU unit tests (cmake/server.cmake: whirl-bench-out-tests, whirl-kt-bench-tests,
 # whirl-stage-bench-tests). Registered, so a build without them is a setup error, as for every exe above.
-foreach ($n in "whirl-bench-out-tests", "whirl-kt-bench-tests", "whirl-stage-bench-tests", "whirl-kt-seed-tests") { $exe[$n] = Join-Path $Build "$n.exe" }
+foreach ($n in "whirl-bench-out-tests", "whirl-kt-bench-tests", "whirl-stage-bench-tests", "whirl-kt-seed-tests", "whirl-kt-f16tie-tests") { $exe[$n] = Join-Path $Build "$n.exe" }
 
 # ---------------------------------------------------------------------------------------------------
 # step table: name, gpu, command (array: exe + args), rule (scriptblock over the output lines + exit code)
@@ -180,6 +180,7 @@ function TmpCmd([string]$x) {
 AddStep "cpu_bench-out" $false (TmpCmd $exe["whirl-bench-out-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "^whirl-bench-out-tests: 0 failed$") -and @($o | Where-Object { $_ -match "^PASS " }).Count -gt 0 -and -not ($o -match "^FAIL ") }
 AddStep "cpu_kt-bench" $false (TmpCmd $exe["whirl-kt-bench-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "^whirl-kt-bench-tests: [1-9]\d* PASS, 0 failed$") -and -not ($o -match "^FAIL ") }
 AddStep "cpu_kt-seed" $false @($exe["whirl-kt-seed-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^whirl-kt-seed-tests: [1-9]\d* PASS, 0 failed$") -and -not ($o -match "(?m)^FAIL ") }  # v0252-ktrng: per-family kt seeds (tests/kernels/kt_seed.h)
+AddStep "cpu_kt-f16tie" $false @($exe["whirl-kt-f16tie-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^whirl-kt-f16tie-tests: [1-9]\d* PASS, 0 failed$") -and -not ($o -match "(?m)^FAIL ") }  # v0252-moedf16b: kt f16 down compare (tests/kernels/kt_f16_tie.h)
 AddStep "cpu_stage-bench" $false (TmpCmd $exe["whirl-stage-bench-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "^[1-9]\d* passed, 0 failed$") -and -not ($o -match "^FAIL ") }
 # arch025 N7: each module's host unit tests alone: tests/unit/<module>_tests.cpp -> whirl-unit-<module>-tests.exe
 # (cmake/unit.cmake), step cpu_unit_<module> (the file's stem); cpu_tests above runs every one of them in one program
@@ -447,6 +448,10 @@ AddStep "srv_precise_cli" $true (GateCmd $SW "basic" "precise" ($ssdOff + @("--c
 AddStep "srv_mt_precise" $true (GateCmd $SW "mt_cache_precise" "" $ssdOff) $gateRule
 # the same for the MoE product model (REVIEW-022 F5: the precise cache-hit guarantee is documented for every model)
 AddStep "srv_mt_precise_moe" $true (GateCmd $MX "mt_cache_precise" "" $ssdOff) $gateRule
+# v0252-precfix (PLAN V1-85): the basic concurrency checks ("N concurrent requests == each alone", "same seed under load")
+# on the MoE product model in precise: a 17..32-row chunk joined into a segmented prefill forward changed its bits
+# (v0.2.0..v0.2.5.1; srv_precise_cli runs basic on Swift only)
+AddStep "srv_precise_moe" $true (GateCmd $MX "basic" "precise" $ssdOff) $gateRule
 AddStep "srv_fs_swift" $true (GateCmd $SW "fast_stream" "" $ssdOff) $gateRule
 AddStep "srv_fs_moe" $true (GateCmd $MX "fast_stream" "" $ssdOff) $gateRule
 # the cache suites run their own SSD dirs under --work (deleted after the step)

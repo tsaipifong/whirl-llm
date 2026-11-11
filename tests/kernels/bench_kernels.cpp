@@ -16,6 +16,8 @@
 //   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state)
 //   fdq   in-object A/B: dequant_f16_mxfp4 + gemm_c<i>_f16 (the shipped MXFP4 dequant choice) vs gemmfq_<v>_mxfp4 (gfx1151),
 //         B bitwise == A on the full output first, then ABBA pairs; rows --fdq-n, slots --fdq-v (v0251-a3port)
+//   ws4r  in-object A/B: attn_wsplit1 / attn_wsplit2 (_q8) vs attn_ws4r1 / 2 [b] (_q8) (gfx1201 decode / verify
+//         attention, Swift 24 / 4 heads, L 2k..128k, 1 / 2 / 4 rows; v0252-ws4r97)
 //   silu  in-object A/B (v0252-silu, gfx1201): silu_mul_x8h vs silu_mul_x8w / silu_mul_x8w4 on the real Ornith f16 g / u of
 //         kt::siluRealGu (rt_code2k / 8k / 32k last full forward, layer 20), B bitwise == A first, then ABBA pairs
 //   ggemv gemvq_nt<N>r2_mxfp4 vs gemvk_nt<N>v1..9_mxfp4 (gfx1151 verify GEMV, N = every gemvk width 2..8 of
@@ -26,6 +28,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -1400,9 +1403,163 @@ void benchFdq(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- ws4r (v0252-ws4r97, PLAN V1-87 phase 1)
+// In-object A/B (gfx1201): A = the shipped attn_wsplit1[_q8] (rows * 6 <= 16 columns) / attn_wsplit2[_q8] (<= 32), B =
+// attn_ws4r1[b][_q8] / attn_ws4r2[b][_q8] (kernels/attn_ws4r.hip) on the same arguments: Swift 24 / 4 heads, hd 256, one
+// group of R rows at consecutive positions ending at L - 1, 64 splits (kFdMaxSplits: the R9700 decode grid), page tables
+// rotated over disjoint pool regions (copies past the 64 MB Infinity Cache). B's partials (m, l, acc) bitwise == A's
+// first (both written over the same fill), then ABBA pairs; bytes = the KV bytes read once (L x 4 kv heads x row, + q8 scales).
+// Cells: kv q8 / f16 x L (WHIRL_KT_WS4R_L, default 2048 32768 65536 131072; --quick 2048 32768) x rows 1 / 2 / 4
+// (WHIRL_KT_WS4R_ROWS) x B in {plain, b}. Values: N(0, 1) f16 (f16 KV); random int8 -127..127 and f16 scales 2^-9..2^-6 (q8).
+std::vector<int> ws4rEnvList(const char* name, std::vector<int> def) {
+    if (const char* s = std::getenv(name)) {
+        std::vector<int> v;
+        for (const char* p = s; *p;) {
+            v.push_back(std::atoi(p));
+            while (*p && *p != ',') ++p;
+            if (*p == ',') ++p;
+        }
+        if (!v.empty()) return v;
+    }
+    return def;
+}
+
+void benchWs4r(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "ws4r";
+    using namespace at;
+    if (!c.fnOpt("attn_ws4r1_q8") || !c.fnOpt("attn_wsplit1_q8")) {
+        c.rep.skip("ws4r", "bench attn_ws4r", "kernel not in this code object");
+        return;
+    }
+    const std::vector<int> lens = ws4rEnvList("WHIRL_KT_WS4R_L", c.quick ? std::vector<int>{2048, 32768} : std::vector<int>{2048, 32768, 65536, 131072});
+    const std::vector<int> rowsets = ws4rEnvList("WHIRL_KT_WS4R_ROWS", {1, 2, 4});
+    const int ns = wk::kFdMaxSplits, grp = heads / nkv;
+    for (const bool q8 : {true, false}) {
+        const std::size_t ebytes = q8 ? 1 : 2;  // K / V element bytes
+        std::uint64_t max_pages = 0;
+        for (int L : lens) {
+            const std::uint64_t pg = static_cast<std::uint64_t>(cdiv(L, wk::kKvPage));
+            const int R = rotationCopies(pg * wk::kKvPage * row * ebytes * 2, e.target, e.o.rot_cap);
+            max_pages = std::max<std::uint64_t>(max_pages, pg * static_cast<std::uint64_t>(R));
+        }
+        const std::size_t pool_el = static_cast<std::size_t>(max_pages) * wk::kKvPage * row;
+        constexpr std::size_t kChunk = std::size_t{1} << 22;
+        Buf pk(pool_el * ebytes), pv(pool_el * ebytes), psk(q8 ? pool_el / 32 * 2 : 2), psv(q8 ? pool_el / 32 * 2 : 2);
+        {
+            std::vector<std::uint8_t> ck(kChunk * ebytes), cv(kChunk * ebytes);
+            if (q8) {
+                for (auto* v : {&ck, &cv})
+                    for (auto& b : *v) {
+                        const std::uint8_t y = static_cast<std::uint8_t>(c.rng());
+                        b = y == 0x80 ? 0x81 : y;
+                    }
+            } else {
+                const auto a = c.randn(kChunk), b = c.randn(kChunk);
+                for (std::size_t i = 0; i < kChunk; ++i) {
+                    const std::uint16_t x = f2h(a[i]), y = f2h(b[i]);
+                    std::memcpy(&ck[i * 2], &x, 2);
+                    std::memcpy(&cv[i * 2], &y, 2);
+                }
+            }
+            for (std::size_t off = 0; off < pool_el; off += kChunk) {
+                const std::size_t nn = std::min(kChunk, pool_el - off);
+                hip::upload(pk.p() + off * ebytes, ck.data(), nn * ebytes);
+                hip::upload(pv.p() + off * ebytes, cv.data(), nn * ebytes);
+            }
+            if (q8) {
+                std::vector<std::uint16_t> s(kChunk / 32);
+                for (auto& y : s) {
+                    const std::uint32_t r = static_cast<std::uint32_t>(c.rng());
+                    y = static_cast<std::uint16_t>(((6 + r % 4) << 10) | ((r >> 8) & 0x3ffu));
+                }
+                for (std::size_t off = 0; off < pool_el / 32; off += kChunk / 32) {
+                    const std::size_t nn = std::min(kChunk / 32, pool_el / 32 - off);
+                    hip::upload(psk.p() + off * 2, s.data(), nn * 2);
+                    hip::upload(psv.p() + off * 2, s.data(), nn * 2);
+                }
+            }
+            hip::sync();
+        }
+        const std::vector<float> q = c.randn(static_cast<std::size_t>(8) * heads * qstride);
+        auto dq = std::make_shared<Buf>(q);
+        for (const int L : lens) {
+            const int pages = static_cast<int>(cdiv(L, wk::kKvPage));
+            const std::uint64_t region_bytes = static_cast<std::uint64_t>(pages) * wk::kKvPage * row * ebytes * 2;
+            const int RC = rotationCopies(region_bytes, e.target, e.o.rot_cap);
+            std::vector<int> ptab(static_cast<std::size_t>(RC) * pages);
+            for (int r = 0; r < RC; ++r) {
+                std::vector<int> perm(static_cast<std::size_t>(pages));
+                std::iota(perm.begin(), perm.end(), r * pages);
+                std::shuffle(perm.begin(), perm.end(), c.rng);
+                std::copy(perm.begin(), perm.end(), ptab.begin() + static_cast<std::ptrdiff_t>(r) * pages);
+            }
+            auto dpt = std::make_shared<Buf>(ptab);
+            for (const int R : rowsets) {
+                if (R < 1 || R * grp > 32 || R > L) continue;
+                std::vector<int> pos;
+                for (int r = L - R; r < L; ++r) pos.push_back(r);
+                auto dpos = std::make_shared<Buf>(pos);
+                auto ml = std::make_shared<Buf>(static_cast<std::size_t>(R) * ns * heads * 2 * 4);
+                auto acc = std::make_shared<Buf>(static_cast<std::size_t>(R) * ns * heads * hd * 4);
+                const bool two = R * grp > 16;
+                const std::string sfx = q8 ? "_q8" : "";
+                const std::string na = std::string(two ? "attn_wsplit2" : "attn_wsplit1") + sfx;
+                const hip::Function fa = c.fnOpt(na);
+                if (!fa) continue;
+                const DevPtr kp = pk.p(), vp = pv.p(), skp = q8 ? psk.p() : DevPtr{0}, svp = q8 ? psv.p() : DevPtr{0}, qp = dq->p();
+                auto launch = [&c, dpt, dpos, ml, acc, kp, vp, skp, svp, qp, pages, R, ns](hip::Function f, std::uint64_t r) {
+                    wk::KvArgs a{};
+                    a.k = kp;
+                    a.v = vp;
+                    a.ks = skp;
+                    a.vs = svp;
+                    a.ptab = dpt->p() + (r % (dpt->bytes() / 4 / static_cast<std::size_t>(pages))) * static_cast<std::uint64_t>(pages) * 4;
+                    wk::AwGroups g{};
+                    g.first[0] = 0;
+                    g.count[0] = R;
+                    hip::launch(f, {nkv, static_cast<unsigned>(ns), 1}, {128, 1, 1}, 0, c.s, qp, a, ml->p(), acc->p(), heads, nkv, qstride, dpos->p(), scale,
+                                DevPtr{0}, g);
+                };
+                for (const char* var : {"", "b"}) {
+                    const std::string nb = std::string(two ? "attn_ws4r2" : "attn_ws4r1") + var + sfx;
+                    const hip::Function fb = c.fnOpt(nb);
+                    if (!fb) continue;
+                    Cell k;
+                    const std::string cell = std::string("swift.") + (q8 ? "q8" : "f16") + "kv.L" + std::to_string(L) + ".rows" + std::to_string(R);
+                    k.ci = e.info("ws4r", na, cell, "heads24_kv4_hd256_L" + std::to_string(L) + "_rows" + std::to_string(R));
+                    k.ci.settings = e.settings(region_bytes * static_cast<std::uint64_t>(RC), RC) + (q8 ? ";kv=q8;kv_values=random_int8" : ";kv=f16;kv_values=randn");
+                    k.ci.bytes = static_cast<double>(L) * row * static_cast<double>(ebytes) * 2 + (q8 ? static_cast<double>(L) * row / 32 * 2 * 2 : 0.0);
+                    k.kernel = na;
+                    k.fa = fa;
+                    k.kernel_b = nb;
+                    k.call = [launch](hip::Function f, std::uint64_t r) { launch(f, r); };
+                    k.call_b = [launch, fb](std::uint64_t r) { launch(fb, r); };
+                    k.bitwise_b = [&c, launch, fa, fb, ml, acc, R, ns]() {
+                        const std::size_t nml = static_cast<std::size_t>(R) * ns * heads * 2, nacc = static_cast<std::size_t>(R) * ns * heads * hd;
+                        auto once = [&](hip::Function f) {
+                            ml->fill(0x7f);
+                            acc->fill(0x7f);
+                            launch(f, 0);
+                            c.sync();
+                            return std::make_pair(ml->down<float>(nml), acc->down<float>(nacc));
+                        };
+                        const auto a = once(fa), b = once(fb);
+                        std::size_t bad = 0;
+                        for (std::size_t i = 0; i < nml; ++i) bad += std::memcmp(&a.first[i], &b.first[i], 4) != 0;
+                        for (std::size_t i = 0; i < nacc; ++i) bad += std::memcmp(&a.second[i], &b.second[i], 4) != 0;
+                        return std::make_pair(nml + nacc, bad);
+                    };
+                    runCellInObject(e, k);
+                }
+            }
+        }
+    }
+}
+
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "silu"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -1453,7 +1610,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
         void (*fn)(Env&);
     };
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
-                      {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"silu", benchSilu}};
+                      {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"ws4r", benchWs4r}, {"silu", benchSilu}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

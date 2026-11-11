@@ -51,6 +51,8 @@
 #include "gemv_hv.hip"             // precise gemvh candidates + tune table (v0252-c2port; LAST: no existing kernel moves)
 #include "gemv_hf.hip"             // precise gemvh on f32 input + the gemvh tile (v0252-c3port; after the shipped set)
 #include "moe_fused.hip"           // precise MoE decode: routed + shared gate/up + SwiGLU in one launch (v0252-c3port; LAST)
+#include "attn_ws4r.hip"           // 4-wave pipelined decode / verify attention == attn_wsplit1 / 2 (v0252-ws4r97; LAST: no kernel moves)
+#include "moe_combine_h.hip"       // balance / fast MoE prefill: combine over f16 moe_yd (v0252-moedf16; LAST: no kernel moves)
 #include "moe_silu_w.hip"          // silu_mul_x8h for short rows, one wave per row (v0252-silu; LAST: no existing kernel moves)
 #endif
 

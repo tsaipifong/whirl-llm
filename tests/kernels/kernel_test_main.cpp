@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
                 std::string f;
                 while (std::getline(ss, f, ',')) {
                     if (!kt::benchFamilyKnown(f)) {
-                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe gdn fdq)\n", f.c_str());
+                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe gdn fdq ggemv ws4r)\n", f.c_str());
                         return usage();
                     }
                     bo.families.insert(f);
@@ -158,7 +158,7 @@ int main(int argc, char** argv) {
         }
     }
     const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "moefuse", "silu", "misc", "attnbench",
-                               "gemvh", "gemvhbench", "gemvhv", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk", "attnkgl"};  // = fams below
+                               "gemvh", "gemvhbench", "gemvhv", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk", "attnkgl", "ws4r"};  // = fams below
     const bool bench = !bo.families.empty();
     if ((!bo.ggemv_nt.empty() || !bo.ggemv_v.empty()) && bo.families.count("ggemv") == 0) {
         std::printf("whirl-kernel-test: --bench-nt / --bench-v need --bench ggemv\n");
@@ -276,7 +276,8 @@ int main(int argc, char** argv) {
                         {"ws4", kt::testAttnWs4}, {"ws4bench", kt::benchAttnWs4},
                         {"ws4g", kt::testAttnWs4g}, {"ws4gbench", kt::benchAttnWs4g},
                         {"vision", kt::testVision}, {"gemvk", kt::testGemvk},  // gemvk: v0251-a6port
-                        {"attnkgl", kt::testAttnKgLong}};  // attnkgl: v0252-c1acc (on request)
+                        {"attnkgl", kt::testAttnKgLong},  // attnkgl: v0252-c1acc (on request)
+                        {"ws4r", kt::testAttnWs4r}};  // ws4r: v0252-ws4r97 (gfx1201 attn_ws4r* == attn_wsplit1 / 2)
     if (bench) {
         const auto t0 = std::chrono::steady_clock::now();
         try {

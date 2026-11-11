@@ -189,6 +189,20 @@ void testLayerMats() {
     for (std::size_t i = 0; i < mg.len; ++i) ISO_CHECK(mg.items[i].ptr == i + 1);
 }
 
+// v0252-precfix (PLAN V1-85): the segmented-prefill join bound (Context::segJoinMin, asked by prefillSegs and the server):
+// a MoE model in precise joins only chunks of more than max_verify_rows (32) rows, the rows its f32 decode experts serve
+// alone (ops::chooseMoe); a MoE model in balance / fast and a dense model in every mode keep max_small_batch (16). Fails
+// before the fix (ops::moeSegJoinMin is a stub returning max_small_batch).
+void testSegJoinMin() {
+    const auto c = smallModel();
+    for (const bool moe : {false, true})
+        for (const bool prec : {false, true}) {
+            c->cfg.moe = moe;
+            c->num_plan.flags.prec_dec = prec;
+            ISO_CHECK(c->segJoinMin() == (moe && prec ? q::max_verify_rows : q::max_small_batch));
+        }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -205,6 +219,7 @@ int main(int argc, char** argv) {
                      {"alloc_ledger", testAllocLedger},
                      {"ensure_snapshots", testEnsureSnapshots},
                      {"reset", testReset},
-                     {"layer_mats", testLayerMats}},
+                     {"layer_mats", testLayerMats},
+                     {"seg_join_min", testSegJoinMin}},  // v0252-precfix
                     argc, argv);
 }

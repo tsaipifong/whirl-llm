@@ -77,6 +77,15 @@ inline constexpr std::uint32_t kMoepMinTokensPerExpert = 32;
 inline constexpr bool moepWide(std::uint32_t n, std::uint32_t K, std::uint32_t R) {
     return static_cast<std::uint64_t>(n) * K >= static_cast<std::uint64_t>(kMoepMinTokensPerExpert) * R;
 }
+// v0252-precfix (PLAN V1-85): a prefill chunk joins a segmented forward (several requests' chunks in one forward) only
+// with MORE rows than this, so that its MoE bit class is the same alone and inside any segmented forward (which has more
+// than twice this many rows). chooseMoe gives the decode experts to n <= small_max (max_small_batch in a prefill forward)
+// and, in precise, to every n <= max_verify_rows (92aa626: moe_f32_row; above it moe_f16_gemm): precise -> max_verify_rows,
+// else max_small_batch (the server's join rule since v0.1.0, docs/guide/en/server.md). One rule for the server
+// (engine_prefill.cpp), the model (Context::prefillSegs), golden and seqtest: change it together with chooseMoe's pl.small.
+inline constexpr std::uint32_t moeSegJoinMin(bool prec_dec, std::uint32_t max_small_batch, std::uint32_t max_verify_rows) {
+    return prec_dec && max_verify_rows > max_small_batch ? max_verify_rows : max_small_batch;
+}
 // v0251-a7port: the plan's moep flags (numerics::Flags moep_gu / moep_dn = variant index + 1, 0 = off; moep_comb) ->
 // MoeFlags (index, -1 = off); qwen35::Context::moeBlock's assembly, pinned on the CPU (tests/ops/ops_moe_cases.inc)
 inline void setMoep(MoeFlags& f, std::uint32_t plan_gu, std::uint32_t plan_dn, std::uint32_t plan_comb) {
@@ -112,7 +121,8 @@ struct MoePlan {
     std::uint32_t gu_bn = 0;
     bool comb_fused = false;         // moep: fdn is the gemm_moepdc_* twin; no moe_combine launch
     bool comb4 = false;              // moe_combine4 instead of moe_combine (any prefill kind)
-    bool ydh = false;                // moep, balance / fast: expert outputs stored f16 (moe_combine4h or the fused f16 twin)
+    bool ydh = false;                // moep, balance / fast: expert outputs stored f16 (moe_combine4h or the fused f16 twin);
+                                     // v0252-moedf16: also the fp8 kind with COMB 3 (fdn = gemm8r_moeh / _moe32h, W2 = null)
     bool comb_atomic = false;        // moep, fast candidate: fdn = gemm_moepda_* (x += w * y), shared expert first by
                                      // moe_combine4 with K = 0; no combine launch after
     Dim3 comb_grid{};

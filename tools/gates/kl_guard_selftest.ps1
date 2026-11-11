@@ -27,7 +27,7 @@ New-Item -ItemType Directory -Force $bin | Out-Null
 foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test", "whirl-tests", "whirl-model-tests", "whirl-cache-tests",
                "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests",
                "whirl-pins", "whirl-startup-replay", "whirl-sampling-tests",
-               "whirl-bench-out-tests", "whirl-kt-bench-tests", "whirl-stage-bench-tests") { [System.IO.File]::WriteAllText((Join-Path $bin "$n.exe"), "fake $n") }
+               "whirl-bench-out-tests", "whirl-kt-bench-tests", "whirl-stage-bench-tests", "whirl-kt-seed-tests") { [System.IO.File]::WriteAllText((Join-Path $bin "$n.exe"), "fake $n") }
 $sw = Join-Path $tmp "Swift-fake.gguf"; [System.IO.File]::WriteAllText($sw, "swift")
 $mx = Join-Path $tmp "Ornith-fake.gguf"; [System.IO.File]::WriteAllText($mx, "moe")
 $sha = (Get-FileHash -Algorithm SHA256 (Join-Path $bin "whirl.exe")).Hash.ToLower()

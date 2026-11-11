@@ -632,9 +632,12 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     std::unique_ptr<qwen35::Model>& mp = b.mp = model::loadServerModel(*am, f, 0, stats, lo);  // the arch module's load (X-16)
     qwen35::Model& model = *mp;
     // whole schedule chunks that fit the prefill batch (a forward never exceeds the batch:
-    // Engine::chunkLen caps it); default 2048 rows, gfx1151 MoE 4096 (SRV-PP; dense 2048, SRV-PP-DENSE)
+    // Engine::chunkLen caps it); default 2048 rows, MoE 4096 on gfx1151 (SRV-PP; dense 2048, SRV-PP-DENSE) and gfx1201
+    // (v0252-ch4k)
     const device::Profile& prof = device::profile(model.arch);
     b.prefill_exec = sched::prefillExec(exec_req, prof, model.cfg.moe, lo.max_batch);  // (the CLI's formula too, arch025-N15c)
+    // v0252-ch4k2: the forward size in the log (the R9700 adoption job pins the server's 4096-row MoE default from it)
+    logI("prefill forward size: up to {} rows (prefill batch {})", b.prefill_exec, lo.max_batch);
     {
         std::string tl;
         qwen35::loadOrTune(model, opt.path, tl);

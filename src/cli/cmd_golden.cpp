@@ -167,7 +167,9 @@ int goldenPair(const Args& a, const gguf::File& f, const Tok& tok, u32 n_dec) {
     }
     const u32 nd_mtp = std::min<u32>(q::mtpDefaults(m.cfg.moe, m.arch).drafts, 4);
     if (mtp && !m.gdn_replay) m.ensureSnapshots(2 * nd_mtp);
-    const bool segmented = m.canSegment() && pa.size() + pb.size() <= m.max_batch;
+    // v0252-precfix: the server's join rule (each chunk longer than segJoinMin())
+    const bool segmented =
+        m.canSegment() && pa.size() + pb.size() <= m.max_batch && std::min(pa.size(), pb.size()) > m.segJoinMin();
     const bool fused = m.fusedDecode();
     gout(fmt("info kv=%s mtp=%d fused=%d segment=%d replay=%d", m.kvName(), mtp ? 1 : 0, fused ? 1 : 0, segmented ? 1 : 0, m.gdn_replay ? 1 : 0));
     GoldenRow gr;

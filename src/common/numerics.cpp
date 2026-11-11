@@ -222,6 +222,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"ATTN_KGVAR", &S::attn_kgvar},
         {"MOE_FUSE", &S::moe_fuse},    // v0252-c3port (feat026-moedec)
         {"GEMVH_F32", &S::gemvh_f32},  // v0252-c3port (feat026-moedec)
+        {"ATTN_WS4R", &S::attn_ws4r},  // v0252-ws4r97b (PLAN V1-87 phase 2)
     }};
     return t;
 }
@@ -329,8 +330,14 @@ std::uint32_t srvU32(const Raw& v, std::uint32_t def) {
     return def;
 }
 
-// v0251-a7pol: the plan's MoE prefill combine without WHIRL_MOEP_COMB (the gfx1151 MXFP4-expert default, else 0)
-std::uint32_t moepCombDefault(const Target& t) { return t.gfx1151 && t.moe_mxfp4 ? kernels::kMoepDefault.comb : 0u; }
+// v0251-a7pol: the plan's MoE prefill combine without WHIRL_MOEP_COMB (the gfx1151 MXFP4-expert default, else 0).
+// v0252-moedf16 (PLAN V1-76): on the gfx1201 code object (R9700) with MXFP4 routed experts, a request with the balance item
+// h16 (f16 intermediates: balance and fast, never precise) takes 3 = the down projection's output moe_yd stored f16 +
+// moe_combine4h (ops::chooseMoe, fp8 kind); A/B by WHIRL_MOEP_COMB=0 (the f32 path) / 3.
+std::uint32_t moepCombDefault(const Target& t, bool h16) {
+    if (t.gfx1151) return t.moe_mxfp4 ? kernels::kMoepDefault.comb : 0u;
+    return t.moe_mxfp4 && h16 ? 3u : 0u;
+}
 
 // loader.cpp:548-553 and :743, then tune.cpp:850-914 (before the numerics block)
 void loadFlags(const Request& r, const Target& t, Flags& F) {
@@ -343,8 +350,9 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     if (t.gfx1151 && t.moe_mxfp4) {
         F.moep_gu = static_cast<std::uint32_t>(kernels::kMoepDefault.gu) + 1;
         F.moep_dn = static_cast<std::uint32_t>(kernels::kMoepDefault.dn) + 1;
-        F.moep_comb = moepCombDefault(t);
     }
+    // the combine default of every card (gfx1151: kMoepDefault.comb; v0252-moedf16 gfx1201: 3 with the item h16, else 0)
+    F.moep_comb = moepCombDefault(t, r.has(Item::h16));
     // feat026-moep (was loader.cpp, envGet): WHIRL_MOEP_GU / _DN name a variant (index + 1); any other value ("0", "",
     // an unknown name) is off; WHIRL_MOEP_COMB by std::strtoul (unparsable = 0 = moe_combine)
     if (e.moep_gu) {
@@ -403,6 +411,12 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     F.attn_kg_var = t.gfx1151 ? 0u : kAttnKgVarAuto;
     if (e.attn_kgvar)
         if (const std::optional<std::uint32_t> v = parseKgVar(*e.attn_kgvar)) F.attn_kg_var = *v;
+    // v0252-ws4r97b (PLAN V1-87 phase 2): the gfx1201 attn_ws4r variant (class B, every mode): auto on every card (the device
+    // profile rows decide: gfx1201 q8 / q8h -> b, f16 -> plain; gfx1151 off); WHIRL_ATTN_WS4R = auto / 0 / 1 / 2 overrides it,
+    // any other value keeps auto (loadOverrides notes it once in Plan::ignored)
+    F.attn_ws4r = kAttnWs4rAuto;
+    if (e.attn_ws4r)
+        if (const std::optional<std::uint32_t> v = parseWs4r(*e.attn_ws4r)) F.attn_ws4r = *v;
     setNe0(F.attn_dqf_on, e.attn_dqf);
     if (e.attn_seg) F.attn_seg = static_cast<std::uint32_t>(std::strtoul(e.attn_seg->c_str(), nullptr, 10)) / 256 * 256;
     setNe0(F.gdn_ba_on, e.gdn_ba);
@@ -468,7 +482,7 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
             tail = " (precise never takes them)";
         }
         if (why != nullptr) {
-            F.moep_comb = moepCombDefault(t);
+            F.moep_comb = moepCombDefault(t, r.has(Item::h16));
             if (items) p.ignored.push_back(std::format("WHIRL_MOEP_COMB={} ignored: {}{}", *v, why, tail));
         }
     }
@@ -509,6 +523,10 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     if (items)
         if (const Raw& v = e.attn_kgvar; v && !parseKgVar(*v))
             p.ignored.push_back(std::format("WHIRL_ATTN_KGVAR={} ignored: not auto, 0, 1 or 3 (the default {} stays)", *v, t.gfx1151 ? "0" : "auto"));
+    // v0252-ws4r97b: an invalid WHIRL_ATTN_WS4R is reported once (auto stays)
+    if (items)
+        if (const Raw& v = e.attn_ws4r; v && !parseWs4r(*v))
+            p.ignored.push_back(std::format("WHIRL_ATTN_WS4R={} ignored: not auto, 0, 1 or 2 (auto stays)", *v));
     if (items) {
         if (const Raw& v = e.spec_sample; v && !v->empty())
             applyOverride(p, Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
@@ -577,6 +595,19 @@ std::optional<std::uint32_t> parseKgVar(std::string_view s) {
         v = v * 10 + static_cast<std::uint32_t>(ch - '0');
     }
     if (v == 0 || v == 1 || v == 3) return v;
+    return std::nullopt;
+}
+
+// v0252-ws4r97b: WHIRL_ATTN_WS4R values (numerics.h)
+std::optional<std::uint32_t> parseWs4r(std::string_view s) {
+    if (s == "auto") return kAttnWs4rAuto;
+    if (s.empty() || s.size() > 8) return std::nullopt;
+    std::uint32_t v = 0;
+    for (const char ch : s) {
+        if (ch < '0' || ch > '9') return std::nullopt;
+        v = v * 10 + static_cast<std::uint32_t>(ch - '0');
+    }
+    if (v <= 2) return v;
     return std::nullopt;
 }
 

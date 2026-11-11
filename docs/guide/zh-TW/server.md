@@ -53,7 +53,7 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | `WHIRL_MTP_BATCH_DRAFTS=d1,d2,…` | 依 decode 中 slot 數決定的草稿上限 |
 | `WHIRL_GATHER_MS` | 新請求的突發收集視窗（預設 30，0 = 關閉） |
 | `WHIRL_DECODE_MIN_TPS` | decode 保底速度（= `--decode-min-tps`，預設 20，0 = 關閉） |
-| `WHIRL_PREFILL_CHUNK` | 每次合併 prefill forward 的最大列數（1024 的倍數，預設 2048；Radeon 8060S 上 MoE 模型為 4096 = prefill batch；一次前向不超過 batch） |
+| `WHIRL_PREFILL_CHUNK` | 每次合併 prefill forward 的最大列數（1024 的倍數，預設 2048；Radeon 8060S 與 R9700 上 MoE 模型為 4096 = prefill batch；一次前向不超過 batch） |
 | `WHIRL_SYS_MIN`、`WHIRL_SYS_CKPTS`、`WHIRL_SYS_LCP=0` | system prompt 檢查點門檻（2048）、VRAM 中的數量（2）、停用 `prefix` 檢查點 |
 | `WHIRL_KV_TIER_MIN` | 各層的最小項目大小（2048 tokens） |
 | `WHIRL_TIMING_RESET=0` | 跨請求保留 MTP 計時表（不建議） |
@@ -171,7 +171,7 @@ Dense 依 decode 中 slot 數的預設上限：1–8 個 slot 分別為 8 / 7 / 
 **Prefill 排程。** Prefill 以 ≤ 1024 token 的區塊執行（最後一塊可多吸收 ≤ 256 個），與 decode cycle
 交錯進行。多個請求的區塊會合併成一次分段 forward：逐列工作（embedding、norm、GEMM、MoE）對所有列
 執行一次；逐序列工作（attention、DeltaNet conv 與 chunk scan）則以單獨模式的 kernel 逐段執行。
-最舊的 prefill 中請求一定會執行；其他請求在下一塊超過 16 列（避開小批次路徑）且總數維持 ≤ 4096
+最舊的 prefill 中請求一定會執行；其他請求在下一塊超過 16 列（避開小批次路徑；MoE 模型在 precise 模式要超過 32 列，因為它的小批次專家路徑服務到 32 列）且總數維持 ≤ 4096
 時才加入。由於每種 GEMM 配置與 MoE tile 都與列無關（row-invariant），批次 prefill 的一列與單獨執行
 的一列逐位元相同。沒有其他 slot 在 decode，或 decode 保底關閉（`--decode-min-tps 0`，吞吐量優先）時，
 同一請求的連續區塊會合併成最多 2048 列的 forward（[kv-and-caching.md](kv-and-caching.md#merge)）。

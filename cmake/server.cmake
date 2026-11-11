@@ -199,3 +199,5 @@ endif()
 
 # v0252-ktrng (PLAN B26-53 (c)): kt families seed their own input stream from their name (tests/kernels/kt_seed.h); CPU only.
 add_executable(whirl-kt-seed-tests ${CMAKE_SOURCE_DIR}/tests/kernels/unit/kt_seed_tests.cpp)
+# v0252-moedf16b (PLAN V1-76): the kt compare of the f16 MoE down projection (tests/kernels/kt_f16_tie.h); CPU only.
+add_executable(whirl-kt-f16tie-tests ${CMAKE_SOURCE_DIR}/tests/kernels/unit/kt_f16tie_tests.cpp)

@@ -17,6 +17,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_ATTN_SEG",  // src/common/numerics.cpp
     "WHIRL_ATTN_WIDE",  // src/common/numerics.cpp
     "WHIRL_ATTN_WS4",  // src/common/numerics.cpp
+    "WHIRL_ATTN_WS4R",  // src/common/numerics.cpp (v0252-ws4r97b: other kernels, same bits; hashed like ATTN_KGVAR)
     "WHIRL_BENCH_MAX_BATCH",  // src/cli/cmd_bench.cpp
     "WHIRL_CODE_OBJECT",  // src/config/env_snapshot.cpp
     "WHIRL_DBG",  // src/common/numerics.cpp

@@ -29,12 +29,16 @@ using hip::Function;
 inline constexpr std::uint32_t kDqMaxKeys = 1u << 22;
 
 // ---- decode / verify (n <= small_max rows)
+// v0252-ws4r97b (PLAN V1-87 phase 2): AttnDecodeFlags::attn_ws4r "auto" (= numerics::kAttnWs4rAuto, WHIRL_ATTN_WS4R unset or
+// "auto"): the device profile's attn_ws4r_q8 / attn_ws4r_f16 row picks the attn_ws4r variant; 0 / 1 / 2 = off / plain / b
+inline constexpr std::uint32_t kAttnWs4rAuto = 255;
 struct AttnDecodeProblem {
     std::uint32_t n = 1;           // query rows
     std::uint32_t head_dim = 256;
     std::uint32_t n_head = 0, n_head_kv = 0;
     std::uint32_t max_ctx = 0;
     bool kv_q4 = false;
+    bool kv_q8 = false;  // v0252-ws4r97b: q8 / q8h KV (the _q8 decode kernels; the profile's attn_ws4r_q8 row), else f16 / q8v / q4
     // per-row positions / sequence bases (known only for host-planned rows: row_n == n), the draft window
     bool rows_known = false;
     std::span<const std::int32_t> row_pos, row_base;
@@ -46,6 +50,7 @@ struct AttnDecodeFlags {
     bool attn_ws4 = true, attn_dq4 = true, dq4_dyn = true, attn_wide = true;
     std::uint32_t fd_splits = 64, dbg_flags = 0;
     bool prec_dec = false;
+    std::uint32_t attn_ws4r = kAttnWs4rAuto;  // v0252-ws4r97b: numerics flag attn_ws4r (WHIRL_ATTN_WS4R)
 };
 enum class AttnDecodeKind : std::uint8_t { ws4, ws4g, wsplit, dq4, split };
 struct AttnDecodePlan {
@@ -60,6 +65,11 @@ struct AttnDecodePlan {
 // caps: the module's markers (attn_group1)
 AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlags& f, const kernels::AttnKernels& k, const kernels::Caps& caps,
                                 const device::Profile& prof);
+// v0252-ws4r97b (PLAN V1-87 phase 2): the gfx1201 attn_ws4r kernel that replaces the wsplit choice (wide = attn_wsplit2,
+// else attn_wsplit1) for flag `flag` (kAttnWs4rAuto -> `row`, the profile row of the problem's KV format): 1 -> plain
+// attn_ws4r{1,2}[_q8], 2 -> b attn_ws4r{1,2}b[_q8]; 0, any other value, or a table without the kernel -> nullptr (the
+// caller keeps attn_wsplit). Exhaustive like attnKgVariant: the kernel is the one with attn_wsplit's arguments and bits.
+Function attnWs4rFor(std::uint32_t flag, std::uint8_t row, bool wide, const kernels::AttnKernels& k);
 // split rule helpers (kept in step with the kernels)
 std::int32_t awPer(std::int32_t n_pos, std::uint32_t n_split);
 std::uint32_t dq4Splits(std::span<const std::int32_t> row_pos, std::int32_t win, std::uint32_t full);

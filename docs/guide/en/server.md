@@ -55,7 +55,7 @@ Useful environment variables (all of them: [usage.md](../../usage.md#env)):
 | `WHIRL_MTP_BATCH_DRAFTS=d1,d2,…` | draft caps by number of decoding slots |
 | `WHIRL_GATHER_MS` | burst-gather window for new requests (default 30, 0 = off) |
 | `WHIRL_DECODE_MIN_TPS` | decode floor (= `--decode-min-tps`, default 20, 0 = off) |
-| `WHIRL_PREFILL_CHUNK` | max rows per merged prefill forward (multiple of 1024, default 2048; Radeon 8060S MoE models 4096 = the prefill batch; a forward never exceeds the batch) |
+| `WHIRL_PREFILL_CHUNK` | max rows per merged prefill forward (multiple of 1024, default 2048; MoE models 4096 = the prefill batch on the Radeon 8060S and the R9700; a forward never exceeds the batch) |
 | `WHIRL_SYS_MIN`, `WHIRL_SYS_CKPTS`, `WHIRL_SYS_LCP=0` | system-prompt checkpoint threshold (2048), VRAM count (2), disable `prefix` checkpoints |
 | `WHIRL_KV_TIER_MIN` | minimum entry size for the tiers (2048 tokens) |
 | `WHIRL_TIMING_RESET=0` | keep the MTP timing table across requests (not recommended) |
@@ -193,7 +193,8 @@ extra), interleaved with decode cycles. Several requests' chunks are combined in
 forward: row-wise work (embeddings, norms, GEMMs, MoE) runs once over all rows; per-sequence work
 (attention, DeltaNet conv and chunk scan) runs per segment with the solo kernels. The oldest
 prefilling request always runs; others join if their next chunk has more than 16 rows (to avoid
-the small-batch path) and the total stays ≤ 4096. Because every GEMM configuration and MoE tile is
+the small-batch path; more than 32 rows for a MoE model in precise mode, whose small-batch experts
+serve up to 32 rows) and the total stays ≤ 4096. Because every GEMM configuration and MoE tile is
 row-invariant, a batched prefill row equals the solo row bit for bit. When no other slot is
 decoding, or with the decode floor off (`--decode-min-tps 0`, throughput first), consecutive chunks
 of one request merge into forwards of up to 2048 rows ([kv-and-caching.md](kv-and-caching.md#merge)).

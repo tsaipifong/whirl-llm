@@ -78,6 +78,7 @@
 //   attn_wsplit1[_q8|_q8v], attn_wsplit2[_q8|_q8v](q, KvArgs, part_ml, part_acc, n_head, n_kv,
 //            q_stride, pos, scale, skip, AwGroups groups)   [<= 16 / <= 32 columns per group]
 //   attn_dq4 (gfx1151 / gfx1201, q4 KV; attn_wsplit1 arguments, block 256, one query per group, n_head / n_kv <= 8)
+//   attn_ws4r1[b][_q8], attn_ws4r2[b][_q8] (gfx1201): attn_wsplit1 / attn_wsplit2 arguments, block 128, same bits
 //   attn_prep[_q8|_q8h|_q8v](qf, kk, vv, qw, kw, KvArgs, pos, n_head, n_kv,
 //            hd, n_rot, theta_scale, eps)
 //   attn_prefill_wmma[_q8|_q8v], attn_kx[_q8|_q8v](q, KvArgs, out, n_head,
@@ -209,7 +210,8 @@
 //   balance (item f16 intermediates) / fast candidates, never in precise (acceptance: task accuracy):
 //   gemm_moepdh_<v>_mxfp4(W, rb, rows_e, X, f16* Y, ncols, tiles, n_tiles): Y stored as f16
 //   gemm_moepdhc_<v>_mxfp4: gemm_moepdc arguments with f16* Y (fused combine reads f16)
-//   moe_combine4h(x, ysh, sg, const f16* yd, inv, w, C, K): moe_combine4 over f16 yd
+//   moe_combine4h(x, ysh, sg, const f16* yd, inv, w, C, K): moe_combine4 over f16 yd (v0252-moedf16: also in the
+//            gfx1201 object, kernels/moe_combine_h.hip, after gemm8r_moeh / gemm8r_moe32h with W2 = null writing f16 yd)
 //   gemm_moepda_<v>_mxfp4(W, rb, rows_e, X, ncols, tiles, n_tiles, perm, w, x, K): x += w * y by f32
 //            atomics (no yd; order varies run to run); the shared expert added before by moe_combine4, K = 0
 
@@ -686,6 +688,10 @@ struct AttnKernels {
     F attn_dq4{};  // q4 KV decode / verify (gfx1151 / gfx1201; null if not built): attn_wsplit1 arguments, 256 threads
     F attn_ws4{};  // gfx1151 4-wave pipelined attn_wsplit1 (same arguments / bits, one query per group): decode rows (WHIRL_ATTN_WS4=0: old path)
     F attn_ws4g[3]{};  // gfx1151 multi-row verify, CG 1..3 tiles (attn_ws4g{1,2,3}[_q8]; 256 threads, grid.x = n_kv x column groups)
+    // v0252-ws4r97b (PLAN V1-87): gfx1201 4-wave pipelined attn_wsplit1 / attn_wsplit2 (same arguments / groups / grid /
+    // 128 threads / bits; kt ws4r): [0] plain attn_ws4r{1,2}, [1] b attn_ws4r{1,2}b, with the _q8 suffix for q8 / q8h KV;
+    // null for q8v / q4 KV and on gfx1151 (ops::attnWs4rFor, device::Profile::attn_ws4r_q8 / _f16, WHIRL_ATTN_WS4R)
+    F attn_ws4r1[2]{}, attn_ws4r2[2]{};
     F attn_kg6{}, attn_kg4{}, attn_kg2{};  // f16 / q8 / q8h / q8v KV (null if not built)
     // v0252-c1port (C1): the f16 attn_kg variants (gfx1201; null elsewhere): head-pair shared V^T (kgv, var 1) and
     // shared K + V^T (kgk, var 3); loaded for every KV format (f16 entries: the plain f16 path and Q8P)

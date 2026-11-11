@@ -433,7 +433,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_POOL_BUDGET_MARGIN_MB=N` | 決定 KV 池大小與事後重查時，在 Windows（WDDM）顯示記憶體預算之下替其他程式成長留的空間。預設取 2048 MiB（GPU 接螢幕時 3072）與預算 6% 的較大者。啟動時其他程式的 VRAM 中預算還沒反映的部分另外保留 |
 | `WHIRL_POOL_RESERVE_MB=N` | 舊的「只看可用 VRAM」規則：決定 KV 池大小時保留不用的 VRAM，同時關掉 WDDM 預算、margin 與池重查（預設保留 768，MoE 1536）。要替其他程式多留空間，請用 `WHIRL_POOL_BUDGET_MARGIN_MB` |
 | `WHIRL_VRAM_HEADROOM_MB=N` | 在保留量與 WDDM margin 之外，再額外留給桌面與其他程式的 VRAM。預設 0（0.2.2.1 起由 WDDM margin 涵蓋桌面：接螢幕時 3 GiB；之前 VRAM 小於 20 GiB 的卡預設 1536）。VRAM 小於 20 GiB 的卡（16 GB 的 RX 9070／9070 XT／9060 XT）仍預設 `--parallel 1`（KV 格式跟其他卡一樣由模式決定） |
-| `WHIRL_PREFILL_CHUNK=N` | 合併後單次 prefill forward 的最多列數（1024 的倍數，預設 2048，Radeon 8060S 上 MoE 模型為 4096；上限為 prefill batch） |
+| `WHIRL_PREFILL_CHUNK=N` | 合併後單次 prefill forward 的最多列數（1024 的倍數，預設 2048，Radeon 8060S 與 R9700 上 MoE 模型為 4096；上限為 prefill batch） |
 | `WHIRL_SEG_PREFILL=0` | 每個請求各自 prefill，不把多個請求放進同一次 forward |
 | `WHIRL_GATHER_MS=MS` | 收集一波新請求的等待時間窗（預設 30，0 = 關閉） |
 | `WHIRL_DECODE_MIN_TPS=N` | 其他請求 prefill 時，每個串流請求的 decode 保底速度（= `--decode-min-tps`，預設 20，0 = 關閉） |

@@ -40,12 +40,14 @@ public:
     Value gemv_k;
     // numerics::loadFlags through numericsRequest (v0252-c1port, feat026-attnkg97): the gfx1201 f16 attn_kg variant
     Value attn_kgvar;
+    // numerics::loadFlags through numericsRequest (v0252-ws4r97b, PLAN V1-87 phase 2): the gfx1201 attn_ws4r variant
+    Value attn_ws4r;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 64;
+    static constexpr std::size_t n_names = 65;
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

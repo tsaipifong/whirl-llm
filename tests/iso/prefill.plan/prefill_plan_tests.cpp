@@ -117,9 +117,17 @@ void testExecSize() {
     namespace d = whirl::device;
     const d::Profile& r9700 = d::profile(whirl::hip::Arch::gfx1201);
     const d::Profile& strix = d::profile(whirl::hip::Arch::gfx1151);
-    ISO_CHECK(s::prefillExecDefault(r9700, true) == 2048 && s::prefillExecDefault(strix, true) == 4096 && s::prefillExecDefault(strix, false) == 2048);
+    // v0252-ch4k2 (PLAN V1-75): gfx1201 MoE solo prefills run 4096-row forwards (fill form, as gfx1151); dense stays 2048
+    ISO_CHECK(s::prefillExecDefault(r9700, true) == 4096 && s::prefillExecDefault(r9700, false) == 2048);
+    ISO_CHECK(s::prefillExecDefault(strix, true) == 4096 && s::prefillExecDefault(strix, false) == 2048);
     ISO_CHECK(s::prefillExec(std::nullopt, strix, true, 4096) == 4096 && s::prefillExec(std::nullopt, strix, false, 4096) == 2048);
-    ISO_CHECK(s::prefillExec(std::size_t(1024), strix, true, 4096) == 1024 && s::prefillExec(std::nullopt, r9700, true, 4096) == 2048);
+    ISO_CHECK(s::prefillExec(std::size_t(1024), strix, true, 4096) == 1024 && s::prefillExec(std::nullopt, r9700, true, 4096) == 4096);
+    ISO_CHECK(s::prefillExec(std::nullopt, r9700, false, 4096) == 2048);  // Swift (dense) on the R9700: unchanged
+    ISO_CHECK(s::prefillExecFor(16384, 4096, r9700.prefill_fill_batch) == 4096);  // seqtest's "largest forwards" at batch 4096
+    // the seqtest chunk-schedule gate (src/cli/cmd_seqtest.cpp, long_n 9500, default batch 4096) then runs a 4096-row
+    // forward in its reference: forwards [4096, 4096, 1308] (whole chunks up to the batch; the 1308-row rest = 1024 + 284)
+    const std::size_t ex = s::prefillExec(std::nullopt, r9700, true, 4096);
+    ISO_CHECK(s::forwardEnds(9500, 0, 0, {}, 0, ex, {}, 4096) == (Sizes{4096, 8192, 9500}));
 }
 
 void testSplitsFromTokens() {

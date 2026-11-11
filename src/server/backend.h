@@ -142,6 +142,9 @@ public:
     virtual const char* profileClassName(std::size_t i) const { (void)i; return "?"; }
     // most rows of one batched verify / MTP step (qwen35::max_verify_rows with the wide GEMV path)
     virtual std::uint32_t verifyRows() const { return qwen35::max_small_batch; }
+    // v0252-precfix (PLAN V1-85): a prefill chunk joins a segmented forward (prefillSegs) only with more rows than this
+    // (qwen35: Context::segJoinMin, 32 for a MoE model in precise). Default: max_small_batch (the rule since v0.1.0)
+    virtual std::uint32_t segJoinMin() const { return qwen35::max_small_batch; }
 
     // ---- DFlash2 drafter (--draft dflash; see Model::dflash*). Defaults: no drafter.
     // most drafts of one block (block - 1)

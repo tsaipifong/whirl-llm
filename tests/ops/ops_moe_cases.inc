@@ -275,6 +275,110 @@ void testOpsMoeFuse(ops::MoeProblem mp, const kn::KernelTable& k97, const kn::Ke
     CHECK(ops::chooseMoeFuse(p, true, pl, only16).use);
 }
 
+// v0252-precfix (PLAN V1-85; KB v0252-precconc:moe-segjoin-window): R9700 2026-11-11 hostwait proof, Ornith precise server
+// gate basic: "5 concurrent requests == each alone (cold)" and "same seed under load (4 concurrent)" FAIL, deterministic; the
+// slot whose prompt was prefilled alone matched, the slots of the segmented prefill forward differed. Cause: since 92aa626
+// precise MoE gives every forward of <= max_verify_rows (32) rows the f32 decode experts, but the server let chunks of
+// > max_small_batch (16) rows join a segmented forward (> 32 rows: the f16 grouped GEMM). A chunk that may join (more than
+// moeSegJoinMin rows) must take the same MoE bit class alone as in the smallest segmented forward it can be part of
+// (itself + another chunk of moeSegJoinMin + 1 rows), in every mode, on both code objects (gfx1201, gfx1151 tables).
+void testOpsMoeSegJoin(ops::MoeProblem p, const kn::KernelTable& k97, const kn::KernelTable& k8) {
+    CHECK_EQ(ops::moeSegJoinMin(false, 16, 32), 16u);  // balance / fast: the decode experts stop at 16 rows in a prefill forward
+    CHECK_EQ(ops::moeSegJoinMin(true, 16, 32), 32u);   // precise: they serve up to max_verify_rows (92aa626)
+    CHECK_EQ(ops::moeSegJoinMin(true, 16, 16), 16u);   // no wider precise range: the server's rule
+    for (const bool precise : {false, true}) {
+        ops::MoeFlags f;
+        f.prec_dec = precise;
+        f.moe_fp8 = !precise;  // balance / fast prefill: MXFP4 x fp8 (numerics plan); precise: f16
+        const std::uint32_t jmin = ops::moeSegJoinMin(f.prec_dec, f.max_small_batch, f.max_verify_rows);
+        for (const kn::KernelTable* k : {&k97, &k8}) {
+            std::uint32_t bad = 0;
+            for (std::uint32_t n = jmin + 1; n <= 2 * f.max_verify_rows + 1; ++n) {
+                p.n = n;
+                const ops::MoePlan alone = ops::chooseMoe(p, f, *k, k->silu_mul_x8h);
+                p.n = n + jmin + 1;
+                const ops::MoePlan joined = ops::chooseMoe(p, f, *k, k->silu_mul_x8h);
+                if (alone.small != joined.small || alone.bits != joined.bits) ++bad;
+            }
+            CHECK_EQ(bad, 0u);
+        }
+    }
+// v0252-moedf16 (PLAN V1-76): on the gfx1201 fp8 MoE prefill (balance / fast), COMB 3 (the balance item f16
+// intermediates) stores the down projection's output moe_yd as f16 - the down launch is gemm8r_moeh / gemm8r_moe32h with
+// W2 = null (one GEMM, f16 epilogue) - and combines it with moe_combine4h (grid (E / 1024, n)). Precise (prec_dec, or the
+// bitwise class with WHIRL_Q8DEC=1) and the 8060S plans never change; without moe_combine4h / the rbf kernels / E % 4: the
+// f32 path. Not floored by the moep token floor (that floor is about the moep tile sharing): any prefill n.
+void testOpsMoeYdh(ops::MoeProblem p, const kn::KernelTable& k97_in, const kn::KernelTable& k8) {
+    kn::KernelTable k97 = k97_in;
+    k97.moe_combine4h = tag("moe_combine4h");  // the gfx1201 code object carries it from v0252-moedf16 on
+    ops::MoeFlags bal, fst, pre, q8p;
+    bal.moe_fp8 = fst.moe_fp8 = q8p.moe_fp8 = true;
+    bal.moep_comb_ok = ops::moepCombFor(false, false);
+    fst.moep_comb_ok = ops::moepCombFor(false, true);
+    pre.prec_dec = true;
+    pre.moep_comb_ok = ops::moepCombFor(true, false);
+    q8p.moep_comb_ok = ops::moepCombFor(true, false);  // precise with WHIRL_Q8DEC=1 (prec_dec cleared), WHIRL_MOE_FP8=1
+    for (ops::MoeFlags* f : {&bal, &fst, &pre, &q8p}) f->moep_comb = 3;
+    for (const std::uint32_t n : {4096u, 2048u, 512u, 200u}) {
+        p.n = n;
+        const ops::MoeFlags bal0 = [&] {
+            ops::MoeFlags g = bal;
+            g.moep_comb = 0;
+            return g;
+        }();
+        const ops::MoePlan a = ops::chooseMoe(p, bal0, k97, k97.silu_mul_x8h);  // A arm (WHIRL_MOEP_COMB=0): the f32 path
+        CHECK(a.kind == ops::MoePrefillKind::fp8 && !a.ydh && !a.comb4 && a.bits == ops::MoeBits::moe_fp8_gemm);
+        CHECK(nameOf(a.fdn) == (a.bn == 32 ? "gemm8r_moe32" : "gemm8r_moe") && a.comb_grid.x == 8 && a.comb_grid.y == n);
+        for (const ops::MoeFlags* f : {&bal, &fst}) {
+            const ops::MoePlan b = ops::chooseMoe(p, *f, k97, k97.silu_mul_x8h);
+            // only the down kernel, the combine and the bit class move; the rest of the plan is the A arm's
+            CHECK(b.kind == ops::MoePrefillKind::fp8 && b.ydh && b.comb4 && !b.comb_fused && !b.comb_atomic && b.bits == ops::MoeBits::moe_lossy_gemm);
+            CHECK(nameOf(b.fdn) == (b.bn == 32 ? "gemm8r_moe32h" : "gemm8r_moeh") && b.comb_grid.x == 2 && b.comb_grid.y == n);
+            CHECK(b.bn == a.bn && b.max_tiles == a.max_tiles && b.fgu == a.fgu && b.rbf && b.gu_pgrid.x == a.gu_pgrid.x && b.dn_pgrid.x == a.dn_pgrid.x &&
+                  b.dn_pgrid.y == a.dn_pgrid.y);
+        }
+        // precise: the gemmr (f16) kind, f32 moe_yd + moe_combine, whatever COMB says
+        const ops::MoePlan c = ops::chooseMoe(p, pre, k97, k97.silu_mul_x8h);
+        CHECK(c.kind == ops::MoePrefillKind::gemmr && !c.ydh && !c.comb4 && c.bits == ops::MoeBits::moe_f16_gemm && nameOf(c.fdn) != "gemm8r_moeh");
+        // precise with prec_dec cleared and fp8 forced: still the f32 moe_yd (the mode's class is bitwise)
+        const ops::MoePlan d = ops::chooseMoe(p, q8p, k97, k97.silu_mul_x8h);
+        CHECK(d.kind == ops::MoePrefillKind::fp8 && !d.ydh && !d.comb4 && d.bits == ops::MoeBits::moe_fp8_gemm &&
+              nameOf(d.fdn) == (d.bn == 32 ? "gemm8r_moe32" : "gemm8r_moe"));
+    }
+    p.n = 4096;
+    // COMB 1 / 2 / 4 / 5 on the fp8 kind: the f32 path (moe_combine; no moe_combine4 in the gfx1201 object)
+    for (const std::uint32_t cm : {1u, 2u, 4u, 5u}) {
+        ops::MoeFlags f = fst;
+        f.moep_comb = cm;
+        const ops::MoePlan b = ops::chooseMoe(p, f, k97, k97.silu_mul_x8h);
+        CHECK(b.kind == ops::MoePrefillKind::fp8 && !b.ydh && !b.comb_fused && !b.comb_atomic && nameOf(b.fdn) == "gemm8r_moe");
+    }
+    // a code object without moe_combine4h (the gfx1201 object before this change) or E % 4 != 0: the f32 path
+    {
+        const ops::MoePlan b = ops::chooseMoe(p, bal, k97_in, k97_in.silu_mul_x8h);
+        CHECK(b.kind == ops::MoePrefillKind::fp8 && !b.ydh && nameOf(b.fdn) == "gemm8r_moe");
+        ops::MoeProblem q = p;
+        q.E = 2050;
+        CHECK(!ops::chooseMoe(q, bal, k97, k97.silu_mul_x8h).ydh);
+    }
+    // WHIRL_MOE_RBF=0 (no row-block-fast entries): the tile-major f32 path, no ydh (gemm8_moeh's 2-D grid is not wired)
+    {
+        ops::MoeFlags f = bal;
+        f.moe_rbf = false;
+        const ops::MoePlan b = ops::chooseMoe(p, f, k97, k97.silu_mul_x8h);
+        CHECK(b.kind == ops::MoePrefillKind::fp8 && !b.rbf && !b.ydh && nameOf(b.fdn) == "gemm8_moe");
+    }
+    // decode / verify (small) batches: no combine, no change
+    p.n = 1;
+    CHECK(ops::chooseMoe(p, bal, k97, k97.silu_mul_x8h).small && !ops::chooseMoe(p, bal, k97, k97.silu_mul_x8h).ydh);
+    // the 8060S table with COMB 3 and no moep variants (the plan's moep off): the fused_gu plan, f32 moe_yd (unchanged)
+    p.n = 4096;
+    kn::KernelTable k8h = k8;
+    k8h.moe_combine4h = tag("moe_combine4h");
+    const ops::MoePlan e = ops::chooseMoe(p, bal, k8h, k8h.silu_mul_x8h);
+    CHECK(e.kind == ops::MoePrefillKind::fused_gu && !e.ydh && !e.comb4 && nameOf(e.fdn) == "gemm_moe32r_mxfp4");
+}
+
 void testOpsMoe() {
     ops::MoeProblem p;  // Ornith-like: E 2048, 8 of 256 experts, F 512, all MXFP4 with row exponents
     p.E = 2048;
@@ -537,6 +641,8 @@ void testOpsMoe() {
     }
     testOpsMoeRouter(p, k97, k8);
     testOpsMoeFuse(p, k97, k8);  // v0252-c3port (fails before the port: chooseMoeFuse is a stub)
+    testOpsMoeSegJoin(p, k97, k8);  // v0252-precfix (fails before the fix: moeSegJoinMin is a stub returning 16)
+    testOpsMoeYdh(p, k97, k8);   // v0252-moedf16 (fails before the change: the fp8 kind never sets ydh)
 }
 
 }  // namespace

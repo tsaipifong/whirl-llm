@@ -226,6 +226,7 @@ void testAttnWs4(Ctx& c);   // "ws4": gfx1151 attn_ws4 bitwise == attn_wsplit1
 void benchAttnWs4(Ctx& c);  // "ws4bench": timing only, on request
 void testAttnWs4g(Ctx& c);   // "ws4g": gfx1151 attn_ws4g multi-row verify bitwise == single-row
 void benchAttnWs4g(Ctx& c);  // "ws4gbench": timing only, on request
+void testAttnWs4r(Ctx& c);   // "ws4r": gfx1201 attn_ws4r* bitwise == attn_wsplit1 / attn_wsplit2 (v0252-ws4r97)
 void testGdn(Ctx& c);
 void testVision(Ctx& c);  // "vision": encoder kernels (own code object) vs CPU
 void testMoe(Ctx& c);
