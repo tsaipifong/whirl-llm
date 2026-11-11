@@ -123,7 +123,9 @@ std::size_t PrefillPhase::prefillStep(Slot& sl) {
 // whole forward; the oldest request's chunk always runs (decode floor).
 std::size_t PrefillPhase::prefillGroup(Slot& first, std::size_t row_budget) {
     const std::size_t n0 = chunkLen(first);
-    const std::size_t small_max = max_small_batch;
+    // v0252-precfix (PLAN V1-85): the model's join bound (32 for a MoE model in precise: its 17..32-row chunks take the
+    // decode experts alone, so they must never join a segmented forward), else max_small_batch
+    const std::size_t small_max = m_.segJoinMin();
     // the rows the solo forward ran (v0252-n10: more than n0 when it holds the tail checkpoint; n0 when it failed)
     auto solo = [&]() -> std::size_t {
         try {
@@ -409,13 +411,13 @@ void PrefillPhase::runPrefill(Slot* pf, bool& idle_wait, std::size_t& pf_rows, b
             }
             pf_rows = prefillGroup(*pf, budget);
             if (spec_.prof) spec_.prof->last_end.reset();
-            // FR-SRV P3-12: chunks of <= max_small_batch rows cannot join a segmented forward;
+            // FR-SRV P3-12: chunks of <= segJoinMin() rows (v0252-precfix) cannot join a segmented forward;
             // they ran only once their request was the oldest, so a short follow-up (a few new
             // tokens on a cached prefix) waited for a whole 128k prefill. They run now, alone
             // (the same forward they would get later: outputs unchanged).
             for (Slot& o : slots_) {
                 if (&o == pf || o.phase != Phase::prefill || o.job == nullptr) continue;
-                if (chunkLen(o) > max_small_batch) continue;
+                if (chunkLen(o) > m_.segJoinMin()) continue;
                 try {
                     prefillStep(o);
                 } catch (const std::exception& ex) {

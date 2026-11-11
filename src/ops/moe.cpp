@@ -73,6 +73,7 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
     // precise mode: every verify / decode batch (up to max_verify_rows rows) takes the decode experts, so a
     // generated token's MoE output never depends on whether its batch had more than 16 rows. balance / fast: a
     // wide verify / MTP batch (small_max raised to max_verify_rows) takes the int8 decode experts too.
+    // v0252-precfix: the segmented-prefill join bound moeSegJoinMin (moe.h) follows this rule: change both together.
     pl.small = n <= f.small_max || preciseRows(f.prec_dec, n, f.max_verify_rows);
     pl.small_q8 = pl.small && !f.prec_dec;
     pl.logits_grid = D((R + 7) / 8);

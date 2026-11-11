@@ -404,6 +404,12 @@ public:
     // wideOk() before setupSeqs decides replay (which wide batches also need)
     bool wideCapable() const;
     std::uint32_t verifyRows() const { return wideOk() ? max_verify_rows : max_small_batch; }
+    // v0252-precfix (PLAN V1-85): a prefill chunk joins a segmented forward (prefillSegs) only with more rows than this, so
+    // its numerics are the same alone and joined: MoE models ops::moeSegJoinMin (precise: max_verify_rows, the decode
+    // experts' bound), dense models max_small_batch
+    std::uint32_t segJoinMin() const {
+        return cfg.moe ? ops::moeSegJoinMin(nf().prec_dec, max_small_batch, max_verify_rows) : max_small_batch;
+    }
     bool hasTiledFp8() const;  // the whole fragment-tiled fp8 set (numerics::Target::k_gemm8t)
 
     // ---- self-checks and microbenchmarks (bench / selftest)

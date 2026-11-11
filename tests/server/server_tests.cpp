@@ -3010,6 +3010,42 @@ void testMtpStepJoinRows() {
     CHECK(h.body.find("\"busy\":false") != std::string::npos);
 }
 
+// v0252-precfix (PLAN V1-85; KB v0252-precconc:moe-segjoin-window): a prefill chunk joins a segmented forward only with more
+// rows than the model's ServerModel::segJoinMin() (32 for a MoE model in precise, whose 17..32-row forwards take the f32
+// decode experts and > 32-row ones the f16 grouped GEMM; R9700 2026-11-11: Ornith precise "5 concurrent == each alone"
+// FAILED because 24-row chunks were joined). One long request A prefills slowly (one busy forward); two 24-token requests
+// B, C arrive during it, so both are prefilling at once: with a bound of 32 they must never share a forward (the engine
+// before the fix joins them: chunks > 16 rows), every text is still its greedy reference. Then 40-token prompts (> 32)
+// still join: the rule only closes the 17..32 window, segmented prefill stays on.
+void testSegJoinMin() {
+    for (const std::uint32_t len : {24u, 40u}) {
+        ServerSetup su = baseSetup(true);
+        su.mc.parallel = 4;
+        su.mc.seg_join_min = 32;
+        su.mc.prefill_us_per_row = 300;  // A's 3000 rows: ~0.9 s of prefill forward
+        TestServer srv(su);
+        const auto pA = makePrompt(3000, 611);
+        const std::vector<std::vector<std::uint32_t>> pBC = {makePrompt(len, 612), makePrompt(len, 613)};
+        std::string gotA;
+        std::vector<std::string> got(2);
+        std::thread ta([&] { gotA = completionText(srv.post("/v1/completions", completionBody(pA, 8))); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));  // A's forward is running
+        std::vector<std::thread> th;
+        for (std::size_t i = 0; i < 2; ++i)
+            th.emplace_back([&, i] { got[i] = completionText(srv.post("/v1/completions", completionBody(pBC[i], 8))); });
+        for (auto& t : th) t.join();
+        ta.join();
+        CHECK_EQ(gotA, decode(srv.model().greedyReference(pA, 8, true)));
+        for (std::size_t i = 0; i < 2; ++i) CHECK_EQ(got[i], decode(srv.model().greedyReference(pBC[i], 8, true)));
+        CHECK_EQ(srv.model().segSmall(), 0u);  // no segment of <= segJoinMin() rows (the fix)
+        if (len == 40) {
+            CHECK(srv.model().segForwards() >= 1);   // the scenario: B and C prefilled together (else this proves nothing)
+            CHECK(srv.model().minSegRows() > 32);
+        }
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+}
+
 // WHIRL_SLOT_DRAFTS=2 planner (planSlotDrafts / qwen35::allocDrafts): pure, synthetic cycle times
 // T = 20 + 0.8 R + 2.5 S + 3 [R > 16] + 0.002 sum(rows_i ctx_i)
 float planTrueMs(const qwen35::CycleFeat& x) {
@@ -9840,6 +9876,7 @@ int main(int argc, char** argv) {
         {"concurrency16", [] { testConcurrency(16, 24, true); }},
         {"concurrency_nomtp", [] { testConcurrency(4, 8, false); }},
         {"mtp_step_join_rows", testMtpStepJoinRows},  // v0252-btl
+        {"seg_join_min", testSegJoinMin},  // v0252-precfix
         {"dflash_greedy", testDFlashGreedy},
         {"dflash_relax_exact", testDFlashRelaxExact},
         {"relax_mtp_runner_up", testRelaxMtpRunnerUp},  // arch025-mutgap2
