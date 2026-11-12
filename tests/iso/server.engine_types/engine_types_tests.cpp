@@ -123,6 +123,26 @@ void testStateStarts() {
             const s::E1Choice n = s::chooseE1(std::nullopt, def, site);
             ISO_CHECK(n.e1 == 0u && !n.bad && n.by_default);
         }
+        // v0252-b5 round 3 (E1 review item C2): an explicitly set WHIRL_SPEC_ACC wins over the DEFAULT E1. The engine
+        // raises the accept mode for E1 (1: host / pinned -> gpu; 2: everything but check -> gpu-zc), so a default E1
+        // would make WHIRL_SPEC_ACC=0 and =3 run the same thing; the default yields (e1 0, flagged `yielded`, no warning)
+        // when the explicit mode is one that E1 value would raise. WHIRL_E1 set: that value, as before (the user's order)
+        for (const std::uint32_t sa : {0u, 1u, 2u, 3u, 4u}) {
+            s::E1Site site = ok;
+            site.spec_acc_env = sa;
+            const std::uint32_t want = def == 2u ? (sa >= 3u ? 2u : 0u) : def == 1u ? (sa >= 2u ? 1u : 0u) : 0u;
+            const s::E1Choice y = s::chooseE1(std::nullopt, def, site);
+            ISO_CHECK(y.e1 == want && !y.bad && y.by_default && y.yielded == (def != 0u && want == 0u));
+            for (const char* v : {"0", "1", "2"}) {
+                const s::E1Choice c = s::chooseE1(std::optional<std::string>(v), def, site);
+                ISO_CHECK(c.e1 == static_cast<std::uint32_t>(v[0] - '0') && !c.bad && !c.by_default && !c.yielded);
+            }
+            s::E1Site off = site;  // a site the default cannot use anyway: 0, and nothing yielded
+            off.model_ok = false;
+            const s::E1Choice z = s::chooseE1(std::nullopt, def, off);
+            ISO_CHECK(z.e1 == 0u && z.by_default && !z.yielded);
+        }
+        ISO_CHECK(!d.yielded && !s::E1Site{}.spec_acc_env.has_value());
     }
 
     s::FloorState f;

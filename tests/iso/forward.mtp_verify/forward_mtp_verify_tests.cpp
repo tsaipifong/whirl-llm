@@ -261,12 +261,29 @@ void testArgmaxMb() {
     namespace dev = whirl::device;
     using whirl::hip::Arch;
     // the mode: the profile default, then the envFlag rule of the override ("0" off, any other value on), "2" adds the tripwire
-    // v0252-b5 round 2c: merged off on both cards (the gfx1201 default comes with the defaults round, PLAN V1-117); the
-    // switch itself is exercised below through argmaxMbMode / setArgmaxMb
-    ISO_CHECK(!dev::profile(Arch::gfx1201).argmax_mb && !dev::profile(Arch::gfx1151).argmax_mb);
-    ISO_CHECK(q::Context::argmaxMbMode(true, std::nullopt) == 1 && q::Context::argmaxMbMode(false, std::nullopt) == 0);
-    ISO_CHECK(q::Context::argmaxMbMode(true, std::string("0")) == 0 && q::Context::argmaxMbMode(false, std::string("1")) == 1);
-    ISO_CHECK(q::Context::argmaxMbMode(false, std::string("2")) == 2 && q::Context::argmaxMbMode(true, std::string("")) == 1);
+    // v0252-b5 round 3 (PLAN V1-117: Ornith fast MTP 2k +0.65 % +-0.42, bitwise; Swift balance -0.03 %): the default is on for
+    // MoE models on the R9700 in FAST only (the row's value for the model class, applied by argmaxMbMode in fast); off for
+    // dense models, in precise / balance and on the 8060S. WHIRL_ARGMAX_MB wins in every cell ("0" off, "2" on + the
+    // tripwire, any other value on), so both arms stay reachable on one exe
+    const dev::Profile& p97 = dev::profile(Arch::gfx1201);
+    const dev::Profile& p51 = dev::profile(Arch::gfx1151);
+    ISO_CHECK(!p97.argmax_mb_dense && p97.argmax_mb_moe && !p51.argmax_mb_dense && !p51.argmax_mb_moe);
+    for (const dev::Profile* p : {&p97, &p51})
+        for (const bool moe : {false, true})
+            for (const bool fast : {false, true}) {
+                const int want = p == &p97 && moe && fast ? 1 : 0;
+                ISO_CHECK(q::Context::argmaxMbMode(*p, moe, fast, std::nullopt) == want);
+                ISO_CHECK(q::Context::argmaxMbMode(*p, moe, fast, std::string("0")) == 0);
+                ISO_CHECK(q::Context::argmaxMbMode(*p, moe, fast, std::string("1")) == 1);
+                ISO_CHECK(q::Context::argmaxMbMode(*p, moe, fast, std::string("2")) == 2);
+                ISO_CHECK(q::Context::argmaxMbMode(*p, moe, fast, std::string("")) == 1);
+            }
+    // the model class picks its own value of the row (a row with only the dense class on), still in fast only
+    dev::Profile pd = p97;
+    pd.argmax_mb_dense = true;
+    pd.argmax_mb_moe = false;
+    ISO_CHECK(q::Context::argmaxMbMode(pd, false, true, std::nullopt) == 1 && q::Context::argmaxMbMode(pd, true, true, std::nullopt) == 0);
+    ISO_CHECK(q::Context::argmaxMbMode(pd, false, false, std::nullopt) == 0);
     const whirl::hip::Function rows = fn(0x32), rows_to = fn(0x31), rank = fn(0x30), mb = fn(0x40), rank_mb = fn(0x41);
     auto setup = [&](MtpProbe& c, std::uintptr_t s, bool twins) {
         c.arch = Arch::gfx1201;
@@ -352,7 +369,7 @@ void testArgmaxMb() {
     auto g = std::make_unique<MtpProbe>();
     setup(*g, 0x44, true);
     g->arch = Arch::gfx1151;
-    g->setArgmaxMb(q::Context::argmaxMbMode(dev::profile(Arch::gfx1151).argmax_mb, std::nullopt));
+    g->setArgmaxMb(q::Context::argmaxMbMode(dev::profile(Arch::gfx1151), true, true, std::nullopt));
     ISO_CHECK(g->argmax_mb == 0 && !g->argmaxMbOn());
 }
 

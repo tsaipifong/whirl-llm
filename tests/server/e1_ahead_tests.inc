@@ -554,6 +554,52 @@ void testE1AheadEnv() {
                 }
         }
     }
+    // v0252-b5 round 3 (E1 review item C2, PLAN V1-93): the default E1=2 must not override an explicitly set
+    // WHIRL_SPEC_ACC. With only WHIRL_SPEC_ACC set, two values give two different starts on the R9700 MoE default:
+    // 0 (host) -> the default lookahead yields (e1 0, the host accept path runs: no ring cycle, no device accept, no
+    // "decode: WHIRL_E1" line); 3 (gpu-zc) -> the lookahead stays (ring cycles, submitted ahead). The reply is the same
+    // greedy text in both (exact acceptance on the mock; not compared between balance arms of a real model).
+    {
+#ifdef WHIRL_SOURCE_DIR
+        CHECK(sm.find(".spec_acc_env = spec_acc_env") != std::string::npos);
+        CHECK(sm.find("the default E1 lookahead is off: WHIRL_SPEC_ACC=") != std::string::npos);
+#endif
+        const std::uint32_t def = qwen35::e1Default(true, hip::Arch::gfx1201);
+        CHECK_EQ(def, 2u);
+        std::uint64_t ring[2] = {0, 0};
+        std::uint32_t e1v[2] = {9, 9};
+        int arm = 0;
+        for (const std::uint32_t sa : {0u, 3u}) {
+            E1Site site{.mtp = true, .dflash = false, .relax = false, .fast = false, .model_ok = true};
+            site.spec_acc_env = sa;
+            const E1Choice c = chooseE1(std::nullopt, def, site);
+            CHECK(c.by_default && !c.bad);
+            CHECK_EQ(c.yielded, sa == 0u);
+            e1v[arm] = c.e1;
+            ServerSetup su = e1ahead::setup(c.e1, 2, sa);
+            g_log.clear();
+            TestServer srv(su);
+            const std::vector<std::uint32_t> p = makePrompt(300, 995);
+            CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(p, 120))), decode(srv.model().greedyReference(p, 120, true)));
+            const Engine::Stats es = srv.engine().stats();
+            ring[arm] = es.acc_ring;
+            std::printf("  E1 default vs WHIRL_SPEC_ACC=%u: e1 %u, ring cycles %llu, device accepts %llu\n", sa, c.e1,
+                        static_cast<unsigned long long>(es.acc_ring), static_cast<unsigned long long>(srv.model().specAccepts()));
+            if (sa == 0u) {
+                CHECK_EQ(srv.model().specAccepts(), 0u);
+                CHECK_EQ(g_log.count("decode: WHIRL_E1="), 0u);
+                CHECK_EQ(g_log.count("decode: WHIRL_SPEC_ACC="), 0u);
+            } else {
+                CHECK(srv.model().specAccepts() > 0u);
+                CHECK_EQ(g_log.count("decode: WHIRL_E1=2"), 1u);
+            }
+            ++arm;
+        }
+        CHECK_EQ(e1v[0], 0u);
+        CHECK_EQ(e1v[1], 2u);
+        CHECK_EQ(ring[0], 0u);
+        CHECK(ring[1] > 0u);
+    }
     // a model without the E1 path: WHIRL_E1=2 is turned off at startup like 1, said once, no device accept forced
     {
         ServerSetup su = e1ahead::setup(2, 2);

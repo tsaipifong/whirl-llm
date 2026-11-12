@@ -625,7 +625,13 @@ void testKvChoice() {
     const nu::KvFitLabel lb_bal = nu::kvFitLabel(bal, false, K::q8h);
     CHECK(lb_bal.mode == "balance" && lb_bal.fmt == "q8h" && lb_bal.alt.empty());
     CHECK(nu::kvFitLabel(pre, false, K::f16).alt.find("--balance") != std::string::npos);
-    CHECK(nu::kvFitLabel(pre, true, K::f16).alt.empty());  // MoE: balance is f16 as well
+    CHECK(nu::kvFitLabel(pre, true, K::f16).alt.empty());  // MoE: balance is f16 as well (the R9700; the default argument)
+    // v0252-b5 round 3 (f) (the v0252-ornkv2 text item, PLAN V1-113): on the card where MoE balance takes int8 KV
+    // (KvCaps::moe_q8, the Radeon 8060S) a precise MoE load that does not fit gets the hint too; never where balance is
+    // f16 as well (the R9700), never outside precise / f16
+    CHECK(nu::kvFitLabel(pre, true, K::f16, true).alt.find("--balance") != std::string::npos);
+    CHECK(nu::kvFitLabel(pre, true, K::f16, false).alt.empty() && nu::kvFitLabel(pre, false, K::f16, true).alt.find("--balance") != std::string::npos);
+    CHECK(nu::kvFitLabel(bal, true, K::q8h, true).alt.empty() && nu::kvFitLabel(bal, true, K::f16, true).alt.empty());
     {
         // CLI: 32 GB card (~12 GiB left): 128k q8h fits, unchanged
         const nu::CtxFit a = nu::cliCtxFit(131072, false, 1000, 13 * GiB, GiB, q8h_pt, 256, lb_bal);

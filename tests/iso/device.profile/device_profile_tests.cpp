@@ -31,9 +31,10 @@ void testProfiles() {
     // the 8060S too (FAST-8S-1 item 2; drafts only, the verify and the output unchanged)
     CHECK(a.draft64k_moe && b.draft64k_moe);
     CHECK(a.relax_rank_check && b.relax_rank_check);  // v0252-f1flip (ADR-0015 Rev 1): F1's one-pass check on both GPUs
-    // v0252-f1arg3 + v0252-b5 round 2c: the multi-block verify argmax twins are merged off on both cards (gfx1151 has no
-    // twins; the gfx1201 default comes with the defaults round, PLAN V1-117)
-    CHECK(!a.argmax_mb && !b.argmax_mb);
+    // v0252-f1arg3 + v0252-b5 round 3 (PLAN V1-117: Ornith fast MTP 2k +0.65 % +-0.42, bitwise; Swift balance -0.03 %): the
+    // multi-block verify argmax twins are the default for the MoE class on gfx1201 (applied in fast only:
+    // Context::argmaxMbMode), off for dense models and on gfx1151 (no twins in that object)
+    CHECK(!a.argmax_mb_dense && a.argmax_mb_moe && !b.argmax_mb_dense && !b.argmax_mb_moe);
     CHECK(!a.attn_sx_balance && b.attn_sx_balance);  // v0252-strixc2: the balance attn_sx prefill attention on the 8060S only
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
@@ -51,7 +52,8 @@ void testProfiles() {
     const std::array<std::uint8_t, 17> rb = {1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
     CHECK(b.gemv_r == rb);
     // v0251-a6port: gfx1151 MXFP4 gemvk rows (dense: v7 at 5 / 6 verify rows; MoE 0), gfx1201 rows 0 (no gemvk in that object)
-    const std::array<std::uint8_t, 17> kb = {0, 0, 0, 0, 0, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, k0{};
+    // v0252-b5 round 3 (PLAN V1-91: Swift balance chat decode +0.78 % +-0.48, bitwise): width 4 on v7 as well
+    const std::array<std::uint8_t, 17> kb = {0, 0, 0, 0, 7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, k0{};
     CHECK(b.gemvk_dense == kb);
     CHECK(b.gemvk_moe == k0 && a.gemvk_dense == k0 && a.gemvk_moe == k0);
     // v0252-n10: the TAIL-CK checkpoint inside the prefill forward on the R9700 only (0.2.5.2 leaves the 8060S as 0.2.5.1)

@@ -1560,9 +1560,10 @@ void testLoadEstimate() {
 void testGemvkDefault() {
     namespace kn = whirl::kernels;
     namespace dv = whirl::device;
+    // v0252-b5 round 3 (PLAN V1-91): verify width 4 joined widths 5 / 6 on v7 (Swift balance chat decode +0.78 % +-0.48)
     q::GemvR swift{};
-    swift[5] = swift[6] = 7;
-    check(dv::profile(whirl::hip::Arch::gfx1151).gemvk_dense == swift, "gemvk: 8060S dense profile row = v7 at 5 and 6 tokens only");
+    swift[4] = swift[5] = swift[6] = 7;
+    check(dv::profile(whirl::hip::Arch::gfx1151).gemvk_dense == swift, "gemvk: 8060S dense profile row = v7 at 4, 5 and 6 tokens only");
     check(q::defaultGemvK(whirl::hip::Arch::gfx1151, false) == swift, "gemvk: defaultGemvK(gfx1151, dense) = the dense row");
     check(q::defaultGemvK(whirl::hip::Arch::gfx1151, true) == q::GemvR{}, "gemvk: defaultGemvK(gfx1151, moe) = all 0 (Ornith not a default yet)");
     check(q::defaultGemvK(whirl::hip::Arch::gfx1201, false) == q::GemvR{} && q::defaultGemvK(whirl::hip::Arch::gfx1201, true) == q::GemvR{},
@@ -1578,7 +1579,11 @@ void testGemvkDefault() {
     o58[6] = 8;
     q::GemvR a5{};
     a5[5] = whirl::ops::kGemvkAuto;
-    const C cs[] = {{"off", {}}, {"0", {}}, {"5:2,6:8", o58}, {"5", a5}, {"", swift}, {"9:2,1:3", {}}, {"5:10", {}}};
+    // "5:7,6:7" = the row before round 3 (the A arm of a width-4 A/B: WHIRL_GEMV_K replaces the whole row, so "4:0" alone
+    // also turns widths 5 / 6 off)
+    q::GemvR old56{};
+    old56[5] = old56[6] = 7;
+    const C cs[] = {{"off", {}}, {"0", {}}, {"5:2,6:8", o58}, {"5", a5}, {"", swift}, {"9:2,1:3", {}}, {"5:10", {}}, {"5:7,6:7", old56}, {"4:0", {}}};
     for (const C& c : cs) {
         setDefault();
         q::parseGemvK(m, c.v);
@@ -1625,9 +1630,9 @@ void testGemvkDefault() {
     for (std::uint32_t n = 2; n <= 16; ++n) {
         const whirl::ops::GemvPlan p = whirl::ops::chooseGemvTile(s3, 3, n, m.k, tn);
         const bool on = n <= static_cast<std::uint32_t>(kn::kGemvkMaxNt) && p.f == &fake[n][7][1];
-        route = route && (on == (n == 5 || n == 6));
+        route = route && (on == (n >= 4 && n <= 6));
     }
-    check(route, "gemvk: the dense default routes exactly 5 / 6 tokens to ggemvk_nt<n>v7 (Model tables)");
+    check(route, "gemvk: the dense default routes exactly 4 / 5 / 6 tokens to ggemvk_nt<n>v7 (Model tables)");
 }
 
 // v0251-a6bench (feat026-ggemv a1f3e35 / a4b700c, ported): the ggemv bench times every width WHIRL_GEMV_K can select
@@ -3095,6 +3100,7 @@ nu::Target targetOf(const q::Model& m) {
     t.k_gemm8t = tiled && m.k.qact_fp8t != nullptr && m.k.rmsnorm_x8t != nullptr && m.k.silu_mul_x8t != nullptr &&
                  m.k.silu_mul_x8ht != nullptr && m.k.gated_norm_x8t != nullptr && m.k.gated_norm_x8ht != nullptr;
     t.relax_moe_arm = nu::relaxMoeDefaultName(t.gfx1151);  // v0252-f2 (tune.cpp numericsTarget)
+    t.relax_dense_arm = nu::relaxDenseDefaultName(t.gfx1151);  // v0252-b5 round 3 (e)
     t.k_relax_rank = whirl::device::profile(m.arch).relax_rank_check && m.k.argmax_rank_rows_to != nullptr;  // v0252-f2def(2)
     // v0252-f5 (moeskip): the routing entry points and the per-card fast default rule (tune.cpp numericsTarget)
     t.k_moe_skip = m.k.moe_topk_skip != nullptr && m.k.moe_skip_apply != nullptr && m.k.moe_route_skip != nullptr && m.k.moe_combine_skip != nullptr;
@@ -3165,6 +3171,29 @@ void testRelaxDefaultTarget() {
                 check(a1.bitsKey() == a0.bitsKey() && nu::logLine(a1) == nu::logLine(a0) && !a1.flags.relax_on && a1.relax_drafts == 0,
                       cell + ": " + mode + " changed by the shipped arm");
             }
+        }
+    }
+    // v0252-b5 round 3 (e) (PLAN V1-97): the dense (Swift) fast arm as the loader builds it: k8a02 (K 8, alpha 0.02) on
+    // gfx1201, none on gfx1151 (k 4 / alpha 0.1 stay); precise / balance equal the plan with no arm. Fails to build before
+    // the change (no Target::relax_dense_arm).
+    for (const hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151}) {
+        const bool g51 = a == hip::Arch::gfx1151;
+        auto m = envtab::makeModel(1);  // dense MXFP4 (Swift-like), host-only
+        m->arch = a;
+        const std::string cell = std::format("b5 dense relax {}", g51 ? "gfx1151" : "gfx1201");
+        nu::Target t = q::numericsTarget(*m);
+        check(t.relax_dense_arm == (g51 ? std::string_view() : std::string_view("k8a02")), std::format("{}: numericsTarget dense arm '{}'", cell, t.relax_dense_arm));
+        check(n2a::targetOf(*m).relax_dense_arm == t.relax_dense_arm, cell + ": n2a::targetOf differs from numericsTarget");
+        t.mtp = true;  // (the host-only Model has no MTP block; the GPU load of Swift does)
+        const nu::Plan pf = nu::plan(nu::forModel(nu::parseMode("fast", "test"), false), t);
+        check(pf.flags.relax_on && pf.flags.relax_k == (g51 ? 4u : 8u) && pf.flags.relax_alpha == (g51 ? 0.1f : 0.02f) && pf.relax_drafts == 0u,
+              std::format("{}: Swift fast k {} alpha {} drafts {}", cell, pf.flags.relax_k, pf.flags.relax_alpha, pf.relax_drafts));
+        for (const char* mode : {"precise", "balance"}) {
+            nu::Target t0 = t;
+            t0.relax_dense_arm = {};
+            const nu::Plan a1 = nu::plan(nu::forModel(nu::parseMode(mode, "test"), false), t);
+            const nu::Plan a0 = nu::plan(nu::forModel(nu::parseMode(mode, "test"), false), t0);
+            check(a1.bitsKey() == a0.bitsKey() && nu::logLine(a1) == nu::logLine(a0) && !a1.flags.relax_on, cell + ": " + mode + " changed by the dense arm");
         }
     }
 #ifdef WHIRL_SOURCE_DIR
