@@ -167,6 +167,13 @@ public:
     std::uint64_t alloc_total = 0;  // bytes live through alloc() (sizing self-check in load; freeAlloc subtracts)
     Profile* prof = nullptr;
     hip::Stream stream = nullptr;  // the work stream (owned by stream_own; every kernel call reads this value)
+    // v0252-f1arg3 (PLAN V1-63 / V1-64; progress/v0252-f1arg2.HANDOFF.md section 6): the multi-block verify argmax twins.
+    // argmax_mb: 0 off, 1 on, 2 on + the workspace tripwire (setArgmaxMb, once per load: device::Profile::argmax_mb,
+    // WHIRL_ARGMAX_MB). am_ws: THIS Context's workspace (one per stream: only argmaxMbEnqueue launches with it, always on
+    // `stream`), allocated by allocCtl directly before the control words in the same allocation, zeroed once; every
+    // launch leaves it zeroed (the last block of each row resets its row)
+    int argmax_mb = 0;
+    DevPtr am_ws = 0;
     std::unique_ptr<hip::Graph> decode_graph;
     bool head_phase = false;
     std::uint32_t row_n = 0;
@@ -394,6 +401,19 @@ public:
     // launches argmax_rank_rows_to over n rows (argmax into out[dst.v[b]], drafts out[src.v[b]]) when rr is set and some
     // row has a draft; false = nothing launched (the caller launches its plain argmax)
     bool relaxRankEnqueue(const RelaxRank& rr, std::uint32_t n, DevPtr out, const RowIdx& dst, const RowIdx& src);
+    // v0252-f1arg3: the twins' switch. argmaxMbMode: the profile default, WHIRL_ARGMAX_MB overrides by the envFlag rule
+    // ("0" off, any other value on), "2" = on + tripwire. setArgmaxMb keeps the mode only when the code object has both
+    // twins (else 0); call it before allocCtl. argmaxMbOn: switched on and the workspace exists
+    static int argmaxMbMode(bool profile_on, const std::optional<std::string>& env);
+    void setArgmaxMb(int mode);
+    bool argmaxMbOn() const { return argmax_mb != 0 && am_ws != 0; }
+    // the control words (`bytes`, zeroed): with the switch on, one allocation of am_ws_bytes + bytes whose first
+    // am_ws_bytes are this Context's workspace (am_ws); returns the address of the control words
+    DevPtr allocCtl(std::uint64_t bytes);
+    // argmax of n verify rows into out[dst.v[b]] (verifyBatchEnqueue): argmax_rows_to_mb when argmaxMbOn(), else argmax_rows_to
+    void argmaxToEnqueue(std::uint32_t n, DevPtr out, const RowIdx& dst);
+    // the tripwire: throws ModelError("ArgmaxWsDirty") when a word of a downloaded workspace is not zero
+    static void checkAmWs(std::span<const std::int32_t> words);
     void mtpBatchStepEx(std::span<const MSeg> segs, std::uint32_t r, bool draft);
     void readCtl(std::span<std::int32_t> dst);
     struct Cycle {
@@ -479,6 +499,10 @@ protected:
     void setTokens(DevPtr ids_dev, std::span<const std::uint32_t> tokens, std::uint32_t pos0);
     void draftHeadMatmul(const Mat& head, std::uint32_t n);
     void argmaxRowsEnqueue(std::uint32_t n);
+    // v0252-f1arg3: THE launcher of both twins (no stream / workspace argument: this Context's own), grid
+    // (AM_TILES(n_vocab), rows) x AM_THREADS; src == nullptr: argmax_rows_to_mb, else argmax_rank_rows_to_mb with
+    // src / stats / stride. false = switched off (nothing launched; the caller launches its one-block kernel)
+    bool argmaxMbEnqueue(std::uint32_t rows, DevPtr out, const RowIdx& dst, const RowIdx* src, DevPtr stats, std::uint32_t stride);
     GdnSegs gdnSegsSingle(std::size_t i, bool conv, std::uint32_t n) const;
     GdnSegs gdnSegsBatch(const BatchPlan& bp, std::size_t i, bool conv) const;
     std::uint64_t pendSsmOff() const;

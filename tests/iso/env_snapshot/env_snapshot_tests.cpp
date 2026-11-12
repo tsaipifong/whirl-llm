@@ -46,6 +46,9 @@ void testFromValuesAndGet() {
     ISO_CHECK(s.fp8 == std::string("1"));
     ISO_CHECK(s.get("KV") == std::string("q8h"));
     ISO_CHECK(!s.get("GDN_WMMA"));
+    // v0252-f1arg3: WHIRL_ARGMAX_MB (the gfx1201 multi-block verify argmax switch) is read once with the load's snapshot
+    const EnvSnapshot am = EnvSnapshot::fromValues({{"ARGMAX_MB", std::string("2")}});
+    ISO_CHECK(am.argmax_mb == std::string("2") && am.get("ARGMAX_MB") == std::string("2"));
     bool threw = false;
     try {
         (void)EnvSnapshot::fromValues({{"NOT_A_NAME", std::string("1")}});

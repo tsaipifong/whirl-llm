@@ -55,6 +55,7 @@
 #include "moe_combine_h.hip"       // balance / fast MoE prefill: combine over f16 moe_yd (v0252-moedf16; LAST: no kernel moves)
 #include "moe_silu_w.hip"          // silu_mul_x8h for short rows, one wave per row (v0252-silu; LAST: no existing kernel moves)
 #include "moe_skip.hip"            // moeskip (fast): routing / grouping / combine / decode-expert twins (v0252-f5; after attn_kgv: LAST)
+#include "sample_argmax_mb.hip"     // multi-block verify argmax + F1 rank twin (v0252-f1arg; LAST: no existing kernel moves)
 #endif
 
 #if defined(__gfx1151__)

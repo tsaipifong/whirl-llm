@@ -90,10 +90,11 @@ std::optional<bool> requiredKernelAbsentOk(const std::string& arch, const std::s
         // gfx1151 (full 8060S run, INT-RC4F): no fp8 path, no gfx1201 precise MoE prefill GEMMs, no precise
         // MoE expert kernel for f32 / f16 experts; no gfx1201 4-wave attention attn_ws4r* (v0252-ws4r97); no DeltaNet replay kernels and no gdn_step_norm_v0 (the
         // gfx1151 fused_decode.hip has neither: verify takes the snapshot path); no moe_mxfp4.hip (MXFP4
-        // expert decode with int8-dot / fp8 prefill experts: the WMMA int8 / fp8 family gfx1151 lacks)
+        // expert decode with int8-dot / fp8 prefill experts: the WMMA int8 / fp8 family gfx1151 lacks); no multi-block
+        // argmax twins (v0252-f1arg: gfx1201 only, the 8060S argmax path is verified separately)
         {"gfx1151", {"fp8 ", "moe gemmr_moe", "moemx gemmr_moe", "moef gemmr_moe", "moef moe_gu_f_f32", "moef moe_gu_f_f16",
                      "gdn gdn_conv_l2 replay", "gdn gdn_step_norm replay", "gdn gdn_step_norm == gdn_step_norm_v0",
-                     "moemx moe_gu_mxfp4w", "moemx gemm8_moe", "ws4r attn_ws4r",
+                     "moemx moe_gu_mxfp4w", "moemx gemm8_moe", "ws4r attn_ws4r", "misc argmax_mb",
                      "e1in gdn"}},  // v0252-e1p1b: the E1 replay-count case (replay mode is gfx1201 only)
     };
     for (const auto& [a, keys] : lists) {

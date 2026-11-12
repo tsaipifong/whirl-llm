@@ -27,6 +27,7 @@ const whirl::test::Suite& unitSuite_server_kv_fit();  // arch025-iso4: split off
 const whirl::test::Suite& unitSuite_contract();
 const whirl::test::Suite& unitSuite_kernels_gemm();
 const whirl::test::Suite& unitSuite_kernels_moe();  // v0251-a7port (feat026-moep schedule replay)
+const whirl::test::Suite& unitSuite_kernels_sample();  // v0252-f1arg (multi-block verify argmax keys / rank model)
 const whirl::test::Suite& unitSuite_model_core();
 const whirl::test::Suite& unitSuite_hip_runtime();
 const whirl::test::Suite& unitSuite_platform_paths();
@@ -78,6 +79,8 @@ const OrderRow kOrder[] = {
     {"kernels.gemm", "testGemvhTuneDefault"},  // v0252-c2acc (gfx1201 precise gemvh default = m1_q1)
     {"kernels.moe", "testMoepSchedule"},  // v0251-a7port
     {"kernels.moe", "testMoeSkipRef"},  // v0252-f5 (moeskip host reference)
+    {"kernels.sample", "testArgmaxKeys"},       // v0252-f1arg (feat026-argmax's key check)
+    {"kernels.sample", "testArgmaxRankModel"},  // v0252-f1arg
     {"model.core", "testValueScope"},
     {"hip.runtime", "testLaunchDigest"},
     {"hip.runtime", "testLaunchDigestLayout"},
@@ -146,6 +149,7 @@ int main(int argc, char** argv) {
         &unitSuite_contract(),
         &unitSuite_kernels_gemm(),
         &unitSuite_kernels_moe(),
+        &unitSuite_kernels_sample(),
         &unitSuite_model_core(),
         &unitSuite_hip_runtime(),
         &unitSuite_platform_paths(),

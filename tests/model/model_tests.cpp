@@ -2574,7 +2574,8 @@ void testEnvSnapshot() {
                                      "ATTN_KGVAR",  // v0252-c1port: numerics loadFlags, not in the exec dump (unit testKgVarFlag)
                                      "ATTN_WS4R",  // v0252-ws4r97b: numerics loadFlags, not in the exec dump (unit testWs4rFlag)
                                      "ATTN_LSPLIT",  // v0252-l2split: numerics loadFlags, not in the exec dump (unit testLsplitFlag)
-                                     "MOESKIP"};  // v0252-f5: numerics loadOverrides, not in the exec dump (unit testMoeSkipPlan)
+                                     "MOESKIP",  // v0252-f5: numerics loadOverrides, not in the exec dump (unit testMoeSkipPlan)
+                                     "ARGMAX_MB"};  // v0252-f1arg3: Model::load -> Context::argmaxMbMode (iso forward.mtp_verify argmax_mb)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -3276,6 +3277,7 @@ void testPlanVsLoadOrTune() {
         {"PREC_GS", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
         {"FDQ8S", "loader.cpp Model::load -> fdqEnv: bit-neutral gemmfq slot (v0251-a3port)"},
         {"FDQ8S_MIN", "loader.cpp Model::load -> fdqEnv: gemmfq row threshold (v0251-a3port)"},
+        {"ARGMAX_MB", "loader.cpp Model::load -> Context::argmaxMbMode / setArgmaxMb: the gfx1201 multi-block verify argmax twins, bitwise the one-block kernels, no numerics flag (v0252-f1arg3)"},
     };
     for (const auto& e : EnvSnapshot::names()) {
         nu::EnvValues v;

@@ -91,6 +91,11 @@ struct Profile {
     // fast outputs were identical. Read by qwen35::numericsTarget (Target::k_relax_rank: the R9700's MoE fast arm needs it;
     // the 8060S arm k6a05 does not) and Context::setRelaxRank / relaxRankEnqueue (server and CLI decode)
     bool relax_rank_check;
+    // v0252-f1arg3: the MTP / batched verify argmax runs the multi-block twins argmax_rows_to_mb / argmax_rank_rows_to_mb
+    // (kernels/sample_argmax_mb.hip: AM_TILES(n_vocab) x rows blocks, bitwise the one-block argmax_rows(_to) /
+    // argmax_rank_rows_to) when the code object has both; WHIRL_ARGMAX_MB (0 off, 1 on, 2 on + workspace tripwire)
+    // overrides it, read once per load (Context::setArgmaxMb). The workspace is per Context (= per stream)
+    bool argmax_mb;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
     // v0252-n10: whirl-server writes the TAIL-CK checkpoint inside the solo prefill forward that contains the tail point
@@ -142,6 +147,12 @@ inline constexpr Profile k_profile_gfx1201{
     // b334a52); drafts only, output unchanged
     .draft64k_moe = true,
     .relax_rank_check = true,  // v0252-f1 G3a (ADR-0015)
+    // v0252-f1arg3 (PLAN V1-63 / V1-64): the multi-block verify argmax twins (kt q7 9525g: B/A 0.06-0.26, bitwise; e2e rule
+    // progress/v0252-f1arg2.HANDOFF.md section 5). WHIRL_ARGMAX_MB=0 turns it off
+    // v0252-b5 (PLAN V1-119, round 2c): merged OFF. The branch shipped true; its e2e verdict was NO-GAIN (V1-63 / V1-64,
+    // 2026-11-11), re-judged 2026-11-12 (V1-117: Ornith fast MTP 2k +0.65 % +-0.42, Swift balance -0.03 %, bitwise): the
+    // default for the measured class comes with the defaults round. WHIRL_ARGMAX_MB=1 / 2 turns it on.
+    .argmax_mb = false,
     // v0252-ch4k (PLAN V1-75): MoE solo prefills run 4096-row forwards in the 8060S fill form (whole chunks up to the
     // batch 4096; no extra memory, the prefill buffers are sized for the batch). Timed e2e A/B on the R9700 (Ornith
     // MXFP4, 4 ABBA rounds, 4096-row forwards vs 2048, scratch/v0252_ch4k/gpu/20261111-0310/summary.md): precise pp 8k
@@ -196,6 +207,7 @@ inline constexpr Profile k_profile_gfx1151{
     // (scratch\v0252_8sdraft\s8draft_gpu.ps1 -Part s, rule in its header)
     .draft64k_moe = true,
     .relax_rank_check = true,  // v0252-f1flip (ADR-0015 Revision 1): F1 on here too; the 8060S speed test ended INCONCLUSIVE twice with no loss, outputs identical
+    .argmax_mb = false,  // v0252-f1arg3: the gfx1151 object has no twins; the one-block argmax_rows(_to) / argmax_rank_rows_to stay
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = false,  // v0252-n10: 0.2.5.2 does not touch the Radeon 8060S (the 0.2.5.1 forward end stays)

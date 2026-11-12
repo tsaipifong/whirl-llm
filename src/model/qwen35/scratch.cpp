@@ -47,6 +47,7 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits
     n += static_cast<u64>(max_small_batch) * cfg.n_embd * f4;  // mtp_h
     n += B * 4 * 3;                                       // mtp_ids, ids, pos_buf
     n += ctl_words * 4;                                   // out_tok
+    n += am_ws_bytes;                                     // v0252-f1arg3: the argmax workspace before out_tok (gfx1201; an upper bound elsewhere)
     const u64 n_split = fd_splits;
     n += max_verify_rows * n_split * cfg.n_head * 2 * f4;  // part_ml
     n += max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4;  // part_acc

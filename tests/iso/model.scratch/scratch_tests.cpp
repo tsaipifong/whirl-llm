@@ -49,7 +49,9 @@ void testDqPtabTerm() {
     // dq_ptab: identity pages for up to ops::kDqMaxKeys keys (Model::kDqMaxKeys is its alias)
     q::Config c;  // all zero: only the size-independent terms remain
     const u64 n = q::bufferBytes(c, 0, 0, 0, 64);
-    ISO_CHECK(n == (static_cast<u64>(whirl::ops::kDqMaxKeys) / 256 + 1) * 4 + q::ctl_words * 4 + 256 + 8 * 4);
+    // v0252-f1arg3: + the argmax workspace (q::am_ws_bytes) that Context::allocCtl places before the control words; the
+    // estimate counts it on every GPU (an upper bound where the switch is off), so it is size-independent too
+    ISO_CHECK(n == (static_cast<u64>(whirl::ops::kDqMaxKeys) / 256 + 1) * 4 + q::ctl_words * 4 + q::am_ws_bytes + 256 + 8 * 4);
 }
 
 void testMoeAddsExpertBuffers() {

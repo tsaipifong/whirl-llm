@@ -175,6 +175,9 @@ void testProfiles() {
     // the 8060S too (FAST-8S-1 item 2; drafts only, the verify and the output unchanged)
     CHECK(a.draft64k_moe && b.draft64k_moe);
     CHECK(a.relax_rank_check && b.relax_rank_check);  // v0252-f1flip (ADR-0015 Rev 1): F1's one-pass check on both GPUs
+    // v0252-f1arg3 + v0252-b5 round 2c: the multi-block verify argmax twins are merged off on both cards (gfx1151 has no
+    // twins; the gfx1201 default comes with the defaults round, PLAN V1-117)
+    CHECK(!a.argmax_mb && !b.argmax_mb);
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
     // v0252-ch4k2 (PLAN V1-75): gfx1201 MoE 4096-row forwards in the fill form, as gfx1151 (v0252-ch4k timed A/B)

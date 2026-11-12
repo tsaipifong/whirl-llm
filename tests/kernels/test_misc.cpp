@@ -6,6 +6,8 @@
 //   * argmax / argmax_rows / argmax_rows_to / argmax_prob / draft_pick(_rows)
 //     tokens and control words exact (first maximum wins), probabilities vs
 //     CPU; set_tokens / set_rows exact; topk_rows candidate sets exact;
+//     (gfx1201) argmax_rows_to_mb / argmax_rank_rows_to_mb == argmax_rows_to /
+//     argmax_rank_rows_to bitwise and vs the CPU scan (v0252-f1arg);
 //   * requant_q6k_q4k / requant_q80_q4k exact (CPU emulation); requant_q6k_d2 + gemv_d2_nt*
 //     vs CPU on the decoded 2-bit head and multi-token == 1-token (bitwise);
 //   * activation fusions (rmsnorm_x8/x16, silu_mul_x8/x16, gated_norm_x8/x16
@@ -20,6 +22,7 @@
 #include <numeric>
 #include <set>
 
+#include "argmax_key.h"  // AM_WS_BYTES (v0252-f1arg multi-block argmax workspace)
 #include "cpu_ref.h"
 #include "whirl/spec_sample.h"
 
@@ -291,6 +294,228 @@ void testMisc(Ctx& c) {
                 rl.mismatches = diff_launch;
                 rl.pass = diff_launch == 0;
                 c.rep.add(rl);
+            }
+        }
+        // v0252-f1arg (gfx1201 only): the multi-block twins argmax_rows_to_mb / argmax_rank_rows_to_mb must give bitwise
+        // what argmax_rows_to / argmax_rank_rows_to give (control words, rank, row max bits, l_d bits) and what the legacy
+        // CPU scan gives, on the verify shapes (n 248320 x 1 / 2 / 3 / 4 / 8 / 32 rows), on n = 3 * 4096 + 5 (scalar tail
+        // path, rows not 16-byte aligned) and n = 7 (one partial tile), with edge rows (tied maxima, also across the 4095 /
+        // 4096 tile border, the maximum in the last element, all -inf / NaN or one finite value late in such a row, a NaN
+        // at index 0, +-0 and denormal maxima, drafts at tile borders, a draft id n / n - 1 / negative, no draft); every
+        // twin launch must leave the workspace zeroed; 10 launches equal. v0252-f1arg2 (REVIEW-v0252-f1arg B2 / C1): 10
+        // back-to-back launches with no host sync between them give the same words and leave the workspace zeroed, and a
+        // grid of 1, tiles - 1 or tiles + 2 blocks per row (not AM_TILES(n)) gives the same bits. Grid and block size come
+        // from kernels/argmax_key.h (AM_TILES, AM_THREADS: the kernel's own constants).
+        static_assert(AM_MAX_ROWS == wk::kMaxVerifyRows, "AmWs rows (kernels/argmax_key.h) == the verify rows a launch may have");
+        {
+            const hip::Function fm = c.fnOpt("argmax_rows_to_mb"), fr = c.fnOpt("argmax_rank_rows_to_mb");
+            if (fm == nullptr || fr == nullptr) {
+                c.rep.skip("misc", "argmax_mb multi-block twins (v0252-f1arg)", "kernel not present in this code object");
+            } else {
+                const bool tab = c.k.argmax_rows_to_mb == fm && c.k.argmax_rank_rows_to_mb == fr;
+                c.rep.add(inv("argmax_mb twins in the host table (loadMisc, v0252-f1arg)", tab, 2));
+                const float inf = std::numeric_limits<float>::infinity(), qnan = std::numeric_limits<float>::quiet_NaN();
+                const float den = std::numeric_limits<float>::denorm_min();
+                // legacy argmax scan (kernels/shared/block_argmax.h order): first index of the maximum over values above
+                // -inf, 0 when none; m = x[index] (bit copy) or -inf
+                auto legacy = [&](const float* row, int nn, float& m) {
+                    float best = -inf;
+                    int idx = 0;
+                    for (int i = 0; i < nn; ++i)
+                        if (row[i] > best) {
+                            best = row[i];
+                            idx = i;
+                        }
+                    m = best;
+                    return idx;
+                };
+                struct Shape {
+                    int n, rows;
+                };
+                const Shape shapes[] = {{248320, 1}, {248320, 2}, {248320, 3}, {248320, 4}, {248320, 8}, {248320, 32}, {3 * 4096 + 5, 10}, {7, 3}};
+                const int stride = 32, words = 128;
+                Buf ws(AM_WS_BYTES);
+                ws.zero();
+                std::size_t n_rows = 0, bad_plain = 0, bad_rank = 0, bad_cpu = 0, bad_rep = 0, bad_ws = 0, n_ws = 0;
+                std::size_t bad_burst = 0, n_burst = 0, bad_grid = 0, n_grid = 0, n_grid_expose = 0;
+                auto wsZero = [&]() {
+                    const auto w = ws.down<std::uint8_t>(AM_WS_BYTES);
+                    ++n_ws;
+                    for (const std::uint8_t b : w)
+                        if (b != 0) return false;
+                    return true;
+                };
+                for (const Shape& sh : shapes) {
+                    const int nn = sh.n, R = sh.rows;
+                    std::vector<float> y = c.randn(static_cast<std::size_t>(R) * nn, 3.f);
+                    auto Y = [&](int r, int i) -> float& { return y[static_cast<std::size_t>(r) * nn + static_cast<std::size_t>(i % nn)]; };
+                    std::vector<int> dr(static_cast<std::size_t>(R), -1);  // draft id per row (-1: no draft word)
+                    float mtmp = 0.f;
+                    for (int r = 0; r < R; ++r) {
+                        float* row = &Y(r, 0);
+                        switch (r % 10) {
+                            case 0:  // random row, the draft is the argmax (rank 0)
+                                dr[r] = legacy(row, nn, mtmp);
+                                break;
+                            case 1:  // tied maximum (first index wins), the draft is the later copy (rank 1)
+                                Y(r, 100) = 50.f, Y(r, 9000) = 50.f, dr[r] = 9000 % nn;
+                                break;
+                            case 2:  // the maximum in the last element, draft id 0
+                                Y(r, nn - 1) = 60.f, dr[r] = 0;
+                                break;
+                            case 3:  // no value above -inf (NaN / -inf only): argmax 0, max -inf; in odd decades one finite
+                                     // value late in such a row (TRT-LLM test_greedy_argmax.py:84-86)
+                                for (int i = 0; i < nn; ++i) row[i] = i % 3 == 0 ? qnan : -inf;
+                                if ((r / 10) % 2 == 1) Y(r, nn - 3) = -1e30f;
+                                dr[r] = 5 % nn;
+                                break;
+                            case 4:  // a NaN at index 0, the maximum mid-row; the draft at a tile border
+                                Y(r, 0) = qnan, Y(r, nn / 2) = 70.f, dr[r] = 4096 % nn;
+                                break;
+                            case 5:  // +-0 maximum: -0 first (its index wins, the row max keeps its sign), draft +0
+                                for (int i = 0; i < nn; ++i) row[i] = -std::fabs(row[i]) - 1.f;
+                                Y(r, 5000) = -0.0f, Y(r, 5001) = 0.0f, Y(r, 5002) = -0.0f, dr[r] = 5001 % nn;
+                                break;
+                            case 6:  // denormal maximum above +0; draft the +0 (two denormals ahead of it)
+                                for (int i = 0; i < nn; ++i) row[i] = -std::fabs(row[i]) - 1.f;
+                                Y(r, 3) = 0.0f, Y(r, 7) = den, Y(r, 4097) = den, dr[r] = 3 % nn;
+                                break;
+                            case 7:  // a draft id at the row's end (REVIEW B2): even decades n = just outside the row (no
+                                     // rank: INT_MAX, l_d -inf; a kernel testing d <= n would read the next row's first
+                                     // logit and report a count), odd decades n - 1 = the last element (a real rank)
+                                dr[r] = (r / 10) % 2 == 0 ? nn : nn - 1;
+                                break;
+                            case 8:  // a negative draft id in the draft word: no rank
+                                dr[r] = -3;
+                                break;
+                            default:  // no draft word (src -1); a tied maximum across the tile border 4095 / 4096 (blocks
+                                      // 0 and 1: the lower index 4095 must win; TRT-LLM test_greedy_argmax.py:76-77)
+                                dr[r] = -1;
+                                Y(r, 4095) = 80.f, Y(r, 4096) = 80.f;
+                                break;
+                        }
+                    }
+                    Buf dy(y), ctl(static_cast<std::size_t>(words) * 4), st(static_cast<std::size_t>(3 * stride) * 4);
+                    std::vector<int> ctl0(static_cast<std::size_t>(words), -7);
+                    wk::RowIdx mdst, msrc;
+                    for (int r = 0; r < 32; ++r) mdst.v[r] = -1, msrc.v[r] = -1;
+                    for (int r = 0; r < R; ++r) {
+                        mdst.v[r] = r;  // argmax words [0, 32), draft words [64, 96): never overlapping (the kernels' contract)
+                        if (r % 10 != 9) {
+                            msrc.v[r] = 64 + r;
+                            ctl0[static_cast<std::size_t>(64 + r)] = dr[r];
+                        }
+                    }
+                    const unsigned tiles = static_cast<unsigned>(AM_TILES(nn));  // the launchers' grid (argmax_key.h)
+                    // one twin launch with gx blocks per row (no sync): 1 = argmax_rows_to_mb, 3 = argmax_rank_rows_to_mb
+                    auto launchMb = [&](int which, unsigned gx) {
+                        if (which == 1)
+                            hip::launch(fm, {gx, static_cast<unsigned>(R), 1}, {AM_THREADS, 1, 1}, 0, c.s, dy.p(), nn, ctl.p(), mdst, ws.p());
+                        else
+                            hip::launch(fr, {gx, static_cast<unsigned>(R), 1}, {AM_THREADS, 1, 1}, 0, c.s, dy.p(), nn, ctl.p(), mdst, msrc, st.p(), stride,
+                                        ws.p());
+                    };
+                    auto words_now = [&]() {  // control words + stats after a sync
+                        c.sync();
+                        std::vector<int> all = ctl.down<int>(static_cast<std::size_t>(words));
+                        const auto sv = st.down<int>(static_cast<std::size_t>(3 * stride));
+                        all.insert(all.end(), sv.begin(), sv.end());
+                        return all;
+                    };
+                    // 0 old plain, 1 new plain, 2 old rank, 3 new rank (new: gx blocks per row) -> control words + stats
+                    auto run = [&](int which, unsigned gx) {
+                        ctl.up(ctl0);
+                        st.fill(0x55);
+                        if (which == 0)
+                            hip::launch(c.k.argmax_rows_to, {static_cast<unsigned>(R), 1, 1}, {1024, 1, 1}, 0, c.s, dy.p(), nn, ctl.p(), mdst);
+                        else if (which == 2)
+                            hip::launch(c.k.argmax_rank_rows_to, {static_cast<unsigned>(R), 1, 1}, {1024, 1, 1}, 0, c.s, dy.p(), nn, ctl.p(), mdst, msrc,
+                                        st.p(), stride);
+                        else
+                            launchMb(which, gx);
+                        return words_now();
+                    };
+                    const std::vector<int> a0 = run(0, tiles), a1 = run(1, tiles);
+                    bad_ws += wsZero() ? 0 : 1;
+                    const std::vector<int> a2 = run(2, tiles), a3 = run(3, tiles);
+                    bad_ws += wsZero() ? 0 : 1;
+                    n_rows += static_cast<std::size_t>(R);
+                    for (std::size_t i = 0; i < a0.size(); ++i) bad_plain += a0[i] != a1[i];
+                    for (std::size_t i = 0; i < a2.size(); ++i) bad_rank += a2[i] != a3[i];
+                    for (int it = 1; it < 10; ++it) {
+                        bad_rep += run(it % 2 == 0 ? 1 : 3, tiles) != (it % 2 == 0 ? a1 : a3);
+                        bad_ws += wsZero() ? 0 : 1;
+                    }
+                    // REVIEW B2: 10 back-to-back launches, plain and rank twins alternating on one workspace with no host
+                    // sync between them (the verify loop once V1-61 drops the per-cycle sync); the last (rank) launch
+                    // leaves a3's words, and the workspace is zeroed after the burst
+                    ctl.up(ctl0);
+                    st.fill(0x55);
+                    for (int it = 0; it < 10; ++it) launchMb(it % 2 == 0 ? 1 : 3, tiles);
+                    bad_burst += words_now() != a3;
+                    bad_burst += wsZero() ? 0 : 1;
+                    ++n_burst;
+                    // REVIEW C1: the twins must not depend on the launcher's grid: 1 block per row (every tile after the
+                    // first in the kernel's slow loop), tiles - 1 (one block takes two tiles) and tiles + 2 (empty blocks)
+                    for (const unsigned gx : {1u, tiles - 1u, tiles + 2u}) {
+                        if (gx < 1u || gx == tiles) continue;
+                        bad_grid += run(1, gx) != a1;
+                        bad_ws += wsZero() ? 0 : 1;
+                        bad_grid += run(3, gx) != a3;
+                        bad_ws += wsZero() ? 0 : 1;
+                        n_grid += 2;
+                    }
+                    // the twins vs the legacy CPU scan and the F1 rank rule
+                    for (int r = 0; r < R; ++r) {
+                        const float* row = &Y(r, 0);
+                        float m = 0.f;
+                        const int tok = legacy(row, nn, m);
+                        const int d = r % 10 != 9 ? dr[r] : -1;
+                        const bool has = d >= 0 && d < nn;
+                        int rank = 0;  // the F1 rule written out (sample_pick_set_tokens.h:80), not argmax_key.h's helper
+                        if (has)
+                            for (int i = 0; i < nn; ++i) rank += (row[i] > row[d] || (row[i] == row[d] && i < d)) ? 1 : 0;
+                        const float ld = has ? row[d] : -inf;
+                        int mb, lb;
+                        std::memcpy(&mb, &m, 4);
+                        std::memcpy(&lb, &ld, 4);
+                        const std::size_t sb = static_cast<std::size_t>(words);
+                        bad_cpu += a1[static_cast<std::size_t>(r)] != tok;
+                        bad_cpu += a3[static_cast<std::size_t>(r)] != tok;
+                        bad_cpu += a3[sb + static_cast<std::size_t>(r)] != (has ? rank : std::numeric_limits<int>::max());
+                        bad_cpu += a3[sb + static_cast<std::size_t>(stride + r)] != mb;
+                        bad_cpu += a3[sb + static_cast<std::size_t>(2 * stride + r)] != lb;
+                        // the grid check bites only on rows whose maximum lies outside tile 0 (what one block per row
+                        // reads without the kernel's remaining-tile loop)
+                        if (tiles > 1u && tok >= AM_TILE) ++n_grid_expose;
+                    }
+                }
+                Result r1, r2, r3, r4, r5, r6, r7;
+                r1.name = "argmax_rows_to_mb == argmax_rows_to (control words bitwise; 8 shapes incl. 248320 x 1..32, edge rows)";
+                r2.name = "argmax_rank_rows_to_mb == argmax_rank_rows_to (control words, rank, max bits, l_d bits)";
+                r3.name = "argmax_mb twins vs the legacy CPU scan (first maximum, -inf -> 0) and the F1 rank rule";
+                r4.name = "argmax_mb twins: 10 launches on one workspace equal";
+                r5.name = "argmax_mb twins leave the workspace zeroed (after every launch)";
+                r6.name = "argmax_mb twins: 10 back-to-back launches without a host sync equal (workspace zeroed after)";
+                r7.name = "argmax_mb twins: grids of 1, tiles - 1 and tiles + 2 blocks per row give the same bits";
+                r1.kind = r2.kind = r4.kind = r5.kind = r6.kind = r7.kind = Kind::invariant;
+                r1.n = r2.n = r3.n = n_rows;
+                r4.n = 9 * (sizeof(shapes) / sizeof(shapes[0]));
+                r5.n = n_ws;
+                r6.n = n_burst;
+                r7.n = n_grid;
+                r1.mismatches = bad_plain;
+                r2.mismatches = bad_rank;
+                r3.mismatches = bad_cpu;
+                r4.mismatches = bad_rep;
+                r5.mismatches = bad_ws;
+                r6.mismatches = bad_burst;
+                r7.mismatches = bad_grid + (n_grid_expose == 0 ? 1u : 0u);  // no exposing row = the check proves nothing
+                r7.note = "rows with the maximum outside tile 0: " + std::to_string(n_grid_expose);
+                for (Result* q : {&r1, &r2, &r3, &r4, &r5, &r6, &r7}) {
+                    q->pass = q->mismatches == 0;
+                    c.rep.add(*q);
+                }
             }
         }
         // argmax_prob

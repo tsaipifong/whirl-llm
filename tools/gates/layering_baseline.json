@@ -296,6 +296,10 @@
    "forward.dispatch"
   ],
   [
+   "forward.mtp_verify",
+   "kernels.sample"
+  ],
+  [
    "forward.prefill",
    "forward.dispatch"
   ],

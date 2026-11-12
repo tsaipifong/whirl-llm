@@ -46,12 +46,14 @@ public:
     Value attn_lsplit;
     // numerics::loadOverrides through numericsRequest (v0252-f5, feat027 moeskip): fast-only, ignored in precise / balance
     Value moeskip;
+    // Model::load (v0252-f1arg3, Context::argmaxMbMode): the gfx1201 multi-block verify argmax twins (WHIRL_ARGMAX_MB)
+    Value argmax_mb;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 67;
+    static constexpr std::size_t n_names = 68;
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

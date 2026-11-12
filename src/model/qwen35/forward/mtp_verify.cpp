@@ -6,8 +6,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../forward_internal.h"
+#include "../../../../kernels/argmax_key.h"  // v0252-f1arg3: AM_TILES / AM_THREADS / AM_MAX_ROWS / AM_WS_BYTES (the twins' geometry)
+
+#include <algorithm>
 
 namespace whirl::qwen35 {
+
+// v0252-f1arg3: the host side of the multi-block twins agrees with the kernel geometry (kernels/argmax_key.h)
+static_assert(AM_WS_BYTES == am_ws_bytes, "Context::allocCtl places AM_WS_BYTES before the control words");
+static_assert(AM_MAX_ROWS >= static_cast<int>(max_verify_rows), "one workspace covers every row a verify may have");
 
 // Rows [0, host.size()) take host tokens, the next n_dev rows the i32 tokens at
 // dev_src; positions pos0 + r. Kernel args only: never blocks.
@@ -239,8 +246,7 @@ u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
     if (gdn_replay)
         for (const VSeg& sg : segs) seqs[sg.seq].npend = 0;
     // relaxacc one-pass check (v0252-f1): the argmax kernel also ranks the MTP drafts of the requested segments
-    if (!relaxRankEnqueue(rr, n, out_tok, dst, relaxRankSrc(segs, rr.mask)))
-        hip::launch(k.argmax_rows_to, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), out_tok, dst);
+    if (!relaxRankEnqueue(rr, n, out_tok, dst, relaxRankSrc(segs, rr.mask))) argmaxToEnqueue(n, out_tok, dst);
     return n;
 }
 
@@ -476,12 +482,44 @@ bool Context::relaxRankEnqueue(const RelaxRank& rr, u32 n, DevPtr out, const Row
     bool any = false;
     for (u32 b = 0; b < n && b < cap; ++b) any = any || src.v[b] >= 0;
     if (!any) return false;
-    hip::launch(k.argmax_rank_rows_to, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), out, dst, src, rr.stats, I(rr.stride));
+    // v0252-f1arg3: the multi-block twin when switched on (bitwise argmax_rank_rows_to)
+    if (!argmaxMbEnqueue(n, out, dst, &src, rr.stats, rr.stride))
+        hip::launch(k.argmax_rank_rows_to, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), out, dst, src, rr.stats, I(rr.stride));
     return true;
 }
 
 void Context::argmaxRowsEnqueue(u32 n) {
+    // v0252-f1arg3: argmax_rows writes row r to ctlSlot(ctl_rows) + r: the twin with dst.v[r] = r on that base (bitwise:
+    // argmax_rows and argmax_rows_to share kernels/shared/block_argmax.h)
+    if (argmaxMbOn()) {
+        RowIdx dst;
+        for (u32 r = 0; r < sizeof(dst.v) / sizeof(dst.v[0]); ++r) dst.v[r] = static_cast<i32>(r);
+        if (argmaxMbEnqueue(n, ctlSlot(ctl_rows), dst, nullptr, 0, 0)) return;
+    }
     hip::launch(k.argmax_rows, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), ctlSlot(ctl_rows));
+}
+
+// v0252-f1arg3: see the header
+void Context::argmaxToEnqueue(u32 n, DevPtr out, const RowIdx& dst) {
+    if (!argmaxMbEnqueue(n, out, dst, nullptr, 0, 0)) hip::launch(k.argmax_rows_to, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), out, dst);
+}
+
+// v0252-f1arg3: the one launcher of the twins. Stream and workspace are this Context's (never an argument), so no caller
+// can pair the workspace with another stream (progress/v0252-f1arg2.HANDOFF.md section 6, rule 2)
+bool Context::argmaxMbEnqueue(u32 rows, DevPtr out, const RowIdx& dst, const RowIdx* src, DevPtr stats, u32 stride) {
+    if (!argmaxMbOn()) return false;
+    if (rows == 0 || rows > static_cast<u32>(AM_MAX_ROWS)) throw ModelError("BatchTooLarge");
+    const hip::Dim3 grid = D(AM_TILES(static_cast<u64>(cfg.n_vocab)), rows), block = D(AM_THREADS);
+    if (src == nullptr)
+        hip::launch(k.argmax_rows_to_mb, grid, block, 0, stream, logits, I(cfg.n_vocab), out, dst, am_ws);
+    else
+        hip::launch(k.argmax_rank_rows_to_mb, grid, block, 0, stream, logits, I(cfg.n_vocab), out, dst, *src, stats, I(stride), am_ws);
+    return true;
+}
+
+void Context::checkAmWs(std::span<const i32> words) {
+    for (const i32 w : words)
+        if (w != 0) throw ModelError("ArgmaxWsDirty", "the multi-block argmax workspace is not zero after a cycle (WHIRL_ARGMAX_MB=0 avoids the twins)");
 }
 
 void Context::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<const u32>> host_drafts, u32 pos0) {
@@ -523,7 +561,21 @@ void Context::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<con
 
 Context::Cycle Context::readCycle(std::span<u32> out, std::span<u32> drafts) {
     i32 buf[ctl_words];
-    hip::download(buf, out_tok, sizeof buf);
+    // v0252-f1arg3 tripwire (WHIRL_ARGMAX_MB=2, debug builds): the workspace directly before the control words comes down
+    // in the same copy (no extra sync) and must be all zero after every cycle
+#ifndef NDEBUG
+    const bool trip = argmaxMbOn();
+#else
+    const bool trip = argmax_mb == 2 && am_ws != 0;
+#endif
+    if (trip && out_tok == am_ws + am_ws_bytes) {
+        i32 wbuf[am_ws_bytes / 4 + ctl_words];
+        hip::download(wbuf, am_ws, sizeof wbuf);
+        checkAmWs(std::span<const i32>(wbuf, am_ws_bytes / 4));
+        std::memcpy(buf, wbuf + am_ws_bytes / 4, sizeof buf);
+    } else {
+        hip::download(buf, out_tok, sizeof buf);
+    }
     for (std::size_t r = 0; r < out.size(); ++r) out[r] = static_cast<u32>(buf[ctl_rows + r]);
     for (std::size_t r = 0; r < drafts.size(); ++r) drafts[r] = static_cast<u32>(buf[ctl_drafts + r]);
     Cycle c;

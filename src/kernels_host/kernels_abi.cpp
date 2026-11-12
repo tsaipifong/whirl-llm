@@ -613,6 +613,8 @@ void loadMisc(MiscKernels& k, const Loader& L) {
         {&KernelTable::spec_accept_rows, "spec_accept_rows"},  // v0252-e1p1 (feat026-acc; null: host accept)
         {&KernelTable::set_rows_dp, "set_rows_dp"},                // v0252-e1p1b (E1 device inputs; null: no E1 path)
         {&KernelTable::rmsnorm_q8_rows_dv, "rmsnorm_q8_rows_dv"},  // v0252-e1p1b
+        {&KernelTable::argmax_rows_to_mb, "argmax_rows_to_mb"},  // v0252-f1arg (gfx1201 only)
+        {&KernelTable::argmax_rank_rows_to_mb, "argmax_rank_rows_to_mb"},  // v0252-f1arg (gfx1201 only)
     };
     for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
     k.copy_rows_map = L.opt("copy_rows_map");
