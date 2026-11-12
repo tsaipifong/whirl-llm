@@ -211,6 +211,10 @@ void testProfiles() {
     // kt verdict q8=KEEP-b f16=KEEP-plain (q7 9525u); the 8060S off (its object has no attn_ws4r; attn_ws4 / ws4g there)
     CHECK(a.attn_ws4r_q8 == 2 && a.attn_ws4r_f16 == 1);
     CHECK(b.attn_ws4r_q8 == 0 && b.attn_ws4r_f16 == 0);
+    // v0252-l2split (PLAN V1-88): the decode / verify split count by machine fill: R9700 64 blocks = 32 WGPs x 2 attn_ws4r
+    // blocks (one machine wave); the 8060S 0 (its attn_ws4 path keeps the constant 64 splits)
+    CHECK(a.attn_lsplit_blocks == 64);
+    CHECK(b.attn_lsplit_blocks == 0);
     // constexpr: the field reads fold like the arch comparisons they replaced
     static_assert(d::profile(Arch::gfx1151).prefill_exec_moe == 4096 && !d::profile(Arch::gfx1201).tune_fast);
     // REVIEW-ARCH3 P3-3: a value with no row throws instead of getting the gfx1201 row (a new enumerator without a

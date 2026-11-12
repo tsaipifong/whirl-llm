@@ -703,6 +703,8 @@ void testFastOnlyOverrides() {
         // v0252-c3port (feat026-moedec): fused precise MoE decode / gemvh on f32 input, bit-identical (kt moefuse, golden)
         {"MOE_FUSE", 'B'},   {"GEMVH_F32", 'B'},
         {"ATTN_WS4R", 'B'},  // v0252-ws4r97b: gfx1201 attn_ws4r1 / 2[b], bit-identical to attn_wsplit1 / 2 (kt ws4r, golden)
+        // v0252-l2split: another decode split partition (another f32 combine order): balance / fast only, precise ignores it
+        {"ATTN_LSPLIT", 'L'},
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -1208,6 +1210,63 @@ static void testWs4rFlag() {
             }
 }
 
+// v0252-l2split (PLAN V1-88): numerics flag attn_lsplit = the decode / verify split count rule (ops::lsplitCount). By MODE:
+// precise 0 (today's split, bit-identical, golden unchanged) on every card, model and value of WHIRL_ATTN_LSPLIT (the variable
+// is ignored there with one Plan::ignored note); balance / fast "auto" (device::Profile::attn_lsplit_blocks); WHIRL_ATTN_LSPLIT
+// = auto / 0..4096 overrides only that flag in balance / fast; an invalid value keeps auto with one note. Fails before
+// v0252-l2split (no flag, no parseLsplit).
+static void testLsplitFlag() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    const std::uint32_t A = nu::kAttnLsplitAuto;
+    NCHECK(A == 0xFFFFFFFFu, "kAttnLsplitAuto {}", A);
+    NCHECK(nu::Flags{}.attn_lsplit == 0, "Flags default attn_lsplit {} (want 0: today's split)", nu::Flags{}.attn_lsplit);
+    const std::pair<const char*, std::uint32_t> valid[] = {{"0", 0}, {"64", 64}, {"128", 128}, {"0192", 192}, {"4096", 4096}, {"auto", A}};
+    const char* const invalid[] = {"4097", "", "x", "-1", "64b", "AUTO", " 64", "10000", "99999"};
+    for (const auto& [v, want] : valid) NCHECK(nu::parseLsplit(v) == want, "parseLsplit('{}')", v);
+    for (const char* v : invalid) NCHECK(!nu::parseLsplit(v).has_value(), "parseLsplit('{}') must be invalid", v);
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const bool precise = std::string_view(mode) == "precise";
+                const nu::Target t = target(c, model, false);
+                const nu::Plan d = pl(t, mode, {});
+                const std::uint32_t want_d = precise ? 0u : A;
+                NCHECK(d.flags.attn_lsplit == want_d, "attn_lsplit default {} {} {}: {} (want {})", c.name, model, mode, d.flags.attn_lsplit, want_d);
+                NCHECK(!d.lossy_override && d.ignored.empty(), "attn_lsplit default {} {} {}: the default is not an override", c.name, model, mode);
+                for (const auto& [v, want] : valid) {
+                    const nu::Plan p = pl(t, mode, {{"ATTN_LSPLIT", v}});
+                    if (precise) {
+                        // precise: never another split; the variable is reported once and changes nothing else
+                        NCHECK(p.flags.attn_lsplit == 0 && p.bitsKey() == d.bitsKey() && !p.lossy_override && p.ignored.size() == 1 &&
+                                   p.ignored[0].rfind(std::string("WHIRL_ATTN_LSPLIT=") + v + " ignored: precise", 0) == 0,
+                               "attn_lsplit precise {} {}: WHIRL_ATTN_LSPLIT='{}' -> {} ({} notes)", c.name, model, v, p.flags.attn_lsplit, p.ignored.size());
+                        continue;
+                    }
+                    NCHECK(p.flags.attn_lsplit == want, "attn_lsplit {} {} {}: WHIRL_ATTN_LSPLIT='{}' -> {} (want {})", c.name, model, mode, v,
+                           p.flags.attn_lsplit, want);
+                    nu::Plan a = d;
+                    a.flags.attn_lsplit = want;
+                    NCHECK(a.bitsKey() == p.bitsKey() && nu::logLine(p) == nu::logLine(d) && p.overrides == d.overrides &&
+                               p.lossy_override == d.lossy_override && p.ignored.empty(),
+                           "attn_lsplit {} {} {}: WHIRL_ATTN_LSPLIT='{}' changes only the attn_lsplit flag", c.name, model, mode, v);
+                }
+                for (const char* v : invalid) {
+                    const nu::Plan p = pl(t, mode, {{"ATTN_LSPLIT", v}});
+                    NCHECK(p.flags.attn_lsplit == want_d, "attn_lsplit {} {} {}: invalid WHIRL_ATTN_LSPLIT='{}' -> {} (want the default)", c.name, model,
+                           mode, v, p.flags.attn_lsplit);
+                    std::size_t notes = 0;
+                    for (const std::string& n : p.ignored) notes += n.rfind(std::string("WHIRL_ATTN_LSPLIT=") + v + " ignored", 0) == 0;
+                    NCHECK(notes == 1 && p.ignored.size() == 1 && p.bitsKey() == d.bitsKey() && p.overrides == d.overrides,
+                           "attn_lsplit {} {} {}: invalid WHIRL_ATTN_LSPLIT='{}': one Plan::ignored note, nothing else changes", c.name, model, mode, v);
+                }
+            }
+}
+
 static void testMoedecDefault() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -1258,6 +1317,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testRfuseDefault();  // v0251-a11port (fails before the port: the plan has no gfx1151 default)
     testKgVarFlag();  // v0252-c1port; v0252-c1acc auto default + invalid-value note (fails before c1acc)
     testWs4rFlag();  // v0252-ws4r97b (fails before phase 2: the stub parseWs4r accepts nothing)
+    testLsplitFlag();  // v0252-l2split (fails to build before the change: no attn_lsplit / parseLsplit)
     testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port); v0252-c3bdef (the R9700 MoE default rows fail before c3bdef)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)

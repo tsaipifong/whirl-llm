@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
                 std::string f;
                 while (std::getline(ss, f, ',')) {
                     if (!kt::benchFamilyKnown(f)) {
-                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe gdn fdq ggemv ws4r)\n", f.c_str());
+                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe gdn fdq ggemv ws4r lsplit)\n", f.c_str());
                         return usage();
                     }
                     bo.families.insert(f);
