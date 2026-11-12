@@ -48,12 +48,14 @@ public:
     Value moeskip;
     // Model::load (v0252-f1arg3, Context::argmaxMbMode): the gfx1201 multi-block verify argmax twins (WHIRL_ARGMAX_MB)
     Value argmax_mb;
+    // numerics::loadFlags (v0252-strixc2): WHIRL_ATTN_SX=0 turns the gfx1151 balance attn_sx prefill attention off
+    Value attn_sx;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 68;
+    static constexpr std::size_t n_names = 69;
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

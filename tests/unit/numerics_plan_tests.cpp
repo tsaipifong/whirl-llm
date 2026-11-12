@@ -87,6 +87,7 @@ nu::Target target(const CardFake& c, std::string_view model, bool kv_explicit) {
     // per-card fast default rule as shipped (moeskip_fast_default_r9700 / _8060s)
     t.k_moe_skip = true;
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
+    t.attn_sx_profile = c.prof.attn_sx_balance;  // v0252-strixc2 (tune.cpp numericsTarget)
     return t;
 }
 
@@ -796,6 +797,7 @@ void testFastOnlyOverrides() {
         // v0252-l2split: another decode split partition (another f32 combine order): balance / fast only, precise ignores it
         {"ATTN_LSPLIT", 'L'},
         {"MOESKIP", 'F'},     // v0252-f5: moeskip, fast-only (applyFastOnlyOverride; drops routed experts)
+        {"ATTN_SX", 'L'},  // v0252-strixc2: attn_sx<NP> (strix fattn-rdna35), not bitwise: balance only (testAttnSxFlag)
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -1277,6 +1279,61 @@ static void testKgVarFlag() {
             }
 }
 
+// v0252-strixc2 (PLAN V1-09): the gfx1151 balance prefill attention attn_sx (strix-llama.cpp fattn-rdna35, NOT bitwise).
+// The plan flag attn_sx is on exactly in balance mode on the 8060S card (device::Profile::attn_sx_balance -> Target::
+// attn_sx_profile) with the item h16 (f16 intermediates) in the request, both models; never in precise or fast (precise
+// stays bit-identical, fast keeps its own path), never on the R9700 card (no kernel). WHIRL_ATTN_SX=0 turns it off and
+// changes nothing else (bitsKey = the default plan's with attn_sx false, same log line, no +overrides, never lossy); "1"
+// changes nothing in balance; a non-"0" value in precise / fast leaves the flag off and adds exactly one Plan::ignored
+// note. A custom balance item list without h16 leaves it off. Fails before the port (loadFlags never sets attn_sx).
+static void testAttnSxFlag() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    std::size_t on_cells = 0;
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const bool want = std::string_view(mode) == "balance" && c.prof.attn_sx_balance;
+                const nu::Plan d = pl(t, mode, {});
+                NCHECK(d.flags.attn_sx == want, "attn_sx default {} {} {}: {} (want {})", c.name, model, mode, d.flags.attn_sx, want);
+                on_cells += d.flags.attn_sx;
+                // "0": off, nothing else moves
+                const nu::Plan z = pl(t, mode, {{"ATTN_SX", "0"}});
+                nu::Plan a = d;
+                a.flags.attn_sx = false;
+                NCHECK(!z.flags.attn_sx && a.bitsKey() == z.bitsKey() && nu::logLine(z) == nu::logLine(d) && z.overrides == d.overrides &&
+                           z.lossy_override == d.lossy_override && z.ignored.empty(),
+                       "attn_sx {} {} {}: WHIRL_ATTN_SX=0 turns only the attn_sx flag off", c.name, model, mode);
+                for (const char* v : {"1", "x", ""}) {
+                    const nu::Plan o = pl(t, mode, {{"ATTN_SX", v}});
+                    NCHECK(o.flags.attn_sx == want && o.bitsKey() == d.bitsKey() && o.overrides == d.overrides && o.lossy_override == d.lossy_override,
+                           "attn_sx {} {} {}: WHIRL_ATTN_SX='{}' keeps the plan's choice", c.name, model, mode, v);
+                    std::size_t notes = 0;
+                    for (const std::string& n : o.ignored) notes += n.rfind(std::string("WHIRL_ATTN_SX=") + v + " ignored", 0) == 0;
+                    const std::size_t want_notes = std::string_view(mode) == "balance" ? 0 : 1;
+                    NCHECK(notes == want_notes && o.ignored.size() == want_notes, "attn_sx {} {} {}: WHIRL_ATTN_SX='{}': {} ignored notes (want {})",
+                           c.name, model, mode, v, notes, want_notes);
+                }
+            }
+    NCHECK(on_cells == 2, "attn_sx: on in exactly 2 cells (8060S balance, both models), got {}", on_cells);
+    // a custom balance list without h16: off; with h16: on (8060S)
+    for (const char* model : {"swift", "moe"}) {
+        const nu::Target t = target(card("8060s"), model, false);
+        const nu::Plan no = pl(t, "balance:fp8,kvq8", {});
+        const nu::Plan yes = pl(t, "balance:h16", {});
+        NCHECK(!no.flags.attn_sx && yes.flags.attn_sx, "attn_sx {}: custom balance without h16 -> off ({}), with h16 -> on ({})", model, no.flags.attn_sx,
+               yes.flags.attn_sx);
+        nu::Target tq = t;  // no MXFP4 tensor (h16 is MXFP4-only on this GPU): off
+        tq.has_mxfp4 = false;
+        NCHECK(!pl(tq, "balance", {}).flags.attn_sx, "attn_sx {}: a model without MXFP4 tensors -> off", model);
+    }
+}
+
 // v0252-c3port (feat026-moedec, gfx1201 precise decode): WHIRL_MOE_FUSE / WHIRL_GEMVH_F32 were off by default on both
 // cards, both models and every mode; "1" turns only that flag on (bitsKey = the off plan's with the flag set, same log
 // line, no +overrides, never lossy); "0" = off. The kernels exist only in the gfx1201 code object (ops::chooseMoeFuse /
@@ -1671,6 +1728,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testKgVarFlag();  // v0252-c1port; v0252-c1acc auto default + invalid-value note (fails before c1acc)
     testWs4rFlag();  // v0252-ws4r97b (fails before phase 2: the stub parseWs4r accepts nothing)
     testLsplitFlag();  // v0252-l2split (fails to build before the change: no attn_lsplit / parseLsplit)
+    testAttnSxFlag();  // v0252-strixc2 (fails before the port: loadFlags never sets attn_sx)
     testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port); v0252-c3bdef (the R9700 MoE default rows fail before c3bdef)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)

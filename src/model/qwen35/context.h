@@ -223,6 +223,7 @@ public:
     //   attn_dqf_on: q8 / q8h KV prefill attention: dequantize the sequence's keys into f16 rows in ffn_g / ffn_u, then the f16 attn_kg (bit-identical to attn_kg_q8; WHIRL_ATTN_DQF=0 off); dq_ptab: identity page table
     //   attn_seg: KG-3 (gfx1151): keys per range of the prefill attention key-range series (attn_prefill_wmma_s; 0 = one range when the keys fit the f16 scratch). WHIRL_ATTN_SEG (multiple of 256); f16 KV also walks its cache in ranges when set. Bit-identical either way.
     //   attn_kg_on: GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
+    //   attn_sx: v0252-strixc2 balance-only gfx1151 prefill attention attn_sx<NP> (strix-llama.cpp fattn-rdna35, not bitwise; device::Profile::attn_sx_balance + item h16; WHIRL_ATTN_SX=0 off)
     //   h16_dq: KG-1: f16 outputs from quantized weights whatever the tuned choice (a fused quantized gemm_cN choice runs as dequant + gemm_chN, bitwise the same as gemm_cN), so whether a GEMM writes f16 never depends on autotune timings (dense non-MXFP4 models, R9700)
     //   draft_window: WHIRL_DRAFT_WINDOW / _MIN: MTP draft attention over the first 256 + the last W positions once the context reaches draft_window_min (W = 0: off); the trunk and verify always see everything
     //   moe_rbf: MXFP4 x fp8 grouped GEMM: row-block-fast gemm8r_* when present (WHIRL_MOE_RBF=0 -> gemm8_moe*)

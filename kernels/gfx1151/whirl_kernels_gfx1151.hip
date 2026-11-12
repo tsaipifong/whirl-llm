@@ -39,3 +39,4 @@
 #include "gemm_fq.hip"             // fused-dequant MXFP4 prefill GEMM gemmfq_c2 / _t2 (gemm family; v0251-a3port, LAST: no existing kernel moves)
 #include "moe_router.hip"         // feat026-router: fused router logits + top-k (v0251-a11port: the 8060S default)
 #include "moe_skip.hip"           // moeskip (fast): routing / grouping / combine / decode-expert twins (v0252-f5; LAST: no existing kernel moves)
+#include "attn_sx.hip"             // v0252-strixc2: balance prefill attention from strix-llama.cpp fattn-rdna35 (MIT; LAST: no existing kernel moves)

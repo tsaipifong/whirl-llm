@@ -126,6 +126,9 @@ struct EnvValues {
     Raw attn_lsplit;
     // v0252-f5 (feat027 moeskip): WHIRL_MOESKIP=T[:M], fast-only (applyFastOnlyOverride; precise / balance ignore it)
     Raw moeskip;
+    // v0252-strixc2 (PLAN V1-09): attn_sx (WHIRL_ATTN_SX: "0" turns the balance gfx1151 attn_sx prefill attention off;
+    // any other value keeps the plan's choice; never on in precise / fast - Plan::ignored notes a non-"0" value there)
+    Raw attn_sx;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -133,7 +136,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 39;
+    static constexpr std::size_t n_fields = 40;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -229,6 +232,8 @@ struct Target {
     // objects) and the per-card fast default rule (moeskip_fast_default_r9700 / _8060s)
     bool k_moe_skip = false;
     bool moeskip_default = false;
+    // v0252-strixc2 (PLAN V1-09): device::Profile::attn_sx_balance (the gfx1151 row): balance prefill attention attn_sx
+    bool attn_sx_profile = false;
 };
 
 // ---- v0252-f2: the fast MoE relaxacc arms (the G3a / G4a screen arms) and the shipped default per GPU.
@@ -373,7 +378,10 @@ struct ItemState {
     X(B, gemvh_f32, false, "")                                   \
     X(B, gv_group, true, "gv_group")                             \
     X(U, gv_nmax, 0, "gv_nmax")                                  \
-    X(B, gdn_v0, false, "")                                          X(F, moe_skip_thr, 0.f, "")                                      X(U, moe_skip_min, 1, "")
+    X(B, gdn_v0, false, "")                                      \
+    X(F, moe_skip_thr, 0.f, "")                                  \
+    X(U, moe_skip_min, 1, "")                                    \
+    X(B, attn_sx, false, "")
 
 struct Flags {
 #define WHIRL_NF_B bool

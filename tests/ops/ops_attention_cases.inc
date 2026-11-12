@@ -671,6 +671,151 @@ void testAttnPrefill() {
     CHECK(pl.steps.size() == 2 && pl.steps[1].head0 == 12 && pl.steps[0].grid.y == 12);
 }
 
+// v0252-strixc2 (PLAN V1-09): the balance gfx1151 prefill attention attn_sx<NP> (strix-llama.cpp fattn-rdna35, not bitwise).
+// (1) attnSxFor: NP = the first of 8 / 4 / 2 dividing the GQA ratio (fattn-rdna35.cu:863-870), only when it also divides
+// the heads of the launch, head_dim 256, and the code object has that NP's kernel; exhaustive (never another NP's kernel).
+// (2) chooseAttnPrefill with attn_sx_on on the 8060S-like table: the f16 cache takes attn_sx<NP> in place of attn_kx
+// (one launch per head range, grid ceil(n / (64 / NP)) x (heads / NP) flattened in x, block 256); q8 / q8h keys in ONE
+// dequantized range take it on the copy in place of attn_pwf; multi-range series (attn_pws), WHIRL_ATTN_SEG and a head
+// range NP does not divide keep the old kernels. (3) attn_sx_on off, or no attn_sx in the code object (gfx1201): every
+// plan is exactly the plan without the flag. Fails before the port (attnSxFor / the flag do not exist).
+void testAttnSx() {
+    static const kn::KernelTable k0 = attnTable(true, true, true, false);
+    static const kn::KernelTable ks = [] {
+        kn::KernelTable k = attnTable(true, true, true, false);
+        k.attn_sx2 = tag("attn_sx2");
+        k.attn_sx4 = tag("attn_sx4");
+        k.attn_sx8 = tag("attn_sx8");
+        return k;
+    }();
+    // (1) the selector
+    struct Pick {
+        std::uint32_t grp, hp, hd;
+        const char* want;
+        std::uint32_t np;
+    };
+    const Pick picks[] = {{6, 24, 256, "attn_sx2", 2}, {8, 16, 256, "attn_sx8", 8}, {4, 16, 256, "attn_sx4", 4}, {2, 4, 256, "attn_sx2", 2},
+                          {12, 24, 256, "attn_sx4", 4}, {6, 12, 256, "attn_sx2", 2}, {8, 12, 256, "null", 0},     {3, 24, 256, "null", 0},
+                          {1, 24, 256, "null", 0},      {6, 24, 128, "null", 0},     {8, 16, 512, "null", 0},     {0, 16, 256, "null", 0}};
+    for (const Pick& c : picks) {
+        const ops::AttnSxPick p = ops::attnSxFor(ks, c.grp, c.hp, c.hd);
+        CHECK(nameOf(p.f) == c.want && p.np == c.np);
+        const ops::AttnSxPick z = ops::attnSxFor(k0, c.grp, c.hp, c.hd);  // not in the code object: none
+        CHECK(z.f == nullptr && z.np == 0);
+    }
+    // (2) the plans
+    struct Shape {
+        std::uint32_t heads, kv, np;
+    };
+    auto prob = [](const Shape& sh, std::uint32_t n, std::uint32_t pos0) {
+        ops::AttnPrefillProblem p;
+        p.n = n;
+        p.pos0 = pos0;
+        p.head_dim = 256;
+        p.n_head = sh.heads;
+        p.n_head_kv = sh.kv;
+        p.scale = 1.0f / 16.0f;
+        return p;
+    };
+    // v0252-strixc2fix: kernels compared by NAME, not by pointer - k0 and ks are two tables whose tag() pointers differ for
+    // the same kernel (ops_fakes.h: every tag() call is a new string), so a pointer compare across tables is always false
+    // (GREEN 10:38, :444). A mismatch prints both plans.
+    auto dump = [](const char* w, const ops::AttnPrefillPlan& a) {
+        std::printf("  %s: %zu steps\n", w, a.steps.size());
+        for (const auto& x : a.steps)
+            std::printf("    op %d %s grid %u x %u block %u head0 %u copy %d ranged %d r %u..%u nrows %u\n", static_cast<int>(x.op), nameOf(x.f).c_str(),
+                        x.grid.x, x.grid.y, x.block.x, x.head0, x.from_copy ? 1 : 0, x.ranged ? 1 : 0, x.r0, x.r1, x.nrows);
+    };
+    auto same = [&dump](const ops::AttnPrefillPlan& a, const ops::AttnPrefillPlan& b) {
+        bool eq = a.steps.size() == b.steps.size();
+        for (std::size_t i = 0; eq && i < a.steps.size(); ++i) {
+            const auto& x = a.steps[i];
+            const auto& y = b.steps[i];
+            if (x.op != y.op || nameOf(x.f) != nameOf(y.f) || x.grid.x != y.grid.x || x.grid.y != y.grid.y || x.block.x != y.block.x ||
+                x.head0 != y.head0 || x.from_copy != y.from_copy || x.ranged != y.ranged || x.r0 != y.r0 || x.r1 != y.r1 || x.nrows != y.nrows)
+                eq = false;
+        }
+        if (!eq) {
+            dump("plan a", a);
+            dump("plan b", b);
+        }
+        return eq;
+    };
+    ops::AttnPrefillFlags off, on;
+    on.attn_sx_on = true;
+    const Shape shapes[] = {{24, 4, 2}, {16, 2, 8}, {4, 2, 2}};
+    for (const Shape& sh : shapes) {
+        const std::string s = "attn_sx" + std::to_string(sh.np);
+        const std::uint32_t cols = 64 / sh.np;
+        // f16 cache, 512 queries at 1536: one launch of attn_sx<NP> in place of attn_kx
+        ops::AttnPrefillProblem p = prob(sh, 512, 1536);
+        auto pl = ops::chooseAttnPrefill(p, on, ks);
+        CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == s && !pl.steps[0].from_copy && !pl.steps[0].ranged && pl.steps[0].head0 == 0 &&
+              pl.steps[0].grid.x == (512 + cols - 1) / cols * (sh.heads / sh.np) && pl.steps[0].grid.y == 1 && pl.steps[0].block.x == 256);
+        CHECK(nameOf(ops::chooseAttnPrefill(p, off, ks).steps.back().f) == "attn_kx");
+        CHECK(same(ops::chooseAttnPrefill(p, off, ks), ops::chooseAttnPrefill(p, off, k0)));
+        CHECK(same(ops::chooseAttnPrefill(p, on, k0), ops::chooseAttnPrefill(p, off, k0)));
+        // an odd query count: the last tile is partial (ceil)
+        p.n = 37;
+        pl = ops::chooseAttnPrefill(p, on, ks);
+        CHECK(pl.steps.size() == 1 && pl.steps[0].grid.x == (37 + cols - 1) / cols * (sh.heads / sh.np));
+        // q8 / q8h keys in one dequantized range (2048 rows <= 8192): kv_dq_rows_r, then attn_sx<NP> on the copy (in place of attn_pwf)
+        p = prob(sh, 512, 1536);
+        p.kv_q8 = true;
+        p.dq_rows = 8192;
+        p.dq_ptab = true;
+        p.dq_st_ml = true;
+        pl = ops::chooseAttnPrefill(p, on, ks);
+        CHECK(pl.steps.size() == 2 && pl.steps[0].op == ops::AttnStep::Op::dq_rows_r && pl.steps[0].nrows == 2048 && nameOf(pl.steps[1].f) == s &&
+              pl.steps[1].from_copy && !pl.steps[1].ranged && pl.steps[1].r0 == 0 && pl.steps[1].r1 == 2048 && pl.steps[1].block.x == 256);
+        CHECK(nameOf(ops::chooseAttnPrefill(p, off, ks).steps.back().f) == "attn_pwf");
+        CHECK(same(ops::chooseAttnPrefill(p, on, k0), ops::chooseAttnPrefill(p, off, k0)));
+        // keys past the scratch: the attn_pws series with the state carried, no attn_sx (no carried state in strix's kernel)
+        p.pos0 = 20000;
+        pl = ops::chooseAttnPrefill(p, on, ks);
+        CHECK(same(pl, ops::chooseAttnPrefill(p, off, ks)));
+        for (const auto& st : pl.steps) CHECK(nameOf(st.f).rfind("attn_sx", 0) != 0);
+        // WHIRL_ATTN_SEG on f16 KV past the range: the attn_pws series stays. v0252-strixc2fix: the series exists only with
+        // the softmax state buffers (dq_st_ml) and without attn_kx (the gfx1151 object has no attn_kx; selector
+        // `... && !kx && rows > attn_seg`); the 10:38 case had neither, so no series was planned at all (seg0 = one attn_kx
+        // launch, seg = attn_sx in its place: both one-range plans, :471 compared two different one-range kernels)
+        p = prob(sh, 512, 8192);
+        p.dq_st_ml = true;
+        ops::AttnPrefillFlags seg = on, seg0 = off;
+        seg.attn_seg = 4096;
+        seg0.attn_seg = 4096;
+        seg.attn_kx_on = false;
+        seg0.attn_kx_on = false;
+        pl = ops::chooseAttnPrefill(p, seg0, ks);
+        std::size_t pws = 0;
+        for (const auto& st : pl.steps) pws += nameOf(st.f) == "attn_pws" && st.ranged && !st.from_copy;
+        CHECK(pws >= 3 && pws == pl.steps.size());  // 8704 keys in ranges of 4096: 3 ranges (x head parts)
+        CHECK(same(ops::chooseAttnPrefill(p, seg, ks), pl));
+        // with attn_kx in the table (no real code object has attn_kx AND attn_sx) the selector never walked ranges: one
+        // attn_kx launch, and attn_sx takes its place like on any one-range f16 plan
+        seg.attn_kx_on = seg0.attn_kx_on = true;
+        CHECK(nameOf(ops::chooseAttnPrefill(p, seg0, ks).steps.back().f) == "attn_kx");
+        pl = ops::chooseAttnPrefill(p, seg, ks);
+        CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == s && !pl.steps[0].ranged);
+        // head_dim 128: never
+        p = prob(sh, 512, 1536);
+        p.head_dim = 128;
+        CHECK(same(ops::chooseAttnPrefill(p, on, ks), ops::chooseAttnPrefill(p, off, ks)));
+    }
+    // long prefill (Windows TDR budget: 4096 x 128k pairs per launch): two head ranges, each its own attn_sx launch
+    {
+        const Shape sw{24, 4, 2}, orn{16, 2, 8}, g8{24, 3, 8};
+        auto pl = ops::chooseAttnPrefill(prob(sw, 4096, 131072), on, ks);
+        CHECK(pl.steps.size() == 2 && nameOf(pl.steps[0].f) == "attn_sx2" && pl.steps[0].head0 == 0 && pl.steps[1].head0 == 12 &&
+              pl.steps[0].grid.x == 128 * 6 && pl.steps[1].grid.x == 128 * 6);
+        pl = ops::chooseAttnPrefill(prob(orn, 4096, 131072), on, ks);
+        CHECK(pl.steps.size() == 2 && nameOf(pl.steps[1].f) == "attn_sx8" && pl.steps[1].head0 == 8 && pl.steps[0].grid.x == 512 * 1);
+        // GQA 8 with 12-head ranges (24 / 3): NP 8 does not divide the range -> exactly the plan without the flag
+        CHECK(same(ops::chooseAttnPrefill(prob(g8, 4096, 131072), on, ks), ops::chooseAttnPrefill(prob(g8, 4096, 131072), off, ks)));
+        CHECK(nameOf(ops::chooseAttnPrefill(prob(g8, 512, 1536), on, ks).steps[0].f) == "attn_sx8");
+    }
+}
+
 // v0252-c1port (C1, feat026-attnkg97 / -97k; DISCOVERY v4 C3-1): the f16 attn_kg variant selector. ops::attnKgVariant is
 // exhaustive (np 6 / 4 / 2 written out, any other np -> nullptr: never the kernel of another NP, whose grid / block would
 // not match), and chooseAttnPrefill takes the variant only on the plain f16 path and on Q8P (kv_dq_rows + the f16

@@ -227,6 +227,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"ATTN_WS4R", &S::attn_ws4r},  // v0252-ws4r97b (PLAN V1-87 phase 2)
         {"ATTN_LSPLIT", &S::attn_lsplit},  // v0252-l2split (PLAN V1-88)
         {"MOESKIP", &S::moeskip},  // v0252-f5
+        {"ATTN_SX", &S::attn_sx},      // v0252-strixc2
     }};
     return t;
 }
@@ -458,6 +459,13 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
         if (e.gdn_strix_min)
             F.gdn_strix_min = static_cast<std::uint32_t>(std::max<unsigned long>(32, std::strtoul(e.gdn_strix_min->c_str(), nullptr, 10)));
     }
+    // v0252-strixc2 (PLAN V1-09): the gfx1151 balance prefill attention attn_sx (strix-llama.cpp fattn-rdna35: GQA-packed
+    // columns, split-D scores, lazy rescale; f32 scores / O / row sums, f16 P) - not bitwise, so balance only, under its
+    // item h16 (f16 intermediates); precise and fast never (fast keeps its own path). The device row decides
+    // (device::Profile::attn_sx_balance, like gdn_strix); ops::chooseAttnPrefill still needs the kernel and the shape.
+    // Like h16 itself on this GPU ("MXFP4 models only"), only for models with MXFP4 tensors (the product models).
+    // WHIRL_ATTN_SX=0 turns it off (A/B arm); other values change nothing (loadOverrides notes them in precise / fast).
+    F.attn_sx = r.mode == Mode::balance && t.attn_sx_profile && t.has_mxfp4 && r.has(Item::h16) && !(e.attn_sx && *e.attn_sx == "0");
 }
 
 // tune.cpp:939-982 on the item table (the per-item overrides, WHIRL_Q8DEC, relaxacc, noteSwitches) and the flags
@@ -586,6 +594,12 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
             else if (!parseLsplit(*v))
                 p.ignored.push_back(std::format("WHIRL_ATTN_LSPLIT={} ignored: not auto or 0..4096 (auto stays)", *v));
         }
+    // v0252-strixc2: WHIRL_ATTN_SX only turns the balance attn_sx off ("0"); a non-"0" value in precise / fast is noted once
+    // (the flag stays off there: the kernel is not bitwise, and fast keeps its own path)
+    if (items)
+        if (const Raw& v = e.attn_sx; v && *v != "0" && p.mode != Mode::balance)
+            p.ignored.push_back(std::format("WHIRL_ATTN_SX={} ignored: the strix prefill attention is balance-only ({} never takes it)", *v,
+                                            modeName(p.mode)));
     if (items) {
         if (const Raw& v = e.spec_sample; v && !v->empty())
             applyOverride(p, Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);

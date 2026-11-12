@@ -96,6 +96,9 @@ struct Profile {
     // argmax_rank_rows_to) when the code object has both; WHIRL_ARGMAX_MB (0 off, 1 on, 2 on + workspace tripwire)
     // overrides it, read once per load (Context::setArgmaxMb). The workspace is per Context (= per stream)
     bool argmax_mb;
+    // v0252-strixc2 (PLAN V1-09): balance-mode prefill attention attn_sx<NP> (strix-llama.cpp fattn-rdna35, gfx1151 code
+    // object only; not bitwise, so the numerics plan takes it in balance only: numerics::Target::attn_sx_profile)
+    bool attn_sx_balance;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
     // v0252-n10: whirl-server writes the TAIL-CK checkpoint inside the solo prefill forward that contains the tail point
@@ -153,6 +156,7 @@ inline constexpr Profile k_profile_gfx1201{
     // 2026-11-11), re-judged 2026-11-12 (V1-117: Ornith fast MTP 2k +0.65 % +-0.42, Swift balance -0.03 %, bitwise): the
     // default for the measured class comes with the defaults round. WHIRL_ARGMAX_MB=1 / 2 turns it on.
     .argmax_mb = false,
+    .attn_sx_balance = false,  // v0252-strixc2: no attn_sx in the gfx1201 code object
     // v0252-ch4k (PLAN V1-75): MoE solo prefills run 4096-row forwards in the 8060S fill form (whole chunks up to the
     // batch 4096; no extra memory, the prefill buffers are sized for the batch). Timed e2e A/B on the R9700 (Ornith
     // MXFP4, 4 ABBA rounds, 4096-row forwards vs 2048, scratch/v0252_ch4k/gpu/20261111-0310/summary.md): precise pp 8k
@@ -208,6 +212,7 @@ inline constexpr Profile k_profile_gfx1151{
     .draft64k_moe = true,
     .relax_rank_check = true,  // v0252-f1flip (ADR-0015 Revision 1): F1 on here too; the 8060S speed test ended INCONCLUSIVE twice with no loss, outputs identical
     .argmax_mb = false,  // v0252-f1arg3: the gfx1151 object has no twins; the one-block argmax_rows(_to) / argmax_rank_rows_to stay
+    .attn_sx_balance = true,  // v0252-strixc2: balance prefill attention (acceptance: progress/v0252-strixc2.HANDOFF.md)
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = false,  // v0252-n10: 0.2.5.2 does not touch the Radeon 8060S (the 0.2.5.1 forward end stays)

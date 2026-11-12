@@ -835,6 +835,7 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     // v0252-f5 (moeskip): the routing / grouping / combine entry points (both code objects) and the per-card fast default rule
     t.k_moe_skip = m.k.moe_topk_skip != nullptr && m.k.moe_skip_apply != nullptr && m.k.moe_route_skip != nullptr && m.k.moe_combine_skip != nullptr;
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
+    t.attn_sx_profile = prof.attn_sx_balance;  // v0252-strixc2: the gfx1151 balance prefill attention (numerics flag attn_sx)
     return t;
 }
 

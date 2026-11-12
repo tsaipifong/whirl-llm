@@ -273,6 +273,10 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
     u32 np = 0;
     int sexp = 0;
     const bool pow2 = std::frexp(p.scale, &sexp) == 0.5f;
+    // v0252-strixc2: the balance attn_sx<NP> for this shape (nullptr unless the plan's attn_sx flag is on and the code
+    // object has the kernel); grid ceil(n / (64 / NP)) query tiles x (hp / NP) head groups, block 256
+    const AttnSxPick sx = f.attn_sx_on ? attnSxFor(k, grp, hp, p.head_dim) : AttnSxPick{};
+    const Dim3 sxGrid = sx.f != nullptr ? D((n + kAttnSxCols / sx.np - 1) / (kAttnSxCols / sx.np) * (hp / sx.np)) : D(0);
     if (f.attn_kg_on && p.head_dim == 256 && pow2) {
         for (const auto& [fn, c] : {std::pair{k.attn_kg6, 6u}, std::pair{k.attn_kg4, 4u}, std::pair{k.attn_kg2, 2u}})
             if (fn != nullptr && grp % c == 0 && hp % c == 0) {
@@ -322,6 +326,11 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
             const u32 r1 = std::min(rows, r0 + seg), nr = r1 - r0;
             dqRange(r0, nr);
             if (r0 == 0 && r1 == rows) {  // all keys in one range: the plain f16 kernel
+                // v0252-strixc2: balance takes attn_sx<NP> on the same f16 copy (not bitwise; precise / fast never)
+                if (sx.f != nullptr) {
+                    for (u32 q = 0; q < parts; ++q) attn(sx.f, sxGrid, D(256), q * hp, true, false, r0, r1);
+                    break;
+                }
                 for (u32 q = 0; q < parts; ++q) attn(k.attn_pwf, D((n + 127) / 128, hp), D(256), q * hp, true, false, r0, r1);
                 break;
             }
@@ -385,10 +394,27 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
     for (u32 q = 0; q < parts; ++q) {
         if (kg != nullptr)
             attn(kg, D((n + 15) / 16, hp / np), D(64 * np), q * hp, false, false, 0, 0);
+        else if (sx.f != nullptr && !p.kv_q8)  // v0252-strixc2: balance, f16 cache (in place of attn_kx / attn_prefill_wmma)
+            attn(sx.f, sxGrid, D(256), q * hp, false, false, 0, 0);
         else
             attn(kx ? k.attn_kx : k.attn_prefill_wmma, D((n + 127) / 128, hp), D(kx ? 512 : 256), q * hp, false, false, 0, 0);
     }
     return pl;
+}
+
+// v0252-strixc2: strix fattn_rdna35_ncols2 (fattn-rdna35.cu:863-870) - the first of 8 / 4 / 2 dividing the GQA ratio - also
+// dividing the heads of one launch (the head groups of a block never cross a launch), written out per NP
+AttnSxPick attnSxFor(const kernels::AttnKernels& k, std::uint32_t grp, std::uint32_t hp, std::uint32_t head_dim) {
+    AttnSxPick r;
+    if (head_dim != 256 || grp == 0 || hp == 0) return r;
+    for (const std::uint32_t np : {8u, 4u, 2u})
+        if (grp % np == 0) {
+            if (hp % np != 0) return r;
+            r.f = np == 8 ? k.attn_sx8 : np == 4 ? k.attn_sx4 : k.attn_sx2;
+            r.np = r.f != nullptr ? np : 0;
+            return r;
+        }
+    return r;
 }
 
 const char* attnPrepName(AttnPrep p) {

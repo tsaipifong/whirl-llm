@@ -858,6 +858,113 @@ void testAttn(Ctx& c) {
                 c.rep.add(cmpExact("attn_prefill_wmma" + fs + " head-split launches == one" + tag,
                                    out.down<float>(ref1.size()), ref1, Kind::invariant));
             }
+            // v0252-strixc2 (PLAN V1-09): attn_sx<NP> (gfx1151 only, the BALANCE prefill attention, NOT bitwise). Limits of
+            // v0252-b8s-c2 (scratch/v0252_b8s/c2/fa_c2_ref.h, checked there against an f64 flash-attention emulation with >= 5x
+            // margin; the 11-07 GPU microbench measured 2.8e-4 .. 7.4e-4): vs the f64 CPU reference rel_rms <= 2e-3 and
+            // max |err| <= 2e-2, vs attn_prefill_wmma (the precise kernel) rel_rms <= 4e-3, every output finite; invariants
+            // (bitwise): a repeated launch == the first, two head-range launches == one. Shapes (n_head, n_kv): (24, 4) Swift,
+            // NP 2, with the CPU reference at pos L - n and 0 and with Q x 3 (scores spread past T_LAZY: lazy max moves; the redo
+            // path (step max > m + T_HI) runs in the first step of every block anyway, m starts at -1e30);
+            // (16, 2) Ornith, NP 8; (24, 3) NP 8; (8, 2) NP 4 (the pool read with fewer KV heads, as the attn_kg cases above).
+            // n = 200 / 130 queries: the last query tile of every NP is partial. Paged pool (pages cross 256-row boundaries).
+            if (fmt == Fmt::f16) {
+                auto relRms = [](const std::vector<float>& a, const std::vector<float>& b, std::size_t cnt, bool& finite) {
+                    double se = 0, sr = 0;
+                    finite = true;
+                    for (std::size_t i = 0; i < cnt; ++i) {
+                        finite = finite && std::isfinite(a[i]);
+                        const double d = static_cast<double>(a[i]) - b[i];
+                        se += d * d;
+                        sr += static_cast<double>(b[i]) * b[i];
+                    }
+                    return sr > 0 ? std::sqrt(se / sr) : (se > 0 ? INFINITY : 0.0);
+                };
+                auto sxResult = [](const std::string& name, std::size_t cnt, double rel, double rel_lim, double maxabs, double abs_lim,
+                                   bool finite) {
+                    Result r;
+                    r.name = name;
+                    r.kind = Kind::tol;
+                    r.n = cnt;
+                    r.max_err = maxabs;
+                    r.metric = std::max(rel / rel_lim, abs_lim > 0 ? maxabs / abs_lim : 0.0);
+                    r.pass = finite && rel <= rel_lim && (abs_lim <= 0 || maxabs <= abs_lim);
+                    char buf[160];
+                    std::snprintf(buf, sizeof buf, "rel_rms %.3g (limit %.3g), max|err| %.3g%s", rel, rel_lim, maxabs, finite ? "" : ", NOT FINITE");
+                    r.note = buf;
+                    return r;
+                };
+                struct SxCase {
+                    int nh, nkv, np;
+                };
+                const SxCase sx_cases[] = {{24, 4, 2}, {16, 2, 8}, {24, 3, 8}, {8, 2, 4}};
+                for (const SxCase& sc : sx_cases) {
+                    const std::string kname = "attn_sx" + std::to_string(sc.np);
+                    const std::string shp = " (" + std::to_string(sc.nh) + " / " + std::to_string(sc.nkv) + " heads)";
+                    auto fx = c.fnOpt(kname);
+                    if (!fx) {
+                        c.rep.skip("attn", kname + shp + tag, "kernel not in this code object");
+                        continue;
+                    }
+                    const unsigned cols = 64u / static_cast<unsigned>(sc.np);
+                    const bool cpu = sc.nh == kHeads && sc.nkv == kKv;
+                    const std::size_t cnt = static_cast<std::size_t>(n) * sc.nh * kHd;
+                    for (const int p0 : {L - n, 0}) {
+                        for (const float qs : {1.0f, 3.0f}) {
+                            if (qs != 1.0f && !cpu) continue;
+                            std::vector<float> qx = qp;
+                            for (float& v : qx) v *= qs;
+                            Buf dqx(qx), dpos(std::vector<int>{p0});
+                            const std::string where = shp + " at pos " + std::to_string(p0) + (qs != 1.0f ? ", Q x 3" : "") + tag;
+                            auto launchSx = [&](Buf& o, int h0, int nh_launch) {
+                                hip::launch(fx, {cdiv(n, cols) * static_cast<unsigned>(nh_launch / sc.np), 1, 1}, {256, 1, 1}, 0, c.s, dqx.p(),
+                                            pool.args(), o.p(), sc.nh, sc.nkv, kQStride, dpos.p(), n, kScale, h0);
+                            };
+                            Buf ow(static_cast<std::size_t>(n) * kHeads * kHd * 4), os(ow.bytes()), os2(ow.bytes()), oh(ow.bytes());
+                            ow.zero();
+                            os.zero();
+                            os2.zero();
+                            oh.zero();
+                            hip::launch(c.fn("attn_prefill_wmma"), {cdiv(n, 128), static_cast<unsigned>(sc.nh), 1}, {256, 1, 1}, 0, c.s, dqx.p(),
+                                        pool.args(), ow.p(), sc.nh, sc.nkv, kQStride, dpos.p(), n, kScale, 0);
+                            launchSx(os, 0, sc.nh);
+                            launchSx(os2, 0, sc.nh);
+                            const bool split_ok = (sc.nh / 2) % sc.np == 0;
+                            if (split_ok)
+                                for (const int h0 : {0, sc.nh / 2}) launchSx(oh, h0, sc.nh / 2);
+                            c.sync();
+                            const auto vw = ow.down<float>(cnt), vs = os.down<float>(cnt);
+                            bool fin = true;
+                            const double rp = relRms(vs, vw, cnt, fin);
+                            double mp = 0;
+                            for (std::size_t i = 0; i < cnt; ++i) mp = std::max(mp, std::fabs(static_cast<double>(vs[i]) - vw[i]));
+                            c.rep.add(sxResult(kname + " vs attn_prefill_wmma (balance, not bitwise)" + where, cnt, rp, 4e-3, mp, 0, fin));
+                            c.rep.add(cmpExact(kname + " repeated launch == first" + where, os2.down<float>(cnt), vs, Kind::invariant));
+                            if (split_ok)
+                                c.rep.add(cmpExact(kname + " head-range launches == one" + where, oh.down<float>(cnt), vs, Kind::invariant));
+                            if (cpu) {
+                                std::vector<int> qpp2(static_cast<std::size_t>(n));
+                                for (int t = 0; t < n; ++t) qpp2[static_cast<std::size_t>(t)] = p0 + t;
+                                std::vector<double> ro2, rs2;
+                                attnRef(h, pool, qx, qpp2, rows, ro2, rs2);
+                                const std::vector<float> got = pickRows(vs, rows);
+                                double se = 0, sr = 0, ma = 0;
+                                bool f2 = true;
+                                for (std::size_t i = 0; i < ro2.size(); ++i) {
+                                    f2 = f2 && std::isfinite(got[i]);
+                                    const double d = static_cast<double>(got[i]) - ro2[i];
+                                    se += d * d;
+                                    sr += ro2[i] * ro2[i];
+                                    ma = std::max(ma, std::fabs(d));
+                                }
+                                const double rc = sr > 0 ? std::sqrt(se / sr) : 0.0;
+                                c.rep.add(sxResult(kname + " vs f64 CPU reference (" + std::to_string(rows.size()) + " of " + std::to_string(n) + " queries)" +
+                                                       where,
+                                                   ro2.size(), rc, 2e-3, ma, 2e-2, f2));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

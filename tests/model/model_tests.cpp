@@ -2575,7 +2575,8 @@ void testEnvSnapshot() {
                                      "ATTN_WS4R",  // v0252-ws4r97b: numerics loadFlags, not in the exec dump (unit testWs4rFlag)
                                      "ATTN_LSPLIT",  // v0252-l2split: numerics loadFlags, not in the exec dump (unit testLsplitFlag)
                                      "MOESKIP",  // v0252-f5: numerics loadOverrides, not in the exec dump (unit testMoeSkipPlan)
-                                     "ARGMAX_MB"};  // v0252-f1arg3: Model::load -> Context::argmaxMbMode (iso forward.mtp_verify argmax_mb)
+                                     "ARGMAX_MB",  // v0252-f1arg3: Model::load -> Context::argmaxMbMode (iso forward.mtp_verify argmax_mb)
+                                     "ATTN_SX"};  // v0252-strixc2: numerics loadFlags, not in the exec dump (unit testAttnSxFlag)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -3098,6 +3099,7 @@ nu::Target targetOf(const q::Model& m) {
     // v0252-f5 (moeskip): the routing entry points and the per-card fast default rule (tune.cpp numericsTarget)
     t.k_moe_skip = m.k.moe_topk_skip != nullptr && m.k.moe_skip_apply != nullptr && m.k.moe_route_skip != nullptr && m.k.moe_combine_skip != nullptr;
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
+    t.attn_sx_profile = whirl::device::profile(m.arch).attn_sx_balance;  // v0252-strixc2
     return t;
 }
 

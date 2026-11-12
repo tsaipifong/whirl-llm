@@ -178,6 +178,7 @@ void testProfiles() {
     // v0252-f1arg3 + v0252-b5 round 2c: the multi-block verify argmax twins are merged off on both cards (gfx1151 has no
     // twins; the gfx1201 default comes with the defaults round, PLAN V1-117)
     CHECK(!a.argmax_mb && !b.argmax_mb);
+    CHECK(!a.attn_sx_balance && b.attn_sx_balance);  // v0252-strixc2: the balance attn_sx prefill attention on the 8060S only
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
     // v0252-ch4k2 (PLAN V1-75): gfx1201 MoE 4096-row forwards in the fill form, as gfx1151 (v0252-ch4k timed A/B)
