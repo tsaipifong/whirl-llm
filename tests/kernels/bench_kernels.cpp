@@ -20,6 +20,8 @@
 //         attention, Swift 24 / 4 heads, L 2k..128k, 1 / 2 / 4 rows; v0252-ws4r97)
 //   silu  in-object A/B (v0252-silu, gfx1201): silu_mul_x8h vs silu_mul_x8w / silu_mul_x8w4 on the real Ornith f16 g / u of
 //         kt::siluRealGu (rt_code2k / 8k / 32k last full forward, layer 20), B bitwise == A first, then ABBA pairs
+//   lsplit in-object A/B of the decode / verify attention split count: attn_ws4r* + attn_combine over today's 64 splits vs the
+//         machine-fill grid (v0252-l2split; Swift q8 / f16, Ornith f16; L x rows x blocks; tolerance check, not bitwise)
 //   ggemv gemvq_nt<N>r2_mxfp4 vs gemvk_nt<N>v1..9_mxfp4 (gfx1151 verify GEMV, N = every gemvk width 2..8 of
 //         kt::ggemvBenchNts(), --bench-nt a subset; feat026-ggemv, v0251-a6bench)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
@@ -162,6 +164,8 @@ struct Cell {
     std::string kernel_b;
     std::function<void(std::uint64_t)> call_b;
     std::function<std::pair<std::size_t, std::size_t>()> bitwise_b;
+    // v0252-l2split: what bitwise_b's "mismatch" means, for the report lines (family lsplit: a tolerance, not bits)
+    std::string b_rule = "bitwise ==";
 };
 
 // family fdq: A = k.fa through k.call, B = k.call_b of the same object; rows A / B (variant=A / B) and the paired ratio
@@ -175,10 +179,10 @@ void runCellInObject(Env& e, Cell& k) {
     rb.n = nb;
     rb.mismatches = mb;
     rb.pass = nb > 0 && mb == 0;
-    rb.name = "bench " + k.kernel_b + " " + k.ci.cell + ": bitwise == " + k.kernel + " (full output)";
+    rb.name = "bench " + k.kernel_b + " " + k.ci.cell + ": " + k.b_rule + " " + k.kernel + " (full output)";
     c.rep.add(rb);
     if (!rb.pass) {
-        std::printf("   %s %s: B is not bitwise == A (%zu of %zu values differ), no timing row\n", k.kernel_b.c_str(), k.ci.cell.c_str(), mb, nb);
+        std::printf("   %s %s: B is not %s A (%zu of %zu values differ), no timing row\n", k.kernel_b.c_str(), k.ci.cell.c_str(), k.b_rule.c_str(), mb, nb);
         return;
     }
     e.bench.beforeCell();
@@ -193,8 +197,8 @@ void runCellInObject(Env& e, Cell& k) {
     cb.variant = "B";
     printCell(ca, ab.a, "A ");
     printCell(cb, ab.b, "B ");
-    std::printf("         B/A %.4f (p10 %.4f p90 %.4f, %d pairs ABBA in one object, order AB %.4f BA %.4f, %s) B bitwise == A\n", ab.ratio.st.median,
-                ab.ratio.st.p10, ab.ratio.st.p90, ab.pairs, ab.order_ab, ab.order_ba, ab.ratio.stop_reason.c_str());
+    std::printf("         B/A %.4f (p10 %.4f p90 %.4f, %d pairs ABBA in one object, order AB %.4f BA %.4f, %s) B %s A\n", ab.ratio.st.median,
+                ab.ratio.st.p10, ab.ratio.st.p90, ab.pairs, ab.order_ab, ab.order_ba, ab.ratio.stop_reason.c_str(), k.b_rule.c_str());
     if (!ab.ratio.ok()) {
         Result r;
         r.name = "bench in-object A/B timing " + k.kernel_b + " " + k.ci.cell + ": " + ab.ratio.error;
@@ -1557,9 +1561,182 @@ void benchWs4r(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- lsplit (v0252-l2split, PLAN V1-88)
+// In-object A/B (gfx1201) of the decode / verify attention SPLIT COUNT: the same shipped kernel (q8: attn_ws4r1b_q8 /
+// attn_ws4r2b_q8, f16: attn_ws4r1 / attn_ws4r2 - the device profile's attn_ws4r rows) followed by attn_combine, A = today's
+// grid (64 splits, kFdMaxSplits) and combine over 64 partials, B = the machine-fill grid of `blocks` blocks: split =
+// min(64, max(2, blocks / n_kv)) (ops::lsplitCount, kept in step by hand: the kernel test does not link ops) and combine over
+// that many. Shapes: Swift 24 / 4 heads q8 and f16, Ornith 16 / 2 heads f16 (hd 256); one group of R rows at consecutive
+// positions ending at L - 1 (rows: Swift 1 / 4 = draft row / 4-row verify, Ornith 1 / 2), page tables rotated over disjoint
+// pool regions. Check before timing (another split = another f32 combine order, never bitwise): every combined output value
+// |B - A| <= 1e-2 * rms(A) + 1e-4 (the attn family's CPU tolerance is 1e-2 of the term sum + 1e-4; B and A each carry it)
+// - a failing cell writes no timing row and is a FAIL. bytes = the KV bytes read once (L x n_kv x hd x 2, + q8 scales).
+// Env: WHIRL_KT_LSPLIT_L (default 2048 8192 32768 131072; --quick 2048 32768), WHIRL_KT_LSPLIT_BLOCKS (default 32 64 128),
+// WHIRL_KT_LSPLIT_SHAPES (default swq8,orf16 - the product cells: Swift balance q8h, Ornith balance f16; swf16 on request).
+// WHIRL_KT_LSPLIT_MUT=1: the check's B run combines only the first half of its splits (a planted wrong combine): every cell
+// must FAIL its tolerance row (proves the check is not vacuous; the kt job's case "mut").
+void benchLsplit(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "lsplit";
+    if (!c.fnOpt("attn_ws4r1b_q8") || !c.fnOpt("attn_ws4r1") || !c.k.attn_combine) {
+        c.rep.skip("lsplit", "bench attn_ws4r split count", "kernel not in this code object");
+        return;
+    }
+    const std::vector<int> lens = ws4rEnvList("WHIRL_KT_LSPLIT_L", c.quick ? std::vector<int>{2048, 32768} : std::vector<int>{2048, 8192, 32768, 131072});
+    const std::vector<int> blocks = ws4rEnvList("WHIRL_KT_LSPLIT_BLOCKS", {32, 64, 128});
+    std::string shapes = "swq8,orf16";
+    if (const char* s = std::getenv("WHIRL_KT_LSPLIT_SHAPES")) shapes = s;
+    const bool mut = std::getenv("WHIRL_KT_LSPLIT_MUT") != nullptr;
+    constexpr int hd = 256, ns_a = wk::kFdMaxSplits;
+    struct Shape {
+        const char* tag;
+        const char* model;
+        int heads, nkv;
+        bool q8;
+        std::vector<int> rowsets;
+    };
+    const Shape all[] = {{"swq8", "swift", 24, 4, true, {1, 4}}, {"swf16", "swift", 24, 4, false, {1, 4}}, {"orf16", "ornith", 16, 2, false, {1, 2}}};
+    for (const Shape& sh : all) {
+        if (shapes.find(sh.tag) == std::string::npos) continue;
+        const int heads = sh.heads, nkv = sh.nkv, row = nkv * hd, qstride = 2 * hd, grp = heads / nkv;
+        const bool q8 = sh.q8;
+        const std::size_t ebytes = q8 ? 1 : 2;
+        std::uint64_t max_pages = 0;
+        for (int L : lens) {
+            const std::uint64_t pg = static_cast<std::uint64_t>(cdiv(L, wk::kKvPage));
+            const int R = rotationCopies(pg * wk::kKvPage * row * ebytes * 2, e.target, e.o.rot_cap);
+            max_pages = std::max<std::uint64_t>(max_pages, pg * static_cast<std::uint64_t>(R));
+        }
+        const std::size_t pool_el = static_cast<std::size_t>(max_pages) * wk::kKvPage * row;
+        constexpr std::size_t kChunk = std::size_t{1} << 22;
+        Buf pk(pool_el * ebytes), pv(pool_el * ebytes), psk(q8 ? pool_el / 32 * 2 : 2), psv(q8 ? pool_el / 32 * 2 : 2);
+        {
+            std::vector<std::uint8_t> ck(kChunk * ebytes), cv(kChunk * ebytes);
+            if (q8) {
+                for (auto* v : {&ck, &cv})
+                    for (auto& b : *v) {
+                        const std::uint8_t y = static_cast<std::uint8_t>(c.rng());
+                        b = y == 0x80 ? 0x81 : y;
+                    }
+            } else {
+                const auto a = c.randn(kChunk), b = c.randn(kChunk);
+                for (std::size_t i = 0; i < kChunk; ++i) {
+                    const std::uint16_t x = f2h(a[i]), y = f2h(b[i]);
+                    std::memcpy(&ck[i * 2], &x, 2);
+                    std::memcpy(&cv[i * 2], &y, 2);
+                }
+            }
+            for (std::size_t off = 0; off < pool_el; off += kChunk) {
+                const std::size_t nn = std::min(kChunk, pool_el - off);
+                hip::upload(pk.p() + off * ebytes, ck.data(), nn * ebytes);
+                hip::upload(pv.p() + off * ebytes, cv.data(), nn * ebytes);
+            }
+            if (q8) {
+                std::vector<std::uint16_t> s(kChunk / 32);
+                for (auto& y : s) {
+                    const std::uint32_t r = static_cast<std::uint32_t>(c.rng());
+                    y = static_cast<std::uint16_t>(((6 + r % 4) << 10) | ((r >> 8) & 0x3ffu));
+                }
+                for (std::size_t off = 0; off < pool_el / 32; off += kChunk / 32) {
+                    const std::size_t nn = std::min(kChunk / 32, pool_el / 32 - off);
+                    hip::upload(psk.p() + off * 2, s.data(), nn * 2);
+                    hip::upload(psv.p() + off * 2, s.data(), nn * 2);
+                }
+            }
+            hip::sync();
+        }
+        const std::vector<float> q = c.randn(static_cast<std::size_t>(8) * heads * qstride);
+        auto dq = std::make_shared<Buf>(q);
+        for (const int L : lens) {
+            const int pages = static_cast<int>(cdiv(L, wk::kKvPage));
+            const std::uint64_t region_bytes = static_cast<std::uint64_t>(pages) * wk::kKvPage * row * ebytes * 2;
+            const int RC = rotationCopies(region_bytes, e.target, e.o.rot_cap);
+            std::vector<int> ptab(static_cast<std::size_t>(RC) * pages);
+            for (int r = 0; r < RC; ++r) {
+                std::vector<int> perm(static_cast<std::size_t>(pages));
+                std::iota(perm.begin(), perm.end(), r * pages);
+                std::shuffle(perm.begin(), perm.end(), c.rng);
+                std::copy(perm.begin(), perm.end(), ptab.begin() + static_cast<std::ptrdiff_t>(r) * pages);
+            }
+            auto dpt = std::make_shared<Buf>(ptab);
+            const int ns_today = std::min(ns_a, static_cast<int>(cdiv(L, wk::kFdChunk)));
+            for (const int R : sh.rowsets) {
+                if (R < 1 || R * grp > 32 || R > L) continue;
+                std::vector<int> pos;
+                for (int r = L - R; r < L; ++r) pos.push_back(r);
+                auto dpos = std::make_shared<Buf>(pos);
+                auto ml = std::make_shared<Buf>(static_cast<std::size_t>(R) * ns_a * heads * 2 * 4);
+                auto acc = std::make_shared<Buf>(static_cast<std::size_t>(R) * ns_a * heads * hd * 4);
+                auto out = std::make_shared<Buf>(static_cast<std::size_t>(R) * heads * hd * 4);
+                const bool two = R * grp > 16;
+                const std::string kn_ = std::string(two ? "attn_ws4r2" : "attn_ws4r1") + (q8 ? "b_q8" : "");
+                const hip::Function fk = c.fnOpt(kn_);
+                if (!fk) continue;
+                const hip::Function fc = c.k.attn_combine;
+                const DevPtr kp = pk.p(), vp = pv.p(), skp = q8 ? psk.p() : DevPtr{0}, svp = q8 ? psv.p() : DevPtr{0}, qp = dq->p();
+                // one decode / verify attention call: the kernel over `ns` splits, then the combine over `nsc` (= ns; the planted
+                // mutant of WHIRL_KT_LSPLIT_MUT passes ns / 2)
+                auto launch = [&c, dpt, dpos, ml, acc, out, kp, vp, skp, svp, qp, fc, pages, R, heads, nkv, qstride](hip::Function f, int ns, std::uint64_t r,
+                                                                                                                     int nsc) {
+                    wk::KvArgs a{};
+                    a.k = kp;
+                    a.v = vp;
+                    a.ks = skp;
+                    a.vs = svp;
+                    a.ptab = dpt->p() + (r % (dpt->bytes() / 4 / static_cast<std::size_t>(pages))) * static_cast<std::uint64_t>(pages) * 4;
+                    wk::AwGroups g{};
+                    g.first[0] = 0;
+                    g.count[0] = R;
+                    hip::launch(f, {static_cast<unsigned>(nkv), static_cast<unsigned>(ns), 1}, {128, 1, 1}, 0, c.s, qp, a, ml->p(), acc->p(), heads, nkv,
+                                qstride, dpos->p(), at::scale, DevPtr{0}, g);
+                    const int hdim = hd;
+                    hip::launch(fc, {static_cast<unsigned>(heads), static_cast<unsigned>(R), 1}, {256, 1, 1}, 0, c.s, ml->p(), acc->p(), qp, out->p(), heads,
+                                hdim, qstride, nsc);
+                };
+                for (const int B : blocks) {
+                    const int ns_b = std::min(ns_today, std::max(2, B / nkv));
+                    Cell k;
+                    const std::string cell = std::string(sh.model) + "." + (q8 ? "q8" : "f16") + "kv.L" + std::to_string(L) + ".rows" + std::to_string(R) +
+                                             ".blocks" + std::to_string(B);
+                    k.ci = e.info("lsplit", kn_, cell,
+                                  "heads" + std::to_string(heads) + "_kv" + std::to_string(nkv) + "_hd256_L" + std::to_string(L) + "_rows" + std::to_string(R) +
+                                      "_splits" + std::to_string(ns_today) + "to" + std::to_string(ns_b));
+                    k.ci.settings = e.settings(region_bytes * static_cast<std::uint64_t>(RC), RC) + (q8 ? ";kv=q8;kv_values=random_int8" : ";kv=f16;kv_values=randn") +
+                                    ";split_a=" + std::to_string(ns_today) + ";split_b=" + std::to_string(ns_b) + ";blocks=" + std::to_string(B);
+                    k.ci.bytes = static_cast<double>(L) * row * static_cast<double>(ebytes) * 2 + (q8 ? static_cast<double>(L) * row / 32 * 2 * 2 : 0.0);
+                    k.ci.launches_per_call = 2;
+                    k.kernel = kn_ + "_s" + std::to_string(ns_today);  // kernel + attn_combine over ns_today splits
+                    k.fa = fk;
+                    k.kernel_b = kn_ + "_s" + std::to_string(ns_b);  // kernel + attn_combine over ns_b splits
+                    k.b_rule = "within 1e-2 rms + 1e-4 of";
+                    k.call = [launch, ns_today](hip::Function f, std::uint64_t r) { launch(f, ns_today, r, ns_today); };
+                    k.call_b = [launch, fk, ns_b](std::uint64_t r) { launch(fk, ns_b, r, ns_b); };
+                    k.bitwise_b = [&c, launch, fk, out, ns_today, ns_b, R, heads, mut]() {
+                        const std::size_t n = static_cast<std::size_t>(R) * heads * hd;
+                        auto once = [&](int ns, int nsc) {
+                            out->fill(0x7f);
+                            launch(fk, ns, 0, nsc);
+                            c.sync();
+                            return out->down<float>(n);
+                        };
+                        const auto a = once(ns_today, ns_today), b = once(ns_b, mut ? ns_b / 2 : ns_b);
+                        double ss = 0;
+                        for (const float x : a) ss += static_cast<double>(x) * x;
+                        const double bound = 1e-2 * std::sqrt(ss / static_cast<double>(n)) + 1e-4;
+                        std::size_t bad = 0;
+                        for (std::size_t i = 0; i < n; ++i) bad += !(std::fabs(static_cast<double>(b[i]) - a[i]) <= bound);  // NaN counts as bad
+                        return std::make_pair(n, bad);
+                    };
+                    runCellInObject(e, k);
+                }
+            }
+        }
+    }
+}
+
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -1610,7 +1787,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
         void (*fn)(Env&);
     };
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
-                      {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"ws4r", benchWs4r}, {"silu", benchSilu}};
+                      {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"ws4r", benchWs4r}, {"silu", benchSilu}, {"lsplit", benchLsplit}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

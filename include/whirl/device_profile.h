@@ -59,6 +59,13 @@ struct Profile {
     // (the _q8 kernels), f16 = f16. 0 = attn_wsplit (off), 1 = plain (LDS-scoped fence + s_barrier), 2 = b (inline-asm
     // s_wait_dscnt 0 + s_barrier_signal / wait). WHIRL_ATTN_WS4R=0 / 1 / 2 overrides both (numerics flag attn_ws4r).
     std::uint8_t attn_ws4r_q8, attn_ws4r_f16;
+    // v0252-l2split (PLAN V1-88): the machine-fill block target of the f16 / q8 / q8h decode / verify attention grid
+    // (attn_wsplit / attn_ws4r path; never q4, never the gfx1151 attn_ws4 path): split count = clamp(blocks / n_head_kv, 2,
+    // today's) by ops::lsplitCount, the same for every row of a model (a row's key partition stays a function of its own
+    // position: seqtest / MTP invariance). Balance / fast only (numerics flag attn_lsplit: precise 0); WHIRL_ATTN_LSPLIT =
+    // auto / 0 / N overrides it. 0 = today's split count. gfx1201: 32 WGPs x 2 attn_ws4r blocks (LDS 47.8 / 58.4 KB of
+    // 128 KB per WGP) = 64 = one machine wave (libr4d decode_splits / TRT-LLM MMHA law, progress/v0252-l2split.PRIOR_ART.md)
+    std::uint16_t attn_lsplit_blocks;
     // ---- tuning (src/model/tune.cpp)
     bool tune_fast;                 // each kernel timed once per shape, slow candidates rejected early
     // tune cache file name suffix (table revision). A change to what the tuner times on this family (candidates, slots,
@@ -121,6 +128,9 @@ inline constexpr Profile k_profile_gfx1201{
     // 0.82 at 4 rows -> plain (b 0.974 / 0.972 at 64k / 128k vs plain 0.969 / 0.965)
     .attn_ws4r_q8 = 2,
     .attn_ws4r_f16 = 1,
+    // v0252-l2split: one machine wave (64 blocks: Swift 4 kv heads -> 16 splits, Ornith 2 -> 32; today 64 each); the R9700
+    // kt lsplit sweep (scratch/v0252_l2split/proposed) and the e2e A/B decide whether it stays
+    .attn_lsplit_blocks = 64,
     .tune_fast = false,
     .tune_cache_suffix = "",
     .tune_time_hint = "2 minutes (a few seconds for MXFP4 models)",
@@ -173,6 +183,7 @@ inline constexpr Profile k_profile_gfx1151{
     .attn_dq4_dynamic_splits = true,
     .attn_ws4r_q8 = 0,  // v0252-ws4r97b: the gfx1151 object has no attn_ws4r (attn_ws4 / attn_ws4g there)
     .attn_ws4r_f16 = 0,
+    .attn_lsplit_blocks = 0,  // v0252-l2split: the gfx1151 decode path is attn_ws4 (constant 64 splits, DES-ATTN-8S); unchanged
     .tune_fast = true,
     .tune_cache_suffix = "-gfx1151r3",  // r3: gemmfq in the dequant family (v0251-a3key; tests/model testTuneCacheKey)
     .tune_time_hint = "8 minutes on the Radeon 8060S (less for MXFP4 models)",

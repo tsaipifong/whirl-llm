@@ -303,6 +303,152 @@ void testAttnDecodeWs4r() {
     }
 }
 
+// v0252-l2split (PLAN V1-88): the f16 / q8 / q8h decode / verify split count by machine fill (ops::lsplitCount). The numerics
+// flag attn_lsplit (precise 0, balance / fast auto = device::Profile::attn_lsplit_blocks; WHIRL_ATTN_LSPLIT) picks the block
+// target; split = min(today's, max(2, blocks / n_head_kv)) on the attn_wsplit / attn_ws4r branch only. Pins: (0) the profile
+// rows and the rule; (1) flag 0 (precise) = the plan of today, every field; (2) Swift balance q8h decode / 4-row verify on
+// the R9700 -> 16 splits, same kernel / groups / combine as today but the split; (3) Ornith f16 -> 32; (4) the split is the
+// same for every batch shape (row invariance: one row, a verify group, two sequences); (5) q4 / attn_dq4, attn_split and the
+// 8060S attn_ws4 path unchanged under every flag value. Fails to build before v0252-l2split (no lsplitCount / attn_lsplit /
+// attn_lsplit_blocks).
+bool samePlan(const ops::AttnDecodePlan& a, const ops::AttnDecodePlan& b) { return nameOf(a.f) == nameOf(b.f) && samePlanButKernel(a, b); }
+
+void testAttnDecodeLsplit() {
+    namespace dv = whirl::device;
+    const auto& p97 = dv::k_profile_gfx1201;
+    const auto& p8s = dv::k_profile_gfx1151;
+    const std::uint32_t A = ops::kAttnLsplitAuto;
+    // (0) profile rows and the rule
+    CHECK(p97.attn_lsplit_blocks == 64 && p8s.attn_lsplit_blocks == 0);
+    CHECK(A == 0xFFFFFFFFu);
+    CHECK(ops::lsplitCount(64, 4, A, 64) == 16 && ops::lsplitCount(64, 2, A, 64) == 32);  // Swift / Ornith on the R9700
+    CHECK(ops::lsplitCount(64, 4, 0, 64) == 64 && ops::lsplitCount(64, 4, A, 0) == 64);   // flag 0 / row 0: today's
+    CHECK(ops::lsplitCount(64, 4, 128, 0) == 32 && ops::lsplitCount(64, 4, 192, 64) == 48 && ops::lsplitCount(64, 4, 4096, 64) == 64);
+    CHECK(ops::lsplitCount(64, 4, 8, 64) == 2 && ops::lsplitCount(64, 4, 1, 64) == 2);    // >= 2 (the draft-window branch)
+    CHECK(ops::lsplitCount(8, 4, A, 64) == 8 && ops::lsplitCount(1, 4, A, 64) == 1);      // never above today's
+    CHECK(ops::lsplitCount(64, 0, A, 64) == 64);
+    ops::AttnDecodeProblem p;
+    p.n = 1;
+    p.head_dim = 256;
+    p.n_head = 24;
+    p.n_head_kv = 4;  // Swift: GQA group 6
+    p.max_ctx = 131072;
+    p.o_on_gemv = true;
+    const std::int32_t pos[4] = {70000, 70001, 70002, 70003}, base[4] = {0, 0, 0, 0}, base2[4] = {0, 0, 4096, 4096};
+    const std::int32_t pos2[4] = {70000, 70001, 1500, 1501};
+    auto rows = [&](ops::AttnDecodeProblem q, std::uint32_t n, const std::int32_t* rp = nullptr, const std::int32_t* rb = nullptr) {
+        q.n = n;
+        q.rows_known = n > 1;
+        q.row_pos = n > 1 ? std::span<const std::int32_t>(rp ? rp : pos, n) : std::span<const std::int32_t>{};
+        q.row_base = n > 1 ? std::span<const std::int32_t>(rb ? rb : base, n) : std::span<const std::int32_t>{};
+        return q;
+    };
+    ops::AttnDecodeFlags f0;  // ops default = precise's flag: today's split
+    CHECK(f0.attn_lsplit == 0);
+    ops::AttnDecodeFlags fa = f0;
+    fa.attn_lsplit = A;
+    const kn::KernelTable kq = ws4rTable(attnTable(false, false, true, true), true);
+    const kn::KernelTable kf = ws4rTable(attnTable(false, false, false, true), false);
+    // (1) + (2) Swift q8h on the R9700
+    {
+        ops::AttnDecodeProblem q = rows(p, 1);
+        q.kv_q8 = true;
+        const auto t = ops::chooseAttnDecode(q, f0, kq, kq.caps, p97), b = ops::chooseAttnDecode(q, fa, kq, kq.caps, p97);
+        CHECK(t.n_split == 64 && t.grid.y == 64 && nameOf(t.f) == "attn_ws4r1b_q8");  // precise / A arm: today's grid
+        CHECK(b.n_split == 16 && b.grid.y == 16 && b.grid.x == 4 && b.grid.z == 1 && nameOf(b.f) == "attn_ws4r1b_q8");
+        CHECK(b.kind == t.kind && b.block.x == t.block.x && b.combine_q8 == t.combine_q8 && b.combine_grid.x == t.combine_grid.x &&
+              b.combine_grid.y == t.combine_grid.y);
+        ops::AttnDecodePlan bb = b;  // everything but the split is today's plan
+        bb.n_split = t.n_split;
+        bb.grid.y = t.grid.y;
+        CHECK(samePlan(bb, t));
+        // a 4-row MTP verify at 70000..70003: one attn_ws4r2b_q8 group of 4, 16 splits; WHIRL_ATTN_LSPLIT=128 -> 32
+        q = rows(q, 4);
+        const auto tv = ops::chooseAttnDecode(q, f0, kq, kq.caps, p97), bv = ops::chooseAttnDecode(q, fa, kq, kq.caps, p97);
+        CHECK(tv.grid.y == 64 && bv.grid.y == 16 && bv.n_split == 16 && nameOf(bv.f) == "attn_ws4r2b_q8" && bv.groups.count[0] == 4 &&
+              bv.grid.z == 1 && nameOf(tv.f) == nameOf(bv.f));
+        ops::AttnDecodeFlags f128 = f0;
+        f128.attn_lsplit = 128;
+        CHECK(ops::chooseAttnDecode(q, f128, kq, kq.caps, p97).grid.y == 32);
+        // a profile row decides under auto, not the kernel set: row 0 -> today's
+        dv::Profile poff = p97;
+        poff.attn_lsplit_blocks = 0;
+        CHECK(samePlan(ops::chooseAttnDecode(q, fa, kq, kq.caps, poff), tv));
+        // the draft window (MTP at 64k+) keeps >= 2 splits and the same rule
+        ops::AttnDecodeProblem qw = q;
+        qw.win = (16384 / 64) | ((65536 / 1024) << 16);
+        CHECK(ops::chooseAttnDecode(qw, fa, kq, kq.caps, p97).grid.y == 16);
+        // a small KV (max_ctx 512: today 8 splits) is never raised
+        ops::AttnDecodeProblem qs = rows(p, 1);
+        qs.kv_q8 = true;
+        qs.max_ctx = 512;
+        CHECK(ops::chooseAttnDecode(qs, fa, kq, kq.caps, p97).grid.y == 8 && ops::chooseAttnDecode(qs, f0, kq, kq.caps, p97).grid.y == 8);
+        // WHIRL_ATTN_WS4R=0 (attn_wsplit kernels): the same split rule
+        ops::AttnDecodeFlags fw = fa;
+        fw.attn_ws4r = 0;
+        const auto w = ops::chooseAttnDecode(q, fw, kq, kq.caps, p97);
+        CHECK(nameOf(w.f) == "attn_wsplit2_q8" && w.grid.y == 16);
+    }
+    // (1) + (3) f16 KV (Swift / Ornith precise and Ornith balance): flag 0 = today, auto = blocks / n_head_kv
+    for (const std::uint32_t nkv : {4u, 2u}) {
+        for (const std::uint32_t n : {1u, 4u}) {
+            ops::AttnDecodeProblem q = rows(p, n);
+            q.n_head = nkv == 4 ? 24 : 16;
+            q.n_head_kv = nkv;
+            const auto t = ops::chooseAttnDecode(q, f0, kf, kf.caps, p97), b = ops::chooseAttnDecode(q, fa, kf, kf.caps, p97);
+            CHECK(t.grid.y == 64 && b.grid.y == (nkv == 4 ? 16u : 32u) && b.n_split == b.grid.y && nameOf(b.f) == nameOf(t.f));
+            CHECK(b.grid.z == t.grid.z && b.groups.count[0] == t.groups.count[0]);
+        }
+    }
+    // (4) row invariance: one decode row, a 4-row verify group, two sequences of different lengths - one split count, so every
+    // row's key partition awPer(pos + 1, split) is a function of its own position only
+    {
+        ops::AttnDecodeProblem q1 = rows(p, 1), q4 = rows(p, 4), q2 = rows(p, 4, pos2, base2);
+        for (ops::AttnDecodeProblem* q : {&q1, &q4, &q2}) q->kv_q8 = true;
+        const auto a1 = ops::chooseAttnDecode(q1, fa, kq, kq.caps, p97), a4 = ops::chooseAttnDecode(q4, fa, kq, kq.caps, p97),
+                   a2 = ops::chooseAttnDecode(q2, fa, kq, kq.caps, p97);
+        CHECK(a1.n_split == 16 && a4.n_split == 16 && a2.n_split == 16 && a2.grid.z == 2);
+        CHECK(ops::awPer(70001, a1.n_split) == ops::awPer(70001, a4.n_split) && ops::awPer(1501, a2.n_split) == ops::awPer(1501, a1.n_split));
+        // graph-captured plain decode (rows the host does not know): the same split
+        ops::AttnDecodeProblem qu = q1;
+        qu.rows_known = false;
+        CHECK(ops::chooseAttnDecode(qu, fa, kq, kq.caps, p97).n_split == 16);
+    }
+    // (5) unchanged: q4 KV (attn_dq4 and its dynamic split), dbg attn_split, and the 8060S under every flag value
+    for (const std::uint32_t fl : {A, 0u, 64u, 128u}) {
+        ops::AttnDecodeFlags g = f0;
+        g.attn_lsplit = fl;
+        ops::AttnDecodeProblem q = rows(p, 4);
+        q.kv_q4 = true;
+        ops::AttnDecodeFlags g4 = g, t4 = f0;
+        g4.fd_splits = t4.fd_splits = 256;
+        CHECK(samePlan(ops::chooseAttnDecode(q, g4, kq, kq.caps, p97), ops::chooseAttnDecode(q, t4, kq, kq.caps, p97)));
+        g4.attn_dq4 = t4.attn_dq4 = false;  // the q4 attn_wsplit fallback is never re-split either
+        CHECK(samePlan(ops::chooseAttnDecode(q, g4, kq, kq.caps, p97), ops::chooseAttnDecode(q, t4, kq, kq.caps, p97)));
+        ops::AttnDecodeProblem qd = rows(p, 4);
+        qd.kv_q8 = true;
+        ops::AttnDecodeFlags gd = g, td = f0;
+        gd.dbg_flags = td.dbg_flags = 2;
+        const auto d = ops::chooseAttnDecode(qd, gd, kq, kq.caps, p97);
+        CHECK(nameOf(d.f) == "attn_split" && d.grid.y == 64 && samePlan(d, ops::chooseAttnDecode(qd, td, kq, kq.caps, p97)));
+        for (const bool q8 : {false, true}) {
+            const kn::KernelTable k8 = attnTable(true, true, false, false);
+            for (const std::uint32_t n : {1u, 4u}) {
+                ops::AttnDecodeProblem q8p = rows(p, n);
+                q8p.max_ctx = 32768;
+                q8p.kv_q8 = q8;
+                ops::AttnDecodeFlags gw = g, tw = f0;
+                CHECK(samePlan(ops::chooseAttnDecode(q8p, gw, k8, k8.caps, p8s), ops::chooseAttnDecode(q8p, tw, k8, k8.caps, p8s)));
+                // WHIRL_ATTN_WS4=0 on the 8060S (attn_wsplit1): the auto row is 0 -> today's split
+                if (fl == A) {
+                    gw.attn_ws4 = tw.attn_ws4 = false;
+                    CHECK(samePlan(ops::chooseAttnDecode(q8p, gw, k8, k8.caps, p8s), ops::chooseAttnDecode(q8p, tw, k8, k8.caps, p8s)));
+                }
+            }
+        }
+    }
+}
+
 // v0252-n2 (taken over from feat027-dq4r9700 764af36, tests/ops/ops_tests.cpp, where it was written and mutation-checked
 // against the pre-0.2.5 tree; never merged): host model of attn_dq4's split ranges, written from the kernel source
 // (kernels/shared/attn_dq4.h + attn_dq_nw.h, one copy for both families: dq_per, DQ_NW 8, DQ_MAXS 128, the MTP

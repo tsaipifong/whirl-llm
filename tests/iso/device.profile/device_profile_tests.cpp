@@ -61,6 +61,10 @@ void testProfiles() {
     // (dense models there and both model classes on the Radeon 8060S keep 0)
     CHECK(a.e1_dense == 0 && a.e1_moe == 2);
     CHECK(b.e1_dense == 0 && b.e1_moe == 0);
+    // v0252-l2split (PLAN V1-88): the decode / verify split count by machine fill: R9700 64 blocks = 32 WGPs x 2 attn_ws4r
+    // blocks (one machine wave); the 8060S 0 (its attn_ws4 path keeps the constant 64 splits)
+    CHECK(a.attn_lsplit_blocks == 64);
+    CHECK(b.attn_lsplit_blocks == 0);
     // constexpr: the field reads fold like the arch comparisons they replaced
     static_assert(d::profile(Arch::gfx1151).prefill_exec_moe == 4096 && !d::profile(Arch::gfx1201).tune_fast);
     // REVIEW-ARCH3 P3-3: a value with no row throws instead of getting the gfx1201 row (a new enumerator without a

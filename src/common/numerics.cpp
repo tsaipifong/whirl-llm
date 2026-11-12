@@ -223,6 +223,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOE_FUSE", &S::moe_fuse},    // v0252-c3port (feat026-moedec)
         {"GEMVH_F32", &S::gemvh_f32},  // v0252-c3port (feat026-moedec)
         {"ATTN_WS4R", &S::attn_ws4r},  // v0252-ws4r97b (PLAN V1-87 phase 2)
+        {"ATTN_LSPLIT", &S::attn_lsplit},  // v0252-l2split (PLAN V1-88)
     }};
     return t;
 }
@@ -428,6 +429,13 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     F.attn_ws4r = kAttnWs4rAuto;
     if (e.attn_ws4r)
         if (const std::optional<std::uint32_t> v = parseWs4r(*e.attn_ws4r)) F.attn_ws4r = *v;
+    // v0252-l2split (PLAN V1-88): the decode / verify attention split count by machine fill (ops::lsplitCount) changes the
+    // split partition and so the f32 combine order: by MODE, precise never (0 = today's split, bit-identical; WHIRL_ATTN_LSPLIT
+    // ignored there, loadOverrides notes it), balance / fast auto (device::Profile::attn_lsplit_blocks); WHIRL_ATTN_LSPLIT =
+    // auto / 0..4096 overrides it in balance / fast, any other value keeps auto (loadOverrides notes it)
+    F.attn_lsplit = r.mode == Mode::precise ? 0u : kAttnLsplitAuto;
+    if (r.mode != Mode::precise && e.attn_lsplit)
+        if (const std::optional<std::uint32_t> v = parseLsplit(*e.attn_lsplit)) F.attn_lsplit = *v;
     setNe0(F.attn_dqf_on, e.attn_dqf);
     if (e.attn_seg) F.attn_seg = static_cast<std::uint32_t>(std::strtoul(e.attn_seg->c_str(), nullptr, 10)) / 256 * 256;
     setNe0(F.gdn_ba_on, e.gdn_ba);
@@ -540,6 +548,14 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     if (items)
         if (const Raw& v = e.attn_ws4r; v && !parseWs4r(*v))
             p.ignored.push_back(std::format("WHIRL_ATTN_WS4R={} ignored: not auto, 0, 1 or 2 (auto stays)", *v));
+    // v0252-l2split: WHIRL_ATTN_LSPLIT in precise (never another split: bit-identical) or an invalid value, reported once
+    if (items)
+        if (const Raw& v = e.attn_lsplit; v) {
+            if (r.mode == Mode::precise)
+                p.ignored.push_back(std::format("WHIRL_ATTN_LSPLIT={} ignored: precise keeps the split count (bit-identical)", *v));
+            else if (!parseLsplit(*v))
+                p.ignored.push_back(std::format("WHIRL_ATTN_LSPLIT={} ignored: not auto or 0..4096 (auto stays)", *v));
+        }
     if (items) {
         if (const Raw& v = e.spec_sample; v && !v->empty())
             applyOverride(p, Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
@@ -621,6 +637,19 @@ std::optional<std::uint32_t> parseWs4r(std::string_view s) {
         v = v * 10 + static_cast<std::uint32_t>(ch - '0');
     }
     if (v <= 2) return v;
+    return std::nullopt;
+}
+
+// v0252-l2split: WHIRL_ATTN_LSPLIT values (numerics.h)
+std::optional<std::uint32_t> parseLsplit(std::string_view s) {
+    if (s == "auto") return kAttnLsplitAuto;
+    if (s.empty() || s.size() > 4) return std::nullopt;
+    std::uint32_t v = 0;
+    for (const char ch : s) {
+        if (ch < '0' || ch > '9') return std::nullopt;
+        v = v * 10 + static_cast<std::uint32_t>(ch - '0');
+    }
+    if (v <= 4096) return v;
     return std::nullopt;
 }
 

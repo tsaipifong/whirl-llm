@@ -89,6 +89,11 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
     if (prof.attn_dq4_dynamic_splits && !ws4_path && p.kv_q4 && f.attn_dq4 && f.dq4_dyn && k.attn_dq4 != nullptr && grp_q <= 8 &&
         p.rows_known && k.attn_wsplit1 != nullptr && hd == 256 && (f.dbg_flags & 2) == 0)
         n_split = dq4Splits(p.row_pos.first(n), p.win, n_split);
+    // v0252-l2split (PLAN V1-88): f16 / q8 / q8h KV on the attn_wsplit / attn_ws4r branch below (the conditions of that
+    // branch; never q4 / attn_dq4, never the gfx1151 attn_ws4 path, never attn_split): the split count by machine fill
+    // (lsplitCount; flag 0 = today's count). Before the grouping, which keys on awPer(pos, n_split).
+    if (!ws4_path && !p.kv_q4 && k.attn_wsplit1 != nullptr && hd == 256 && grp_q <= 16 && (f.dbg_flags & 2) == 0)
+        n_split = lsplitCount(n_split, p.n_head_kv, f.attn_lsplit, prof.attn_lsplit_blocks);
     pl.n_split = n_split;
     if (ws4_path) {
         // groups: consecutive rows of one sequence at consecutive positions whose split ranges
@@ -191,6 +196,13 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
     pl.combine_q8 = k.attn_combine_q8 != nullptr && p.o_on_gemv && !f.prec_dec && hd == 256;
     pl.combine_grid = D(p.n_head, n);
     return pl;
+}
+
+// v0252-l2split: attention.h
+std::uint32_t lsplitCount(std::uint32_t n_split, std::uint32_t n_head_kv, std::uint32_t flag, std::uint16_t row) {
+    const std::uint32_t blocks = flag == kAttnLsplitAuto ? row : flag;
+    if (blocks == 0 || n_head_kv == 0) return n_split;
+    return std::min(n_split, std::max<std::uint32_t>(2, blocks / n_head_kv));
 }
 
 // v0252-ws4r97b: attention.h. 1 / 2 index the table's [plain, b] pair of the CG the wsplit choice took.
