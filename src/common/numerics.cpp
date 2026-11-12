@@ -25,7 +25,7 @@ constexpr std::array<ItemInfo, n_items> k_items = {{
     {"moefp8", "MoE expert prefill GEMMs with fp8 activations"},
     {"gdnwmma", "f16-WMMA DeltaNet prefill chunks"},
     {"h16", "f16 FFN / DeltaNet GEMM outputs"},
-    {"kvq8", "q8h KV on dense models"},
+    {"kvq8", "q8h KV (dense models; MoE models on the Radeon 8060S)"},
     {"specsample", "race-coupled sampled MTP drafts (temperature > 0)"},
     {"kvq4", "4-bit KV"},
     {"relaxacc", "relaxed speculative acceptance"},
@@ -334,8 +334,18 @@ std::uint32_t srvU32(const Raw& v, std::uint32_t def) {
 // v0252-moedf16 (PLAN V1-76): on the gfx1201 code object (R9700) with MXFP4 routed experts, a request with the balance item
 // h16 (f16 intermediates: balance and fast, never precise) takes 3 = the down projection's output moe_yd stored f16 +
 // moe_combine4h (ops::chooseMoe, fp8 kind); A/B by WHIRL_MOEP_COMB=0 (the f32 path) / 3.
-std::uint32_t moepCombDefault(const Target& t, bool h16) {
-    if (t.gfx1151) return t.moe_mxfp4 ? kernels::kMoepDefault.comb : 0u;
+// v0252-ornkv2 (PLAN V1-94): the gfx1151 code object (Radeon 8060S) takes 3 as well, in BALANCE with the item h16:
+// gemm_moepdh_* (f16 moe_yd) + moe_combine4h on the moep GU / DN defaults (ops::chooseMoe, moep branch). Env-only screen
+// on the frozen int0252 7dc6832 exe (scratch\abscreen\moedf8s, 4 ABBA rounds, KEEP): Ornith balance prefill 8k +1.00 %,
+// 32k +1.14 %; with WHIRL_MOEP_DN=m64w4n128k64 on top NEAR (+0.6..+0.7 %), so the DN default stays. Precise never (f16
+// intermediates are a balance item); fast keeps kMoepDefault.comb (1): only balance was screened. A/B by
+// WHIRL_MOEP_COMB=1 (the f32 moe_yd) / 3.
+std::uint32_t moepCombDefault(const Request& r, const Target& t) {
+    const bool h16 = r.has(Item::h16);
+    if (t.gfx1151) {
+        if (!t.moe_mxfp4) return 0u;
+        return r.mode == Mode::balance && h16 ? 3u : kernels::kMoepDefault.comb;
+    }
     return t.moe_mxfp4 && h16 ? 3u : 0u;
 }
 
@@ -351,8 +361,9 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
         F.moep_gu = static_cast<std::uint32_t>(kernels::kMoepDefault.gu) + 1;
         F.moep_dn = static_cast<std::uint32_t>(kernels::kMoepDefault.dn) + 1;
     }
-    // the combine default of every card (gfx1151: kMoepDefault.comb; v0252-moedf16 gfx1201: 3 with the item h16, else 0)
-    F.moep_comb = moepCombDefault(t, r.has(Item::h16));
+    // the combine default of every card (gfx1151: kMoepDefault.comb, v0252-ornkv2 3 in balance with the item h16;
+    // v0252-moedf16 gfx1201: 3 with the item h16, else 0)
+    F.moep_comb = moepCombDefault(r, t);
     // feat026-moep (was loader.cpp, envGet): WHIRL_MOEP_GU / _DN name a variant (index + 1); any other value ("0", "",
     // an unknown name) is off; WHIRL_MOEP_COMB by std::strtoul (unparsable = 0 = moe_combine)
     if (e.moep_gu) {
@@ -461,7 +472,9 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
         if (const Raw& v = e.kv; v && *v == "q4") {
             if (std::string ign = applyFastOnlyOverride(p, Item::kvq4, "KV", *v, true, true); !ign.empty()) p.ignored.push_back(std::move(ign));
         } else if (v && !v->empty() && *v != "auto")
-            applyOverride(p, Item::kvq8, "KV", *v, *v != "f16", !t.moe || *v != "f16");
+            // v0252-ornkv2: a MoE model on gfx1151 has kvq8 on by default, as a dense model: WHIRL_KV=f16 turns it off
+            // (the way back to f16 KV in balance); the R9700 MoE rule is unchanged (kvq8 is skipped there)
+            applyOverride(p, Item::kvq8, "KV", *v, *v != "f16", !t.moe || t.gfx1151 || *v != "f16");
     }
     // tune.cpp:954-957
     F.prec_dec = !p.q8dec_default;
@@ -482,7 +495,7 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
             tail = " (precise never takes them)";
         }
         if (why != nullptr) {
-            F.moep_comb = moepCombDefault(t, r.has(Item::h16));
+            F.moep_comb = moepCombDefault(r, t);
             if (items) p.ignored.push_back(std::format("WHIRL_MOEP_COMB={} ignored: {}{}", *v, why, tail));
         }
     }
@@ -664,7 +677,11 @@ Plan plan(const Request& r_in, const Target& t) {
                 else if (t.gfx1151) note = "f16 weights only on this GPU";
                 break;
             case Item::kvq8:
-                if (t.moe) why = "MoE models keep f16 KV";
+                // v0252-ornkv2 (PLAN V1-113): MoE models take int8 KV on the gfx1151 card (balance item int8 KV; Ornith
+                // balance server decode q8h vs f16 +7.94 % at 32k, +15.52 % at 64k, 2k and prefill inside the band:
+                // scratch\abscreen\ornkv8s, KEEP). The R9700 keeps f16 KV on MoE models: its q8h screen was a DROP
+                // (decode 128k -3.60 %, KB v0252-b8s2 R1). KvCaps::moe_q8 is the same rule in chooseKv.
+                if (t.moe && !t.gfx1151) why = "MoE models keep f16 KV";
                 else note = t.k_kv_q8h ? "q8h KV (int8 + f16 scale / 32, Hadamard-rotated q/k)" : "q8 KV (int8 + f16 scale / 32)";
                 break;
             case Item::specsample:
@@ -878,7 +895,9 @@ KvChoice chooseKvMode(const Request& r, bool moe, const KvCaps& caps) {
         }
         return c;
     }
-    if (r.has(Item::kvq8) && !moe) {
+    // v0252-ornkv2: MoE models too where caps.moe_q8 (gfx1151). q8h, not q8v: half the KV bytes (q8v saves V only) and
+    // the gfx1151 q8h decode attention is the tuned int8 path; progress\v0252-ornkv.PRIOR_ART.md
+    if (r.has(Item::kvq8) && (!moe || caps.moe_q8)) {
         c.kv = q8;
         c.why = std::format("{}, {}: {}", modeName(r.mode), model, kvFormatName(q8));
         return c;

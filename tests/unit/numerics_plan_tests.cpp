@@ -111,11 +111,74 @@ std::map<std::string, std::string> splitKv(std::string_view s) {
     return o;
 }
 
+// v0252-ornkv2 (PLAN V1-113): the S0b-2 num_plan of an 8060S MoE balance / fast cell -> the same line with kvq8 enabled
+// (int8 KV for MoE models on gfx1151; fast keeps q4 through kvq4, which wins in chooseKv): "kvq8 (MoE models keep f16
+// KV)" leaves the skipped list and "kvq8 (<q8h note>)" enters the enabled list in item order (before specsample).
+// false = the old text is missing. (From the v0252-ornkv port, which did it on both cards.)
+bool ornkvRepin(std::string& l) {
+    const std::string old_sk = "kvq8 (MoE models keep f16 KV)";
+    const std::size_t at = l.find(old_sk);
+    if (at == std::string::npos) return false;
+    if (l.compare(at + old_sk.size(), 2, ", ") == 0) l.erase(at, old_sk.size() + 2);           // first of several
+    else if (at >= 2 && l.compare(at - 2, 2, ", ") == 0) l.erase(at - 2, old_sk.size() + 2);   // after another
+    else l.replace(at, old_sk.size(), "none");                                                 // the only one
+    const std::size_t ss = l.find(", specsample (");
+    if (ss == std::string::npos) return false;
+    l.insert(ss, ", kvq8 (q8h KV (int8 + f16 scale / 32, Hadamard-rotated q/k))");
+    return true;
+}
+
+// v0252-ornkv2: Ornith (MoE) balance on the 8060S: kvq8 on by default (q8h KV), the cache identity carries it (bitsKey
+// and logLine - the KV-tier fingerprint's numerics field - differ from the f16 plan, so a tier entry written with f16 KV
+// is never restored as q8h, nor the reverse; kv_name is in the fingerprint as well, tests/cache/fingerprint_cases.inc),
+// WHIRL_KV=f16 turns it off as on a dense model (the way back to f16), WHIRL_KV=q8h (the screen's B arm) is the new
+// default plan, precise unchanged; fast: kvq8 listed as enabled (as dense fast), the format stays q4 (contract_tests
+// testKvChoiceMoe8060s). The R9700: unchanged (kvq8 skipped, WHIRL_KV=f16 no override).
+// (the Request and the Target live in this helper's frame: testOrnkvPlan in one piece used 18584 bytes of stack, over
+// MSVC /analyze's 16 KiB, C6262.) kv: nullptr = WHIRL_KV unset, else its value (Target::kv_explicit as the loader sets it)
+nu::Plan ornkvPlan(const char* cn, const char* mode, const char* kv) {
+    nu::Request r = nu::parseMode(mode, "command line");
+    r.load_overrides = true;
+    if (kv != nullptr) *r.env.find("KV") = kv;
+    return nu::plan(r, target(card(cn), "moe", kv != nullptr));
+}
+
+void testOrnkvPlan8060s() {
+    const nu::Plan pb = ornkvPlan("8060s", "balance", nullptr);
+    NCHECK(pb.on(nu::Item::kvq8), "8060s Ornith balance: kvq8 off");
+    NCHECK(nu::logLine(pb).find("MoE models keep f16 KV") == std::string::npos, "8060s Ornith balance: old skip note");
+    NCHECK(pb.bitsKey().find("kvq8=1;") != std::string::npos, "8060s Ornith balance bitsKey without kvq8=1");
+    const nu::Plan pf = ornkvPlan("8060s", "balance", "f16");
+    NCHECK(!pf.on(nu::Item::kvq8) && pf.overrides.size() == 1 && pf.overrides[0] == "WHIRL_KV=f16: kvq8 off" && !pf.lossy_override,
+           "8060s Ornith balance WHIRL_KV=f16: kvq8 not turned off ({} overrides)", pf.overrides.size());
+    NCHECK(pf.bitsKey() != pb.bitsKey() && nu::logLine(pf) != nu::logLine(pb), "8060s Ornith balance: f16 and q8h plans share a cache key");
+    const nu::Plan pq = ornkvPlan("8060s", "balance", "q8h");
+    NCHECK(pq.on(nu::Item::kvq8) && pq.overrides.empty() && pq.bitsKey() == pb.bitsKey(), "8060s Ornith balance WHIRL_KV=q8h != default");
+    NCHECK(!ornkvPlan("8060s", "precise", nullptr).on(nu::Item::kvq8), "8060s Ornith precise: kvq8 on");
+    const nu::Plan pfa = ornkvPlan("8060s", "fast", nullptr);
+    NCHECK(pfa.on(nu::Item::kvq8) && pfa.on(nu::Item::kvq4), "8060s Ornith fast: kvq8 + kvq4 listed (the format stays q4)");
+}
+
+void testOrnkvPlanR9700() {
+    const nu::Plan pb = ornkvPlan("r9700", "balance", nullptr);
+    NCHECK(!pb.on(nu::Item::kvq8) && nu::logLine(pb).find("kvq8 (MoE models keep f16 KV)") != std::string::npos &&
+               pb.bitsKey().find("kvq8=0;") != std::string::npos,
+           "r9700 Ornith balance: the plan changed (f16 KV must stay)");
+    const nu::Plan pf = ornkvPlan("r9700", "balance", "f16");
+    NCHECK(!pf.on(nu::Item::kvq8) && pf.overrides.empty() && pf.bitsKey() == pb.bitsKey(), "r9700 Ornith balance WHIRL_KV=f16: plan changed");
+    NCHECK(!ornkvPlan("r9700", "fast", nullptr).on(nu::Item::kvq8), "r9700 Ornith fast: kvq8 on");
+}
+
+void testOrnkvPlan() {
+    testOrnkvPlan8060s();
+    testOrnkvPlanR9700();
+}
+
 // env names a cell sets that no plan field reads (checkGemvBitwise only: not a flag, prints a warning)
 const std::set<std::string> k_not_plan_env = {"GEMV_BITWISE_FLOAT"};
 
 void testPlanTable() {
-    std::size_t n_cells = 0, n_fields = 0, n_repin = 0;
+    std::size_t n_cells = 0, n_fields = 0, n_repin = 0, n_ornkv = 0;
     // the value of one S0b-2 dump key in a plan ("" + known = false: not decided by the plan)
     auto keyOf = [](const nu::Plan& p, const std::string& k, bool& known) {
         known = true;
@@ -155,7 +218,15 @@ void testPlanTable() {
         }
         const nu::Target tc = target(card(c.card), c.model, kv_explicit);
         const nu::Plan p = nu::plan(r, tc);
-        const auto want = splitKv(c.kv);
+        auto want = splitKv(c.kv);
+        // v0252-ornkv2: the S0b-2 dump predates int8 KV for MoE models on the 8060S; its MoE cells without WHIRL_KV
+        // (balance and fast) expect kvq8 moved from "skipped (MoE models keep f16 KV)" to "enabled" - one declared text
+        // edit of num_plan, no other key (the KV format itself is chooseKv's, contract_tests testKvChoiceMoe8060s; the
+        // moep flags have no dump key). The R9700 MoE cells are compared unchanged.
+        if (std::string_view(c.card) == "8060s" && std::string_view(c.model) == "moe" && std::string_view(c.mode) != "precise" && !kv_explicit) {
+            ++n_ornkv;
+            NCHECK(ornkvRepin(want["num_plan"]), "{} {} (ornkv2 re-pin): S0b-2 num_plan has no 'kvq8 (MoE models keep f16 KV)'", c.card, c.cell);
+        }
         std::size_t n_over = 0;
         if (repin) {
             ++n_repin;
@@ -195,6 +266,7 @@ void testPlanTable() {
             if (*fi.dump_key) NCHECK(want.count(fi.dump_key) == 1, "{} {}: dump has no {}", c.card, c.cell, fi.dump_key);
     }
     NCHECK(n_repin == 10, "bug-fastonly re-pin cells {} (expected the 10 env_RELAX* balance cells)", n_repin);
+    NCHECK(n_ornkv == 2, "ornkv2 re-pin cells {} (expected cli_moe_balance / cli_moe_fast of the 8060s)", n_ornkv);
     NCHECK(n_cells == 68, "cells {}", n_cells);
     std::printf("  numerics plan table: %zu S0b-2 cells, %zu fields compared\n", n_cells, n_fields);
 }
@@ -922,7 +994,9 @@ void testRelaxMoeArms() {
 
 // v0251-a7port: the Radeon 8060S MoE prefill default (kernels::kMoepDefault = g64n64k64 + m128w4n128k64 + moe_combine4,
 // plan flags = variant index + 1) on the gfx1151 card with MXFP4 routed experts, in every mode; off on the R9700, on a
-// dense model and on non-MXFP4 experts; WHIRL_MOEP_GU / _DN / _COMB override it ("0" / "" = off)
+// dense model and on non-MXFP4 experts; WHIRL_MOEP_GU / _DN / _COMB override it ("0" / "" = off).
+// v0252-ornkv2 (PLAN V1-94): the 8060S balance combine default is 3 (f16 moe_yd + moe_combine4h); GU / DN as before,
+// precise and fast keep kMoepDefault.comb (1). The balance rows fail before the change.
 static void testMoepDefault() {
     namespace kn = whirl::kernels;
     NCHECK(std::string(kn::kMoepGu[kn::kMoepDefault.gu].name) == "g64n64k64" && std::string(kn::kMoepDn[kn::kMoepDefault.dn].name) == "m128w4n128k64" &&
@@ -940,9 +1014,10 @@ static void testMoepDefault() {
                 const nu::Target t = target(c, model, false);
                 const nu::Flags f = fl(t, mode, {});
                 const bool on = std::string_view(c.name) == "8060s" && std::string_view(model) == "moe";
+                const unsigned c8 = std::string_view(mode) == "balance" ? 3u : 1u;  // v0252-ornkv2
                 // v0252-moedf16: the R9700 MoE MXFP4 balance / fast default is COMB 3 (f16 moe_yd on the fp8 kind), no moep
                 const bool ydh = std::string_view(c.name) == "r9700" && std::string_view(model) == "moe" && std::string_view(mode) != "precise";
-                NCHECK(on    ? f.moep_gu == 1 && f.moep_dn == 3 && f.moep_comb == 1
+                NCHECK(on    ? f.moep_gu == 1 && f.moep_dn == 3 && f.moep_comb == c8
                        : ydh ? f.moep_gu == 0 && f.moep_dn == 0 && f.moep_comb == 3
                              : f.moep_gu == 0 && f.moep_dn == 0 && f.moep_comb == 0,
                        "moep default {} {} {}: gu {} dn {} comb {}", c.name, model, mode, f.moep_gu, f.moep_dn, f.moep_comb);
@@ -950,8 +1025,9 @@ static void testMoepDefault() {
     const nu::Target t8 = target(card("8060s"), "moe", false);
     for (const char* mode : {"precise", "balance", "fast"}) {
         const nu::Flags g0 = fl(t8, mode, {{"MOEP_GU", "0"}}), d0 = fl(t8, mode, {{"MOEP_DN", ""}}), c0 = fl(t8, mode, {{"MOEP_COMB", "0"}});
-        NCHECK(g0.moep_gu == 0 && g0.moep_dn == 3 && g0.moep_comb == 1, "8060s moe {}: WHIRL_MOEP_GU=0 turns the gate + up variant off", mode);
-        NCHECK(d0.moep_gu == 1 && d0.moep_dn == 0 && d0.moep_comb == 1, "8060s moe {}: WHIRL_MOEP_DN= (empty) turns the down variant off", mode);
+        const unsigned cd = std::string_view(mode) == "balance" ? 3u : 1u;  // v0252-ornkv2: the mode's combine default
+        NCHECK(g0.moep_gu == 0 && g0.moep_dn == 3 && g0.moep_comb == cd, "8060s moe {}: WHIRL_MOEP_GU=0 turns the gate + up variant off", mode);
+        NCHECK(d0.moep_gu == 1 && d0.moep_dn == 0 && d0.moep_comb == cd, "8060s moe {}: WHIRL_MOEP_DN= (empty) turns the down variant off", mode);
         NCHECK(c0.moep_gu == 1 && c0.moep_dn == 3 && c0.moep_comb == 0, "8060s moe {}: WHIRL_MOEP_COMB=0 = moe_combine", mode);
         const nu::Flags all0 = fl(t8, mode, {{"MOEP_GU", "0"}, {"MOEP_DN", "0"}, {"MOEP_COMB", "0"}});
         NCHECK(all0.moep_gu == 0 && all0.moep_dn == 0 && all0.moep_comb == 0, "8060s moe {}: WHIRL_MOEP_*=0 = the shipped 0.2.5 path", mode);
@@ -1014,11 +1090,13 @@ static void testMoepCombMode() {
                 }
             }
         }
-    // the default plan is untouched: 8060S MoE MXFP4 = 1 / 3 / 1 in every mode (testMoepDefault), no notes without the variable
+    // the default plan is untouched: 8060S MoE MXFP4 = 1 / 3 / 1 in precise and fast, 1 / 3 / 3 in balance (v0252-ornkv2;
+    // testMoepDefault), no notes without the variable
     const nu::Target t8 = target(card("8060s"), "moe", false);
     for (const char* mode : {"precise", "balance", "fast"}) {
         const nu::Plan d = planOf(mode, t8, {});
-        NCHECK(d.flags.moep_gu == 1 && d.flags.moep_dn == 3 && d.flags.moep_comb == 1 && d.ignored.empty(), "B26-41 8060s moe {}: default plan changed", mode);
+        NCHECK(d.flags.moep_gu == 1 && d.flags.moep_dn == 3 && d.flags.moep_comb == (std::string_view(mode) == "balance" ? 3u : 1u) && d.ignored.empty(),
+               "B26-41 8060s moe {}: default plan changed", mode);
     }
 }
 
@@ -1057,10 +1135,39 @@ static void testMoeYdhDefault() {
         const nu::Plan p3 = planOf("precise", t97, ex);
         NCHECK(p3.flags.moep_comb == 0 && p3.bitsKey() == p.bitsKey() && p3.ignored.size() == 1, "moedf16 r9700 moe precise q8dec={}: COMB=3 refused", q8);
     }
-    // the 8060S: unchanged in every mode (kMoepDefault 1 / 3 / 1)
+    // the 8060S (v0252-ornkv2, PLAN V1-94): balance takes COMB 3 too (gemm_moepdh f16 moe_yd + moe_combine4h on the moep
+    // GU / DN defaults; screen KEEP: Ornith balance prefill 8k +1.00 %, 32k +1.14 %); precise and fast keep kMoepDefault
+    // 1 / 3 / 1 (fast was not screened). A/B: WHIRL_MOEP_COMB=1 (A, the f32 moe_yd) / 3 (B). Fails before the change.
     for (const char* mode : {"precise", "balance", "fast"}) {
+        const bool bal = std::string_view(mode) == "balance";
         const nu::Plan d = planOf(mode, t8, {});
-        NCHECK(d.flags.moep_gu == 1 && d.flags.moep_dn == 3 && d.flags.moep_comb == 1, "moedf16 8060s moe {}: plan changed", mode);
+        NCHECK(d.flags.moep_gu == 1 && d.flags.moep_dn == 3 && d.flags.moep_comb == (bal ? 3u : 1u) && d.ignored.empty(),
+               "ornkv2 8060s moe {}: default comb {} (want {})", mode, d.flags.moep_comb, bal ? 3 : 1);
+        const nu::Plan a = planOf(mode, t8, {{"MOEP_COMB", "1"}});
+        NCHECK(a.flags.moep_comb == 1 && a.ignored.empty() && (a.bitsKey() != d.bitsKey()) == bal,
+               "ornkv2 8060s moe {}: WHIRL_MOEP_COMB=1 = the A arm (f32 moe_yd)", mode);
+        NCHECK(planOf(mode, target(card("8060s"), "swift", false), {}).flags.moep_comb == 0, "ornkv2 8060s swift {}: dense model unchanged", mode);
+    }
+    {
+        const nu::Plan d = planOf("balance", t8, {});
+        NCHECK(planOf("balance", t8, {{"MOEP_COMB", "3"}}).bitsKey() == d.bitsKey(), "ornkv2 8060s moe balance: WHIRL_MOEP_COMB=3 = the default");
+        NCHECK(planOf("balance", t8, {{"MOEP_COMB", "5"}}).flags.moep_comb == 3, "ornkv2 8060s moe balance: COMB=5 refused -> 3");
+        // a balance list without the item h16 (f16 intermediates): the f32 moe_yd combine
+        NCHECK(planOf("balance:gdnwmma,specsample", t8, {}).flags.moep_comb == 1, "ornkv2 8060s moe balance without h16: comb 1");
+        // non-MXFP4 routed experts: no moep, combine 0
+        nu::Target tq = t8;
+        tq.moe_mxfp4 = false;
+        NCHECK(planOf("balance", tq, {}).flags.moep_comb == 0, "ornkv2 8060s non-MXFP4 experts balance: comb 0");
+        // precise: f32 moe_yd, also with WHIRL_Q8DEC=1 and with WHIRL_MOEP_COMB=3 (refused)
+        for (const bool q8 : {false, true}) {
+            std::vector<std::pair<const char*, const char*>> ex;
+            if (q8) ex.emplace_back("Q8DEC", "1");
+            const nu::Plan p = planOf("precise", t8, ex);
+            ex.emplace_back("MOEP_COMB", "3");
+            const nu::Plan p3 = planOf("precise", t8, ex);
+            NCHECK(p.flags.moep_comb == 1 && p3.flags.moep_comb == 1 && p3.bitsKey() == p.bitsKey() && p3.ignored.size() == 1,
+                   "ornkv2 8060s moe precise q8dec={}: comb 1, COMB=3 refused", q8);
+        }
     }
 }
 
@@ -1254,7 +1361,8 @@ void testNumericsPlan(int& pass, int& fail) {
     testLoadRules();
     testMoepDefault();  // v0251-a7port (fails before the port: the plan has no gfx1151 default)
     testMoepCombMode();  // v0251-a7pol B26-41 (the refusal rows fail on cfce7ea)
-    testMoeYdhDefault();  // v0252-moedf16 (fails before the change: the R9700 balance / fast comb is 0)
+    testMoeYdhDefault();  // v0252-moedf16 (fails before the change: the R9700 balance / fast comb is 0); v0252-ornkv2 8060S balance 3
+    testOrnkvPlan();  // v0252-ornkv2: 8060S Ornith balance kvq8 on, cache key, WHIRL_KV=f16 way back (fails before the change)
     testRfuseDefault();  // v0251-a11port (fails before the port: the plan has no gfx1151 default)
     testKgVarFlag();  // v0252-c1port; v0252-c1acc auto default + invalid-value note (fails before c1acc)
     testWs4rFlag();  // v0252-ws4r97b (fails before phase 2: the stub parseWs4r accepts nothing)

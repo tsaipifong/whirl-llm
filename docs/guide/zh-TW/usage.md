@@ -57,7 +57,7 @@ K-quant 檔（混用多種 tensor 型別）會久一些。結果會快取起來�
 | 模式 | dense 模型 | MoE 模型 |
 |---|---|---|
 | precise | f16 | f16 |
-| balance（預設） | q8h（K、V 都是 int8，每 32 個值一個 f16 scale，q / k 先做 Hadamard 旋轉；在 128k 通過相對 f16 的 balance KL 門檻，KL-1） | f16 |
+| balance（預設） | q8h（K、V 都是 int8，每 32 個值一個 f16 scale，q / k 先做 Hadamard 旋轉；在 128k 通過相對 f16 的 balance KL 門檻，KL-1） | f16；Radeon 8060S 為 q8h（0.2.5.2 起） |
 | fast | q4（Radeon 8060S：q8h，在那裡 decode 比 q4 快） | q4 |
 
 格式不會因為放不放得下而切換：選定的格式放不下要求的 context 時，沒有指定 context 就降低 context 並發出警告；
@@ -66,7 +66,7 @@ K-quant 檔（混用多種 tensor 型別）會久一些。結果會快取起來�
 | 模式 | 內容 |
 |---|---|
 | **precise**（`--precise`） | GGUF 權重反量化成 f16；prefill 的 activation 與累加用 f16 / f32；DeltaNet prefill 用 f32 區塊路徑；**KV 快取在每張卡上都是 f16**。decode、MTP / n-gram 驗證與其他小 batch 也用 f16 activation 進同一個 f16 GEMM（f32 累加，不用 int8 activation）。除了檔案本身的量化權重，不再額外量化。f16 KV 放不下時：沒有指定 context 就降低 context 並發出警告；有指定（`--ctx`、`--ctx-per-slot`）就停止並說明（結束代碼 5）——絕不自行改用 int8 KV |
-| **balance**（預設；`--balance`） | 沒指定模式時的預設：下表以速度為主的項目，dense 模型用 q8h KV、MoE 模型用 f16 KV；dense 與 MoE 模型開的項目相同。近乎無損但不是逐位元相同：輸出可能與 precise 有些微差異（KL / 準確度實測見 [quantization.md](quantization.md)） |
+| **balance**（預設；`--balance`） | 沒指定模式時的預設：下表以速度為主的項目，dense 模型用 q8h KV、MoE 模型用 f16 KV（Radeon 8060S 為 q8h）；dense 與 MoE 模型開的項目相同。近乎無損但不是逐位元相同：輸出可能與 precise 有些微差異（KL / 準確度實測見 [quantization.md](quantization.md)） |
 | **fast** | balance 再加上更積極的有損項目（4-bit 等級品質），以任務準確度驗收（回收至少達 precise 的 95%）；KL / top-1 只作回歸守門。已實作：`kvq4` 與 `relaxacc`；其他列為略過 |
 
 項目（用 `--balance=fp8,kvq8` 或 `--fast=...` 只選一部分；`WHIRL_MODE=balance:fp8,kvq8`）：
@@ -77,7 +77,7 @@ K-quant 檔（混用多種 tensor 型別）會久一些。結果會快取起來�
 | `moefp8` | balance（只限 MoE 模型） | MoE 專家 prefill GEMM 用 fp8 activation | MXFP4 MoE（Ornith MXFP4） | 略過 |
 | `gdnwmma` | balance | DeltaNet prefill 區塊用 f16 WMMA，取代 f32 區塊路徑 | MXFP4 模型，以及任何權重格式的 dense 模型（Q4_K_M、Q5_K、Q6_K、IQ4_XS 等；KG-1）；MoE 模型只限 MXFP4 | 略過（還沒有 kernel） |
 | `h16` | balance | FFN / DeltaNet 的 GEMM 輸出先存成 f16 再進逐元素運算 | MXFP4 模型，以及任何權重格式的 dense 模型（KG-1）；MoE 模型只限 MXFP4 | MXFP4 模型，只有 f16 權重 |
-| `kvq8` | balance | dense 模型一律用 q8h KV（不是 f16 放不下才換）；MoE 模型暫時維持 f16（MoE 的 int8 KV 待任務準確度驗證） | dense 模型 | dense 模型 |
+| `kvq8` | balance | dense 模型一律用 q8h KV（不是 f16 放不下才換）。MoE 模型：R9700 維持 f16；Radeon 8060S 自 0.2.5.2 起用 q8h（KV 記憶體約為 f16 的一半：Ornith-1.5-35B-A3B 每個 token 11.7 KiB，原本 22 KiB），在那裡 `WHIRL_KV=f16` 可讓 balance 維持 f16 KV | dense 模型 | dense 與 MoE 模型 |
 | `kvq4` | fast | 4-bit KV（int4，每 32 個值一個 f16 scale，q / k 先做 Hadamard 旋轉）；8060S 的 decode attention 用 `attn_dq4` 讀取（約 180 GB/s）：Ornith-1.5-35B-A3B MXFP4 decode 128k 58.5 tok/s（f16 KV 32.7）、64k 67.0（46.4）；R9700（FAST-1c）Swift-1.5 27B 在 131k 的 decode：plain 30.98 tok/s（f16 KV 25.08）、MTP 68.79（63.12），128k prefill −1.9%；對 f16 的 KL 在 fast 門檻內 | dense 與 MoE | MoE（dense 模型在 fast 維持 q8h KV：那裡 decode 較快） |
 | `relaxacc` | fast | 寬鬆推測接受（只對 MTP draft；n-gram draft 維持精確接受）。放寬接受若會讓結尾的 6-gram 與最近 4096 個 token 內重複，就不接受（重複防護）。greedy：draft 不是驗證列的 argmax 時，只要它在該列前 `WHIRL_RELAX_K` 名（預設 4）且 p(draft) >= `WHIRL_RELAX_ALPHA` × p(argmax)（預設 0.1）就保留；最後一個保留的 draft 之後那個 token 一定是目標模型自己的 argmax。temperature > 0：typical acceptance（Medusa）：在請求過濾後的分布上 p(draft) >= min(`WHIRL_RELAX_EPS` 0.09, `WHIRL_RELAX_DELTA` 0.3 × exp(−熵)) 就保留（此時不用 `specsample`）。**會改變 greedy 輸出**：fast 的 greedy 不等於 plain greedy，MTP ≠ plain；同樣的 prompt、seed、設定仍是確定的（此時 draft 數量策略改用固定的合成週期成本，不看牆鐘時間；並發請求共用 draft 數量，可能互相影響輸出）。`WHIRL_RELAX=0` 關閉。MoE 模型（Ornith-1.5-35B-A3B）用依任務準確度量出的每卡設定：R9700 前 4 名、alpha 0.1、每回合 2 個 MTP draft（需要一趟檢查 kernel，沒有就略過），Radeon 8060S 前 6 名、alpha 0.05、1 個 draft（和 R9700 一樣用一趟檢查 kernel 檢查）；`WHIRL_RELAX_K`／`WHIRL_RELAX_ALPHA`／`WHIRL_MTP_DRAFTS`／`--mtp-drafts` 仍可覆蓋。只屬於 fast：precise 與 balance 會忽略 `WHIRL_RELAX`（載入 log 會留一行說明） | MTP 模型：dense；MoE 前 4 名、alpha 0.1、2 個 draft（要有一趟檢查 kernel） | MTP 模型：dense；MoE 前 6 名、alpha 0.05、1 個 draft |
 | `headq`、`moeskip`、`a8`、`a4` | fast | 低位元輸出頭、略過 MoE 專家、W4A8 / W4A4 prefill | 尚未實作 | 尚未實作 |
