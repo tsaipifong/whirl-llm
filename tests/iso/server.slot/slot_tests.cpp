@@ -136,6 +136,8 @@ void testSlotDefaults() {
     ISO_CHECK(sl.greedy && !sl.ignore_eos && sl.finish == "length" && !sl.done && !sl.parked);
     ISO_CHECK(sl.pend.size() == sv::max_small_batch && sl.batch.size() == sv::max_small_batch + 1);
     ISO_CHECK(sv::max_small_batch == whirl::qwen35::max_small_batch);
+    // v0252-e1p1c (E1 lookahead): host inputs, and the gen-end checkpoint takes its hidden row from the model (mtpH)
+    ISO_CHECK(sl.e1_rows == 0u && sl.e1_hid == 0u);
 }
 
 }  // namespace

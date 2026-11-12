@@ -49,11 +49,14 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <fstream>  // v0252-e1p1: spec_acc_tests.inc reads the env table / docs / server_main sources
 #include <functional>
 #include <future>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <regex>  // v0252-e1p1b-fix: spec_acc_tests.inc reads the spec-acc stats line fields by their labels
 #include <set>
 #include <sstream>
 #include <string>
@@ -4701,6 +4704,11 @@ void testSampling() {
     CHECK_EQ(srv.model().poison(), 0u);
 }
 
+// v0252-e1p1 (PLAN V1-93 P1a): WHIRL_SPEC_ACC, the device accept decision (port of feat026-acc / feat026-acc-r1)
+#include "spec_acc_tests.inc"
+// v0252-e1p1b (PLAN V1-93 P1b): WHIRL_E1, the next cycle's inputs on the device (synchronous cycle)
+#include "e1_inputs_tests.inc"
+
 // stop strings and end-of-turn
 void testStopAndEos() {
     ServerSetup su = baseSetup();
@@ -8631,6 +8639,8 @@ void testTierBridgeRestore() {
 
 }  // namespace
 
+#include "e1_ahead_tests.inc"  // v0252-e1p1c (E1 one-cycle lookahead, WHIRL_E1=2); after the helpers it uses
+
 // arch024 S10 (M8): thread ownership. FakeLoop is a thread that owns an EngineThread the way runLoop does (enter at the
 // start, leave at the end) and runs the calls given to it.
 int g_owner_expected = 0;  // violations a test causes on purpose (main compares each test's count with it)
@@ -9908,6 +9918,7 @@ int main(int argc, char** argv) {
         {"spec_rules_d4", r12b::testRulesD4},
         {"spec_rules_d6", r12b::testRulesD6},
         {"spec_rules_d8", r12b::testRulesD8},
+        {"spec_rules_ahead", r12b::testRulesAhead},  // v0252-e1p1c
         {"spec_rules_d14", r12b::testRulesD14},
         {"spec_rules_d16", r12b::testRulesD16},  // arch025-lane1
         {"spec_rules_d17", r12b::testRulesD17},
@@ -9940,6 +9951,19 @@ int main(int argc, char** argv) {
         {"supersede_compress", testSupersedeCompressCuts},
         {"sampling", testSampling},
         {"stop_eos", testStopAndEos},
+        {"spec_acc_modes", testSpecAccModes},  // v0252-e1p1 (feat026-acc port)
+        {"spec_acc_reads", testSpecAccReads},
+        {"spec_acc_r1_counters", testSpecAccR1Counters},
+        {"spec_acc_r1_env", testSpecAccR1Env},
+        {"e1_inputs_sync", testE1InputsSync},  // v0252-e1p1b (E1 device inputs)
+        {"e1_inputs_fallback", testE1InputsFallback},
+        {"e1_inputs_env", testE1InputsEnv},
+        {"e1_ahead_equal", testE1AheadEqual},  // v0252-e1p1c (E1 one-cycle lookahead)
+        {"e1_ahead_end", testE1AheadEnd},
+        {"e1_ahead_order", testE1AheadOrder},
+        {"e1_ahead_drain", testE1AheadDrain},
+        {"e1_ahead_fallback", testE1AheadFallback},
+        {"e1_ahead_env", testE1AheadEnv},
         {"fr_tool_truncated", testFrToolTruncated},
         {"fr_nonstream_disconnect", testFrNonStreamDisconnect},
         {"fr_pool_prefill", testFrPoolPrefill},

@@ -192,11 +192,59 @@ void testRelaxRank() {
     ISO_CHECK(c->takeRelaxRank().stats == 0x5000);
 }
 
+// v0252-e1p1b (E1, PLAN V1-93 P1b): the replay count from the NPEND control word (setPending npend_dev), the word address of
+// any sequence, and the E1 refusals (a device-input segment without the E1 kernels, with literal drafts or in snapshot mode)
+void testE1Inputs() {
+    auto c = std::make_unique<MtpProbe>();
+    c->out_tok = 0x8000;
+    ISO_CHECK(c->ctlWord(3, q::ctl_npend) == 0x8000 + 4 * (3 * q::ctl_words + q::ctl_npend));
+    ISO_CHECK(q::ctl_acc == 50 && q::ctl_chosen == 51 && q::ctl_npos == 54 && q::ctl_npend == 57 && q::ctl_npend < q::ctl_words);
+    c->seqs.resize(4);
+    q::GdnSeg g;
+    c->seqs[2].npend = 3;
+    c->replayCount(g, 2);
+    ISO_CHECK(g.npend == 3 && g.snap[0] == 0);  // by value: the snapshot pointers stay unused
+    c->seqs[2].npend = q::npend_dev;
+    q::GdnSeg gd;
+    c->replayCount(gd, 2);
+    ISO_CHECK(gd.npend == -1 && gd.snap[0] == c->ctlWord(2, q::ctl_npend));
+    // commitSeq with the device count: the same two launches as by value, and the pending marker is consumed
+    c->gdn_replay = true;
+    c->cfg.d_conv = 4, c->cfg.n_k_heads = 2, c->cfg.d_state = 8, c->cfg.d_inner = 256, c->cfg.n_v_heads = 4;
+    c->layers.resize(2);
+    c->layers[0].kind = q::LayerKind::attn;
+    c->layers[1].kind = q::LayerKind::gdn;
+    std::vector<DevPtr> conv{0, 0x100}, ssm{0, 0x200};
+    c->seqs[2].conv = conv;
+    c->seqs[2].ssm = ssm;
+    c->gdn_ord = {0, 0};
+    c->k.gdn_conv_l2 = fn(0x10);
+    c->k.gdn_step_norm = fn(0x20);
+    fake::recordLaunches(true);
+    c->commitSeq(2);
+    const auto l = fake::recordedLaunches();
+    fake::recordLaunches(false);
+    ISO_CHECK(l.size() == 2 && c->seqs[2].npend == 0);
+    // refusals: an E1 segment needs the kernels (set_rows_dp / rmsnorm_q8_rows_dv), MTP drafts and replay mode
+    std::vector<q::VSeg> vs(1);
+    vs[0].seq = 1, vs[0].nd = 1, vs[0].pos = 10, vs[0].dev = true;  // nd 1: the probe has no fused decode (unfusedVerifyOk)
+    c->max_ctx = 4096;
+    ISO_CHECK(codeOf([&] { (void)c->verifyBatchEnqueue(vs); }) == "BadBatch");  // no set_rows_dp
+    c->k.set_rows_dp = fn(0x40);
+    const std::uint32_t lit[1] = {5};
+    vs[0].drafts = std::span(lit, 1);
+    ISO_CHECK(codeOf([&] { (void)c->verifyBatchEnqueue(vs); }) == "BadBatch");  // literal drafts
+    std::vector<q::MSeg> ms(1);
+    ms[0].seq = 1, ms[0].e1_rows = 3, ms[0].pend_pos = 11;
+    c->mtp.emplace();
+    ISO_CHECK(codeOf([&] { c->mtpBatchStepEx(ms, 0, true); }) == "BadBatch");  // no rmsnorm_q8_rows_dv
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     return iso::run("forward.mtp_verify",
                     {{"ctl_slot", testCtlSlot}, {"refusals", testRefusals}, {"commit_seq", testCommitSeq}, {"draft_head_problem", testDraftHeadProblem},
-                     {"relax_rank", testRelaxRank}},
+                     {"relax_rank", testRelaxRank}, {"e1_inputs", testE1Inputs}},
                     argc, argv);
 }

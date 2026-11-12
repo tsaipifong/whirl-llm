@@ -45,6 +45,13 @@ void testOptionalHookDefaults() {
     m.visRelease();
     m.profileStop();
     m.setVisMap(0, nullptr);
+    // v0252-e1p1 (feat026-acc port, WHIRL_SPEC_ACC): no device accept kernel unless a model says so (the engine then keeps the
+    // host accept path, and a device mode falls back to the pinned read); the pinned read defaults to readCtl
+    ISO_CHECK(!m.specAcceptOk());
+    std::array<std::int32_t, 64> ctl{};
+    m.readCtlPinned(ctl);
+    // v0252-e1p1b (E1, WHIRL_E1): no device-input path unless a model says so (the engine then turns E1 off at startup)
+    ISO_CHECK(!m.e1InputsOk());
 }
 
 void testRequiredCallsThroughTheInterface() {

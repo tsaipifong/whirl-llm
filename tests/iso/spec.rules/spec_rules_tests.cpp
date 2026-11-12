@@ -29,6 +29,7 @@ int main(int argc, char** argv) {
                      {"d8", r12b::testRulesD8},
                      {"d14", r12b::testRulesD14},
                      {"d16", r12b::testRulesD16},
-                     {"d17", r12b::testRulesD17}},
+                     {"d17", r12b::testRulesD17},
+                     {"ahead", r12b::testRulesAhead}},  // v0252-e1p1c (E1 lookahead rules)
                     argc, argv);
 }

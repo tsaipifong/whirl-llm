@@ -126,12 +126,12 @@ void Context::commitSeq(u32 s) {
         GdnSegs sc;
         sc.s[0].state = sq.conv[i];
         sc.s[0].pend = pendPtr(sq, i, true);
-        sc.s[0].npend = static_cast<i32>(sq.npend);
+        replayCount(sc.s[0], s);  // v0252-e1p1b: by value or the sequence's ctl_npend word (E1)
         hip::launch(k.gdn_conv_l2, D(ch / 128), D(128), 0, stream, qkv, g.conv, conv_out, I(ch), I(2 * cfg.n_k_heads), cfg.eps, sc);
         GdnSegs ss;
         ss.s[0].state = sq.ssm[i];
         ss.s[0].pend = pendPtr(sq, i, false);
-        ss.s[0].npend = static_cast<i32>(sq.npend);
+        replayCount(ss.s[0], s);
         hip::launch(k.gdn_step_norm, D(cfg.n_v_heads), D(512), 0, stream, conv_out, alpha, beta, z, g.norm, gdn_out, xq, xd, I(cfg.n_k_heads),
                     scale_g, cfg.eps, I(cfg.n_v_heads), I(ch), ss);
     }
@@ -158,23 +158,32 @@ u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
     plan.segs = segs;
     RowTab tab;
     RowIdx dst;
+    // v0252-e1p1b (E1): per row the device position word (-1: tab.pos is the position)
+    RowIdx pdev;
+    for (i32& v : pdev.v) v = -1;
+    bool any_dev = false;
     u32 n = 0;
     u32 snaps = 0;
     for (std::size_t kk = 0; kk < segs.size(); ++kk) {
         const VSeg& sg = segs[kk];
         if (sg.pos + sg.nd + 1 > max_ctx) throw ModelError("ContextTooLong");
         if (sg.nd + 1 > max_small_batch || n + sg.nd + 1 > verifyRows()) throw ModelError("BatchTooLarge");
+        // E1 rows: MTP drafts in replay mode with the device-input kernel, no image (the vision rows need host positions)
+        if (sg.dev && (!gdn_replay || !sg.drafts.empty() || !k.set_rows_dp || visOf(sg.seq) != nullptr)) throw ModelError("BadBatch");
+        any_dev = any_dev || sg.dev;
         plan.snap_base[kk] = snaps;
         snaps += sg.nd;
         for (u32 r = 0; r < sg.nd + 1; ++r) {
-            // drafts: the sequence's control area (MTP), or literal tokens (n-gram)
+            // drafts: the sequence's control area (MTP), or literal tokens (n-gram); E1: row 0 = the accept kernel's chosen word
             if (r == 0)
-                tab.tok[n] = lookupId(sg.next);
+                tab.tok[n] = sg.dev ? -static_cast<i32>(sg.seq * ctl_words + ctl_chosen) - 1 : lookupId(sg.next);
             else if (!sg.drafts.empty())
                 tab.tok[n] = lookupId(sg.drafts[r - 1]);
             else
                 tab.tok[n] = -static_cast<i32>(sg.seq * ctl_words + ctl_drafts + r - 1) - 1;
-            tab.pos[n] = static_cast<i32>(sg.pos + r);
+            // E1: the position is the sequence's ctl_npos word + r (set_rows_dp)
+            tab.pos[n] = static_cast<i32>(sg.dev ? r : sg.pos + r);
+            if (sg.dev) pdev.v[n] = static_cast<i32>(sg.seq * ctl_words + ctl_npos);
             tab.base[n] = static_cast<i32>(seqs[sg.seq].kv_base);
             dst.v[n] = static_cast<i32>(sg.seq * ctl_words + ctl_rows + r);
             n += 1;
@@ -184,7 +193,9 @@ u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
         if (snaps > gdn_max_snap) throw ModelError("BatchTooLarge");
         ensureSnapshots(snaps);
     }
-    row_n = n;
+    // E1: the host does not know the rows' positions -> 0 = unknown (attention: one row per group, bitwise the same as
+    // the grouped launch, src/ops/attention.cpp chooseAttnDecode rows_known)
+    row_n = any_dev ? 0 : n;
     for (u32 ri = 0; ri < n; ++ri) {
         row_pos[ri] = tab.pos[ri];
         row_base[ri] = tab.base[ri];
@@ -204,7 +215,10 @@ u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
             visCommit(n);
         }
     }
-    hip::launch(k.set_rows, D(1), D(32), 0, stream, ids, pos_buf, kvbase_buf, out_tok, tab, I(n));
+    if (any_dev)
+        hip::launch(k.set_rows_dp, D(1), D(32), 0, stream, ids, pos_buf, kvbase_buf, out_tok, tab, I(n), pdev);  // v0252-e1p1b
+    else
+        hip::launch(k.set_rows, D(1), D(32), 0, stream, ids, pos_buf, kvbase_buf, out_tok, tab, I(n));
     keep_hidden = true;
     all_logits = true;
     bplan = &plan;
@@ -239,10 +253,37 @@ void Context::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     RowTab tab;
     RowIdx last;
     RowIdx area;
+    // v0252-e1p1b (E1, MSeg::e1_rows > 0): step 0's head row = the segment's first row + the sequence's ctl_acc word (add),
+    // steps r >= 1 at its ctl_npos word + r (pdev); -1 = by value
+    RowIdx add, pdev;
+    for (i32& v : add.v) v = -1;
+    for (i32& v : pdev.v) v = -1;
+    bool any_dev = false;
     u32 n = 0;
     for (std::size_t kk = 0; kk < segs.size(); ++kk) {
         const MSeg& sg = segs[kk];
         const Seq& sq = seqs[sg.seq];
+        const bool dev = sg.e1_rows > 0;
+        if (dev && (!k.set_rows_dp || !k.rmsnorm_q8_rows_dv || visOf(sg.seq) != nullptr)) throw ModelError("BadBatch");
+        any_dev = any_dev || dev;
+        if (r == 0 && dev) {
+            // E1: nd_prev + 1 rows (padded): the previous verify's argmax tokens, its hidden rows (all of them were copied),
+            // positions pend_pos + j; rows past the accepted count are draft-area rows (later overwritten, never read by
+            // a kept row: causal); the draft head reads row ctl_acc
+            const u32 m = sg.e1_rows;
+            if (m > max_small_batch || n + m > verifyRows()) throw ModelError("BatchTooLarge");
+            hip::copyAsync(mtp_in + static_cast<u64>(n) * E * 4, sq.hid, static_cast<std::size_t>(m) * E * 4, stream);
+            last.v[kk] = static_cast<i32>(n);
+            add.v[kk] = static_cast<i32>(sg.seq * ctl_words + ctl_acc);
+            for (u32 j = 0; j < m; ++j) {
+                tab.tok[n] = -static_cast<i32>(sg.seq * ctl_words + ctl_rows + j) - 1;
+                tab.pos[n] = static_cast<i32>(sg.pend_pos + j);
+                tab.base[n] = static_cast<i32>(sq.kv_base);
+                n += 1;
+            }
+            area.v[kk] = static_cast<i32>(sg.seq * ctl_words);
+            continue;
+        }
         if (r == 0) {
             if (sg.pend.size() > max_small_batch || n + sg.pend.size() > verifyRows()) throw ModelError("BatchTooLarge");
             hip::copyAsync(mtp_in + static_cast<u64>(n) * E * 4, sq.hid, sg.pend.size() * E * 4, stream);
@@ -254,13 +295,16 @@ void Context::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
             }
         } else {
             tab.tok[n] = -static_cast<i32>(sg.seq * ctl_words + ctl_drafts + r - 1) - 1;
-            tab.pos[n] = static_cast<i32>(sg.pos + r);
+            tab.pos[n] = static_cast<i32>(dev ? r : sg.pos + r);  // E1: + the ctl_npos word (set_rows_dp)
+            if (dev) pdev.v[n] = static_cast<i32>(sg.seq * ctl_words + ctl_npos);
             tab.base[n] = static_cast<i32>(sq.kv_base);
             n += 1;
         }
         last.v[kk] = static_cast<i32>(n - 1);
         area.v[kk] = static_cast<i32>(sg.seq * ctl_words);
     }
+    // E1 steps r >= 1: the positions are on the device (attention: one row per group); step 0's are host values
+    const bool pos_dev = any_dev && r > 0;
     const DevPtr hidden = r == 0 ? mtp_in : h;
     xq_src = 0;
     x16_src = 0;
@@ -273,7 +317,7 @@ void Context::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
             m.small_max = max_small_batch;
         }
     } batch_reset{*this};
-    row_n = n;
+    row_n = pos_dev ? 0 : n;  // v0252-e1p1b: 0 = positions not known on the host
     for (u32 ri = 0; ri < n; ++ri) {
         row_pos[ri] = tab.pos[ri];
         row_base[ri] = tab.base[ri];
@@ -288,7 +332,7 @@ void Context::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
             visEnsure();
             u32 ri = 0;
             for (const MSeg& sg : segs) {
-                const std::size_t cnt = r == 0 ? sg.pend.size() : 1;
+                const std::size_t cnt = r == 0 ? (sg.e1_rows > 0 ? sg.e1_rows : sg.pend.size()) : 1;  // v0252-e1p1b: padded step 0
                 for (std::size_t j = 0; j < cnt; ++j) {
                     const u32 p = r == 0 ? sg.pend_pos + static_cast<u32>(j) : sg.pos + r;
                     visRow(visOf(sg.seq), ri++, p);
@@ -298,7 +342,10 @@ void Context::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
             visCommit(n);
         }
     }
-    hip::launch(k.set_rows, D(1), D(32), 0, stream, mtp_ids, pos_buf, kvbase_buf, out_tok, tab, I(n));
+    if (pos_dev)
+        hip::launch(k.set_rows_dp, D(1), D(32), 0, stream, mtp_ids, pos_buf, kvbase_buf, out_tok, tab, I(n), pdev);  // v0252-e1p1b
+    else
+        hip::launch(k.set_rows, D(1), D(32), 0, stream, mtp_ids, pos_buf, kvbase_buf, out_tok, tab, I(n));
     hip::launch(k.get_rows[ti(tok_embd.ty)], D(8, n), D(128), 0, stream, tok_embd.ptr, tok_embd.row_bytes, mtp_ids, x, I(E));
     rmsnorm(x, mw.enorm, mtp_cat, static_cast<u32>(E), n, static_cast<u32>(E), static_cast<u32>(2 * E));
     rmsnorm(hidden, mw.hnorm, mtp_cat + E * 4, static_cast<u32>(E), n, static_cast<u32>(E), static_cast<u32>(2 * E));
@@ -312,7 +359,10 @@ void Context::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     if (!draft) return;
     // head over each seg's last row
     const u32 ns = static_cast<u32>(segs.size());
-    hip::launch(k.rmsnorm_q8_rows, D(ns), D(1024), 0, stream, x, mw.head_norm, h, xq, xd, I(E), cfg.eps, last);
+    if (any_dev && r == 0)  // v0252-e1p1b (E1): the head row of a padded step 0 = its first row + the ctl_acc word
+        hip::launch(k.rmsnorm_q8_rows_dv, D(ns), D(1024), 0, stream, x, mw.head_norm, h, xq, xd, I(E), cfg.eps, last, out_tok, add);
+    else
+        hip::launch(k.rmsnorm_q8_rows, D(ns), D(1024), 0, stream, x, mw.head_norm, h, xq, xd, I(E), cfg.eps, last);
     xq_src = h;
     xq_n = ns;
     x16_src = 0;

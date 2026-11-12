@@ -22,6 +22,9 @@
 # | jq_, jq_.slots_ (S10; slots_ new: JobQueue's reference to Engine's slots_) | JobQueue (the former members q_mutex_ .. loop_calls_ and tier_wake_ / wake_seq_, verbatim, in that order; private slots_ reference last) | each member's own (Mutex, condition_variable, deque<Job*>, atomics, vector<function<void()>>; the rest trivial) | the group sits where q_mutex_ was (S10); flattened as jq_.<member>; ids_ / rcx_ now after it, tier_wake_ / wake_seq_ inside it (rows above) | the queue members keep their relative order; no destructor reads ids_ / rcx_; nothing waits on q_cond_ or holds q_mutex_ at ~Engine (stop() and the loop's return come first, C3) |
 # | q_mutex_ / queue_ / n_active_ references of Engine (S10, removed in S16 health) | reference members | none | removed: health reads them through jq_.jqHealth (arch025-engclose) | references, no destructor; the members they named are jq_'s |
 # | se_, pf_, cyc_, ss_, tg_, sch_ (new in S11 .. S15b in that order) | SlotEnd, PrefillPhase, SpecCycle, SlotStart, TierGlue, Scheduler: references only (core.shared members, placed state, jq_ and the components declared before them) | trivial (references only; layout static_asserts follow with their iso manifests) | added last, in this order, after vw_ | destroyed first (sch_ first); no destructor reads them, they own nothing; every member before them keeps its order and offset class |
+# | sb_.ctl_pin_, sb_.acc_stats_ (new in v0252-e1p1) | feat026-acc port (WHIRL_SPEC_ACC): device::PinnedBuf (pinned host memory, allocated only for WHIRL_SPEC_ACC >= 1), SpecAccStats (6 uint64 counters) | ctl_pin_ frees its pinned host memory through the Backend (ops_, which outlives Engine; nothing waits on it: the decode cycle synced the stream before reading it), acc_stats_ trivial | added last in SampleBuffers, after ctl_host_ | destroyed before ctl_host_ / every older SampleBuffers member (memory only, no destructor reads them); every member before them keeps its order and offset |
+# | spec_.e1_fly, spec_.e1_sync, spec_.e1_t_read (new in v0252-e1p1c) | E1 one-cycle lookahead (WHIRL_E1=2): std::shared_ptr<void> (the SpecCycle::Cycle submitted and not yet read; null unless a lookahead pipeline is running), bool, TimePoint | e1_fly frees a Cycle (host memory only: vectors of Slot*, arrays, the accept arguments; its deleter was captured in engine_decode.cpp where Cycle is complete), the others trivial | added last in SpecState, after policy_cycles | memory only; no destructor reads them; SpecCycle::aheadCycle leaves nothing in flight once the slot's request ended (a dropped cycle and a failure both sync the model stream first), and runLoop returns only with every slot idle; every member before them keeps its order and offset |
+# | sb_.ring_pin_, sb_.ring_hid_, sb_.ring_ev_, sb_.ring_words_, sb_.ring_hid_bytes_, sb_.acc_mode_ (new in v0252-e1p1c) | the lookahead ring (allocated only for WHIRL_E1=2 with a device accept mode): device::PinnedBuf (2 x parallel control areas the accept kernel writes), device::DevBuf (2 x 16 hidden rows), std::array<device::EventH, 2>, uint64 x 2, uint32 | the two events are destroyed first (eventDestroy; recorded on the model stream, which outlives Engine: no use after the stream is gone), then ring_hid_ (Backend::free) and ring_pin_ (Backend::hostFree); the rest trivial | added last in SampleBuffers, after acc_stats_ | destroyed before every older SampleBuffers member; no kernel writes the ring and no copy reads the keep at that point (no cycle in flight: see the spec_.e1_fly row); every member before them keeps its order and offset |
 # Stored callbacks that capture `this` (review3 C4): today they capture Engine; after the split they capture a
 # component (sc_ / dc_ / tg_), which is declared after vis_ and destroyed FIRST, while tb_ / the Tier outlive it.
 # | callback | stored in | captures (today -> after split) | lifetime rule |
@@ -47,6 +50,9 @@ spec_.n_cycles
 spec_.vrows
 spec_.prev_nd
 spec_.policy_cycles
+spec_.e1_fly
+spec_.e1_sync
+spec_.e1_t_read
 fl_.floor
 fl_.epoch
 fl_.log_t
@@ -64,6 +70,14 @@ sb_.row_host_
 sb_.in_cands_
 sb_.cands_scratch_
 sb_.ctl_host_
+sb_.ctl_pin_
+sb_.acc_stats_
+sb_.ring_pin_
+sb_.ring_hid_
+sb_.ring_ev_
+sb_.ring_words_
+sb_.ring_hid_bytes_
+sb_.acc_mode_
 spec_on_
 conv_bytes_
 ssm_bytes_

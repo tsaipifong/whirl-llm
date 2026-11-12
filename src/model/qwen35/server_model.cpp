@@ -7,6 +7,25 @@
 #include "whirl/hip.h"
 #include "whirl/model.h"  // the qwen35::Model this backend forwards to (backend.h sees model_types.h only, arch025-M3)
 
+#include "../../../kernels/spec_accept.h"  // v0252-e1p1 (feat026-acc port): the device accept decision's ABI
+
+#include <cstdint>
+
+// SpecAccArgs is passed by value to spec_accept_rows: plain ints, no device address (whirl/hip.h launch log)
+template <>
+struct whirl::hip::LaunchArgPtrWords<SpecAccArgs> : whirl::hip::LaunchArgNoPtrWords {};
+// the control-area words the header names are the kernel ABI's (whirl/kernels_abi.h kCtl*); the result words 50 .. 56 lie
+// past every word the verify writes (kCtlStop) and inside the area; one verify's sequences / drafts / rows
+static_assert(WHIRL_SA_CTL_ROWS == whirl::kernels::kCtlRows && WHIRL_SA_CTL_DRAFTS == whirl::kernels::kCtlDrafts &&
+              WHIRL_SA_CTL_ND == whirl::kernels::kCtlNd && WHIRL_SA_CTL_WORDS == whirl::kernels::kCtlWords &&
+              WHIRL_SA_CTL_ACC > whirl::kernels::kCtlStop && WHIRL_SA_CTL_ACC0 < whirl::kernels::kCtlWords &&
+              WHIRL_SA_MAX_SEG == whirl::kernels::kGdnMaxSeg && WHIRL_SA_MAX_ND == whirl::kernels::kGdnMaxSnap &&
+              WHIRL_SA_MAX_ROWS == whirl::kernels::kMaxVerifyRows);
+// v0252-e1p1b (E1): the words the model's E1 launches read (whirl/model_types.h ctl_*) are the ones the accept kernel writes
+static_assert(whirl::qwen35::ctl_acc == WHIRL_SA_CTL_ACC && whirl::qwen35::ctl_chosen == WHIRL_SA_CTL_CHOSEN &&
+              whirl::qwen35::ctl_npos == WHIRL_SA_CTL_NPOS && whirl::qwen35::ctl_npend == WHIRL_SA_CTL_NPEND &&
+              WHIRL_SA_CTL_NPEND < whirl::kernels::kCtlWords);
+
 namespace whirl::server {
 
 namespace {
@@ -98,6 +117,20 @@ public:
         return m_.setRelaxRank(stats, seg_mask, stride);
     }
     void readCtl(std::span<std::int32_t> dst) override { m_.readCtl(dst); }
+    // v0252-e1p1 (feat026-acc port, WHIRL_SPEC_ACC; was Model::readCtlPinned / specAcceptEnqueue / readSpecTab in
+    // feat026-acc-p25 4ac9da6, here so the forward sources stay as they are): the control words (scratch out_tok, as
+    // Context::readCtl) into pinned memory by an async copy on the model stream + a stream sync
+    void readCtlPinned(std::span<std::int32_t> dst) override {
+        hip::downloadAsync(dst.data(), m_.scratch().out_tok, dst.size() * 4, m_.stream);
+        hip::streamSync(m_.stream);
+    }
+    bool specAcceptOk() const override { return m_.k.spec_accept_rows != nullptr; }
+    // v0252-e1p1b (E1): the device-input kernels and the accept kernel, DeltaNet replay mode (gfx1151: snapshot mode, no)
+    bool e1InputsOk() const override {
+        return m_.k.set_rows_dp != nullptr && m_.k.rmsnorm_q8_rows_dv != nullptr && m_.k.spec_accept_rows != nullptr && m_.gdn_replay;
+    }
+    void specAccept(const SpecAccArgs& a, std::int32_t* host) override;
+    void readSpecTab(SpecNextTab& t) override;
     bool draftSampleOk() const override { return m_.draftSampleOk(); }
     void setDraftSample(std::uint32_t s, const spec::DraftSample& ds) override {
         if (s < m_.draft_samp.size()) m_.draft_samp[s] = ds;
@@ -167,7 +200,31 @@ private:
     qwen35::Model& m_;
     hip::Function topk_ = nullptr;
     std::array<std::unique_ptr<qwen35::Profile>, qwen35::gdn_max_seg + 1> prof_mtp_, prof_ver_;
+    DevPtr spec_tab_ = 0;  // v0252-e1p1: the device SpecNextTab of spec_accept_rows (model allocation ledger; first use)
 };
+
+// v0252-e1p1 (feat026-acc port): spec_accept_rows right after the verify's argmax, on the model stream (kernels/spec_accept.hip):
+// one block of 64 threads, thread k = sequence k of the verify. kvbase / n_vocab come from the model here.
+void Qwen35Backend::specAccept(const SpecAccArgs& a, std::int32_t* host) {
+    if (m_.k.spec_accept_rows == nullptr) return;  // (the engine never calls it then: specAcceptOk)
+    if (a.n <= 0 || a.n > WHIRL_SA_MAX_SEG) throw qwen35::ModelError("BadBatch");
+    SpecAccArgs b = a;
+    for (int kk = 0; kk < b.n; ++kk) {
+        if (b.seq[kk] < 0 || static_cast<std::size_t>(b.seq[kk]) >= m_.seqs.size() || b.nd[kk] < 0 || b.nd[kk] > WHIRL_SA_MAX_ND)
+            throw qwen35::ModelError("BadBatch");
+        b.kvbase[kk] = static_cast<std::int32_t>(m_.seqs[static_cast<std::size_t>(b.seq[kk])].kv_base);
+    }
+    b.n_vocab = static_cast<std::int32_t>(m_.cfg.n_vocab);
+    if (spec_tab_ == 0) spec_tab_ = m_.allocZero(sizeof(SpecNextTab));
+    const DevPtr host_dev = static_cast<DevPtr>(reinterpret_cast<std::uintptr_t>(host));
+    hip::launch(m_.k.spec_accept_rows, hip::Dim3{1, 1, 1}, hip::Dim3{64, 1, 1}, 0, m_.stream, m_.scratch().out_tok, b, host_dev, spec_tab_);
+}
+
+void Qwen35Backend::readSpecTab(SpecNextTab& t) {
+    if (spec_tab_ == 0) return;
+    hip::streamSync(m_.stream);
+    hip::download(&t, spec_tab_, sizeof(SpecNextTab));
+}
 
 }  // namespace
 

@@ -9,6 +9,9 @@ mutsym    now
 mutsym    model
 # headers (include closure of the files above)
 hdr       include/whirl/relax_accept.h
+# v0252-e1p1 (feat026-acc port): the device accept decision shared by the kernel spec_accept_rows and the host (plain C,
+# no other include); the test program's testSpecAccept checks it against the host accept path
+hdr       kernels/spec_accept.h
 # test program
 testsrc   tests/unit/accept_policy_tests.cpp
 testhdr   tests/test_check.h

@@ -23,6 +23,7 @@
 #include "server/backend.h"
 #include "device/null_backend.h"
 #include "whirl/tokenizer.h"
+#include "../../kernels/spec_accept.h"  // v0252-e1p1: SpecAccArgs / SpecNextTab (MockModel::specAccept runs the header)
 
 #include <atomic>
 #include <cstdint>
@@ -95,6 +96,21 @@ struct MockConfig {
     // v0252-precfix: ServerModel::segJoinMin (the real model: 16, or 32 for a MoE model in precise). A prefillSegs segment
     // of <= seg_join_min rows counts in segSmall() (the real Context::prefillSegs throws BadBatch for it after the fix)
     std::uint32_t seg_join_min = qwen35::max_small_batch;
+    // v0252-e1p1 (feat026-acc port): the mock has the device accept kernel (specAccept runs kernels/spec_accept.h on the
+    // host, as spec_accept_rows does on the GPU); false = a code object without spec_accept_rows
+    bool spec_acc_kernel = true;
+    // feat026-acc-r1: every Nth specAccept (0 = never) writes an out-of-range accept count (nd + 5) for its first
+    // device-decided sequence, like a broken device result: modes 2/3 must fall back to the host, mode 4 must report it
+    std::uint32_t spec_acc_corrupt = 0;
+    // v0252-e1p1b (E1): the mock has the E1 device-input path (ServerModel::e1InputsOk, with replay and the accept kernel);
+    // false = a code object without set_rows_dp / rmsnorm_q8_rows_dv
+    bool e1_inputs = true;
+    // v0252-e1p1c (E1 lookahead): every Nth specAccept (0 = never) decides ONE accepted draft fewer than the rule for its
+    // first device-decided sequence with at least one accepted draft, and stores every word of that shorter decision
+    // (ACC0 / ACC / CHOSEN / NPOS / NROW / NPEND): a device result that is in range and self-consistent but not the
+    // host's. gpu / gpu-zc follow it (an exact prefix is still exact: same text); check mode reports it - and a lookahead
+    // cycle that already consumed those words cannot be taken back (the engine fails the request)
+    std::uint32_t spec_acc_short = 0;
 };
 
 class MockModel final : public server::ServerModel {
@@ -213,8 +229,46 @@ public:
     std::uint64_t topkCalls() const { return topk_calls_.load(); }
     std::uint64_t rankVerifies() const { return rank_verifies_.load(); }
     std::uint64_t rankRows() const { return rank_rows_.load(); }
+    // v0252-e1p1 (feat026-acc port, WHIRL_SPEC_ACC): the device accept kernel, run on the host with the same code
+    // (kernels/spec_accept.h): result words 50 .. 56 of each control area, the next-cycle rows, and (host != null) the
+    // verify's control areas written into host (the gpu-zc zero-copy write). readCtlPinned: the pinned read (counted
+    // apart from readCtl, so a test sees which read a cycle used; gpu-zc must use neither)
+    void readCtlPinned(std::span<std::int32_t> dst) override;
+    bool specAcceptOk() const override { return mc_.spec_acc_kernel; }
+    void specAccept(const SpecAccArgs& a, std::int32_t* host) override;
+    void readSpecTab(SpecNextTab& t) override;
+    std::uint64_t specAccepts() const { return spec_accepts_.load(); }
+    std::uint64_t specCorrupted() const { return spec_corrupted_.load(); }  // feat026-acc-r1 (MockConfig::spec_acc_corrupt)
+    std::uint64_t specShorted() const { return spec_shorted_.load(); }      // v0252-e1p1c (MockConfig::spec_acc_short)
+    std::uint64_t readCtlCalls() const { return readctl_calls_.load(); }
+    std::uint64_t readCtlPinnedCalls() const { return readctl_pinned_calls_.load(); }
+
+    // ---- v0252-e1p1b (E1 next-cycle inputs on the device; WHIRL_E1). The mock reads a device input the way the model's
+    // kernels do: VSeg::dev -> row 0 = the CHOSEN word, position = the NPOS word (sg.next / sg.pos are only compared with
+    // them: a host copy that differs counts in disagree - in the synchronous P1b cycle they must agree); MSeg::e1_rows -> step
+    // 0's rows = the last verify's argmax words at pend_pos + j, the chain continues from row ACC (pend must be empty);
+    // setPending(s, qwen35::npend_dev) -> the replay count is the NPEND word; SpecAccArgs::pos < 0 -> the NPOS word.
+    bool e1InputsOk() const override { return mc_.e1_inputs && mc_.replay && mc_.spec_acc_kernel; }
+    struct E1Counts {
+        std::uint64_t verify_segs = 0;   // verify segments with dev
+        std::uint64_t mtp_segs = 0;      // MTP step-0 segments with e1_rows
+        std::uint64_t padded_rows = 0;   // step-0 rows past the accepted count (draft-area rows of a padded step 0)
+        std::uint64_t npend_dev = 0;     // replays whose count came from the NPEND word
+        std::uint64_t pos_dev = 0;       // accept sequences whose position came from the NPOS word
+        std::uint64_t disagree = 0;      // a host copy (next, pos, pend) that differs from the control words
+        // v0252-e1p1c (E1 lookahead, WHIRL_E1=2): verify segments of a cycle submitted before the host read the cycle
+        // before it (VSeg::next == qwen35::tok_dev): the host's position is only an upper bound there - a device position
+        // above it counts in disagree
+        std::uint64_t ahead_segs = 0;
+    };
+    E1Counts e1Counts() const;
+    std::uint64_t verifyCalls() const { return verify_calls_.load(); }
 
 private:
+    std::atomic<std::uint64_t> e1_vsegs_{0}, e1_msegs_{0}, e1_padded_{0}, e1_npend_{0}, e1_pos_{0}, e1_disagree_{0}, verify_calls_{0};
+    std::atomic<std::uint64_t> e1_ahead_{0}, spec_shorted_{0};  // v0252-e1p1c
+    SpecNextTab spec_tab_{};  // the next-cycle rows of the last specAccept (engine thread)
+    std::atomic<std::uint64_t> spec_accepts_{0}, spec_corrupted_{0}, readctl_calls_{0}, readctl_pinned_calls_{0};
     void prefillRows(std::size_t n);
     struct State {
         std::uint64_t h = 0;   // recurrent hash

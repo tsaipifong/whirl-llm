@@ -349,10 +349,28 @@ void MockModel::prefillOne(std::uint32_t si, std::span<const std::uint32_t> toks
 void MockModel::commitSeq(std::uint32_t si) {
     Seq& s = seqs_[si];
     if (s.npend == 0) return;
+    // v0252-e1p1b (E1): qwen35::npend_dev = the count is the NPEND control word (what the GDN kernels read at snap[0])
+    std::uint32_t n = s.npend;
+    if (n == qwen35::npend_dev) {
+        n = static_cast<std::uint32_t>(std::max<std::int32_t>(0, s.ctl[WHIRL_SA_CTL_NPEND]));
+        e1_npend_ += 1;
+    }
     std::uint64_t h = readH(s);
-    for (std::uint32_t i = 0; i < s.npend && i < s.pend.size(); ++i) h = stepH(h, s.pend[i].tok, s.pend[i].pos);
+    for (std::uint32_t i = 0; i < n && i < s.pend.size(); ++i) h = stepH(h, s.pend[i].tok, s.pend[i].pos);
     writeH(s, h);
     s.npend = 0;
+}
+
+MockModel::E1Counts MockModel::e1Counts() const {
+    E1Counts c;
+    c.verify_segs = e1_vsegs_.load();
+    c.mtp_segs = e1_msegs_.load();
+    c.padded_rows = e1_padded_.load();
+    c.npend_dev = e1_npend_.load();
+    c.pos_dev = e1_pos_.load();
+    c.disagree = e1_disagree_.load();
+    c.ahead_segs = e1_ahead_.load();  // v0252-e1p1c
+    return c;
 }
 
 void MockModel::ensureSnapshots(std::uint32_t n) {
@@ -504,20 +522,22 @@ void MockModel::mtpBatchStepEx(std::span<const server::MSeg> segs, std::uint32_t
     if (!mc_.mtp) throw std::runtime_error("NoMtp");
     // v0252-btl: the real model's limits (Context::mtpBatchStepEx, src/model/qwen35/forward/mtp_verify.cpp:235 / :244)
     if (segs.empty() || segs.size() > qwen35::max_small_batch) throw std::runtime_error("BadBatch");
+    // v0252-e1p1b (E1): step 0's rows of a segment (an E1 segment runs e1_rows padded rows)
+    const auto rows0 = [](const server::MSeg& sg) { return sg.e1_rows > 0 ? static_cast<std::size_t>(sg.e1_rows) : sg.pend.size(); };
     if (r == 0) {
         std::uint32_t rows = 0;
-        for (const server::MSeg& sg : segs) rows += static_cast<std::uint32_t>(sg.pend.size());
+        for (const server::MSeg& sg : segs) rows += static_cast<std::uint32_t>(rows0(sg));
         cyc_rows_ += rows;
         cyc_calls_ += 1;
         if (rows > max_step_rows_.load()) max_step_rows_.store(rows);
         std::uint32_t n = 0;
         for (const server::MSeg& sg : segs) {
-            if (sg.pend.size() > qwen35::max_small_batch || n + sg.pend.size() > verifyRows()) {
+            if (rows0(sg) > qwen35::max_small_batch || n + rows0(sg) > verifyRows()) {
                 endMtpCycle();  // the cycle ends here (the engine fails the requests of the batch)
                 h_rows_.clear();
                 throw std::runtime_error("BatchTooLarge");
             }
-            n += static_cast<std::uint32_t>(sg.pend.size());
+            n += static_cast<std::uint32_t>(rows0(sg));
         }
     } else {
         // step r reads, for segment kk, the head row kk that step r - 1 of the same sequence wrote just before
@@ -530,7 +550,29 @@ void MockModel::mtpBatchStepEx(std::span<const server::MSeg> segs, std::uint32_t
     const std::uint64_t E = cfg_.n_embd;
     for (const server::MSeg& sg : segs) {
         Seq& s = seqs_[sg.seq];
-        if (r == 0) {
+        if (r == 0 && sg.e1_rows > 0) {
+            // v0252-e1p1b (E1): the padded step 0 the model runs - rows j < e1_rows at pend_pos + j with the last verify's
+            // argmax words, the hidden rows of all of them (the engine copied nd + 1), the chain from row ACC (= the last
+            // pend row of the host path: under exact acceptance pend[j] == ctl_rows[j] for j <= acc)
+            if (!sg.pend.empty()) e1_disagree_ += 1;  // the engine must not hand host pend rows on the E1 path
+            const std::uint32_t acc = static_cast<std::uint32_t>(std::max<std::int32_t>(0, s.ctl[WHIRL_SA_CTL_ACC]));
+            if (acc >= sg.e1_rows || s.ctl[WHIRL_SA_CTL_CHOSEN] != s.ctl[qwen35::ctl_rows + acc]) poison_ += 1;
+            for (std::uint32_t j = 0; j < sg.e1_rows; ++j) {
+                const State hs = readHidden(s.hid + j * E * 4);
+                if (hs.pos + 1 != sg.pend_pos + j) hid_mismatch_ += 1;
+            }
+            const State last = readHidden(s.hid + acc * E * 4);
+            const std::uint32_t tok = static_cast<std::uint32_t>(s.ctl[qwen35::ctl_rows + acc]);
+            const std::uint32_t p = sg.pend_pos + acc;
+            State ch{stepH(last.h, tok, p), 0, p};
+            ch.kv = mix(last.kv, kvRow(tok, p, ch.h), p);
+            s.chain = ch;
+            s.chain_pos = p;
+            s.ctl[qwen35::ctl_nd] = 0;
+            e1_msegs_ += 1;
+            if (acc < sg.e1_rows) e1_padded_ += sg.e1_rows - 1 - acc;
+            if (!draft) continue;
+        } else if (r == 0) {
             if (sg.pend.empty()) throw std::runtime_error("mock: MTP step without pend rows");
             for (std::size_t j = 0; j < sg.pend.size(); ++j) {
                 const State hs = readHidden(s.hid + j * E * 4);
@@ -587,23 +629,41 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
         for (Snap& x : snaps_) x = Snap{};
     }
     std::uint32_t snap = 0;
+    verify_calls_ += 1;
     for (const server::VSeg& sg : segs) {
         Seq& s = seqs_[sg.seq];
         for (std::uint32_t cur = max_seg_nd_.load(); sg.nd > cur && !max_seg_nd_.compare_exchange_weak(cur, sg.nd);) {}
+        // v0252-e1p1b (E1): row 0 and the position from the control words the last accept wrote (set_rows_dp); the host copy
+        // must agree in the synchronous cycle
+        std::uint32_t next = sg.next, pos = sg.pos;
+        if (sg.dev) {
+            if (!mc_.replay || !sg.drafts.empty()) throw std::runtime_error("BadBatch");  // as Context::verifyBatchEnqueue
+            next = static_cast<std::uint32_t>(s.ctl[WHIRL_SA_CTL_CHOSEN]);
+            pos = static_cast<std::uint32_t>(s.ctl[WHIRL_SA_CTL_NPOS]);
+            if (sg.next == qwen35::tok_dev) {
+                // v0252-e1p1c (lookahead): the host has not read the cycle before this one - it knows no next token and
+                // only an upper bound of the position (the context check, the mapped pages)
+                if (pos > sg.pos) e1_disagree_ += 1;
+                e1_ahead_ += 1;
+            } else if (next != sg.next || pos != sg.pos) {
+                e1_disagree_ += 1;
+            }
+            e1_vsegs_ += 1;
+        }
         commitSeq(sg.seq);  // the kept rows of the previous verify reach the state
-        std::vector<std::uint32_t> toks{sg.next};
+        std::vector<std::uint32_t> toks{next};
         for (std::uint32_t r = 0; r < sg.nd; ++r)
             toks.push_back(!sg.drafts.empty() ? sg.drafts[r]
                                               : static_cast<std::uint32_t>(s.ctl[qwen35::ctl_drafts + r]));
         // the real model's limits (Context::verifyBatchEnqueue, mtp_verify.cpp:165; verifyRows() = max_small_batch by default)
         if (toks.size() > qwen35::max_small_batch || row + toks.size() > verifyRows()) throw std::runtime_error("BatchTooLarge");
-        if (sg.pos + toks.size() > mc_.slot_ctx) throw std::runtime_error("ContextTooLong");
-        const State st0{readH(s), kvPrefix(s, sg.pos), sg.pos};
+        if (pos + toks.size() > mc_.slot_ctx) throw std::runtime_error("ContextTooLong");
+        const State st0{readH(s), kvPrefix(s, pos), pos};
         State st = st0;
         const std::uint64_t E = cfg_.n_embd;
         s.pend.clear();
         for (std::size_t i = 0; i < toks.size(); ++i) {
-            const std::uint32_t p = sg.pos + static_cast<std::uint32_t>(i);
+            const std::uint32_t p = pos + static_cast<std::uint32_t>(i);
             st.h = stepH(st.h, toks[i], p);
             writeKv(s, p, toks[i], st.h);
             st.kv = mix(st.kv, kvRow(toks[i], p, st.h), p);
@@ -654,9 +714,72 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
 }
 
 void MockModel::readCtl(std::span<std::int32_t> dst) {
+    readctl_calls_ += 1;
     for (std::size_t s = 0; s < seqs_.size() && (s + 1) * qwen35::ctl_words <= dst.size(); ++s)
         std::memcpy(dst.data() + s * qwen35::ctl_words, seqs_[s].ctl.data(), qwen35::ctl_words * 4);
 }
+
+// v0252-e1p1 (feat026-acc port): the pinned read is the same copy (counted apart)
+void MockModel::readCtlPinned(std::span<std::int32_t> dst) {
+    readctl_pinned_calls_ += 1;
+    for (std::size_t s = 0; s < seqs_.size() && (s + 1) * qwen35::ctl_words <= dst.size(); ++s)
+        std::memcpy(dst.data() + s * qwen35::ctl_words, seqs_[s].ctl.data(), qwen35::ctl_words * 4);
+}
+
+// v0252-e1p1 (feat026-acc port, 4ac9da6): what spec_accept_rows does on the device, with the same header code
+void MockModel::specAccept(const SpecAccArgs& a_in, std::int32_t* host) {
+    SpecAccArgs a = a_in;
+    if (a.n <= 0 || a.n > WHIRL_SA_MAX_SEG) throw std::runtime_error("BadBatch");
+    a.n_vocab = static_cast<int>(cfg_.n_vocab);
+    const std::size_t W = qwen35::ctl_words;
+    std::vector<std::int32_t> all(seqs_.size() * W);
+    for (std::size_t s = 0; s < seqs_.size(); ++s) std::memcpy(all.data() + s * W, seqs_[s].ctl.data(), W * 4);
+    SpecAccResult res[WHIRL_SA_MAX_SEG];
+    for (int k = 0; k < a.n; ++k) {
+        if (a.seq[k] < 0 || static_cast<std::size_t>(a.seq[k]) >= seqs_.size() || a.nd[k] < 0 || a.nd[k] > WHIRL_SA_MAX_ND)
+            throw std::runtime_error("BadBatch");
+        a.kvbase[k] = 0;
+        std::int32_t* ctl = all.data() + static_cast<std::size_t>(a.seq[k]) * W;
+        // v0252-e1p1b: a.pos[k] < 0 = the NPOS word (spec_pos, inside both); a host-decided sequence through spec_copy_one
+        if (a.pos[k] < 0) e1_pos_ += 1;
+        const SpecAccResult r = a.dev[k] ? spec_accept_one(a, k, ctl) : spec_copy_one(a, k, ctl);
+        spec_store(a, k, r, ctl);
+        res[k] = r;
+    }
+    spec_next_rows(a, all.data(), res, &spec_tab_);
+    if (mc_.spec_acc_corrupt > 0 && (spec_accepts_.load() + 1) % mc_.spec_acc_corrupt == 0) {
+        for (int k = 0; k < a.n; ++k) {
+            if (!a.dev[k]) continue;
+            std::int32_t* ctl = all.data() + static_cast<std::size_t>(a.seq[k]) * W;
+            ctl[WHIRL_SA_CTL_ACC0] = ctl[WHIRL_SA_CTL_NDDEV] + 5;
+            spec_corrupted_ += 1;
+            break;
+        }
+    }
+    // v0252-e1p1c (MockConfig::spec_acc_short): one accepted draft fewer, every word of the shorter decision stored
+    if (mc_.spec_acc_short > 0 && (spec_accepts_.load() + 1) % mc_.spec_acc_short == 0) {
+        for (int k = 0; k < a.n; ++k) {
+            std::int32_t* ctl = all.data() + static_cast<std::size_t>(a.seq[k]) * W;
+            if (!a.dev[k] || res[k].acc < 1) continue;
+            SpecAccResult r = res[k];
+            r.acc -= 1;
+            r.acc0 = r.acc;
+            r.chosen = ctl[WHIRL_SA_CTL_ROWS + r.acc];
+            r.flags = WHIRL_SA_F_DEV;
+            spec_store(a, k, r, ctl);
+            spec_shorted_ += 1;
+            break;
+        }
+    }
+    for (int k = 0; k < a.n; ++k) {
+        const std::size_t s = static_cast<std::size_t>(a.seq[k]);
+        std::memcpy(seqs_[s].ctl.data(), all.data() + s * W, W * 4);
+        if (host != nullptr) std::memcpy(host + s * W, all.data() + s * W, W * 4);
+    }
+    spec_accepts_ += 1;
+}
+
+void MockModel::readSpecTab(SpecNextTab& t) { t = spec_tab_; }
 
 void MockModel::mtpEnqueue(server::DevPtr, std::span<const std::uint32_t>, std::uint32_t) { h_rows_.clear(); }
 

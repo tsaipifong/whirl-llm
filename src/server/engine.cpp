@@ -120,6 +120,8 @@ void Engine::allocState() {
     for (Spe& s : ps_.spes()) ck_.init(s.ck, false);
     // sampling buffers
     sb_.alloc(opt_.parallel, opt_.relax.on, opt_.relax.on ? opt_.relax.topk() : 0);
+    // WHIRL_E1 / WHIRL_SPEC_ACC (v0252-e1p1, the device accept and the E1 inputs / lookahead): the decode cycle's startup
+    cyc_.specAccSetup();
     if (opt_.relax.on) {
         logI("decode: relaxed draft acceptance (relaxacc, fast): greedy top-{} with p >= {:.2f} p_max; sampling typical "
              "acceptance eps {:.2f} delta {:.2f} - output differs from exact speculative decoding",
@@ -207,6 +209,7 @@ Engine::Stats Engine::stats() const {
     s.dfl_accepted = bst_.dfl_accepted;
     s.dfl_cold = bst_.dfl_cold;
     s.dfl_gap = bst_.dfl_gap;
+    cyc_.specAccReport(s);  // v0252-e1p1 (WHIRL_SPEC_ACC / WHIRL_E1): the device-accept, E1 and lookahead counters
     return s;
 }
 

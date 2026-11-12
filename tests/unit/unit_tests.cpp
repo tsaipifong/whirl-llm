@@ -57,6 +57,7 @@ const OrderRow kOrder[] = {
     {"release", "testSharedHelpersN6"},
     {"accept_policy", "testRelaxAccept"},
     {"accept_policy", "testRelaxRank"},  // v0252-f1
+    {"accept_policy", "testSpecAccept"},  // v0252-e1p1 (feat026-acc port: kernels/spec_accept.h vs the host accept path)
     {"json", "testJson"},
     {"tokenizer", "testUnicode"},
     {"gguf", "testGguf"},

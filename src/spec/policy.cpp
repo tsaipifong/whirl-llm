@@ -705,4 +705,10 @@ MtpDefaults mtpDefaults(bool moe, hip::Arch arch) {
     return {8, 0.0f, 0, true};
 }
 
+// v0252-e1def (PLAN V1-93): the device profile's WHIRL_E1 default of the model class (the pattern of defaultGemvK)
+std::uint32_t e1Default(bool moe, hip::Arch arch) {
+    const device::Profile& p = device::profile(arch);
+    return moe ? p.e1_moe : p.e1_dense;
+}
+
 }  // namespace whirl::qwen35

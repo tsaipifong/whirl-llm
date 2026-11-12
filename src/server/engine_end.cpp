@@ -29,19 +29,21 @@ void SlotEnd::finishJob(Slot& sl) {
     ops_.streamSync(m_.stream());
     const double gen_ms = msSince(sl.td0);
     if (sl.stopped_str) sl.finish = "stop";
+    // v0252-e1p1c (E1 lookahead): the request's last cycle was read through the lookahead ring (Slot::e1_hid) - its hidden
+    // rows are the ring entry's keep, and the model's logits rows may already hold a later cycle: the gen-end checkpoint
+    // gets no logits row (cache::CkptKey::has_logits = false: only a prompt that ends exactly there cannot use it)
+    const DevPtr hid0 = sl.e1_hid != 0 ? static_cast<DevPtr>(sl.e1_hid) : m_.mtpH();
     // ---- checkpoint after the last token the trunk has seen
     if (sl.pos > N && sl.pos == sl.cache_tokens.size() && sl.logits_ok) {
         const std::optional<DevPtr> last_hid =
-            opt_.use_mtp ? std::optional<DevPtr>(m_.mtpH() + static_cast<std::uint64_t>(sl.last_acc) * E * 4) : std::nullopt;
-        sc_.saveCkpt(sl, sl.pos, "gen-end", last_hid, sb_.logitsRow(sl.last_row));
+            opt_.use_mtp ? std::optional<DevPtr>(hid0 + static_cast<std::uint64_t>(sl.last_acc) * E * 4) : std::nullopt;
+        sc_.saveCkpt(sl, sl.pos, "gen-end", last_hid, sl.e1_hid != 0 ? std::optional<DevPtr>() : std::optional<DevPtr>(sb_.logitsRow(sl.last_row)));
         // MTP KV rows for the accepted drafts of the last cycle (normally
         // written at the start of the next cycle)
-        if (opt_.use_mtp && sl.n_pend > 1)
-            m_.mtpEnqueue(m_.mtpH(), std::span<const std::uint32_t>(sl.pend.data(), sl.n_pend - 1), sl.pend_pos);
+        if (opt_.use_mtp && sl.n_pend > 1) m_.mtpEnqueue(hid0, std::span<const std::uint32_t>(sl.pend.data(), sl.n_pend - 1), sl.pend_pos);
     } else if (sl.pos == sl.cache_tokens.size()) {
         // no gen-end checkpoint; the MTP KV rows of the last cycle are still needed
-        if (opt_.use_mtp && sl.n_pend > 1)
-            m_.mtpEnqueue(m_.mtpH(), std::span<const std::uint32_t>(sl.pend.data(), sl.n_pend - 1), sl.pend_pos);
+        if (opt_.use_mtp && sl.n_pend > 1) m_.mtpEnqueue(hid0, std::span<const std::uint32_t>(sl.pend.data(), sl.n_pend - 1), sl.pend_pos);
     } else {
         logW("req {} | slot {} | cache bookkeeping mismatch (pos {}, tokens {}); dropping prefix cache", job.id, sl.id, sl.pos,
              sl.cache_tokens.size());
@@ -80,6 +82,15 @@ void SlotEnd::finishJob(Slot& sl) {
              job.id, sl.id, sl.drafted, sl.accepted, sl.drafted > 0 ? 100.0 * sl.accepted / sl.drafted : 0.0,
              sl.cycles > 0 ? static_cast<double>(sl.accepted + sl.cycles) / sl.cycles : 0.0, sl.cycles);
         if (opt_.ngram) logI("req {} | slot {} | n-gram drafts in {} of {} cycles", job.id, sl.id, sl.ng_cycles, sl.cycles);
+    }
+    // v0252-e1p1 (feat026-acc-r1 review C5, ported): engine totals since start, the two failure kinds apart
+    if (opt_.spec_acc >= 2) {
+        const SpecAccStats& as = sb_.accCounts();
+        logI("req {} | slot {} | spec-acc stats | {}: decided on the device {}, out of range (host decided) {}; check: "
+             "compared {}, disagree {}; next-cycle rows: compared {}, disagree {}; E1 device-input cycles {}; lookahead: ring cycles {}, "
+             "submitted ahead {}, discarded {}",
+             job.id, sl.id, specAccName(opt_.spec_acc), as.dev, as.fallback, as.checked, as.mismatch, as.tab_checked, as.tab_mismatch, as.e1,
+             as.ring, as.ahead, as.discard);
     }
     // (whatever the draft source: with DFlash2 drafts it must stay 0, FR-DFL P2-3)
     if (opt_.relax.on && (opt_.use_mtp || opt_.use_dflash))

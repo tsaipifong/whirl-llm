@@ -366,6 +366,11 @@ public:
                     std::optional<std::uint32_t> slot);
     DevPtr ctlSlot(std::uint32_t word) const;
     DevPtr draftSlot(std::uint32_t r) const { return ctlSlot(ctl_drafts + r); }
+    // v0252-e1p1b (E1): control word `word` of sequence s (any sequence, not only the selected one)
+    DevPtr ctlWord(std::uint32_t s, std::uint32_t word) const { return out_tok + 4 * (static_cast<std::uint64_t>(s) * ctl_words + word); }
+    // v0252-e1p1b (E1): the replay count of sequence s into a DeltaNet segment (replay mode): by value, or for npend_dev
+    // (ServerModel::setPending with qwen35::npend_dev) npend = -1 with the sequence's ctl_npend word at snap[0]
+    void replayCount(GdnSeg& g, std::uint32_t s) const;
     void verify(std::span<const std::uint32_t> tokens, std::uint32_t pos0, std::span<std::uint32_t> out);
     void verifyEnqueueEx(std::uint32_t next, std::uint32_t n_draft, std::optional<std::span<const std::uint32_t>> host_drafts,
                          std::uint32_t pos0);

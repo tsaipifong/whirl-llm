@@ -33,7 +33,12 @@ void checkDefined(M... m) {
     (checkOne(m != nullptr), ...);
 }
 
-void testFunctionsLinked() { checkDefined(&X::pickDrafts, &X::relaxRepeats, &X::decodeCycle, &X::relaxes, &X::verifyRoom, &X::dropOutOfRoom, &X::draftLimits, &X::ngramDrafts, &X::dflashDrafts, &X::mtpDrafts, &X::layoutBatch, &X::draftSampling, &X::enqueueVerify, &X::sampleRows, &X::trainCycle, &X::cycleStats, &X::acceptSlot, &X::finishCycle, &X::splitDrafts, &X::draftCap); }
+void testFunctionsLinked() { checkDefined(&X::pickDrafts, &X::relaxRepeats, &X::decodeCycle, &X::relaxes, &X::verifyRoom, &X::dropOutOfRoom, &X::draftLimits, &X::ngramDrafts, &X::dflashDrafts, &X::mtpDrafts, &X::layoutBatch, &X::draftSampling, &X::enqueueVerify, &X::sampleRows, &X::trainCycle, &X::cycleStats, &X::acceptSlot, &X::finishCycle, &X::splitDrafts, &X::draftCap,
+                                               // v0252-e1p1c (E1 one-cycle lookahead, WHIRL_E1=2)
+                                               &X::aheadCycle, &X::aheadBuild,
+                                               // v0252-e1p1c-fix: the decode accept's startup and report halves, moved out
+                                               // of Engine::allocState / Engine::stats (engine cut core shape: <= 30 lines)
+                                               &X::specAccSetup, &X::specAccReport); }
 
 }  // namespace
 }  // namespace whirl::server

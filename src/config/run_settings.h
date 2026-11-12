@@ -125,6 +125,12 @@ inline std::optional<std::uint32_t> visCkptMin(const Warn& warn) { return envU32
 // WHIRL_SLOT_DRAFTS: unset nullopt; "2" = 2 (cost-model allocation), "0" = 0 (uniform), any other text 1 (marginal-gain swaps).
 std::optional<std::uint32_t> parseSlotDrafts(const std::optional<std::string>& v);
 inline std::optional<std::uint32_t> slotDrafts() { return parseSlotDrafts(envGet("SLOT_DRAFTS")); }
+// v0252-e1p1 (feat026-acc port): WHIRL_SPEC_ACC as text; whirl-server parses it with server::parseSpecAcc (the names
+// host / pinned / gpu / gpu-zc / check or 0..4; a bad value warns there and runs host)
+inline std::optional<std::string> specAcc() { return envGet("SPEC_ACC"); }
+// v0252-e1p1b (E1, PLAN V1-93 P1b): WHIRL_E1 as text; whirl-server parses it with server::parseE1 (0 / 1 / 2, v0252-e1p1c:
+// 2 = the one-cycle lookahead; a bad value warns there and runs 0)
+inline std::optional<std::string> e1() { return envGet("E1"); }
 // WHIRL_GATHER_MS: std::stod (a leading number counts); unset or unreadable nullopt (the engine's default stays).
 std::optional<double> parseGatherMs(const std::optional<std::string>& v);
 inline std::optional<double> gatherMs() { return parseGatherMs(envGet("GATHER_MS")); }

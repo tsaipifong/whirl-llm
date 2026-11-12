@@ -138,8 +138,16 @@
 //   draft_sample_rows(x, n, int* ctl_all, RowIdx area, int r, const int* map, DSampArgs a, int* qbuf)
 //            (optional) after draft_pick_rows: rows with a.on draw draft r from the filtered draft
 //            distribution q and write q to qbuf + a.qoff (whirl/spec_sample.h layout)
+//   spec_accept_rows(int* ctl_all, SpecAccArgs a, int* host, SpecNextTab* tab)   (optional; kernels/spec_accept.h,
+//            feat026-acc ported by v0252-e1p1): after the verify's argmax, the accept decision of its greedy sequences
+//            into control words 50 .. 56, the next cycle's rows into tab (may be null), the verify's control areas
+//            into pinned host memory at host (may be null: WHIRL_SPEC_ACC=gpu-zc); one block of 64 threads
 //   set_tokens(ids, pos, dev_src, Tok16 toks, n, n_host, pos0)
 //   set_rows(ids, pos, kvbase, dev_src, RowTab tab, n)
+//   set_rows_dp(ids, pos, kvbase, dev_src, RowTab tab, n, RowIdx pdev)   (optional; v0252-e1p1b E1, kernels/e1_inputs.hip)
+//            set_rows + pos[i] += dev_src[pdev.v[i]] for pdev.v[i] >= 0 (the device position base of the row)
+//   rmsnorm_q8_rows_dv(x, w, out, xq, xd, int n, float eps, RowIdx src, const int* dev, RowIdx add)   (optional; v0252-e1p1b)
+//            rmsnorm_q8_rows with input row src.v[b] + dev[add.v[b]] for add.v[b] >= 0
 //   topk_rows(x, n, K, float inv_t, int* ids, float* vals, float* stats)
 //   requant_q6k_q4k(src, u64 src_rb, dst, u64 dst_rb); requant_q6k_d2(src,
 //            u64 src_rb, dst, int ncols); requant_q80_q4k(src, u64 src_rb, dst, u64 dst_rb)
@@ -421,7 +429,9 @@ static_assert(sizeof(Tok16) == 64 && sizeof(RowTab) == 384 && sizeof(RowIdx) == 
 // Recurrent-state segment of the fused DeltaNet decode kernels: rows
 // [row0, row0 + nrows) belong to one sequence whose state is at `state`;
 // snap[t] (if nonzero) receives the state after local row t. Replay mode
-// (pend != 0): the first npend kept rows in pend are applied first.
+// (pend != 0): the first npend kept rows in pend are applied first; v0252-e1p1b
+// (E1): npend < 0 = their count is the int at snap[0] (a sequence's NPEND control
+// word; gfx1201 kernels only - gfx1151 has no replay mode).
 struct GdnSeg {
     DevPtr state = 0;
     DevPtr snap[kGdnMaxSnap] = {};
@@ -768,6 +778,9 @@ struct MiscKernels {
     F topk_rows{};
     F argmax_rank_rows_to{};  // optional (v0252-f1 relaxacc one-pass check; null: relaxacc greedy keeps topk_rows)
     F silu_mul_x8w{}, silu_mul_x8w4{};  // optional (v0252-silu, gfx1201): silu_mul_x8h for short rows, one wave per row
+    F spec_accept_rows{};     // optional (feat026-acc, ported by v0252-e1p1; null: the host makes the accept decision)
+    // optional (v0252-e1p1b, E1 next-cycle inputs on the device, kernels/e1_inputs.hip; null: no E1 path)
+    F set_rows_dp{}, rmsnorm_q8_rows_dv{};
 };
 
 struct KernelTable : MatmulKernels, AttnKernels, MoeKernels, DeltaNetKernels, MiscKernels {

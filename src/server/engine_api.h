@@ -97,6 +97,14 @@ public:
         // context was not ready (no DFlash2 drafts), positions without features (forward rows
         // outside the capture, restores)
         std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0;
+        // v0252-e1p1 (feat026-acc port, WHIRL_SPEC_ACC): slot cycles decided on the device, compared with the host path
+        // (check) and disagreeing (check only); device results out of range in gpu / gpu-zc, decided on the host instead
+        // (feat026-acc-r1: a different event from a disagreement); next-cycle row tables compared / disagreeing
+        std::uint64_t acc_dev = 0, acc_checked = 0, acc_mismatch = 0, acc_fallback = 0, tab_checked = 0, tab_mismatch = 0;
+        std::uint64_t acc_e1 = 0;  // v0252-e1p1b (WHIRL_E1): slot cycles that took their inputs from the device
+        // v0252-e1p1c (WHIRL_E1=2): cycles read through the lookahead ring, cycles submitted before the cycle before them
+        // was read, submitted cycles dropped at the end of a request
+        std::uint64_t acc_ring = 0, acc_ahead = 0, acc_discard = 0;
     };
 
     virtual ~EngineApi() = default;

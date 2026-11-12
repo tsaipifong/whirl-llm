@@ -90,6 +90,11 @@ struct Profile {
     // (sched::tailInside, EngineOptions::tail_ck_in_forward) instead of ending a forward there; the CLI keeps its forward
     // end (same bits: docs/guide/en/kv-and-caching.md section 7, progress/v0252-n10.DESIGN.md). 0.2.5.2: gfx1201 only
     bool tail_ck_in_forward;
+    // v0252-e1def (PLAN V1-93): the WHIRL_E1 value whirl-server starts with when the variable is not set, per model class
+    // (dense / MoE; qwen35::e1Default picks the row's value, server::chooseE1 applies it only where a cycle can use it;
+    // WHIRL_E1 = 0 / 1 / 2 always wins). 0 = the host-input cycle, 2 = the E1 one-cycle lookahead (EngineOptions::e1).
+    // The lookahead changes when a cycle is submitted, never what it computes: the reply is the same in the same mode
+    std::uint8_t e1_dense, e1_moe;
     // ---- vision
     unsigned vision_attn_threads;  // kernels/vision/vision.hip vis_attn2 block size of this code object
 };
@@ -135,6 +140,13 @@ inline constexpr Profile k_profile_gfx1201{
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = true,  // v0252-n10 (R9700 precise pp 2k: one forward instead of 1024 + 1034)
+    // v0252-e1def: R9700 screens of 2026-11-12 (exe = branch v0252-e1p1 032c817, WHIRL_E1=2 against 0, decode tok/s per
+    // round): Ornith (MoE) balance +3.93 / +4.15 % (scratch/v0252_e1p1c/gpu/DONE_e1p1c_screen) and +3.35 / +3.97 %
+    // (scratch/abscreen/e1p1c-orn/DONE_e1p1c-orn: KEEP), Ornith precise +1.62 / +1.30 % with identical output; Swift
+    // (dense) balance -1.37 / +0.09 % (no gain: stays 0). Fast keeps 0 through server::chooseE1 (not run with the
+    // lookahead; its relaxed acceptance never looks ahead)
+    .e1_dense = 0,
+    .e1_moe = 2,
     .vision_attn_threads = 128,
 };
 
@@ -176,6 +188,9 @@ inline constexpr Profile k_profile_gfx1151{
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = false,  // v0252-n10: 0.2.5.2 does not touch the Radeon 8060S (the 0.2.5.1 forward end stays)
+    // v0252-e1def: the 8060S verifies with DeltaNet snapshot sets (no E1 path: ServerModel::e1InputsOk), nothing measured
+    .e1_dense = 0,
+    .e1_moe = 0,
     .vision_attn_threads = 256,
 };
 

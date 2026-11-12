@@ -13,9 +13,67 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 
 namespace whirl::server {
+
+// v0252-e1p1 (port of feat026-acc-r1 c797b27: parseSpecAcc / specAccName, engine.{h,cpp} there): WHIRL_SPEC_ACC values.
+// 0..4 or the names host / pinned / gpu / gpu-zc / check (case-insensitive, surrounding blanks ignored; gpu_zc and zc =
+// gpu-zc). Anything else: nullopt (server_main warns and uses 0 = host). specAccName: the name of a mode ("?" outside
+// 0..4); one table for the parser, the startup log line and the per-request stats line.
+inline constexpr std::array<const char*, 5> spec_acc_names{"host", "pinned", "gpu", "gpu-zc", "check"};
+
+inline const char* specAccName(std::uint32_t mode) { return mode < spec_acc_names.size() ? spec_acc_names[mode] : "?"; }
+
+inline std::optional<std::uint32_t> parseSpecAcc(std::string_view v) {
+    while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
+    if (v.size() == 1 && v[0] >= '0' && v[0] <= '4') return static_cast<std::uint32_t>(v[0] - '0');
+    std::string s(v);
+    for (char& c : s) c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    if (s == "gpu_zc" || s == "zc") return 3u;
+    for (std::uint32_t m = 0; m < spec_acc_names.size(); ++m)
+        if (s == spec_acc_names[m]) return m;
+    return std::nullopt;
+}
+
+// v0252-e1p1b (E1, PLAN V1-93 P1b): WHIRL_E1 values: "0" / "1" / "2" (v0252-e1p1c: 2 = the one-cycle lookahead;
+// surrounding blanks ignored); anything else nullopt (server_main warns and uses 0).
+inline std::optional<std::uint32_t> parseE1(std::string_view v) {
+    while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
+    if (v == "0" || v == "1" || v == "2") return static_cast<std::uint32_t>(v[0] - '0');
+    return std::nullopt;
+}
+
+// v0252-e1def (PLAN V1-93): the WHIRL_E1 value whirl-server starts with. Set: that value, on every card, model and mode
+// (bad = not 0 / 1 / 2: server_main warns and 0 runs, as before). Not set: `def` (qwen35::e1Default: the device profile's
+// value for the model class) where a decode cycle can use it at all - MTP drafts with exact acceptance (no DFlash2
+// drafts, no relaxed acceptance) and the model's E1 path (Backend::e1InputsOk), and not in fast mode (its relaxed
+// acceptance never qualifies, and fast with that arm turned off was never run with the lookahead) - else 0, so a default
+// never turns the device accept on (EngineOptions::spec_acc) for cycles that all run the usual way, and never warns.
+struct E1Site {
+    bool mtp = false;       // EngineOptions::use_mtp
+    bool dflash = false;    // EngineOptions::use_dflash
+    bool relax = false;     // EngineOptions::relax.on
+    bool fast = false;      // the numerics mode is fast (numerics::Mode::fast)
+    bool model_ok = false;  // Backend::e1InputsOk
+};
+struct E1Choice {
+    std::uint32_t e1 = 0;
+    bool bad = false;         // WHIRL_E1 is set and is not 0 / 1 / 2
+    bool by_default = false;  // WHIRL_E1 is not set
+};
+inline E1Choice chooseE1(const std::optional<std::string>& env, std::uint32_t def, const E1Site& site) {
+    if (env) {
+        const std::optional<std::uint32_t> m = parseE1(*env);
+        return {m.value_or(0u), !m.has_value(), false};
+    }
+    const bool usable = site.mtp && !site.dflash && !site.relax && !site.fast && site.model_ok;
+    return {usable ? def : 0u, false, true};
+}
 
 struct EngineOptions {
     std::string model_name;
@@ -61,6 +119,27 @@ struct EngineOptions {
     float ngram_slope = 0.015f;
     std::uint32_t ngram_max = 0;
     bool ngram_force = false;
+    // v0252-e1p1 (feat026-acc port, WHIRL_SPEC_ACC): how a decode cycle reads the verify's control words and where the
+    // greedy accept decision is made. 0 host (pageable readCtl, host path: as before), 1 pinned (async copy into pinned
+    // memory + stream sync), 2 gpu (spec_accept_rows decides greedy exact slots; pinned read), 3 gpu-zc (the kernel writes
+    // the control words into pinned memory: no copy), 4 check (gpu, and the host path runs too and must agree: accept
+    // counts, next token, next-cycle rows; the host result is used). The reply is the same in every mode (exact greedy
+    // acceptance; sampling / relaxacc slots always decide on the host). SampleBuffers::readCycleCtl.
+    std::uint32_t spec_acc = 0;
+    // v0252-e1p1b (E1, PLAN V1-93 P1b; WHIRL_E1): 1 = a decode cycle that qualifies (one greedy exact MTP slot, DeltaNet
+    // replay mode, no image / DFlash2 / profiling events) takes its inputs from the control words the last cycle's accept
+    // kernel wrote (next token, positions, MTP step-0 rows, draft-head row, replay count), and leaves the next cycle's
+    // there. Still one cycle at a time (P1c pipelines it); needs the device accept (Engine::allocState raises spec_acc to
+    // 2 = gpu when it is host / pinned) and the model's E1 kernels (ServerModel::e1InputsOk; else off with a warning).
+    // The reply is the same as with 0.
+    // v0252-e1p1c (PLAN V1-93 P1c): 2 = the one-cycle lookahead on top of 1 - the next cycle of that request is submitted
+    // before the host has read the last one (SpecCycle::aheadCycle; the host reads each cycle from a ring of two pinned
+    // control-word areas the accept kernel writes, so Engine::allocState raises spec_acc to 3 = gpu-zc unless it is 4 =
+    // check). A cycle that does not qualify, the last cycles before max_tokens and every cycle while another request is
+    // active run as with 1. The reply is the same as with 0.
+    // v0252-e1def: whirl-server sets it with chooseE1 (WHIRL_E1, else the device profile's default for the model class:
+    // 2 for MoE models on the R9700, 0 elsewhere); the engine's own default stays 0.
+    std::uint32_t e1 = 0;
     // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)
     std::uint32_t slot_drafts = 0;
     bool trace_nd = false;

@@ -4,6 +4,7 @@
 #include "engine_sampling.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace whirl::server {
 
@@ -100,5 +101,67 @@ float SampleBuffers::logitAt(std::uint32_t gr, std::uint32_t t) {
 }
 
 std::uint32_t SampleBuffers::nVocab() const { return m_.cfg().n_vocab; }
+
+// v0252-e1p1 (feat026-acc port: Engine::allocState's pinned block and Engine::readCycleCtl of feat026-acc-p25 4ac9da6,
+// here with the control words they read; the engine logs the mode)
+std::uint32_t SampleBuffers::allocSpecAcc(std::uint32_t parallel, std::uint32_t mode) {
+    if (mode == 0 || mode > 4) return 0;
+    const std::uint64_t cb = static_cast<std::uint64_t>(parallel) * qwen35::ctl_words * 4;
+    ctl_pin_ = device::PinnedBuf::alloc(ops_, cb);
+    std::memset(ctl_pin_.get(), 0, cb);
+    // the device accept needs the kernel (else the pinned read + the host accept)
+    if (mode >= 2 && !m_.specAcceptOk()) mode = 1;
+    acc_mode_ = mode;  // v0252-e1p1c: allocAhead needs a device mode
+    return mode;
+}
+
+// v0252-e1p1c (E1 one-cycle lookahead): the ring of two entries (engine_sampling.h)
+bool SampleBuffers::allocAhead(std::uint32_t parallel, std::uint32_t rows) {
+    if (acc_mode_ < 2 || parallel == 0 || rows == 0) return false;
+    ring_words_ = static_cast<std::uint64_t>(parallel) * qwen35::ctl_words;
+    ring_pin_ = device::PinnedBuf::alloc(ops_, 2 * ring_words_ * 4);
+    std::memset(ring_pin_.get(), 0, 2 * ring_words_ * 4);
+    ring_hid_bytes_ = static_cast<std::uint64_t>(rows) * m_.cfg().n_embd * 4;
+    ring_hid_ = device::DevBuf::alloc(ops_, 2 * ring_hid_bytes_);
+    for (device::EventH& ev : ring_ev_) ev = device::EventH::create(ops_);
+    return true;
+}
+
+DevPtr SampleBuffers::aheadHid(std::uint32_t e) const { return ring_hid_.get() + static_cast<std::uint64_t>(e & 1u) * ring_hid_bytes_; }
+
+void SampleBuffers::aheadSubmit(std::uint32_t e, const SpecAccArgs& aa, std::uint32_t seq, std::uint32_t row0, std::uint32_t rows) {
+    e &= 1u;
+    m_.specAccept(aa, static_cast<std::int32_t*>(ring_pin_.get()) + e * ring_words_);
+    const std::uint64_t row_bytes = static_cast<std::uint64_t>(m_.cfg().n_embd) * 4;
+    const std::uint64_t bytes = std::min(static_cast<std::uint64_t>(rows) * row_bytes, ring_hid_bytes_);
+    const DevPtr src = m_.hn() + static_cast<std::uint64_t>(row0) * row_bytes;
+    // (the keep first: it must hold the verify's rows whatever the second copy's destination is)
+    ops_.copyAsync(aheadHid(e), src, bytes, m_.stream());
+    ops_.copyAsync(m_.seqHid(seq), src, bytes, m_.stream());
+    ops_.eventRecord(ring_ev_[e].get(), m_.stream());
+}
+
+const std::int32_t* SampleBuffers::aheadWait(std::uint32_t e) {
+    e &= 1u;
+    ops_.eventSync(ring_ev_[e].get());
+    return static_cast<const std::int32_t*>(ring_pin_.get()) + e * ring_words_;
+}
+
+const std::int32_t* SampleBuffers::readCycleCtl(std::uint32_t mode, std::size_t words, const SpecAccArgs* aa) {
+    if (mode == 0 || !ctl_pin_) {
+        m_.readCtl(std::span<std::int32_t>(ctl_host_.data(), std::min(words, ctl_host_.size())));
+        return ctl_host_.data();
+    }
+    auto* pin = static_cast<std::int32_t*>(ctl_pin_.get());
+    if (aa != nullptr && mode == 3) {
+        // zero copy: the kernel writes the verify's control words into the pinned buffer; the host only waits for it
+        m_.specAccept(*aa, pin);
+        ops_.streamSync(m_.stream());
+        return pin;
+    }
+    if (aa != nullptr) m_.specAccept(*aa, nullptr);
+    m_.readCtlPinned(std::span<std::int32_t>(pin, std::min<std::size_t>(words, ctl_pin_.bytes() / 4)));
+    return pin;
+}
 
 }  // namespace whirl::server

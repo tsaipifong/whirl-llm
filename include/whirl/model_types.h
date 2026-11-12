@@ -59,6 +59,18 @@ constexpr std::uint32_t ctl_probs = 32;   // [32, 48): draft probabilities (f32)
 constexpr std::uint32_t ctl_nd = 48;      // drafts kept this cycle (device p-min cutoff)
 constexpr std::uint32_t ctl_stop = 49;    // draft chain stopped
 constexpr std::uint32_t ctl_words = 64;
+// v0252-e1p1b (E1, PLAN V1-93 P1b): words spec_accept_rows writes (kernels/spec_accept.h WHIRL_SA_CTL_*; static_asserts in
+// src/model/qwen35/server_model.cpp) that the next cycle's launches read on the E1 path instead of host values
+constexpr std::uint32_t ctl_acc = 50;     // accepted drafts (after the EOS / budget cuts): the MTP head's row of the padded step 0
+constexpr std::uint32_t ctl_chosen = 51;  // the token after them: the next verify's row 0
+constexpr std::uint32_t ctl_npos = 54;    // the next verify's position (pos + acc + 1)
+constexpr std::uint32_t ctl_npend = 57;   // the DeltaNet replay rows of the next verify / commitSeq (acc + 1)
+// ServerModel::setPending / Model::setPending rows value (E1): the replay count is the sequence's ctl_npend word, read by the
+// kernels (GdnSeg npend < 0, the word at snap[0]); the host does not know it
+constexpr std::uint32_t npend_dev = 0xffffffffu;
+// VSeg::next of a dev segment whose row 0 the host does not know (E1 lookahead, v0252-e1p1c: the cycle is submitted before
+// the host has read the cycle before it). The model never reads `next` of a dev segment; this is no token id.
+constexpr std::uint32_t tok_dev = 0xffffffffu;
 
 // ---------------------------------------------------------------------------
 // configuration
@@ -134,6 +146,10 @@ struct LoadEstimate {
 struct VSeg {
     std::uint32_t seq = 0, next = 0, nd = 0, pos = 0;
     std::span<const std::uint32_t> drafts = {};  // empty: drafts from the control area (MTP)
+    // v0252-e1p1b (E1): row 0's token is the sequence's ctl_chosen word and row r sits at its ctl_npos word + r (the last
+    // spec_accept_rows of the sequence); `next` is not read (tok_dev when the host does not know it: the E1 lookahead),
+    // `pos` only bounds the context check (the lookahead passes an upper bound). MTP drafts only, no image.
+    bool dev = false;
 };
 // One sequence's prefill chunk in a segmented prefill.
 struct PSeg {
@@ -153,6 +169,10 @@ struct MSeg {
     std::span<const std::uint32_t> pend = {};
     std::uint32_t pend_pos = 0;
     std::uint32_t pos = 0;
+    // v0252-e1p1b (E1): > 0 = the inputs are on the device: step r = 0 runs e1_rows rows (the last verify's nd + 1, padded)
+    // with the tokens of that verify's argmax words (ctl_rows + j) at pend_pos + j and the draft head on row ctl_acc of them;
+    // steps r >= 1 sit at the ctl_npos word + r. `pend` is not read (empty), `pos` is not read.
+    std::uint32_t e1_rows = 0;
 };
 
 struct BatchPlan {

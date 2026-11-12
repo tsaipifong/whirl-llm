@@ -45,6 +45,13 @@ struct SpecState {
     std::uint32_t vrows = max_small_batch;
     std::uint32_t prev_nd = 0;
     std::uint32_t policy_cycles = 0;  // cycles since the draft-policy state was last reset
+    // v0252-e1p1c (E1 one-cycle lookahead, WHIRL_E1=2; SpecCycle::aheadCycle): the decode cycle that was submitted and not
+    // yet read (a SpecCycle::Cycle of engine_decode.cpp; null = none); "the slot's next cycle runs synchronously" (the
+    // n-gram drafter has a proposal, or the device's accept and the host's differed); when the last ring cycle was read
+    // (the next one's cycle time for the draft-count policy starts there)
+    std::shared_ptr<void> e1_fly;
+    bool e1_sync = false;
+    TimePoint e1_t_read{};
 };
 
 // The decode floor bookkeeping (main thread). arch025-N4f: the former Engine members floor_ .. stat_floor_periods_,

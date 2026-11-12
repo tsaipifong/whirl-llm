@@ -677,6 +677,10 @@
   ],
   [
    "model.qwen35.server",
+   "kernels.sample"
+  ],
+  [
+   "model.qwen35.server",
    "model.core"
   ],
   [
@@ -1794,6 +1798,10 @@
   [
    "server.spec_cycle",
    "contract.server"
+  ],
+  [
+   "server.spec_cycle",
+   "kernels.sample"
   ],
   [
    "server.spec_cycle",

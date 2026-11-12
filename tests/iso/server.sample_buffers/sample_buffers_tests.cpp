@@ -79,8 +79,84 @@ void testRows() {
     }
 }
 
+// v0252-e1p1c (PLAN V1-93 P1c, the E1 one-cycle lookahead; WHIRL_E1=2): the ring of two control-word areas in pinned
+// memory, one event and one hidden-row keep per entry.
+//   allocAhead     only with a device accept mode (allocSpecAcc >= 2); two distinct entries, each `parallel` control areas
+//   aheadSubmit    the accept kernel gets entry e's area as its host pointer (zero copy: no readCtl, no download); the
+//                  cycle's hidden rows go to the sequence's MTP input and to entry e's keep (2 copies); ONE eventRecord
+//   aheadWait      one eventSync of entry e's event, then entry e's words - an entry written by a later submit of the
+//                  OTHER entry is not touched (the ring is why cycle n + 1 may finish before the host reads cycle n)
+// The Backend calls are read off NullBackend::callThreads (no eventDone, no download, no streamSync in any of them).
+void testAheadRing() {
+    using Call = NullBackend::Call;
+    const auto count = [](const NullBackend& b, Call c) {
+        std::size_t n = 0;
+        for (const auto& [k, t] : b.callThreads())
+            if (k == c) ++n;
+        return n;
+    };
+    NullBackend nb;
+    FakeServerModel model(nb, k_vocab);
+    const std::uint64_t E = model.cfg().n_embd;
+    // an argument object the fake never reads (this module sees SpecAccArgs only by name: kernels/spec_accept.h is not
+    // one of its headers)
+    alignas(16) static unsigned char raw[4096] = {};
+    const SpecAccArgs& aa = *reinterpret_cast<const SpecAccArgs*>(raw);
+    {
+        // no device accept mode: no ring
+        SampleBuffers sb(model, nb);
+        sb.alloc(2, false, 0);
+        ISO_CHECK(!sb.aheadOk());
+        ISO_CHECK(sb.allocSpecAcc(2, 1) == 1u);
+        ISO_CHECK(!sb.allocAhead(2, 4) && !sb.aheadOk());
+    }
+    model.spec_ok = true;
+    SampleBuffers sb(model, nb);
+    sb.alloc(2, false, 0);
+    ISO_CHECK(sb.allocSpecAcc(2, 3) == 3u);
+    ISO_CHECK(sb.allocAhead(2, 4) && sb.aheadOk());
+    ISO_CHECK(sb.aheadHid(0) != 0 && sb.aheadHid(1) != 0 && sb.aheadHid(0) != sb.aheadHid(1));
+    ISO_CHECK(sb.aheadHid(1) >= sb.aheadHid(0) + 4 * E * 4 || sb.aheadHid(0) >= sb.aheadHid(1) + 4 * E * 4);  // 4 rows each
+    // hidden rows of a "verify": row r of the model's hn holds the value 100 + r in every element
+    auto* hn = reinterpret_cast<float*>(model.hn());
+    for (std::uint32_t r = 0; r < 4; ++r)
+        for (std::uint64_t j = 0; j < E; ++j) hn[r * E + j] = static_cast<float>(100 + r);
+    nb.recordThreads(true);
+    model.spec_mark = 11;
+    sb.aheadSubmit(0, aa, 0, 1, 3);  // rows 1 .. 3 of the verify
+    ISO_CHECK(model.spec_hosts.size() == 1 && model.spec_hosts[0] != nullptr);
+    ISO_CHECK(count(nb, Call::event_record) == 1 && count(nb, Call::copy_async) == 2);
+    const auto* keep0 = reinterpret_cast<const float*>(sb.aheadHid(0));
+    ISO_CHECK(keep0[0] == 101.0f && keep0[E] == 102.0f && keep0[2 * E + E - 1] == 103.0f);
+    // the next cycle goes to the other entry before the first one is read
+    for (std::uint64_t j = 0; j < 4 * E; ++j) hn[j] = 7.0f;
+    model.spec_mark = 22;
+    sb.aheadSubmit(1, aa, 0, 0, 2);
+    ISO_CHECK(model.spec_hosts.size() == 2 && model.spec_hosts[1] != nullptr && model.spec_hosts[1] != model.spec_hosts[0]);
+    // the two areas do not overlap: `parallel` control areas each
+    const std::ptrdiff_t gap = model.spec_hosts[1] - model.spec_hosts[0];
+    ISO_CHECK(gap >= static_cast<std::ptrdiff_t>(2 * qwen35::ctl_words) || -gap >= static_cast<std::ptrdiff_t>(2 * qwen35::ctl_words));
+    ISO_CHECK(count(nb, Call::event_record) == 2 && count(nb, Call::copy_async) == 4 && count(nb, Call::event_sync) == 0);
+    ISO_CHECK(keep0[0] == 101.0f);  // entry 0's keep is not the one the second cycle wrote
+    ISO_CHECK(reinterpret_cast<const float*>(sb.aheadHid(1))[0] == 7.0f);
+    const std::int32_t* w0 = sb.aheadWait(0);
+    ISO_CHECK(w0 == model.spec_hosts[0] && w0[0] == 11);
+    ISO_CHECK(count(nb, Call::event_sync) == 1);
+    const std::int32_t* w1 = sb.aheadWait(1);
+    ISO_CHECK(w1 == model.spec_hosts[1] && w1[0] == 22);
+    ISO_CHECK(count(nb, Call::event_sync) == 2);
+    // E1 rules R-a / R-c / R-e: no event query, no D2H copy command, no stream sync
+    ISO_CHECK(count(nb, Call::event_done) == 0 && count(nb, Call::event_done_checked) == 0);
+    ISO_CHECK(count(nb, Call::download) == 0 && count(nb, Call::stream_sync) == 0);
+    // the synchronous gpu-zc read keeps using the first area (WHIRL_E1=2's synchronous cycles)
+    model.spec_mark = 33;
+    const std::int32_t* ws = sb.readCycleCtl(3, 2 * qwen35::ctl_words, &aa);
+    ISO_CHECK(ws != nullptr && ws[0] == 33 && model.spec_hosts.size() == 3);
+    nb.recordThreads(false);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    return iso::run("server.sample_buffers", {{"alloc", testAlloc}, {"rows", testRows}}, argc, argv);
+    return iso::run("server.sample_buffers", {{"alloc", testAlloc}, {"rows", testRows}, {"ahead_ring", testAheadRing}}, argc, argv);
 }
