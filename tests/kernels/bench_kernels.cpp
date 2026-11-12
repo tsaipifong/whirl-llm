@@ -18,6 +18,8 @@
 //         B bitwise == A on the full output first, then ABBA pairs; rows --fdq-n, slots --fdq-v (v0251-a3port)
 //   ws4r  in-object A/B: attn_wsplit1 / attn_wsplit2 (_q8) vs attn_ws4r1 / 2 [b] (_q8) (gfx1201 decode / verify
 //         attention, Swift 24 / 4 heads, L 2k..128k, 1 / 2 / 4 rows; v0252-ws4r97)
+//   silu  in-object A/B (v0252-silu, gfx1201): silu_mul_x8h vs silu_mul_x8w / silu_mul_x8w4 on the real Ornith f16 g / u of
+//         kt::siluRealGu (rt_code2k / 8k / 32k last full forward, layer 20), B bitwise == A first, then ABBA pairs
 //   ggemv gemvq_nt<N>r2_mxfp4 vs gemvk_nt<N>v1..9_mxfp4 (gfx1151 verify GEMV, N = every gemvk width 2..8 of
 //         kt::ggemvBenchNts(), --bench-nt a subset; feat026-ggemv, v0251-a6bench)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
@@ -1026,6 +1028,110 @@ void benchMoe(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- silu (v0252-silu, gfx1201 fp8 MoE prefill activation)
+// In-object A/B on the real Ornith f16 g / u (kt::siluRealGu: the 11-10 R9700 routing dumps rt_code2k / 8k / 32k, last
+// full forward (2054 / 2048 / 2048 tokens x top-8 rows), layer 20 weights, gemm8r_moeh / gemm8r_moe32h by the plan's tile):
+//   A = silu_mul_x8h (grid rows x 256 threads, the shipped fp8 MoE prefill activation)
+//   B = silu_mul_x8w (ceil(rows / 8) x 256) or silu_mul_x8w4 (ceil(rows / 4) x 128)
+// B bitwise == A on every fp8 byte and row scale first (bitwise_b), then ABBA pairs (Bench::runAB) -> ab_ratio B / A.
+// The kt job's KEEP rule is in scratch\v0252_silu\silu_kt.ps1 (registered before data).
+void benchSilu(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "silu";
+    if (!c.k.silu_mul_x8w || !c.k.silu_mul_x8w4 || !c.k.silu_mul_x8h) {
+        c.rep.skip("silu", "bench silu_mul_x8w", "kernel not in this code object");
+        return;
+    }
+    const int layer = 20;
+    for (const std::string& path : siluDumpPaths()) {
+        SiluGu gu;
+        std::string why;
+        if (!siluRealGu(c, path, layer, gu, why)) {
+            Result r;
+            r.family = "silu";
+            r.name = "bench silu real g, u " + path + ": " + why;
+            r.pass = false;
+            c.rep.add(r);
+            continue;
+        }
+        const int pairs = gu.pairs, F = gu.F;
+        auto hg = std::make_shared<Buf>(gu.g), hu = std::make_shared<Buf>(gu.u);
+        auto qa = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * F), sxa = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * 4);
+        auto qb = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * F), sxb = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * 4);
+        const std::size_t sl = path.find_last_of("\\/");
+        std::string base = sl == std::string::npos ? path : path.substr(sl + 1);
+        if (base.size() > 4) base.resize(base.size() - 4);  // rt_code2k
+        struct V {
+            const char* name;
+            hip::Function f;
+            int wpb;
+        };
+        const V vs[] = {{"silu_mul_x8w", c.k.silu_mul_x8w, wk::siluWRowsPerBlock(false)}, {"silu_mul_x8w4", c.k.silu_mul_x8w4, wk::siluWRowsPerBlock(true)}};
+        for (const V& v : vs) {
+            Cell k;
+            k.ci = e.info("silu", "silu_mul_x8h", "ornith." + base + ".fwd" + std::to_string(gu.fwd) + ".l" + std::to_string(layer) + "." + v.name,
+                          "F" + std::to_string(F) + "_rows" + std::to_string(pairs) + "_n" + std::to_string(gu.n));
+            k.ci.settings = e.settings(hg->bytes() + hu->bytes(), 1) + ";routing=" + base + ";forward=" + std::to_string(gu.fwd) + ";layer=" + std::to_string(layer) +
+                            ";tile_bn=" + std::to_string(gu.bn);
+            k.kernel = k.ci.kernel;
+            k.fa = c.k.silu_mul_x8h;
+            k.call = [&c, hg, hu, qa, sxa, pairs, F](hip::Function fn, std::uint64_t) {
+                hip::launch(fn, {static_cast<unsigned>(pairs), 1, 1}, {256, 1, 1}, 0, c.s, hg->p(), hu->p(), qa->p(), sxa->p(), F);
+            };
+            k.run = [&c, &k, qa, sxa, pairs, F](hip::Function fn) {
+                qa->fill(0x5a);
+                sxa->fill(0x5a);
+                k.call(fn, 0);
+                c.sync();
+                const auto s = sxa->down<float>(static_cast<std::size_t>(pairs));
+                std::vector<float> o(s.begin(), s.end());
+                const auto q = qa->down<std::uint8_t>(static_cast<std::size_t>(pairs) * F);
+                for (std::size_t i = 0; i < q.size(); i += 61) o.push_back(static_cast<float>(q[i]));
+                return o;
+            };
+            k.verify = [pairs](const std::vector<float>& got) {
+                // A is the shipped kernel (kt silu / moemx check its values); here: every row scale written (none left at
+                // the 0x5a fill), finite and positive for these real activations
+                std::size_t bad = 0;
+                for (int p = 0; p < pairs && p < static_cast<int>(got.size()); ++p)
+                    bad += !std::isfinite(got[static_cast<std::size_t>(p)]) || got[static_cast<std::size_t>(p)] <= 0.f || got[static_cast<std::size_t>(p)] > 1e30f;
+                Result r;
+                r.kind = Kind::invariant;
+                r.n = static_cast<std::size_t>(pairs);
+                r.mismatches = bad;
+                r.pass = bad == 0;
+                r.name = "A row scales written, finite and positive";
+                return r;
+            };
+            k.kernel_b = v.name;
+            const hip::Function fb = v.f;
+            const int wpb = v.wpb;
+            k.call_b = [&c, fb, wpb, hg, hu, qb, sxb, pairs, F](std::uint64_t) {
+                hip::launch(fb, {cdiv(static_cast<std::uint64_t>(pairs), static_cast<std::uint64_t>(wpb)), 1, 1}, {static_cast<unsigned>(32 * wpb), 1, 1}, 0, c.s,
+                            hg->p(), hu->p(), qb->p(), sxb->p(), F, pairs);
+            };
+            k.bitwise_b = [&c, &k, qa, sxa, qb, sxb, pairs, F]() -> std::pair<std::size_t, std::size_t> {
+                qa->fill(0x5a);
+                sxa->fill(0x5a);
+                qb->fill(0xa5);
+                sxb->fill(0xa5);
+                k.call(k.fa, 0);
+                k.call_b(0);
+                c.sync();
+                const auto a1 = qa->down<std::uint8_t>(static_cast<std::size_t>(pairs) * F), b1 = qb->down<std::uint8_t>(static_cast<std::size_t>(pairs) * F);
+                const auto a2 = sxa->down<std::uint32_t>(static_cast<std::size_t>(pairs)), b2 = sxb->down<std::uint32_t>(static_cast<std::size_t>(pairs));
+                std::size_t bad = 0;
+                for (int p = 0; p < pairs; ++p) {
+                    bad += std::memcmp(&a1[static_cast<std::size_t>(p) * F], &b1[static_cast<std::size_t>(p) * F], static_cast<std::size_t>(F)) != 0;
+                    bad += a2[static_cast<std::size_t>(p)] != b2[static_cast<std::size_t>(p)];
+                }
+                return {2 * static_cast<std::size_t>(pairs), bad};
+            };
+            runCell(e, k);
+        }
+    }
+}
+
 // ---------------------------------------------------------------- gdn (decode step + gated norm)
 void benchGdn(Env& e) {
     Ctx& c = e.c;
@@ -1453,7 +1559,7 @@ void benchWs4r(Env& e) {
 
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -1504,7 +1610,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
         void (*fn)(Env&);
     };
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
-                      {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"ws4r", benchWs4r}};
+                      {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"ws4r", benchWs4r}, {"silu", benchSilu}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);
