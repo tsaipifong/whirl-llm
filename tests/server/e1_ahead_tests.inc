@@ -515,6 +515,45 @@ void testE1AheadEnv() {
         if (parseE1(s).has_value()) std::printf("  parseE1(\"%s\") accepted\n", s);
         CHECK(!parseE1(s).has_value());
     }
+    // v0252-e1def (PLAN V1-93): the default per (code object, model class) as whirl-server computes it
+    // (chooseE1(settings::e1(), qwen35::e1Default(moe, arch), site)): the lookahead for MoE models on the R9700, 0 for
+    // dense models there and for both classes on the Radeon 8060S; fast mode's relaxed acceptance keeps 0 on every card;
+    // WHIRL_E1=0 / 1 / 2 wins on every card, model class and mode
+    {
+#ifdef WHIRL_SOURCE_DIR
+        CHECK(sm.find("chooseE1(e1_env, qwen35::e1Default(model.cfg.moe, model.arch),") != std::string::npos);
+        CHECK(sm.find(".fast = nreq.mode == numerics::Mode::fast,") != std::string::npos);
+        CHECK(doc.find("Not set: `2` for MoE models (Ornith) on the Radeon AI PRO R9700") != std::string::npos);
+        CHECK(doc.find("The reply is the same with every value in the same mode") != std::string::npos);
+#endif
+        struct Row {
+            hip::Arch arch;
+            bool moe;
+            std::uint32_t want;
+        };
+        const Row rows[] = {{hip::Arch::gfx1201, true, 2}, {hip::Arch::gfx1201, false, 0}, {hip::Arch::gfx1151, true, 0}, {hip::Arch::gfx1151, false, 0}};
+        const E1Site exact{.mtp = true, .dflash = false, .relax = false, .fast = false, .model_ok = true};
+        E1Site fast = exact;  // fast mode with its relaxed-acceptance arm
+        fast.relax = true;
+        fast.fast = true;
+        E1Site fast_exact = exact;  // fast mode with relaxed acceptance turned off: not measured, so not a default either
+        fast_exact.fast = true;
+        for (const Row& r : rows) {
+            const std::uint32_t def = qwen35::e1Default(r.moe, r.arch);
+            const E1Choice c = chooseE1(std::nullopt, def, exact);
+            std::printf("  WHIRL_E1 default %s %s: %u (want %u)\n", r.arch == hip::Arch::gfx1201 ? "gfx1201" : "gfx1151", r.moe ? "MoE" : "dense", c.e1, r.want);
+            CHECK_EQ(c.e1, r.want);
+            CHECK(c.by_default && !c.bad);
+            CHECK_EQ(chooseE1(std::nullopt, def, fast).e1, 0u);
+            CHECK_EQ(chooseE1(std::nullopt, def, fast_exact).e1, 0u);
+            for (const E1Site& site : {exact, fast, fast_exact})
+                for (const std::uint32_t v : {0u, 1u, 2u}) {
+                    const E1Choice e = chooseE1(std::optional<std::string>(std::to_string(v)), def, site);
+                    CHECK_EQ(e.e1, v);
+                    CHECK(!e.by_default && !e.bad);
+                }
+        }
+    }
     // a model without the E1 path: WHIRL_E1=2 is turned off at startup like 1, said once, no device accept forced
     {
         ServerSetup su = e1ahead::setup(2, 2);

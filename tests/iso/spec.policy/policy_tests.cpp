@@ -166,6 +166,18 @@ void testMtpDefaults() {
     ISO_CHECK(a.ngram_min >= 1);
 }
 
+// v0252-e1def (PLAN V1-93): the WHIRL_E1 value of a server that does not set it, per code object and model class
+// (device::Profile::e1_dense / e1_moe): the one-cycle lookahead (2) for MoE models on the R9700, 0 everywhere else
+void testE1Default() {
+    ISO_CHECK(e1Default(true, hip::Arch::gfx1201) == 2u);
+    ISO_CHECK(e1Default(false, hip::Arch::gfx1201) == 0u);
+    ISO_CHECK(e1Default(true, hip::Arch::gfx1151) == 0u);
+    ISO_CHECK(e1Default(false, hip::Arch::gfx1151) == 0u);
+    ISO_CHECK(e1Default(true) == e1Default(true, device::k_default_arch) && e1Default(false) == 0u);
+    for (const hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151})
+        ISO_CHECK(e1Default(true, a) == device::profile(a).e1_moe && e1Default(false, a) == device::profile(a).e1_dense);
+}
+
 void testNgram() {
     Ngram ng;
     ng.reset();
@@ -467,7 +479,7 @@ int main(int argc, char** argv) {
     return iso::run("spec.policy",
                     {{"draft_vocab", testDraftVocab}, {"exe_directory", testExeDirectory}, {"exe_directory_files", testExeDirectoryFiles},
                      {"exe_directory_plain_long", testExeDirectoryPlainLong},
-                     {"mtp_defaults", testMtpDefaults}, {"ngram", testNgram},
+                     {"mtp_defaults", testMtpDefaults}, {"e1_default", testE1Default}, {"ngram", testNgram},
                      {"batch_drafts", testBatchDrafts}, {"draft_vocab_gate", testDraftVocabGate}, {"draft_vocab_moe_row", testDraftVocabMoeRow}, {"draft_vocab_subset", testDraftVocabSubset}, {"mtp_auto_mode", testMtpAutoMode},
                      {"dflash_rules", testDflashRules}, {"ngram_shown", testNgramShown}, {"mtp_drafts_given", testMtpDraftsGiven}},
                     argc, argv);

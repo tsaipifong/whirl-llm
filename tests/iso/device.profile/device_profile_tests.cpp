@@ -52,6 +52,10 @@ void testProfiles() {
     // v0252-n10: the TAIL-CK checkpoint inside the prefill forward on the R9700 only (0.2.5.2 leaves the 8060S as 0.2.5.1)
     CHECK(a.tail_ck_in_forward);
     CHECK(!b.tail_ck_in_forward);
+    // v0252-e1def (PLAN V1-93): the E1 one-cycle lookahead (WHIRL_E1=2) is the default of MoE models on the R9700 only
+    // (dense models there and both model classes on the Radeon 8060S keep 0)
+    CHECK(a.e1_dense == 0 && a.e1_moe == 2);
+    CHECK(b.e1_dense == 0 && b.e1_moe == 0);
     // constexpr: the field reads fold like the arch comparisons they replaced
     static_assert(d::profile(Arch::gfx1151).prefill_exec_moe == 4096 && !d::profile(Arch::gfx1201).tune_fast);
     // REVIEW-ARCH3 P3-3: a value with no row throws instead of getting the gfx1201 row (a new enumerator without a

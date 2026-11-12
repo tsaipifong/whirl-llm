@@ -207,9 +207,12 @@ void testE1InputsEnv() {
     CHECK(!rel.empty() && !doc.empty() && !sm.empty() && !rs.empty());
     CHECK(rel.find("\"E1=0|1|2\"") != std::string::npos);  // v0252-e1p1c: 2 = the one-cycle lookahead (e1_ahead_env)
     CHECK(doc.find("`WHIRL_E1=0\\|1\\|2`") != std::string::npos);
-    // the one read point (config.settings) and the one parser
+    // the one read point (config.settings) and the one parser (v0252-e1def: server_main reaches it through chooseE1,
+    // engine_options.h, which also applies the device profile's default when the variable is not set)
     CHECK(rs.find("envGet(\"E1\")") != std::string::npos);
-    CHECK(sm.find("settings::e1()") != std::string::npos && sm.find("parseE1(") != std::string::npos);
+    CHECK(sm.find("settings::e1()") != std::string::npos && sm.find("chooseE1(") != std::string::npos);
+    CHECK_EQ(sm.find("parseE1("), std::string::npos);
+    CHECK(slurp("/src/server/engine_options.h").find("parseE1(*env)") != std::string::npos);
     CHECK_EQ(sm.find("\"E1\""), std::string::npos);
 #else
     CHECK(false);  // whirl-server-tests is built with WHIRL_SOURCE_DIR (cmake/server.cmake): the source checks must run

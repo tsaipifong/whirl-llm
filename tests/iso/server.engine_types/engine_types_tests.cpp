@@ -95,6 +95,35 @@ void testStateStarts() {
     ISO_CHECK(s::parseE1("2") == std::optional<std::uint32_t>(2u) && s::parseE1(" 2	") == std::optional<std::uint32_t>(2u));
     ISO_CHECK(!s::parseE1("3").has_value() && !s::parseE1("").has_value() && !s::parseE1("02").has_value());
     ISO_CHECK(s::EngineOptions{}.e1 == 0u);
+    // v0252-e1def (PLAN V1-93): what whirl-server starts with. WHIRL_E1 set: that value on every card and model (a bad
+    // one: 0, flagged); not set: the profile default, and only where a cycle can use it (MTP drafts, exact acceptance,
+    // no DFlash2, the model's E1 path) - else 0, so the default never turns the device accept on for nothing
+    const s::E1Site ok{.mtp = true, .dflash = false, .relax = false, .fast = false, .model_ok = true};
+    for (const std::uint32_t def : {0u, 1u, 2u}) {
+        for (const s::E1Site site : {ok, s::E1Site{}, s::E1Site{.mtp = true, .relax = true, .model_ok = true}}) {
+            for (const char* v : {"0", "1", "2"}) {
+                const s::E1Choice c = s::chooseE1(std::optional<std::string>(v), def, site);
+                ISO_CHECK(c.e1 == static_cast<std::uint32_t>(v[0] - '0') && !c.bad && !c.by_default);
+            }
+            const s::E1Choice bad = s::chooseE1(std::optional<std::string>("on"), def, site);
+            ISO_CHECK(bad.e1 == 0u && bad.bad && !bad.by_default);
+            const s::E1Choice empty = s::chooseE1(std::optional<std::string>(""), def, site);
+            ISO_CHECK(empty.e1 == 0u && empty.bad && !empty.by_default);
+        }
+        const s::E1Choice d = s::chooseE1(std::nullopt, def, ok);
+        ISO_CHECK(d.e1 == def && !d.bad && d.by_default);
+        // not usable: no MTP drafts / DFlash2 drafts / relaxed acceptance / fast mode (also with its relaxed acceptance
+        // turned off) / a model without the E1 path
+        for (const s::E1Site site : {s::E1Site{.mtp = false, .dflash = false, .relax = false, .fast = false, .model_ok = true},
+                                     s::E1Site{.mtp = true, .dflash = true, .relax = false, .fast = false, .model_ok = true},
+                                     s::E1Site{.mtp = true, .dflash = false, .relax = true, .fast = false, .model_ok = true},
+                                     s::E1Site{.mtp = true, .dflash = false, .relax = true, .fast = true, .model_ok = true},
+                                     s::E1Site{.mtp = true, .dflash = false, .relax = false, .fast = true, .model_ok = true},
+                                     s::E1Site{.mtp = true, .dflash = false, .relax = false, .fast = false, .model_ok = false}}) {
+            const s::E1Choice n = s::chooseE1(std::nullopt, def, site);
+            ISO_CHECK(n.e1 == 0u && !n.bad && n.by_default);
+        }
+    }
 
     s::FloorState f;
     ISO_CHECK(f.epoch == s::TimePoint{} && f.log_t == s::TimePoint{});
