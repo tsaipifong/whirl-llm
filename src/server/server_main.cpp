@@ -996,11 +996,8 @@ void ServerRun::makeEngine() {
         if (const std::optional<std::uint32_t> m = parseSpecAcc(*sa)) eo.spec_acc = *m;
         else logW("WHIRL_SPEC_ACC={} is not one of 0..4 / host, pinned, gpu, gpu-zc, check; using 0 (host)", *sa);
     }
-    // v0252-e1p1b (E1): WHIRL_E1 0 (default) / 1 / 2 (EngineOptions::e1; v0252-e1p1c: 2 = one cycle ahead); a bad value warns and runs 0
-    if (const std::optional<std::string> e1 = settings::e1()) {
-        if (const std::optional<std::uint32_t> m = parseE1(*e1)) eo.e1 = *m;
-        else logW("WHIRL_E1={} is not 0, 1 or 2; using 0", *e1);
-    }
+    // v0252-e1p1b (E1): WHIRL_E1 0 / 1 / 2 (EngineOptions::e1; v0252-e1p1c: 2 = one cycle ahead) is chosen below, once the
+    // backend can say whether the model has the E1 path (v0252-e1def)
     if (lm.use_dflash) {
         // MTP-only settings: the per-slot MTP draft allocation, the draft-head vocabulary subset and
         // the MTP draft attention window have nothing to act on without the MTP block (qwen35::dflashMtpOnly, module
@@ -1038,6 +1035,17 @@ void ServerRun::makeEngine() {
     eo.seed = seed0;
 
     backend = makeQwen35Backend(model);
+    // v0252-e1def (PLAN V1-93): WHIRL_E1 when set (a bad value warns and runs 0); else the device profile's default for the
+    // model class (2 = the one-cycle lookahead for MoE models on the R9700, 0 elsewhere), only where a cycle can use it
+    const std::optional<std::string> e1_env = settings::e1();
+    const E1Choice e1c = chooseE1(e1_env, qwen35::e1Default(model.cfg.moe, model.arch),
+                                  E1Site{.mtp = eo.use_mtp,
+                                         .dflash = eo.use_dflash,
+                                         .relax = eo.relax.on,
+                                         .fast = nreq.mode == numerics::Mode::fast,
+                                         .model_ok = backend->e1InputsOk()});
+    eo.e1 = e1c.e1;
+    if (e1c.bad) logW("WHIRL_E1={} is not 0, 1 or 2; using 0", *e1_env);
     engine.emplace(*backend, *lm.ops, tok, eo);
     // the checkpoint VRAM is measured around allocState only (F-7: Engine::allocStateMeasured, CPU-tested order)
     const Engine::StateMem mem_ck = engine->allocStateMeasured();

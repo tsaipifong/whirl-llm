@@ -40,6 +40,9 @@ struct MtpDefaults {
 // Per-device defaults: gfx1201 (R9700) is the reference; gfx1151 (Radeon 8060S, UMA,
 // bandwidth-bound decode) has its own values measured on that device.
 MtpDefaults mtpDefaults(bool moe, hip::Arch arch = device::k_default_arch);
+// v0252-e1def (PLAN V1-93): the WHIRL_E1 value of a server that does not set it, for the model class on this code object
+// (device::Profile::e1_dense / e1_moe: 2 = the one-cycle lookahead for MoE models on the R9700, 0 elsewhere)
+std::uint32_t e1Default(bool moe, hip::Arch arch = device::k_default_arch);
 
 // ---- draft-head vocabulary subset (T5-1b): WHIRL_DRAFT_VOCAB = 48k | 64k | <file> | off | N
 // File for a WHIRL_DRAFT_VOCAB value: "48k" / "64k" / ... -> <dir>/subset_48k.bin, anything else

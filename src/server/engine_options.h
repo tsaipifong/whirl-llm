@@ -48,6 +48,33 @@ inline std::optional<std::uint32_t> parseE1(std::string_view v) {
     return std::nullopt;
 }
 
+// v0252-e1def (PLAN V1-93): the WHIRL_E1 value whirl-server starts with. Set: that value, on every card, model and mode
+// (bad = not 0 / 1 / 2: server_main warns and 0 runs, as before). Not set: `def` (qwen35::e1Default: the device profile's
+// value for the model class) where a decode cycle can use it at all - MTP drafts with exact acceptance (no DFlash2
+// drafts, no relaxed acceptance) and the model's E1 path (Backend::e1InputsOk), and not in fast mode (its relaxed
+// acceptance never qualifies, and fast with that arm turned off was never run with the lookahead) - else 0, so a default
+// never turns the device accept on (EngineOptions::spec_acc) for cycles that all run the usual way, and never warns.
+struct E1Site {
+    bool mtp = false;       // EngineOptions::use_mtp
+    bool dflash = false;    // EngineOptions::use_dflash
+    bool relax = false;     // EngineOptions::relax.on
+    bool fast = false;      // the numerics mode is fast (numerics::Mode::fast)
+    bool model_ok = false;  // Backend::e1InputsOk
+};
+struct E1Choice {
+    std::uint32_t e1 = 0;
+    bool bad = false;         // WHIRL_E1 is set and is not 0 / 1 / 2
+    bool by_default = false;  // WHIRL_E1 is not set
+};
+inline E1Choice chooseE1(const std::optional<std::string>& env, std::uint32_t def, const E1Site& site) {
+    if (env) {
+        const std::optional<std::uint32_t> m = parseE1(*env);
+        return {m.value_or(0u), !m.has_value(), false};
+    }
+    const bool usable = site.mtp && !site.dflash && !site.relax && !site.fast && site.model_ok;
+    return {usable ? def : 0u, false, true};
+}
+
 struct EngineOptions {
     std::string model_name;
     std::string model_file;  // GGUF file name without directory (GET /props model_path)
@@ -110,6 +137,8 @@ struct EngineOptions {
     // control-word areas the accept kernel writes, so Engine::allocState raises spec_acc to 3 = gpu-zc unless it is 4 =
     // check). A cycle that does not qualify, the last cycles before max_tokens and every cycle while another request is
     // active run as with 1. The reply is the same as with 0.
+    // v0252-e1def: whirl-server sets it with chooseE1 (WHIRL_E1, else the device profile's default for the model class:
+    // 2 for MoE models on the R9700, 0 elsewhere); the engine's own default stays 0.
     std::uint32_t e1 = 0;
     // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)
     std::uint32_t slot_drafts = 0;
