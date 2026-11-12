@@ -995,9 +995,13 @@ void ServerRun::makeEngine() {
     if (const std::optional<std::uint32_t> sd = settings::slotDrafts()) eo.slot_drafts = *sd;  // (config.settings, arch025-lane1 leg 8)
     // v0252-e1p1 (feat026-acc port): WHIRL_SPEC_ACC 0 host (default), 1 pinned, 2 gpu, 3 gpu-zc, 4 check, or those names
     // (EngineOptions::spec_acc); a bad value warns and runs host (FR-SRV P3-10: never a startup failure)
+    // v0252-b5 round 3 (E1 review item C2): spec_acc_env = the mode the user set (a bad value: 0 = host, what the warning
+    // says); the default E1 below yields to it (chooseE1)
+    std::optional<std::uint32_t> spec_acc_env;
     if (const std::optional<std::string> sa = settings::specAcc()) {
         if (const std::optional<std::uint32_t> m = parseSpecAcc(*sa)) eo.spec_acc = *m;
         else logW("WHIRL_SPEC_ACC={} is not one of 0..4 / host, pinned, gpu, gpu-zc, check; using 0 (host)", *sa);
+        spec_acc_env = eo.spec_acc;
     }
     // v0252-e1p1b (E1): WHIRL_E1 0 / 1 / 2 (EngineOptions::e1; v0252-e1p1c: 2 = one cycle ahead) is chosen below, once the
     // backend can say whether the model has the E1 path (v0252-e1def)
@@ -1046,9 +1050,17 @@ void ServerRun::makeEngine() {
                                          .dflash = eo.use_dflash,
                                          .relax = eo.relax.on,
                                          .fast = nreq.mode == numerics::Mode::fast,
-                                         .model_ok = backend->e1InputsOk()});
+                                         .model_ok = backend->e1InputsOk(),
+                                         .spec_acc_env = spec_acc_env});
     eo.e1 = e1c.e1;
     if (e1c.bad) logW("WHIRL_E1={} is not 0, 1 or 2; using 0", *e1_env);
+    // v0252-b5 round 3 (C2): the explicit accept mode wins over the default lookahead (which would raise it to gpu-zc)
+    if (e1c.yielded)
+        logI("the default E1 lookahead is off: WHIRL_SPEC_ACC={} ({}) is set and stays as set (WHIRL_E1=2 turns the lookahead on)", eo.spec_acc,
+             specAccName(eo.spec_acc));
+    // v0252-b5 round 3 (PLAN V1-117): the multi-block verify argmax kernels as this load chose them (Model::load: the
+    // device profile's default for MoE models in fast mode on the R9700, or WHIRL_ARGMAX_MB)
+    if (model.argmax_mb != 0) logI("verify argmax: multi-block kernels on (WHIRL_ARGMAX_MB=0 turns them off)");
     engine.emplace(*backend, *lm.ops, tok, eo);
     // the checkpoint VRAM is measured around allocState only (F-7: Engine::allocStateMeasured, CPU-tested order)
     const Engine::StateMem mem_ck = engine->allocStateMeasured();
@@ -1269,7 +1281,7 @@ void ServerRun::planPool() {
         // (startfit::poolFitExplicit / poolAdjust, module server.kv_fit, arch025-lane1 leg 10)
         const startfit::PoolFitExplicit fe = startfit::poolFitExplicit(lm.is_uma, opt.ctx.has_value(), opt.ctx_per_slot.has_value());
         {
-            const numerics::KvFitLabel lb = numerics::kvFitLabel(nreq, lm.cfg.moe, model.kv_choice.kv);
+            const numerics::KvFitLabel lb = numerics::kvFitLabel(nreq, lm.cfg.moe, model.kv_choice.kv, device::profile(model.arch).numerics_8060s);
             lm.sin.put("pool.avail", avail);
             lm.sin.put("pool.per_token", model.kvBytesPerToken());
             lm.sin.put("pool.req", lm.pool_req ? std::to_string(*lm.pool_req) : std::string("-"));
@@ -1284,7 +1296,7 @@ void ServerRun::planPool() {
         }
         const numerics::PoolFit pf = numerics::serverPoolFit(avail, model.kvBytesPerToken(), lm.pool_req,
                                                              fe.pool, lm.slot_ctx, fe.slot, kv_page, 8 * lm.cap_max,
-                                                             numerics::kvFitLabel(nreq, lm.cfg.moe, model.kv_choice.kv));
+                                                             numerics::kvFitLabel(nreq, lm.cfg.moe, model.kv_choice.kv, device::profile(model.arch).numerics_8060s));
         if (pf.refuse) throw app::UserError(app::exit_vram, pf.msg);
         const std::string fit_why = std::format("{:.2f} GiB usable for the KV cache ({}), {:.1f} KiB per token in {}", avail / 1073741824.0,
                                                 budget_note.empty() ? "free VRAM" : "WDDM budget minus the margin",
@@ -1413,7 +1425,9 @@ void ServerRun::planPool() {
     {
         const std::uint32_t pool_now = model.pool_pages * kv_page;
         // (startfit::poolFloorWarn, module server.kv_fit; arch025-lane1 leg 9)
-        const bool int8_hint = model.kv_choice.kv == KvFormat::f16 && !lm.cfg.moe && nreq.mode == numerics::Mode::precise;
+        // (v0252-ornkv2 text item: a MoE model too on the card where its balance KV is int8, the gfx1151 row)
+        const bool int8_hint = model.kv_choice.kv == KvFormat::f16 && (!lm.cfg.moe || device::profile(model.arch).numerics_8060s) &&
+                               nreq.mode == numerics::Mode::precise;
         if (const std::string w = startfit::poolFloorWarn(pool_now, slot_ctx_eff, opt.parallel, int8_hint); !w.empty()) logW("{}", w);
     }
 }

@@ -60,19 +60,31 @@ struct E1Site {
     bool relax = false;     // EngineOptions::relax.on
     bool fast = false;      // the numerics mode is fast (numerics::Mode::fast)
     bool model_ok = false;  // Backend::e1InputsOk
+    // v0252-b5 round 3 (E1 review item C2): WHIRL_SPEC_ACC as the user set it (the parsed mode; not set: nullopt)
+    std::optional<std::uint32_t> spec_acc_env{};
 };
 struct E1Choice {
     std::uint32_t e1 = 0;
     bool bad = false;         // WHIRL_E1 is set and is not 0 / 1 / 2
     bool by_default = false;  // WHIRL_E1 is not set
+    bool yielded = false;     // the default was usable but gave way to the explicitly set WHIRL_SPEC_ACC (e1 = 0)
 };
+// v0252-b5 round 3 (E1 review item C2): the accept mode a WHIRL_E1 value runs with - SpecCycle::specAccSetup raises
+// EngineOptions::spec_acc to it: 1 needs gpu (2) or above, 2 needs gpu-zc (3) or check (4). true = `spec_acc` stays as set.
+inline bool e1KeepsSpecAcc(std::uint32_t e1, std::uint32_t spec_acc) { return e1 == 0 || (e1 == 1 ? spec_acc >= 2 : spec_acc >= 3); }
+// An explicitly set WHIRL_SPEC_ACC wins over the DEFAULT E1 (precedence as everywhere: the explicit value over the
+// default): where the default E1 would raise the mode the user set, the default yields (0, `yielded`), so
+// WHIRL_SPEC_ACC alone still selects the accept path (an A/B by that variable compares two different things). An
+// explicit WHIRL_E1 keeps its meaning (it raises the mode: the user's order).
 inline E1Choice chooseE1(const std::optional<std::string>& env, std::uint32_t def, const E1Site& site) {
     if (env) {
         const std::optional<std::uint32_t> m = parseE1(*env);
-        return {m.value_or(0u), !m.has_value(), false};
+        return {m.value_or(0u), !m.has_value(), false, false};
     }
     const bool usable = site.mtp && !site.dflash && !site.relax && !site.fast && site.model_ok;
-    return {usable ? def : 0u, false, true};
+    if (!usable) return {0u, false, true, false};
+    if (site.spec_acc_env && !e1KeepsSpecAcc(def, *site.spec_acc_env)) return {0u, false, true, true};
+    return {def, false, true, false};
 }
 
 struct EngineOptions {

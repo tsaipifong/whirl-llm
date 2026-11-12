@@ -40,8 +40,8 @@ DevPtr Context::allocZero(u64 bytes) {
 }
 
 // v0252-f1arg3: the multi-block verify argmax switch and its per-Context workspace (see the header)
-int Context::argmaxMbMode(bool profile_on, const std::optional<std::string>& env) {
-    if (!env) return profile_on ? 1 : 0;
+int Context::argmaxMbMode(const device::Profile& prof, bool moe, bool fast, const std::optional<std::string>& env) {
+    if (!env) return fast && (moe ? prof.argmax_mb_moe : prof.argmax_mb_dense) ? 1 : 0;
     if (*env == "0") return 0;
     return *env == "2" ? 2 : 1;
 }

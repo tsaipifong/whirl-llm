@@ -168,8 +168,8 @@ public:
     Profile* prof = nullptr;
     hip::Stream stream = nullptr;  // the work stream (owned by stream_own; every kernel call reads this value)
     // v0252-f1arg3 (PLAN V1-63 / V1-64; progress/v0252-f1arg2.HANDOFF.md section 6): the multi-block verify argmax twins.
-    // argmax_mb: 0 off, 1 on, 2 on + the workspace tripwire (setArgmaxMb, once per load: device::Profile::argmax_mb,
-    // WHIRL_ARGMAX_MB). am_ws: THIS Context's workspace (one per stream: only argmaxMbEnqueue launches with it, always on
+    // argmax_mb: 0 off, 1 on, 2 on + the workspace tripwire (setArgmaxMb, once per load: device::Profile::argmax_mb_dense /
+    // _moe in fast mode, WHIRL_ARGMAX_MB). am_ws: THIS Context's workspace (one per stream: only argmaxMbEnqueue launches with it, always on
     // `stream`), allocated by allocCtl directly before the control words in the same allocation, zeroed once; every
     // launch leaves it zeroed (the last block of each row resets its row)
     int argmax_mb = 0;
@@ -404,8 +404,11 @@ public:
     bool relaxRankEnqueue(const RelaxRank& rr, std::uint32_t n, DevPtr out, const RowIdx& dst, const RowIdx& src);
     // v0252-f1arg3: the twins' switch. argmaxMbMode: the profile default, WHIRL_ARGMAX_MB overrides by the envFlag rule
     // ("0" off, any other value on), "2" = on + tripwire. setArgmaxMb keeps the mode only when the code object has both
-    // twins (else 0); call it before allocCtl. argmaxMbOn: switched on and the workspace exists
-    static int argmaxMbMode(bool profile_on, const std::optional<std::string>& env);
+    // twins (else 0); call it before allocCtl. argmaxMbOn: switched on and the workspace exists.
+    // v0252-b5 round 3 (PLAN V1-117): the profile default = the row's value for the model class (argmax_mb_moe /
+    // argmax_mb_dense), and only in fast mode (the measured gain: Ornith fast on the R9700); the override works in every
+    // mode and class (the twins are bitwise the one-block kernels)
+    static int argmaxMbMode(const device::Profile& prof, bool moe, bool fast, const std::optional<std::string>& env);
     void setArgmaxMb(int mode);
     bool argmaxMbOn() const { return argmax_mb != 0 && am_ws != 0; }
     // the control words (`bytes`, zeroed): with the switch on, one allocation of am_ws_bytes + bytes whose first

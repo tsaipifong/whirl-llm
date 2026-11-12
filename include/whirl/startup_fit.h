@@ -280,7 +280,8 @@ std::uint32_t poolTokens(std::optional<std::uint32_t> fit_pool, std::optional<st
 // A second long request the pool should hold besides one full request (--parallel > 1).
 inline constexpr std::uint32_t floor_second_ctx = 65536;
 // The warning when the pool holds less than one full request plus a second one of up to floor_second_ctx tokens ("" =
-// none); int8_hint adds the "--balance allows int8 KV" hint (precise, dense, f16 KV).
+// none); int8_hint adds the "--balance allows int8 KV" hint (precise, f16 KV, and a model whose balance KV is int8: dense
+// models, and MoE models on the Radeon 8060S).
 std::string poolFloorWarn(std::uint32_t pool_now, std::uint32_t slot_ctx, std::uint32_t parallel, bool int8_hint);
 // The "target not reached" entry of the startup adjustments: with an explicit --parallel the context per request ended
 // below target_ctx (nullopt: reached).

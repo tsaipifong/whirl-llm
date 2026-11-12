@@ -343,16 +343,24 @@ std::uint32_t srvU32(const Raw& v, std::uint32_t def) {
 // gemm_moepdh_* (f16 moe_yd) + moe_combine4h on the moep GU / DN defaults (ops::chooseMoe, moep branch). Env-only screen
 // on the frozen int0252 7dc6832 exe (scratch\abscreen\moedf8s, 4 ABBA rounds, KEEP): Ornith balance prefill 8k +1.00 %,
 // 32k +1.14 %; with WHIRL_MOEP_DN=m64w4n128k64 on top NEAR (+0.6..+0.7 %), so the DN default stays. Precise never (f16
-// intermediates are a balance item); fast keeps kMoepDefault.comb (1): only balance was screened. A/B by
-// WHIRL_MOEP_COMB=1 (the f32 moe_yd) / 3.
+// intermediates are a balance item). A/B by WHIRL_MOEP_COMB=1 (the f32 moe_yd) / 3.
+// v0252-b5 round 3 (PLAN V1-95 / V1-94, item (d)): the gfx1151 FAST plan takes 3 as well (fast prefill +1.05..+1.61 %
+// +-0.80) - where moeskip is off: this function is the mode's combine WITHOUT moeskip; loadOverrides replaces it by
+// moepCombMoeSkip when the fast plan runs moeskip (the default for MXFP4 MoE models since round 3, PLAN V1-116).
 std::uint32_t moepCombDefault(const Request& r, const Target& t) {
     const bool h16 = r.has(Item::h16);
     if (t.gfx1151) {
         if (!t.moe_mxfp4) return 0u;
-        return r.mode == Mode::balance && h16 ? 3u : kernels::kMoepDefault.comb;
+        return r.mode != Mode::precise && h16 ? 3u : kernels::kMoepDefault.comb;
     }
     return t.moe_mxfp4 && h16 ? 3u : 0u;
 }
+
+// v0252-b5 round 3 (the combine rule accepted 2026-11-13, PLAN V1-116): the combine of a fast plan that runs moeskip when
+// WHIRL_MOEP_COMB is not set = the card's non-f16 one (gfx1151 MXFP4 experts: kMoepDefault.comb = 1; gfx1201: 0), because
+// ops::chooseMoe (skipOk) refuses the moeskip prefill path with the f16 moe_yd combines (pl.ydh: 3 / 4) and with the fused
+// one. An explicit WHIRL_MOEP_COMB wins (with 3 the decode skips and the prefill does not: the screen's other arm).
+std::uint32_t moepCombMoeSkip(const Target& t) { return t.gfx1151 && t.moe_mxfp4 ? kernels::kMoepDefault.comb : 0u; }
 
 // loader.cpp:548-553 and :743, then tune.cpp:850-914 (before the numerics block)
 void loadFlags(const Request& r, const Target& t, Flags& F) {
@@ -366,8 +374,8 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
         F.moep_gu = static_cast<std::uint32_t>(kernels::kMoepDefault.gu) + 1;
         F.moep_dn = static_cast<std::uint32_t>(kernels::kMoepDefault.dn) + 1;
     }
-    // the combine default of every card (gfx1151: kMoepDefault.comb, v0252-ornkv2 3 in balance with the item h16;
-    // v0252-moedf16 gfx1201: 3 with the item h16, else 0)
+    // the combine default of every card (gfx1151: kMoepDefault.comb, v0252-ornkv2 / v0252-b5 3 in balance and fast with the
+    // item h16; v0252-moedf16 gfx1201: 3 with the item h16, else 0); loadOverrides: the non-f16 one where fast runs moeskip
     F.moep_comb = moepCombDefault(r, t);
     // feat026-moep (was loader.cpp, envGet): WHIRL_MOEP_GU / _DN name a variant (index + 1); any other value ("0", "",
     // an unknown name) is off; WHIRL_MOEP_COMB by std::strtoul (unparsable = 0 = moe_combine)
@@ -465,7 +473,13 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     // (device::Profile::attn_sx_balance, like gdn_strix); ops::chooseAttnPrefill still needs the kernel and the shape.
     // Like h16 itself on this GPU ("MXFP4 models only"), only for models with MXFP4 tensors (the product models).
     // WHIRL_ATTN_SX=0 turns it off (A/B arm); other values change nothing (loadOverrides notes them in precise / fast).
-    F.attn_sx = r.mode == Mode::balance && t.attn_sx_profile && t.has_mxfp4 && r.has(Item::h16) && !(e.attn_sx && *e.attn_sx == "0");
+    // v0252-b5 round 3, item (h): the DEFAULT is the MoE class only (Ornith screen KEEP: balance long prefill +1.60 % +-0.63 /
+    // +1.37 % +-1.25; Swift's is still OPEN, +1.16 % +-2.02: a dense model stays on the old kernel until its screen decides).
+    // WHIRL_ATTN_SX=1 forces it on wherever it may run (a dense model too: the arm of that screen), =0 forces the old kernel.
+    const bool sx_can = r.mode == Mode::balance && t.attn_sx_profile && t.has_mxfp4 && r.has(Item::h16);
+    const bool sx_default = t.moe;
+    const bool sx_on = e.attn_sx && *e.attn_sx == "1" ? true : sx_default;
+    F.attn_sx = sx_can && sx_on && !(e.attn_sx && *e.attn_sx == "0");
 }
 
 // tune.cpp:939-982 on the item table (the per-item overrides, WHIRL_Q8DEC, relaxacc, noteSwitches) and the flags
@@ -536,7 +550,9 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
         F.relax_on = true;
         // v0252-f2: on a MoE model the arm (default or forced by WHIRL_RELAX=1) gives the base k / alpha / drafts; the
         // WHIRL_RELAX_* values below still override them. No arm: the Flags defaults (dense, and MoE forced as before).
-        if (const RelaxArm* arm = t.moe ? relaxArm(t.relax_moe_arm) : nullptr; arm != nullptr && arm->on) {
+        // v0252-b5 round 3 (PLAN V1-97): a dense model takes its own arm the same way (Target::relax_dense_arm: k8a02 on
+        // gfx1201; none on gfx1151 = the Flags defaults k 4 / alpha 0.1)
+        if (const RelaxArm* arm = t.moe ? relaxArm(t.relax_moe_arm) : relaxDenseArm(t.relax_dense_arm); arm != nullptr && arm->on) {
             F.relax_k = arm->k;
             F.relax_alpha = arm->alpha;
             p.relax_drafts = arm->drafts;
@@ -554,7 +570,8 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     // v0252-f5 (feat027 moeskip): WHIRL_MOESKIP=T[:M] is fast-only (precise / balance: plan untouched, one note for any value
     // but "0"); in fast T > 0 = on (a user override where the mode did not request it), "0" = off, a malformed value = one
     // note and nothing else. moe_skip_thr / moe_skip_min: fast + the item on + int8 decode activations (not prec_dec: the
-    // precise decode experts never see id -1), from the value or the defaults (moeskip_default_thr / _min); else 0 / 1.
+    // precise decode experts never see id -1), from the value or the defaults (moeskip_default_thr / _min = the arm k6,
+    // static top 6; a value "T" without ":M" keeps the top moeskip_value_min = 1); else 0 / 1.
     std::optional<MoeSkipValue> skv;
     if (const Raw& v = e.moeskip; v && !v->empty()) {
         if (p.mode != Mode::fast) {
@@ -569,14 +586,27 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
         }
     }
     F.moe_skip_thr = 0.f;
-    F.moe_skip_min = moeskip_default_min;
+    F.moe_skip_min = moeskip_value_min;
     if (p.mode == Mode::fast && p.on(Item::moeskip) && !F.prec_dec) {
-        F.moe_skip_thr = skv && skv->thr > 0.f ? skv->thr : moeskip_default_thr;
-        F.moe_skip_min = skv && skv->min_keep ? *skv->min_keep : moeskip_default_min;
+        const bool by_value = skv && skv->thr > 0.f;  // WHIRL_MOESKIP=T[:M]; else the default arm (static top 6)
+        F.moe_skip_thr = by_value ? skv->thr : moeskip_default_thr;
+        F.moe_skip_min = by_value ? skv->min_keep.value_or(moeskip_value_min) : moeskip_default_min;
         if (items)
             p.items[static_cast<std::size_t>(Item::moeskip)].note +=
                 F.moe_skip_thr >= 1.f ? std::format(" [static top {}]", F.moe_skip_min)
                                       : std::format(" [tau {:.3f}, top {} kept]", F.moe_skip_thr, F.moe_skip_min);
+    }
+    // v0252-b5 round 3 (the combine rule, PLAN V1-116): fast with moeskip running and no WHIRL_MOEP_COMB = the card's
+    // non-f16 MoE prefill combine (moepCombMoeSkip); the explicit value wins; balance / precise never get here with
+    // moe_skip_thr > 0. The note says so in the plan line (no parenthesis in it: tests cut the item's entry at its closing
+    // one; no semicolon: the plan line joins its sections with "; ").
+    if (F.moe_skip_thr > 0.f && !e.moep_comb) {
+        const std::uint32_t comb = moepCombMoeSkip(t);
+        if (items && comb != F.moep_comb)
+            p.items[static_cast<std::size_t>(Item::moeskip)].note +=
+                std::format(" [MoE prefill combine {} instead of {}: the moeskip prefill path needs f32 expert outputs, WHIRL_MOEP_COMB overrides]", comb,
+                            F.moep_comb);
+        F.moep_comb = comb;
     }
     // v0252-c1acc (C-3): an invalid WHIRL_ATTN_KGVAR is reported once (the default from loadFlags stays)
     if (items)
@@ -594,7 +624,8 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
             else if (!parseLsplit(*v))
                 p.ignored.push_back(std::format("WHIRL_ATTN_LSPLIT={} ignored: not auto or 0..4096 (auto stays)", *v));
         }
-    // v0252-strixc2: WHIRL_ATTN_SX only turns the balance attn_sx off ("0"); a non-"0" value in precise / fast is noted once
+    // v0252-strixc2: WHIRL_ATTN_SX turns the balance attn_sx off ("0") or forces it on ("1", v0252-b5 round 3: also for
+    // the model class whose default is off); a non-"0" value in precise / fast is noted once
     // (the flag stays off there: the kernel is not bitwise, and fast keeps its own path)
     if (items)
         if (const Raw& v = e.attn_sx; v && *v != "0" && p.mode != Mode::balance)
@@ -869,6 +900,13 @@ const RelaxArm* relaxArm(std::string_view name) {
     return nullptr;
 }
 std::string_view relaxMoeDefaultName(bool gfx1151) { return gfx1151 ? relax_moe_default_8060s : relax_moe_default_r9700; }
+// v0252-b5 round 3 (PLAN V1-97)
+const RelaxArm* relaxDenseArm(std::string_view name) {
+    for (const RelaxArm& a : relax_dense_arms)
+        if (a.name == name) return &a;
+    return nullptr;
+}
+std::string_view relaxDenseDefaultName(bool gfx1151) { return gfx1151 ? relax_dense_default_8060s : relax_dense_default_r9700; }
 
 void skipItem(Plan& p, Item it, const std::string& why) {
     ItemState& s = p.items[static_cast<std::size_t>(it)];
@@ -1045,12 +1083,13 @@ KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<
 }
 
 
-KvFitLabel kvFitLabel(const Request& r, bool moe, KvFormat kv) {
+KvFitLabel kvFitLabel(const Request& r, bool moe, KvFormat kv, bool moe_q8) {
     KvFitLabel l;
     l.mode = modeName(r.mode);
     l.fmt = kvFormatName(kv);
-    // a lower-precision mode only helps where it changes the format (precise, dense: balance is q8h)
-    l.alt = r.mode == Mode::precise && !moe && kv == KvFormat::f16 ? "--balance allows int8 KV" : "";
+    // a lower-precision mode only helps where it changes the format (precise, dense: balance is q8h; v0252-ornkv2: a
+    // MoE model too where its balance KV is int8, moe_q8 = the Radeon 8060S - on the R9700 MoE balance is f16 as well)
+    l.alt = r.mode == Mode::precise && (!moe || moe_q8) && kv == KvFormat::f16 ? "--balance allows int8 KV" : "";
     return l;
 }
 

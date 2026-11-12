@@ -79,18 +79,22 @@ inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq
 inline constexpr std::uint32_t fast_optin_items = bit(Item::moeskip);
 // v0252-f5 (DISCOVERY v4 F5): the per-card fast default rule of moeskip - plain --fast requests it for MoE models with MXFP4
 // experts on the card whose constant is true (Target::moeskip_default, filled by the loader). Both shipped false until the
-// G5 (R9700) / G6 (8060S) screens (speed ABBA + taskacc v2 S arms >= 92 % of precise) accept a threshold; flipping one is
+// G5 (R9700) / G6 (8060S) screens (speed ABBA + taskacc v2 S arms >= 92 % of precise) accepted an arm; flipping one is
 // the whole switch (plus its pin test, testMoeSkipPlan S1).
-inline constexpr bool moeskip_fast_default_r9700 = false;
-inline constexpr bool moeskip_fast_default_8060s = false;
-// v0252-f5: the threshold / min-keep moeskip runs with when its WHIRL_MOESKIP value does not set them. tau 0.05 is an
-// estimate (feat027 PRIOR_ART; no Ornith router-weight distribution measured yet): the G5 sweep (0.03 / 0.05 / 0.08,
-// static k 7 / 6) replaces it.
-inline constexpr float moeskip_default_thr = 0.05f;
-inline constexpr std::uint32_t moeskip_default_min = 1;
+// v0252-b5 round 3 (PLAN V1-116; the screens re-judged KEEP for the arm k6 on 2026-11-12): on for both cards. The fast
+// task-accuracy acceptance of the default is the final batch's step. WHIRL_MOESKIP=0 is the way back (the arm without it).
+inline constexpr bool moeskip_fast_default_r9700 = true;
+inline constexpr bool moeskip_fast_default_8060s = true;
+// v0252-f5: the threshold / min-keep moeskip runs with when no WHIRL_MOESKIP value sets them. v0252-b5 round 3: the screened
+// arm k6 = static top 6 (thr 1, min 6 = WHIRL_MOESKIP=1:6; was the estimate tau 0.05 / top 1 before the G5 / G6 screens).
+inline constexpr float moeskip_default_thr = 1.0f;
+inline constexpr std::uint32_t moeskip_default_min = 6;
+// the top slots always kept when a WHIRL_MOESKIP value gives "T" without ":M" (its own meaning, not the default arm's 6),
+// and the value of Flags::moe_skip_min wherever moeskip is off (precise / balance plans do not move with the default arm)
+inline constexpr std::uint32_t moeskip_value_min = 1;
 // WHIRL_MOESKIP = "T" or "T:M": T in [0, 1] (0 = off; 1 = static top-M, as llama.cpp's expert_used_count = M with the
 // weights renormalized over the kept slots), M a whole number in [1, 64] (the top M always kept; default
-// moeskip_default_min). std::nullopt = malformed (the plan ignores it with a note).
+// moeskip_value_min = 1). std::nullopt = malformed (the plan ignores it with a note).
 struct MoeSkipValue {
     float thr = 0.f;
     std::optional<std::uint32_t> min_keep;
@@ -228,6 +232,9 @@ struct Target {
     // with it (the topk_rows check costs ~5.5-12 % of an R9700 Ornith cycle [est]); the 8060S arm needs no F1.
     std::string_view relax_moe_arm{};
     bool k_relax_rank = false;
+    // v0252-b5 round 3 (PLAN V1-97): the name of the RelaxArm fast takes on a DENSE model (relax_dense_arms; the loader fills
+    // relaxDenseDefaultName(gfx1151); "" = the Flags defaults k 4 / alpha 0.1, every hand-built Target)
+    std::string_view relax_dense_arm{};
     // v0252-f5 (moeskip): the routing kernels (moe_topk_skip, moe_skip_apply, moe_route_skip, moe_combine_skip; both code
     // objects) and the per-card fast default rule (moeskip_fast_default_r9700 / _8060s)
     bool k_moe_skip = false;
@@ -267,6 +274,20 @@ inline constexpr std::string_view relax_moe_default_r9700 = "k4a10d2";
 const RelaxArm* relaxArm(std::string_view name);
 // The default arm name for the code object (Target::gfx1151): relax_moe_default_8060s / _r9700.
 std::string_view relaxMoeDefaultName(bool gfx1151);
+// ---- v0252-b5 round 3 (PLAN V1-97): the fast DENSE relaxacc arms, the same mechanism (Target::relax_dense_arm). A dense
+// model always ran relaxed acceptance in fast with the Flags defaults (k 4, alpha 0.1): an arm only replaces k / alpha
+// (drafts 0 = the device's draft count, unchanged); WHIRL_RELAX_K / _ALPHA still override, WHIRL_RELAX=0 turns it off.
+// Shipped: gfx1201 (R9700) k8a02 = K 8, alpha 0.02 (Swift fast screen KEEP); gfx1151 (8060S) none - Swift fast there keeps
+// k 4 / alpha 0.1 (its own screen is queued). The A arm on the R9700 = WHIRL_RELAX_K=4 WHIRL_RELAX_ALPHA=0.1.
+inline constexpr std::array<RelaxArm, 1> relax_dense_arms{{
+    {"k8a02", true, 8, 0.02f, 0},
+}};
+inline constexpr std::string_view relax_dense_default_r9700 = "k8a02";
+inline constexpr std::string_view relax_dense_default_8060s = "";
+// nullptr for an unknown name ("" included)
+const RelaxArm* relaxDenseArm(std::string_view name);
+// The default dense arm name for the code object (Target::gfx1151): relax_dense_default_8060s / _r9700.
+std::string_view relaxDenseDefaultName(bool gfx1151);
 
 // gdnwmma / h16 for a model without MXFP4 tensors (KG-1): dense models on the R9700 only
 // (MoE non-MXFP4 models and the Radeon 8060S keep the f32 paths).
@@ -567,7 +588,8 @@ struct KvFitLabel {
     std::string fmt = "f16";
     std::string alt = "--balance allows int8 KV";  // a lower-precision alternative the user may choose ("" = none)
 };
-KvFitLabel kvFitLabel(const Request& r, bool moe, KvFormat kv);
+// moe_q8: MoE models take int8 KV in balance on this card (KvCaps::moe_q8, the gfx1151 row; v0252-b5 round 3 (f))
+KvFitLabel kvFitLabel(const Request& r, bool moe, KvFormat kv, bool moe_q8 = false);
 
 // ---- KV fit (every mode: the chosen format only, never a lower-precision one)
 

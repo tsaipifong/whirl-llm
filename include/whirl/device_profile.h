@@ -94,8 +94,10 @@ struct Profile {
     // v0252-f1arg3: the MTP / batched verify argmax runs the multi-block twins argmax_rows_to_mb / argmax_rank_rows_to_mb
     // (kernels/sample_argmax_mb.hip: AM_TILES(n_vocab) x rows blocks, bitwise the one-block argmax_rows(_to) /
     // argmax_rank_rows_to) when the code object has both; WHIRL_ARGMAX_MB (0 off, 1 on, 2 on + workspace tripwire)
-    // overrides it, read once per load (Context::setArgmaxMb). The workspace is per Context (= per stream)
-    bool argmax_mb;
+    // overrides it, read once per load (Context::setArgmaxMb). The workspace is per Context (= per stream).
+    // v0252-b5 round 3 (PLAN V1-117): one value per model class (dense / MoE), as e1_dense / e1_moe; the row's value is
+    // the default in FAST mode only (Context::argmaxMbMode applies the mode: precise / balance were not measured for a gain)
+    bool argmax_mb_dense, argmax_mb_moe;
     // v0252-strixc2 (PLAN V1-09): balance-mode prefill attention attn_sx<NP> (strix-llama.cpp fattn-rdna35, gfx1151 code
     // object only; not bitwise, so the numerics plan takes it in balance only: numerics::Target::attn_sx_profile)
     bool attn_sx_balance;
@@ -153,9 +155,11 @@ inline constexpr Profile k_profile_gfx1201{
     // v0252-f1arg3 (PLAN V1-63 / V1-64): the multi-block verify argmax twins (kt q7 9525g: B/A 0.06-0.26, bitwise; e2e rule
     // progress/v0252-f1arg2.HANDOFF.md section 5). WHIRL_ARGMAX_MB=0 turns it off
     // v0252-b5 (PLAN V1-119, round 2c): merged OFF. The branch shipped true; its e2e verdict was NO-GAIN (V1-63 / V1-64,
-    // 2026-11-11), re-judged 2026-11-12 (V1-117: Ornith fast MTP 2k +0.65 % +-0.42, Swift balance -0.03 %, bitwise): the
-    // default for the measured class comes with the defaults round. WHIRL_ARGMAX_MB=1 / 2 turns it on.
-    .argmax_mb = false,
+    // 2026-11-11), re-judged 2026-11-12 (V1-117: Ornith fast MTP 2k +0.65 % +-0.42, Swift balance -0.03 %, bitwise).
+    // Round 3: on for the measured class and mode only = MoE models in fast (the mode is applied by
+    // Context::argmaxMbMode); dense models stay off. WHIRL_ARGMAX_MB=0 turns it off, =1 / 2 on in every mode and class.
+    .argmax_mb_dense = false,  // gfx1201 dense: off (Swift balance -0.03 %)
+    .argmax_mb_moe = true,  // gfx1201 MoE: on in fast (PLAN V1-117)
     .attn_sx_balance = false,  // v0252-strixc2: no attn_sx in the gfx1201 code object
     // v0252-ch4k (PLAN V1-75): MoE solo prefills run 4096-row forwards in the 8060S fill form (whole chunks up to the
     // batch 4096; no extra memory, the prefill buffers are sized for the batch). Timed e2e A/B on the R9700 (Ornith
@@ -182,7 +186,9 @@ inline constexpr Profile k_profile_gfx1151{
     // v0251-a6port: Swift (dense) verify widths 5 / 6 on gemvk v7 (KW 8, PF 2): the A6 kernel bench pick (sum of the
     // 8 Swift shapes 0.900 / 0.897 of gemvq_nt*r2, scratch/feat026_ggemv/results_8060s_b2a.txt) and its e2e (balance
     // decode 2k +7.91 %, 128k +5.43 %, results_8060s_h2.txt). MoE (Ornith) stays on gemvq until its own e2e passes.
-    .gemvk_dense = {0, 0, 0, 0, 0, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    // v0252-b5 round 3 (PLAN V1-91): verify width 4 on v7 as well (Swift balance chat decode +0.78 % +-0.48, KEEP; bitwise
+    // the gemvq path). WHIRL_GEMV_K replaces the whole row: "5:7,6:7" = the row before this change, "off" = all gemvq.
+    .gemvk_dense = {0, 0, 0, 0, 7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
     .gemvk_moe = {},
     .gemvh_grid_by_rows = true,
     .h16_from_candidates = true,
@@ -211,7 +217,9 @@ inline constexpr Profile k_profile_gfx1151{
     // (scratch\v0252_8sdraft\s8draft_gpu.ps1 -Part s, rule in its header)
     .draft64k_moe = true,
     .relax_rank_check = true,  // v0252-f1flip (ADR-0015 Revision 1): F1 on here too; the 8060S speed test ended INCONCLUSIVE twice with no loss, outputs identical
-    .argmax_mb = false,  // v0252-f1arg3: the gfx1151 object has no twins; the one-block argmax_rows(_to) / argmax_rank_rows_to stay
+    // v0252-f1arg3: the gfx1151 object has no twins; the one-block argmax_rows(_to) / argmax_rank_rows_to stay
+    .argmax_mb_dense = false,  // gfx1151 dense: no twins
+    .argmax_mb_moe = false,  // gfx1151 MoE: no twins
     .attn_sx_balance = true,  // v0252-strixc2: balance prefill attention (acceptance: progress/v0252-strixc2.HANDOFF.md)
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,

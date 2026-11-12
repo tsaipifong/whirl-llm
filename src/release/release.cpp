@@ -313,8 +313,9 @@ constexpr EnvDoc k_env[] = {
     {"GPU and loading", "GPU_WAIT=S", "seconds to wait for another WHIRL process to free the GPU (default 1800)", GPU},
     {"GPU and loading", "MODE=precise|balance|fast[:ITEMS]", "numerics mode (= --precise / --balance / --fast / --mode; default balance; "
      "ITEMS e.g. fp8,kvq8 picks lossy items)", GPU},
-    {"GPU and loading", "KV=auto|f16|q8|q8h|q8v", "KV cache format (auto: f16; in balance / fast mode dense models fall back to q8v, then q8h, "
-     "when f16 does not fit; MoE f16). A q8 value in precise mode is a user-requested lossy override",
+    {"GPU and loading", "KV=auto|f16|q8|q8h|q8v", "KV cache format (auto: by mode and model class - precise f16; balance q8h for dense models and, "
+     "on the Radeon 8060S, for MoE models (MoE on the R9700: f16); fast 4-bit, q8h for dense models on the Radeon 8060S). "
+     "A q8 value in precise mode is a user-requested lossy override",
      GPU},
     {"GPU and loading", "PREFILL_BATCH=N", "prefill rows per forward (default 4096, up to 16384)", C | B | T | S},
     {"GPU and loading", "MAX_CTX=N", "default context size of chat (= --ctx; default 8192)", C},
@@ -323,8 +324,8 @@ constexpr EnvDoc k_env[] = {
     {"GPU and loading", "MOE_MXW=0", "generic MXFP4 MoE decode kernels instead of the whole-block ones", GPU},
     {"GPU and loading", "MOESKIP=T[:M]",
      "moeskip (fast, MoE with MXFP4 experts): drop routed experts whose renormalized weight is below T (the top M always kept, default 1; "
-     "T = 1: exactly the top M), kept weights renormalized; 0 = off (default: off, opt-in with T or --fast=...,moeskip until its GPU screen "
-     "passes; lossy; ignored in precise / balance)",
+     "T = 1: exactly the top M), kept weights renormalized; 0 = off (default in fast: 1:6 = the top 6 experts; lossy; ignored in "
+     "precise / balance)",
      GPU},
     {"GPU and loading", "EMBD_HOST=0", "keep the token embedding table in VRAM (default: pinned host memory, declared as Shared Usage)", S},
     {"GPU and loading", "TUNE_COLD=1", "autotune: evict the cache before each timing", C | B | T},
@@ -356,7 +357,7 @@ constexpr EnvDoc k_env[] = {
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_FORCE=1", "take every n-gram proposal", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_DEBUG=1", "log every decode cycle to stderr", C | B},
     {"Speculative decoding (output always equals plain greedy)", "SPEC_ACC=host|pinned|gpu|gpu-zc|check", "server A/B, same reply with every value: where a draft cycle's accept decision is made. host (= 0, default) host path after a pageable read; pinned (1) the same with a pinned read; gpu (2) a GPU kernel decides the greedy slots; gpu-zc (3) gpu, written straight into pinned host memory (zero copy, not yet GPU-verified); check (4) GPU and host both decide, every cycle compared, host result used", S},
-    {"Speculative decoding (output always equals plain greedy)", "E1=0|1|2", "server A/B, same reply with every value in the same mode (not set: 2 for MoE models on the R9700 in precise / balance, else 0): 1 = a draft cycle of one greedy request takes its inputs (next token, positions, replay rows) from the GPU's accept result instead of the host (implies SPEC_ACC=gpu or above; DeltaNet replay mode only, so the Radeon 8060S keeps 0), still one cycle at a time; 2 = the same and one cycle ahead: the next cycle is submitted before the host reads the last one (implies SPEC_ACC=gpu-zc unless it is check)", S},
+    {"Speculative decoding (output always equals plain greedy)", "E1=0|1|2", "server A/B, same reply with every value in the same mode (not set: 2 for MoE models on the R9700 in precise / balance, else 0; also 0 when WHIRL_SPEC_ACC is set to host, pinned or gpu): 1 = a draft cycle of one greedy request takes its inputs (next token, positions, replay rows) from the GPU's accept result instead of the host (implies SPEC_ACC=gpu or above; DeltaNet replay mode only, so the Radeon 8060S keeps 0), still one cycle at a time; 2 = the same and one cycle ahead: the next cycle is submitted before the host reads the last one (implies SPEC_ACC=gpu-zc unless it is check)", S},
 
     {"Server", "NO_PREFIX_CACHE=1", "disable the prefix cache", S},
     {"Server", "PREFIX_CACHE_VERIFY=1", "diagnostic: re-prefill after every cache hit and compare", S},
