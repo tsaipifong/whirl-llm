@@ -211,7 +211,9 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         // and never switched afterwards (no fallback to a lower-precision format when it does
         // not fit: the context shrinks or the load stops, below / in the server).
         const kernels::Caps caps = kernels::Caps::probe(m.module);
-        const numerics::KvCaps kv_caps{caps.kv_q8h, caps.kv_q8v, caps.kv_q4, device::profile(m.arch).numerics_8060s};
+        // the device row gives fast_q8h and (v0252-ornkv2) moe_q8: int8 KV on MoE models in balance, gfx1151 only
+        const bool row_8060s = device::profile(m.arch).numerics_8060s;
+        const numerics::KvCaps kv_caps{caps.kv_q8h, caps.kv_q8v, caps.kv_q4, row_8060s, row_8060s};
         m.kv_choice = dump::kv("loader.load", opt.numerics, cfg.moe, kv_caps, kvm,
                                numerics::chooseKv(opt.numerics, cfg.moe, kv_caps, kvm));  // (WHIRL_DUMP_KV)
         m.fixFormat(m.kv_choice.kv);  // the KV pool's format, fixed here once (arch025-M2: KvPool, read-only after)

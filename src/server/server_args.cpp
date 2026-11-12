@@ -46,7 +46,7 @@ const char* const kHelpBody =
     "  --ctx-per-slot N         longest context of one request (default min(pool, 131072); up to 262144)\n"
     "  --precise | --balance | --fast\n"
     "                           numerics mode (default balance: dense fp8 MXFP4 prefill, q8h KV, int8\n"
-    "                           decode activations; MoE f16 KV; --precise: f16/f32 activations,\n"
+    "                           decode activations; MoE f16 KV (8060S: q8h); --precise: f16/f32 activations,\n"
     "                           f16 KV; --fast: balance + 4-bit KV, relaxed MTP acceptance).\n"
     "                           --balance=fp8,kvq8 picks items; --mode M;\n"
     "                           WHIRL_MODE\n"
