@@ -136,7 +136,10 @@ void testNumerics() {
         const nu::Plan p = nu::plan(bal, swift);
         CHECK(p.on(Item::fp8) && !p.on(Item::moefp8) && p.on(Item::gdnwmma) && p.on(Item::h16) && p.on(Item::kvq8));
         CHECK(p.items[static_cast<std::size_t>(Item::moefp8)].note == "dense model");
-        const nu::Plan po = nu::plan(bal, ornith);  // MODES-MXFP4: MoE balance = fp8 + moefp8 + gdnwmma + h16 + q8dec, f16 KV
+        // MODES-MXFP4: MoE balance = fp8 + moefp8 + gdnwmma + h16 + q8dec, f16 KV (the R9700 stays so after v0252-ornkv2:
+        // its q8h screen on Ornith was a DROP; only gfx1151 takes int8 KV on MoE models)
+        const nu::Plan po = nu::plan(bal, ornith);
+        CHECK(po.items[static_cast<std::size_t>(Item::kvq8)].note == "MoE models keep f16 KV");
         CHECK(po.on(Item::fp8) && po.on(Item::moefp8) && po.on(Item::gdnwmma) && po.on(Item::h16) && !po.on(Item::kvq8));
         CHECK(po.on(Item::specsample) && po.q8dec && po.q8dec_default);
         const nu::Plan pq = nu::plan(bal, q4);
@@ -266,11 +269,14 @@ void testNumerics() {
         const nu::Plan pq = nu::plan(bal, q4);
         CHECK(!pq.on(Item::fp8) && pq.on(Item::gdnwmma) && pq.on(Item::h16) && pq.on(Item::kvq8) && !pq.items[0].moved);
         // Radeon 8060S MoE: no fp8 WMMA there, so fp8 / moefp8 stay skipped with the hardware reason and
-        // the enabled set is the same as under MOE-BAL (h16, specsample; f16 KV): 8060S MoE balance unchanged
+        // the enabled set is the MOE-BAL one (h16, specsample) plus kvq8 (v0252-ornkv2: int8 KV on MoE models on the
+        // gfx1151 card, was f16; balance item int8 KV)
         nu::Target s8m = s8060;
         s8m.moe = s8m.moe_mxfp4 = true;
         const nu::Plan p8 = nu::plan(bal, s8m);
-        CHECK(!p8.on(Item::fp8) && !p8.on(Item::moefp8) && !p8.on(Item::gdnwmma) && p8.on(Item::h16) && !p8.on(Item::kvq8) && p8.on(Item::specsample));
+        CHECK(!p8.on(Item::fp8) && !p8.on(Item::moefp8) && !p8.on(Item::gdnwmma) && p8.on(Item::h16) && p8.on(Item::kvq8) && p8.on(Item::specsample));
+        CHECK(p8.items[static_cast<std::size_t>(Item::kvq8)].note.find("MoE") == std::string::npos);
+        CHECK(!nu::plan(pre, s8m).on(Item::kvq8));  // precise: never
         CHECK(p8.items[static_cast<std::size_t>(Item::fp8)].note.find("gfx1151") != std::string::npos);
         CHECK(p8.items[static_cast<std::size_t>(Item::moefp8)].note.find("gfx1151") != std::string::npos);
         std::uint32_t en_old = 0, en_new = 0;  // old = the MOE-BAL table (gdnwmma, h16, specsample)
@@ -279,7 +285,8 @@ void testNumerics() {
             if (p8o.items[i].enabled) en_old |= 1u << i;
             if (p8.items[i].enabled) en_new |= 1u << i;
         }
-        CHECK(en_old == en_new);
+        const std::uint32_t kvq8_bit = 1u << static_cast<unsigned>(Item::kvq8);
+        CHECK((en_old | kvq8_bit) == en_new && (en_old & kvq8_bit) == 0);
         CHECK(p8.q8dec && p8o.q8dec);  // MOE-BAL-3: q8dec on in 8060S MoE balance too
     }
     // MOE-BAL-3 (2026-10-15): q8dec back in MoE balance (MOE-BAL-2 had made it fast-only); the
@@ -407,6 +414,7 @@ void testKvEstimateCaps() {
     for (const Gpu& g : gpus) {
         nu::KvCaps real = g.code;
         real.fast_q8h = g.prof.numerics_8060s;  // loader.cpp: device::profile(m.arch).numerics_8060s
+        real.moe_q8 = g.prof.numerics_8060s;    // v0252-ornkv2: the same row (int8 KV on MoE models, gfx1151)
         const nu::KvCaps est = nu::kvCapsEstimate(g.integrated);
         for (const char* ms : modes)
             for (bool moe : {false, true})
@@ -442,6 +450,7 @@ void testKvEstimateCaps() {
             CHECK(nu::kvEstSiteIntegrated(s.site) == s.gpu.integrated);
             nu::KvCaps real = s.gpu.code;
             real.fast_q8h = s.gpu.prof.numerics_8060s;
+            real.moe_q8 = s.gpu.prof.numerics_8060s;
             for (const char* ms : modes)
                 for (bool moe : {false, true})
                     for (const auto& f : forced) {
@@ -466,6 +475,20 @@ void testKvEstimateCaps() {
     // the estimate caps themselves (the literals they replaced at loader.cpp:492, server_main.cpp:810 / :922)
     CHECK(nu::kvCapsEstimate(false).q8h && nu::kvCapsEstimate(false).q8v && nu::kvCapsEstimate(false).q4 && !nu::kvCapsEstimate(false).fast_q8h);
     CHECK(nu::kvCapsEstimate(true).q8h && nu::kvCapsEstimate(true).q8v && nu::kvCapsEstimate(true).q4 && nu::kvCapsEstimate(true).fast_q8h);
+    CHECK(nu::kvCapsEstimate(true).moe_q8 && !nu::kvCapsEstimate(false).moe_q8);  // v0252-ornkv2
+    // v0252-ornkv2: the estimates size the format the load picks for a MoE model in balance: q8h on the 8060S (UMA
+    // estimates), f16 on the R9700 (dGPU estimate); precise f16 and fast q4 on both
+    {
+        const nu::Request rb = nu::forModel(nu::parseMode("balance", "t"), true), rp = nu::forModel(nu::parseMode("precise", "t"), true),
+                          rf = nu::forModel(nu::parseMode("fast", "t"), true);
+        CHECK(nu::kvEstimate(nu::KvEstSite::loader_uma, rb, true, std::nullopt) == KvFormat::q8h);
+        CHECK(nu::kvEstimate(nu::KvEstSite::server_uma, rb, true, std::nullopt) == KvFormat::q8h);
+        CHECK(nu::kvEstimate(nu::KvEstSite::server_dgpu, rb, true, std::nullopt) == KvFormat::f16);
+        for (const nu::KvEstSite st : {nu::KvEstSite::loader_uma, nu::KvEstSite::server_uma, nu::KvEstSite::server_dgpu}) {
+            CHECK(nu::kvEstimate(st, rp, true, std::nullopt) == KvFormat::f16);
+            CHECK(nu::kvEstimate(st, rf, true, std::nullopt) == KvFormat::q4);
+        }
+    }
     // the KvFormat names and properties (the former Model bools: loader.cpp:543-546 before N3)
     for (const KvFormat k : {KvFormat::f16, KvFormat::q8, KvFormat::q8h, KvFormat::q8v, KvFormat::q4}) {
         CHECK(whirl::kvFormatFromName(whirl::kvFormatName(k)) == k);
@@ -486,6 +509,51 @@ void testKvEstimateCaps() {
         }
     }
     static_assert(static_cast<int>(KvFormat::f16) == 0 && static_cast<int>(KvFormat::q4) == 4);  // env table kvModeFromEnv numbering
+}
+
+// v0252-ornkv2 (PLAN V1-113): int8 KV for MoE models in balance on the gfx1151 card (KvCaps::moe_q8; loader.cpp fills it
+// from device::Profile::numerics_8060s). The R9700 keeps f16 KV on MoE models (KB v0252-b8s2 R1: q8h decode 128k
+// -3.60 %, DROP). Precise f16 and fast q4 on both cards; WHIRL_KV=f16 is the way back; a custom list without kvq8
+// keeps f16. Called from testKvChoice (its own function: stack size, /analyze C6262).
+void testKvChoiceMoe8060s() {
+    namespace nu = whirl::numerics;
+    using K = whirl::KvFormat;
+    const nu::Request rb = nu::forModel(nu::parseMode("balance", "t"), true), rp = nu::forModel(nu::parseMode("precise", "t"), true),
+                      rf = nu::forModel(nu::parseMode("fast", "t"), true);
+    nu::KvCaps s8{true, true, true, true};  // gfx1151 code object + the profile row (loader.cpp)
+    s8.moe_q8 = true;
+    const nu::KvCaps r97{true, true, true, false};  // gfx1201: moe_q8 off
+    CHECK(nu::chooseKv(rb, true, s8, std::nullopt).kv == K::q8h);
+    CHECK(nu::chooseKv(rb, true, s8, std::nullopt).why == "balance, MoE model: q8h" && !nu::chooseKv(rb, true, s8, std::nullopt).debug);
+    CHECK(nu::chooseKv(rp, true, s8, std::nullopt).kv == K::f16);  // precise unchanged
+    CHECK(nu::chooseKv(rf, true, s8, std::nullopt).kv == K::q4);   // fast MoE unchanged (kvq4 wins)
+    CHECK(nu::chooseKv(rb, true, s8, K::f16).kv == K::f16 && nu::chooseKv(rb, true, s8, K::f16).debug);  // WHIRL_KV=f16
+    CHECK(nu::chooseKv(rb, true, r97, std::nullopt).kv == K::f16);  // the R9700: unchanged
+    CHECK(nu::chooseKv(rb, true, r97, std::nullopt).why == "balance, MoE model: f16");
+    CHECK(nu::chooseKv(rf, true, r97, std::nullopt).kv == K::q4 && nu::chooseKv(rp, true, r97, std::nullopt).kv == K::f16);
+    // dense models: as before on both cards
+    for (const nu::KvCaps& c : {s8, r97}) {
+        CHECK(nu::chooseKv(nu::parseMode("balance", "t"), false, c, std::nullopt).kv == K::q8h);
+        CHECK(nu::chooseKv(nu::parseMode("precise", "t"), false, c, std::nullopt).kv == K::f16);
+    }
+    // no q8h kernels: plain q8 (never q8v); a custom balance list without kvq8: f16; fast:kvq8 (no kvq4): q8h
+    nu::KvCaps noq8h{false, true, false, true};
+    noq8h.moe_q8 = true;
+    CHECK(nu::chooseKv(rb, true, noq8h, std::nullopt).kv == K::q8);
+    CHECK(nu::chooseKv(nu::forModel(nu::parseMode("balance:fp8,moefp8", "t"), true), true, s8, std::nullopt).kv == K::f16);
+    CHECK(nu::chooseKv(nu::forModel(nu::parseMode("fast:kvq8", "t"), true), true, s8, std::nullopt).kv == K::q8h);
+    CHECK(nu::chooseKv(nu::forModel(nu::parseMode("fast:kvq8", "t"), true), true, r97, std::nullopt).kv == K::f16);
+    // the plan agrees with the format (gfx1151 MoE: kvq8 enabled in balance, off in precise)
+    nu::Target t8;
+    t8.gfx1151 = t8.has_mxfp4 = t8.moe = t8.moe_mxfp4 = true;
+    t8.k_kv_q8h = t8.k_kv_q8v = t8.k_kv_q4 = true;
+    const nu::Plan pb = nu::plan(rb, t8);
+    CHECK(pb.on(nu::Item::kvq8) && nu::logLine(pb).find("kvq8 (q8h KV (int8 + f16 scale / 32, Hadamard-rotated q/k))") != std::string::npos);
+    CHECK(nu::logLine(pb).find("MoE models keep f16 KV") == std::string::npos);
+    CHECK(!nu::plan(rp, t8).on(nu::Item::kvq8));
+    nu::Target t97 = t8;
+    t97.gfx1151 = false;
+    CHECK(!nu::plan(rb, t97).on(nu::Item::kvq8) && nu::logLine(nu::plan(rb, t97)).find("kvq8 (MoE models keep f16 KV)") != std::string::npos);
 }
 
 // KV format (BAL-Q8): one fixed format per mode x model type, never by what fits
@@ -582,6 +650,7 @@ void testKvChoice() {
         const nu::PoolFit e = nu::serverPoolFit(GiB / 16, q8h_pt, std::nullopt, false, 131072, false, 256, 8 * 262144, lb_bal);
         CHECK(e.refuse && e.msg.find("q8h KV cache (balance mode)") != std::string::npos);
     }
+    testKvChoiceMoe8060s();  // v0252-ornkv2 (fails before the change: MoE balance is f16 KV on every card)
     // the card's defaults carry no KV choice: 16 GB and 32 GB pick the same format
     {
         vram::CardInput in;

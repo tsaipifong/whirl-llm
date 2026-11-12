@@ -7,7 +7,8 @@
 //    WHIRL_KV). If f16 KV does not fit, the context shrinks (when not given explicitly) or the load
 //    stops with a message pointing to --balance / a shorter context.
 //  - balance: the speed-oriented defaults (MXFP4 fp8 prefill activations, f16-WMMA DeltaNet,
-//    f16 GEMM intermediates, int8 decode activations q8dec); KV q8h on dense models, f16 on MoE models.
+//    f16 GEMM intermediates, int8 decode activations q8dec); KV q8h on dense models; MoE models f16, on the
+//    Radeon 8060S q8h (v0252-ornkv2: KvCaps::moe_q8; the R9700 screen of q8h on MoE was a DROP, so f16 there).
 //    Balance is defined by its allowed items (owner policy 2026-10-16, MODES-MXFP4): fp8, moefp8,
 //    q8dec, f16 intermediates (h16, gdnwmma), int8 KV - near-lossless, not bitwise. MoE models get
 //    the same items (fp8 + moefp8 back in MoE balance; MOE-BAL 2026-10-13 had made them fast-only).
@@ -42,7 +43,8 @@ enum class Item : std::uint8_t {
     moefp8,   // MoE routed experts (MXFP4) with fp8 activations in prefill
     gdnwmma,  // f16-WMMA DeltaNet chunked prefill (vs the f32 chunk path)
     h16,      // f16 FFN / DeltaNet GEMM outputs before the elementwise ops
-    kvq8,     // dense models: q8h KV (int8 K and V + f16 scale / 32, Hadamard-rotated q / k)
+    kvq8,     // q8h KV (int8 K and V + f16 scale / 32, Hadamard-rotated q / k): dense models; MoE models on the
+              // Radeon 8060S (v0252-ornkv2), f16 KV on the R9700
     specsample,  // temperature > 0: MTP drafts drawn from the draft distribution, accepted with min(1, p/q)
                  // (same output distribution as plain sampling, not the same tokens for a seed)
     // fast items (kvq4 and relaxacc implemented, the rest not yet)
@@ -253,6 +255,8 @@ struct ItemState {
 // MoeFlags combine; v0251-a7port: on the Radeon 8060S (Target::gfx1151) with MXFP4 routed experts plan() starts from
 // kernels::kMoepDefault, WHIRL_MOEP_GU / _DN name a variant ("0", "" or an unknown name = off), WHIRL_MOEP_COMB by
 // std::strtoul. Not in the S0b-2 dump (recorded before them): the launch log pins the kernels.
+// v0252-ornkv2 (PLAN V1-94): the gfx1151 combine default is 3 (f16 moe_yd + moe_combine4h, balance item f16
+// intermediates) in balance with the item h16; precise and fast keep kMoepDefault.comb (1).
 // v0252-c1port: attn_kg_var = WHIRL_ATTN_KGVAR by std::strtoul, kept only as 1 (attn_kgv) or 3 (attn_kgk), any other
 // value 0 (the shipped attn_kg; var 2 attn_kgw of feat026-attnkg97 is not ported: not bit-identical); default 0 on
 // every card. Not in the S0b-2 dump either (the launch log pins the kernel).
@@ -454,13 +458,17 @@ struct KvCaps {
     // RC6: this GPU's fast mode takes q8h instead of q4 KV on dense models (gfx1151: the q8h decode
     // attention is faster than q4's at 32k-128k and the error 4-10x smaller, FAST-8S; the R9700 keeps q4)
     bool fast_q8h = false;
+    // v0252-ornkv2 (PLAN V1-113): this GPU takes int8 KV (kvq8) on MoE models too (gfx1151: Ornith balance server
+    // decode q8h vs f16 +7.9 % at 32k, +15.5 % at 64k, 2k and prefill inside the band; the R9700 keeps f16 KV on
+    // MoE models: its screen was a DROP, decode 128k -3.60 %). Not in the "D kv:" dump line (its format is pinned).
+    bool moe_q8 = false;
 };
 // The KV caps the pre-load VRAM estimates assume, before any code object is loaded (Model::load's UMA check,
 // the server's dGPU and UMA estimates; arch025-N3: were the literals {true, true, true(, true)} at each site):
-// every KV kernel (both shipped code objects have q8h / q8v / q4 since FAST-1c / FC-1c) and fast_q8h on an
+// every KV kernel (both shipped code objects have q8h / q8v / q4 since FAST-1c / FC-1c) and fast_q8h / moe_q8 on an
 // integrated GPU (the Radeon 8060S, device::Profile::numerics_8060s). whirl-tests testKvEstimateCaps checks the
 // choice made with these equals the choice Model::load makes with each GPU's real caps.
-constexpr KvCaps kvCapsEstimate(bool integrated) { return KvCaps{true, true, true, integrated}; }
+constexpr KvCaps kvCapsEstimate(bool integrated) { return KvCaps{true, true, true, integrated, integrated}; }
 struct KvChoice {
     KvFormat kv = KvFormat::f16;
     bool debug = false;  // WHIRL_KV chose it (debug override: no fit check, sizing as before)
@@ -491,8 +499,8 @@ KvFormat kvEstimate(KvEstSite site, const Request& r, bool moe, std::optional<Kv
 // that is ignored (the mode's own choice below, debug = false) and the why starts with fastOnlyIgnoredNote; else kvq4 -> q4 (where the kernels exist,
 // else f16: R9700 has no q4 KV kernels yet, and int8 is no stand-in), dense and MoE, except a dense
 // model where caps.fast_q8h (gfx1151) -> q8h; else kvq8 on
-// a dense model -> q8h (q8 where the code object has no q8h kernels);
-// else f16 (precise, MoE in balance). Independent of free memory and card size.
+// a dense model, or on a MoE model where caps.moe_q8 (gfx1151, v0252-ornkv2) -> q8h (q8 where the code object has
+// no q8h kernels); else f16 (precise, MoE in balance on the R9700). Independent of free memory and card size.
 KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<KvFormat> forced);
 
 // Wording of the "does not fit" messages for the chosen format

@@ -7583,8 +7583,12 @@ void testServerKvSsdDirEnv() {
 void testServerHelpBody() {
     using namespace c1a_args;
     const std::string_view body(kHelpBody);
-    CHECK_EQ(body.size(), std::size_t{6669});
-    CHECK_EQ(fnv1a(body), 0xf3f8420410023c7aull);
+    // v0252-ornkv2 (2026-11-12): "MoE f16 KV" -> "MoE f16 KV (8060S: q8h)" in the mode help (+13 bytes; int8 KV for MoE
+    // models in balance on the Radeon 8060S). Was 6669 / 0xf3f8420410023c7a; the new values are computed from the literal
+    // (scratch\v0252_ornkv2\helppin.py, which gives the old pair on the old text).
+    CHECK_EQ(body.size(), std::size_t{6682});
+    CHECK_EQ(fnv1a(body), 0x8ab608283875d8ddull);
+    CHECK(body.find("decode activations; MoE f16 KV (8060S: q8h); --precise: f16/f32 activations,\n") != std::string_view::npos);
     CHECK(body.starts_with("Loads a qwen35 / qwen35moe GGUF model on the GPU"));
     CHECK(body.ends_with("  -V, --version            show the version\n"));
 }
