@@ -93,6 +93,9 @@ struct EnvValues {
     Raw moe_fuse, gemvh_f32;
     // v0252-ws4r97b (PLAN V1-87 phase 2): attn_ws4r (WHIRL_ATTN_WS4R, the gfx1201 attn_ws4r variant; class B)
     Raw attn_ws4r;
+    // v0252-l2split (PLAN V1-88): attn_lsplit (WHIRL_ATTN_LSPLIT, the gfx1201 decode / verify split count by machine fill; lossy
+    // class: balance / fast only)
+    Raw attn_lsplit;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -100,7 +103,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 37;
+    static constexpr std::size_t n_fields = 38;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -265,6 +268,12 @@ struct ItemState {
 // (parseWs4r) overrides it in every mode, class B (bit-identical to attn_wsplit1 / 2, kt ws4r); any other value keeps auto
 // with one Plan::ignored note. In bitsKey like every flag (the new field re-keys the KV tiers of both cards once). Not in
 // the S0b-2 dump (the launch log pins the kernel).
+// v0252-l2split (PLAN V1-88): attn_lsplit = the decode / verify attention split count rule of the gfx1201 attn_wsplit /
+// attn_ws4r path (ops::lsplitCount): 0 = today's split count (fd_splits), kAttnLsplitAuto = device::Profile::
+// attn_lsplit_blocks (the machine-fill block target; gfx1201 64, gfx1151 0 = off), N = N blocks. By MODE (owner mode
+// standard 2026-10-26): precise is always 0 (bit-identical, golden unchanged) and ignores WHIRL_ATTN_LSPLIT (one
+// Plan::ignored note); balance / fast default to auto, WHIRL_ATTN_LSPLIT = "auto" or a whole decimal 0..4096 (parseLsplit)
+// overrides it (another split partition = another f32 combine order: near-lossless, not bitwise). Not in the S0b-2 dump.
 // v0252-c3port (feat026-moedec, gfx1201 precise decode): moe_fuse (WHIRL_MOE_FUSE: ops::chooseMoeFuse, the fused
 // routed + shared gate/up + SwiGLU launch) and gemvh_f32 (WHIRL_GEMVH_F32: ops::gemvhF32, gemvh on the f32 input):
 // bitwise switches, the loader's envFlag rule ("0" off, any other value on), class B (no +overrides label, never lossy);
@@ -304,7 +313,7 @@ struct ItemState {
     X(U, attn_seg, 0, "attn_seg")                                \
     X(B, attn_kg_on, true, "attn_kg_on")                         \
     X(U, attn_kg_var, 0, "")                                     \
-    X(U, attn_ws4r, 255, "")                                     \
+    X(U, attn_ws4r, 255, "")                                         X(U, attn_lsplit, 0, "")                                     \
     X(B, ffn_h16, false, "ffn_h16")                              \
     X(B, h16_dq, false, "h16_dq")                                \
     X(B, g8t, false, "g8t")                                      \
@@ -401,6 +410,11 @@ inline constexpr std::uint32_t kAttnWs4rAuto = 255;
 // v0252-ws4r97b: WHIRL_ATTN_WS4R -> "auto" = kAttnWs4rAuto, a whole decimal 0 / 1 / 2 = off / plain / b; anything else
 // (3, 255, "", "x", "2b", "-1") = std::nullopt (invalid: auto stays and plan() notes it in Plan::ignored)
 std::optional<std::uint32_t> parseWs4r(std::string_view s);
+// v0252-l2split (PLAN V1-88): attn_lsplit "auto" (= ops::kAttnLsplitAuto): device::Profile::attn_lsplit_blocks decides
+inline constexpr std::uint32_t kAttnLsplitAuto = 0xFFFFFFFFu;
+// v0252-l2split: WHIRL_ATTN_LSPLIT -> "auto" = kAttnLsplitAuto, a whole decimal 0..4096 = that block target (0 = today's split
+// count); anything else ("", "x", "64b", "-1", "4097") = std::nullopt (invalid: the mode's default stays, Plan::ignored notes it)
+std::optional<std::uint32_t> parseLsplit(std::string_view s);
 // arch025-N2b-r2: the five flags every load decides (Model::load, before loadOrTune; before N2b loader.cpp:537-540 and
 // :730): fp8_prefill = the item fp8; moe_fp8 = WHIRL_MOE_FP8 (r.env) else the item moefp8; moe_mxw / moe_wide / moe_rbf =
 // WHIRL_MOE_MXW / _WIDE / _RBF else true / false / true. WHIRL_FP8 is not applied here (plan() applies it in loadOrTune, as

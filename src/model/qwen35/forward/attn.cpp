@@ -110,6 +110,10 @@ void Context::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         // v0252-ws4r97b (PLAN V1-87 phase 2): WHIRL_ATTN_WS4R; default auto = device::Profile::attn_ws4r_q8 / _f16
         static_assert(ops::kAttnWs4rAuto == numerics::kAttnWs4rAuto, "attn_ws4r auto: one value in numerics and ops");
         af.attn_ws4r = nf().attn_ws4r;
+        // v0252-l2split (PLAN V1-88): WHIRL_ATTN_LSPLIT; numerics plan: precise 0 (today's split), balance / fast auto =
+        // device::Profile::attn_lsplit_blocks
+        static_assert(ops::kAttnLsplitAuto == numerics::kAttnLsplitAuto, "attn_lsplit auto: one value in numerics and ops");
+        af.attn_lsplit = nf().attn_lsplit;
         const ops::AttnDecodePlan pl = ops::chooseAttnDecode(ap, af, k, k.caps, device::profile(arch));
         if (pl.kind == ops::AttnDecodeKind::split)
             hip::launch(pl.f, pl.grid, pl.block, 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv), I(hd), I(2 * hd), pos_buf,

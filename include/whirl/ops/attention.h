@@ -32,6 +32,9 @@ inline constexpr std::uint32_t kDqMaxKeys = 1u << 22;
 // v0252-ws4r97b (PLAN V1-87 phase 2): AttnDecodeFlags::attn_ws4r "auto" (= numerics::kAttnWs4rAuto, WHIRL_ATTN_WS4R unset or
 // "auto"): the device profile's attn_ws4r_q8 / attn_ws4r_f16 row picks the attn_ws4r variant; 0 / 1 / 2 = off / plain / b
 inline constexpr std::uint32_t kAttnWs4rAuto = 255;
+// v0252-l2split (PLAN V1-88): AttnDecodeFlags::attn_lsplit "auto" (= numerics::kAttnLsplitAuto): the device profile's
+// attn_lsplit_blocks row is the machine-fill block target; 0 = today's split count, N = N blocks (lsplitCount)
+inline constexpr std::uint32_t kAttnLsplitAuto = 0xFFFFFFFFu;
 struct AttnDecodeProblem {
     std::uint32_t n = 1;           // query rows
     std::uint32_t head_dim = 256;
@@ -51,6 +54,9 @@ struct AttnDecodeFlags {
     std::uint32_t fd_splits = 64, dbg_flags = 0;
     bool prec_dec = false;
     std::uint32_t attn_ws4r = kAttnWs4rAuto;  // v0252-ws4r97b: numerics flag attn_ws4r (WHIRL_ATTN_WS4R)
+    // v0252-l2split: numerics flag attn_lsplit (WHIRL_ATTN_LSPLIT; numerics plan: precise 0, balance / fast auto). The ops
+    // default is 0 (today's split count): a caller that does not pass the mode's flag keeps today's bits
+    std::uint32_t attn_lsplit = 0;
 };
 enum class AttnDecodeKind : std::uint8_t { ws4, ws4g, wsplit, dq4, split };
 struct AttnDecodePlan {
@@ -70,6 +76,13 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
 // attn_ws4r{1,2}[_q8], 2 -> b attn_ws4r{1,2}b[_q8]; 0, any other value, or a table without the kernel -> nullptr (the
 // caller keeps attn_wsplit). Exhaustive like attnKgVariant: the kernel is the one with attn_wsplit's arguments and bits.
 Function attnWs4rFor(std::uint32_t flag, std::uint8_t row, bool wide, const kernels::AttnKernels& k);
+// v0252-l2split (PLAN V1-88): the f16 / q8 attn_wsplit / attn_ws4r split count for flag `flag` (kAttnLsplitAuto -> `row`,
+// the profile's attn_lsplit_blocks) given today's count n_split (min(fd_splits, max_ctx / 64)) and the model's KV heads:
+// blocks 0 -> n_split (today: bit-identical); else min(n_split, max(2, blocks / n_head_kv)) - one grid of n_head_kv x
+// split blocks per query group fills `blocks` (one machine wave on gfx1201). A function of the model and the flag only, never
+// of the rows or their positions, so a row's key partition (awPer(n_pos, split), kernels/attn_ws4r.hip:181) is the same in
+// any batch, verify group or plain decode. >= 2 keeps the MTP draft-window branch (it needs a second split).
+std::uint32_t lsplitCount(std::uint32_t n_split, std::uint32_t n_head_kv, std::uint32_t flag, std::uint16_t row);
 // split rule helpers (kept in step with the kernels)
 std::int32_t awPer(std::int32_t n_pos, std::uint32_t n_split);
 std::uint32_t dq4Splits(std::span<const std::int32_t> row_pos, std::int32_t win, std::uint32_t full);
