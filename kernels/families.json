@@ -92,7 +92,8 @@
     "kernels/moe*.hip",
     "kernels/gfx1151/moe.hip",
     "kernels/gfx1151/moe_prefill_mt.hip",
-    "kernels/gfx1151/moe_router.hip"
+    "kernels/gfx1151/moe_router.hip",
+    "kernels/gfx1151/moe_skip.hip"
    ],
    "deps": [
     "kernels.common",

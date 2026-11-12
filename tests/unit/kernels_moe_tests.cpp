@@ -15,12 +15,14 @@
 #include "../test_check.h"
 #include "../test_env.h"
 #include "whirl/kernels_abi.h"
+#include "whirl/moe_skip.h"  // v0252-f5 moeskip host reference
 
 #include "../../kernels/moep_map.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <numeric>
 #include <random>
 #include <string>
@@ -186,6 +188,182 @@ void testMoepSchedule() {
         }
 }
 
+
+// v0252-f5 (F5 moeskip, from feat027-moeskip-r1 4b6474b testMoeSkip parts 2-3): the host reference of the moeskip entry
+// points (include/whirl/moe_skip.h) - the rule every kernel and the GPU kernel tests (family moeskip) are held to:
+//   * applyRow on random sorted router rows (2000 rows, K 8, thr 0.06, min_keep 1..3): the kept slots are a prefix, the
+//     dropped ones id -1 / weight 0, the kept weights sum to 1 and keep their ratios, the first dropped slot was below thr and
+//     every kept slot past min_keep at or above it, at least min_keep kept; nothing dropped -> ids / weights bitwise unchanged;
+//     thr 0 never drops; thr 1 = static top-min_keep; min_keep clamped to [1, K]; the test distribution drops some, not all;
+//   * keptPrefix;
+//   * route with dropped pairs (37 tokens, K 4, R 16, bn 8): tiles cover exactly the kept positions, grouped by expert, the
+//     dropped pairs parked after n_kept with inv -1 (perm there = a valid dropped pair); no -1 = moe_route's grouping;
+//   * combine (k ascending, inv -1 skipped) == the direct sum over the kept experts, bitwise (NaN tail never read);
+//   * mutant control: the rule without the renormalization fails the sum check.
+void testMoeSkipRef() {
+    namespace ms = whirl::moeskip;
+    std::uint32_t seed = 12345u;
+    auto rnd = [&seed] {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>((seed >> 8) & 0xFFFF) / 65536.0f;
+    };
+    const int K = 8;
+    int total = 0, dropped = 0;
+    bool ok_prefix = true, ok_sum = true, ok_ratio = true, ok_thr = true, ok_min = true, ok_same = true, ok_ids = true, mutant_caught = false;
+    for (int it = 0; it < 2000; ++it) {
+        float v[K];
+        v[0] = 4.f * rnd();
+        for (int k = 1; k < K; ++k) v[k] = v[k - 1] - 1.5f * rnd();  // sorted descending (moe_topk order)
+        float w0[K];
+        int ids0[K];
+        {
+            float s = 0.f;
+            for (int k = 0; k < K; ++k) s += std::exp(v[k] - v[0]);
+            for (int k = 0; k < K; ++k) {
+                w0[k] = std::exp(v[k] - v[0]) / s;  // moe_topk's weights
+                ids0[k] = 100 + k;
+            }
+        }
+        const ms::Params p{0.06f, 1 + it % 3};
+        float w[K];
+        int ids[K];
+        std::copy(w0, w0 + K, w);
+        std::copy(ids0, ids0 + K, ids);
+        const int keep = ms::applyRow(ids, w, K, p);
+        total += K;
+        dropped += K - keep;
+        double s = 0;
+        for (int k = 0; k < K; ++k) {
+            if (k < keep && (w[k] <= 0.f || ids[k] != ids0[k])) ok_prefix = false;
+            if (k >= keep && (w[k] != 0.f || ids[k] != -1)) ok_prefix = false;
+            s += w[k];
+        }
+        if (std::fabs(s - 1.0) > 1e-5) ok_sum = false;
+        for (int k = 1; k < keep; ++k)
+            if (std::fabs(w[k] / w[0] - w0[k] / w0[0]) > 1e-4 * (w0[k] / w0[0]) + 1e-7) ok_ratio = false;
+        if (keep < K && w0[keep] >= p.thr) ok_thr = false;
+        for (int k = p.min_keep; k < keep; ++k)
+            if (w0[k] < p.thr) ok_thr = false;
+        if (keep < p.min_keep) ok_min = false;
+        if (keep == K && (std::memcmp(w, w0, sizeof w) != 0 || std::memcmp(ids, ids0, sizeof ids) != 0)) ok_same = false;
+        if (ms::keptPrefix(ids, K) != keep) ok_ids = false;
+        if (keep < K) {
+            // mutant: drop without renormalizing (the kernel mutant of the CPU chain) -> the weights no longer sum to 1
+            double sm = 0;
+            for (int k = 0; k < keep; ++k) sm += w0[k];
+            if (std::fabs(sm - 1.0) > 1e-5) mutant_caught = true;
+        }
+    }
+    check(ok_prefix, "moeskip ref: kept slots a prefix (ids kept), dropped id -1 / weight 0");
+    check(ok_sum, "moeskip ref: kept weights renormalized (sum 1)");
+    check(ok_ratio, "moeskip ref: kept weight ratios preserved");
+    check(ok_thr, "moeskip ref: first dropped slot below thr, every kept slot past min_keep at or above it");
+    check(ok_min, "moeskip ref: at least min_keep kept");
+    check(ok_same, "moeskip ref: nothing dropped -> ids / weights bitwise unchanged (moe_topk's)");
+    check(ok_ids, "moeskip ref: keptPrefix == the kept count");
+    check(dropped > 0 && dropped < total, "moeskip ref: the test distribution drops some slots, not all");
+    check(mutant_caught, "moeskip ref: mutant (no renormalization) is caught by the sum check");
+    {
+        float w[K] = {0.3f, 0.2f, 0.15f, 0.1f, 0.1f, 0.07f, 0.05f, 0.03f}, x[K];
+        int ids[K], y[K];
+        for (int k = 0; k < K; ++k) ids[k] = k;
+        auto run = [&](float thr, int mk) {
+            std::copy(w, w + K, x);
+            std::copy(ids, ids + K, y);
+            return ms::applyRow(y, x, K, ms::Params{thr, mk});
+        };
+        check(run(0.f, 1) == K && std::memcmp(x, w, sizeof w) == 0, "moeskip ref: thr 0 drops nothing");
+        check(run(1.f, 1) == 1 && x[0] == 1.f && y[1] == -1, "moeskip ref: thr 1 keeps exactly min_keep (1)");
+        check(run(1.f, 6) == 6 && y[6] == -1 && y[5] == 5, "moeskip ref: thr 1 min 6 = static top 6");
+        check(run(0.5f, 0) == 1, "moeskip ref: min_keep clamped to 1");
+        check(run(0.5f, 99) == K, "moeskip ref: min_keep clamped to K");
+        check(run(0.06f, 1) == 6 && y[6] == -1 && y[7] == -1, "moeskip ref: thr 0.06 drops the 0.05 / 0.03 slots");
+        const int ids_a[8] = {5, 9, 2, 7, -1, -1, -1, -1}, ids_b[8] = {5, 9, 2, 7, 1, 3, 4, 6}, ids_c[8] = {5, -1, -1, -1, -1, -1, -1, -1};
+        check(ms::keptPrefix(ids_a, 8) == 4 && ms::keptPrefix(ids_b, 8) == 8 && ms::keptPrefix(ids_c, 8) == 1, "moeskip ref: keptPrefix cases");
+    }
+    // prefill grouping + combine with dropped pairs
+    {
+        const int R = 16, Kp = 4, n = 37, C = 5, bn = 8;
+        std::uint32_t sd = 777u;
+        auto nxt = [&sd] {
+            sd = sd * 1664525u + 1013904223u;
+            return sd >> 8;
+        };
+        std::vector<int> ids(static_cast<std::size_t>(n) * Kp), ids_full;
+        std::vector<float> w(ids.size());
+        for (int t = 0; t < n; ++t) {
+            std::vector<int> pick;
+            while (static_cast<int>(pick.size()) < Kp) {
+                const int e = static_cast<int>(nxt() % R);
+                if (std::find(pick.begin(), pick.end(), e) == pick.end()) pick.push_back(e);
+            }
+            const int keep = 1 + static_cast<int>(nxt() % Kp);
+            float s = 0;
+            for (int k = 0; k < Kp; ++k) {
+                ids[static_cast<std::size_t>(t) * Kp + k] = k < keep ? pick[static_cast<std::size_t>(k)] : -1;
+                w[static_cast<std::size_t>(t) * Kp + k] = k < keep ? 1.f + static_cast<float>(nxt() % 100) / 100.f : 0.f;
+                s += w[static_cast<std::size_t>(t) * Kp + k];
+            }
+            for (int k = 0; k < Kp; ++k) w[static_cast<std::size_t>(t) * Kp + k] /= s;
+        }
+        ids_full = ids;
+        for (int& e : ids_full)
+            if (e < 0) e = 0;
+        const ms::Route rf = ms::route(ids_full, R, bn);
+        bool full_ok = rf.n_kept == n * Kp;
+        for (int p = 0; p < n * Kp; ++p)
+            if (rf.inv[static_cast<std::size_t>(p)] < 0 || rf.perm[static_cast<std::size_t>(rf.inv[static_cast<std::size_t>(p)])] != p) full_ok = false;
+        check(full_ok, "moeskip ref: route without -1 = moe_route's grouping (every pair kept, inv = perm^-1)");
+        const ms::Route r = ms::route(ids, R, bn);
+        int kept = 0;
+        for (int e : ids) kept += e >= 0;
+        check(r.n_kept == kept, "moeskip ref: route n_kept = the kept pairs");
+        bool ok = true;
+        std::vector<int> covered(static_cast<std::size_t>(n) * Kp, 0);
+        for (const auto& tl : r.tiles) {
+            if (tl.count < 1 || tl.count > bn || tl.first < 0 || tl.first + tl.count > r.n_kept) ok = false;
+            for (int q = tl.first; q < tl.first + tl.count && q < r.n_kept; ++q) {
+                const int p = r.perm[static_cast<std::size_t>(q)];
+                if (p < 0 || ids[static_cast<std::size_t>(p)] != tl.expert) ok = false;
+                ++covered[static_cast<std::size_t>(q)];
+            }
+        }
+        for (int q = 0; q < n * Kp; ++q) {
+            const int p = r.perm[static_cast<std::size_t>(q)];
+            if (p < 0 || p >= n * Kp) ok = false;
+            if (q < r.n_kept && covered[static_cast<std::size_t>(q)] != 1) ok = false;
+            if (q >= r.n_kept && (covered[static_cast<std::size_t>(q)] != 0 || ids[static_cast<std::size_t>(p)] >= 0)) ok = false;
+        }
+        for (int p = 0; p < n * Kp; ++p) {
+            const int q = r.inv[static_cast<std::size_t>(p)];
+            if (ids[static_cast<std::size_t>(p)] < 0 ? q != -1 : (q < 0 || q >= r.n_kept || r.perm[static_cast<std::size_t>(q)] != p)) ok = false;
+        }
+        check(ok, "moeskip ref: route with dropped pairs (tiles = kept positions by expert, dropped parked after n_kept, inv -1)");
+        std::vector<float> yexp(static_cast<std::size_t>(R) * n * C);
+        for (float& y : yexp) y = static_cast<float>(static_cast<int>(nxt() % 2001) - 1000) / 250.f;
+        auto yOf = [&](int e, int t, int c) { return yexp[(static_cast<std::size_t>(e) * n + t) * C + c]; };
+        std::vector<float> yd(static_cast<std::size_t>(n) * Kp * C, std::nanf(""));  // tail positions: NaN, never read
+        for (int q = 0; q < r.n_kept; ++q) {
+            const int p = r.perm[static_cast<std::size_t>(q)];
+            for (int c = 0; c < C; ++c) yd[static_cast<std::size_t>(q) * C + c] = yOf(ids[static_cast<std::size_t>(p)], p / Kp, c);
+        }
+        bool cmb = true;
+        for (int t = 0; t < n; ++t)
+            for (int c = 0; c < C; ++c) {
+                const float got = ms::combine(0.5f, r.inv.data() + static_cast<std::size_t>(t) * Kp, w.data() + static_cast<std::size_t>(t) * Kp, Kp,
+                                              [&](int q) { return yd[static_cast<std::size_t>(q) * C + c]; }, true, 0.25f, 2.f);
+                float acc = 0.f;
+                for (int k = 0; k < Kp; ++k) {
+                    const int e = ids[static_cast<std::size_t>(t) * Kp + k];
+                    if (e >= 0) acc += w[static_cast<std::size_t>(t) * Kp + k] * yOf(e, t, c);
+                }
+                acc += 0.25f * 2.f;
+                if (!(got == 0.5f + acc)) cmb = false;
+            }
+        check(cmb, "moeskip ref: combine (inv -1 skipped, NaN tail never read) == the direct sum over the kept experts (bitwise)");
+    }
+}
+
 }  // namespace
 
 // tests/unit/unit_tests.cpp ORDER lists all modules
@@ -193,6 +371,7 @@ const whirl::test::Suite& unitSuite_kernels_moe() {
     static const whirl::test::Suite s{"kernels.moe",
                                       {
                                           {"testMoepSchedule", [] { testMoepSchedule(); }},
+                                          {"testMoeSkipRef", [] { testMoeSkipRef(); }},  // v0252-f5
                                       },
                                       nullptr};
     return s;

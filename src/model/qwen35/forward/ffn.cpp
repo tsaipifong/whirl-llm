@@ -105,6 +105,10 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
     // outside fast; this keeps chooseMoe from taking them on prec_dec alone)
     mf.moep_comb_ok = ops::moepCombFor(num_plan.mode == numerics::Mode::precise, num_plan.mode == numerics::Mode::fast);
     mf.moe_rfuse = nf().moe_rfuse;
+    // v0252-f5 (moeskip, fast only): the threshold / min-keep the plan decided (0 = off); chooseMoe sets pl.skip only where
+    // every kernel of the block's path has its skip entry point
+    mf.moe_skip_thr = nf().moe_skip_thr;
+    mf.moe_skip_min = nf().moe_skip_min;
     const ops::MoePlan pl = ops::chooseMoe(mp, mf, k, k.silu_mul_x8h);
     const bool small = pl.small;
     // precise decode: f32-activation experts (moe_gu_f / moe_down_f) and the shared expert on
@@ -122,6 +126,11 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
         hip::launch(pl.router, pl.logits_grid, D(256), 0, stream, mo.router.ptr, h, moe_logits, I(R), I(E), I(n), gate,
                     mo.sh_gate, moe_ids, moe_w, moe_sg, I(K), I(E), moe_rcnt);
         mark(OpClass::matmul);
+        if (pl.skip) {
+            // v0252-f5 moeskip: the rule on the fused router's ids / weights in place (== moe_topk_skip's output)
+            hip::launch(k.moe_skip_apply, D((n + 255) / 256), D(256), 0, stream, moe_ids, moe_w, I(n), I(K), nf().moe_skip_thr, I(nf().moe_skip_min));
+            mark(OpClass::misc);
+        }
     } else if (small) {
         // 16 tokens per launch (the kernel's tile); each token's logits are the same in any piece
         for (u32 t0 = 0; t0 < n; t0 += max_small_batch)
@@ -132,7 +141,12 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
         matmul(mo.router, h, moe_logits, n, false);
     }
     if (pl.router == nullptr) {
-        hip::launch(k.moe_topk, D(n), D(256), 0, stream, moe_logits, I(R), h, mo.sh_gate, moe_ids, moe_w, moe_sg, I(R), I(K), I(E));
+        if (pl.skip)
+            // v0252-f5 moeskip (fast): moe_topk, then the dropped slots get id -1 / weight 0 and the kept weights are renormalized
+            hip::launch(k.moe_topk_skip, D(n), D(256), 0, stream, moe_logits, I(R), h, mo.sh_gate, moe_ids, moe_w, moe_sg, I(R), I(K), I(E),
+                        nf().moe_skip_thr, I(nf().moe_skip_min));
+        else
+            hip::launch(k.moe_topk, D(n), D(256), 0, stream, moe_logits, I(R), h, mo.sh_gate, moe_ids, moe_w, moe_sg, I(R), I(K), I(E));
         mark(OpClass::misc);
     }
     if (moe_dump) {
@@ -277,7 +291,9 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
     // prefill: group (token, slot) pairs by expert, grouped GEMMs, combine
     const u32 pairs = n * K;
     const u32 bn = pl.bn;
-    hip::launch(k.moe_route, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(bn), moe_perm, moe_inv, moe_tiles, moe_ntiles);
+    // v0252-f5 moeskip: moe_route_skip parks the dropped pairs after the kept positions (inv -1); the tiles cover kept pairs only
+    hip::launch(pl.skip ? k.moe_route_skip : k.moe_route, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(bn), moe_perm, moe_inv, moe_tiles,
+                moe_ntiles);
     if (pl.kind == ops::MoePrefillKind::fp8) {
         // MXFP4 experts x fp8 activations (per-pos scale, folded E8M0 as gemm8): gate + up in
         // one launch with f16 outputs, silu(g) * u -> fp8 rows, down with f32 output (v0252-moedf16: f16 when pl.ydh -
@@ -297,7 +313,7 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
         // Radeon 8060S: gate + up + SwiGLU in one grouped GEMM over 64-token tiles (A, f16,
         // into the f32 gate buffer: X is still being read), down over 32-token tiles; the
         // same perm positions for both tile lists, every row bit-identical to the path below
-        hip::launch(k.moe_tiles, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(64), moe_tiles64, moe_ntiles64);
+        hip::launch(pl.skip ? k.moe_tiles_skip : k.moe_tiles, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(64), moe_tiles64, moe_ntiles64);
         hip::launch(k.moe_gather_f16, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, I(E), I(K));
         mark(OpClass::misc);
         hip::launch(pl.fgu, pl.gu_pgrid, D(256), 0, stream, mo.gate.ptr, mo.up.ptr, mo.gate.row_bytes, I(F), moe_x16, moe_yg, I(E), moe_tiles64,
@@ -308,7 +324,8 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
         // feat026-moep (Radeon 8060S; v0251-a7port: the gfx1151 default): gate + up + SwiGLU and down with several
         // 16-token fragments of one expert per block (tile lists bn = the variants'; the same perm positions); every
         // value as the fused_gu path. With the fused combine the down launch follows the shared expert (it reads ysh), below.
-        hip::launch(k.moe_tiles, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(pl.gu_bn), moe_tiles64, moe_ntiles64);
+        hip::launch(pl.skip ? k.moe_tiles_skip : k.moe_tiles, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(pl.gu_bn), moe_tiles64,
+                    moe_ntiles64);
         hip::launch(k.moe_gather_f16, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, I(E), I(K));
         mark(OpClass::misc);
         hip::launch(pl.fgu, pl.gu_pgrid, D(256), 0, stream, mo.gate.ptr, mo.up.ptr, mo.gate.row_bytes, I(F), moe_x16, moe_yg, I(E), moe_tiles64,
@@ -354,6 +371,10 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
         hip::launch(pl.fdn, pl.dn_pgrid, D(256), 0, stream, mo.down.ptr, mo.down.row_bytes, I(E), moe_yg, I(F), moe_tiles, moe_ntiles, moe_perm,
                     moe_w, x, I(K));
         mark(OpClass::matmul);
+    } else if (pl.skip) {
+        // v0252-f5 moeskip: the dropped slots (inv -1) are left out of the sum (never comb_fused / ydh: chooseMoe)
+        hip::launch(pl.comb4 ? k.moe_combine4_skip : k.moe_combine_skip, pl.comb_grid, D(256), 0, stream, x, ysh, moe_sg, moe_yd, moe_inv, moe_w, I(E),
+                    I(K));
     } else {
         hip::launch(pl.ydh ? k.moe_combine4h : pl.comb4 ? k.moe_combine4 : k.moe_combine, pl.comb_grid, D(256), 0, stream, x, ysh, moe_sg, moe_yd,
                     moe_inv, moe_w, I(E), I(K));

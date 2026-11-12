@@ -54,6 +54,7 @@
 #include "attn_ws4r.hip"           // 4-wave pipelined decode / verify attention == attn_wsplit1 / 2 (v0252-ws4r97; LAST: no kernel moves)
 #include "moe_combine_h.hip"       // balance / fast MoE prefill: combine over f16 moe_yd (v0252-moedf16; LAST: no kernel moves)
 #include "moe_silu_w.hip"          // silu_mul_x8h for short rows, one wave per row (v0252-silu; LAST: no existing kernel moves)
+#include "moe_skip.hip"            // moeskip (fast): routing / grouping / combine / decode-expert twins (v0252-f5; after attn_kgv: LAST)
 #endif
 
 #if defined(__gfx1151__)

@@ -77,6 +77,7 @@ const OrderRow kOrder[] = {
     {"kernels.gemm", "testGemvhDirectMap"},  // v0252-c2port (feat026-gemvh: right after testKernelFetchBounds)
     {"kernels.gemm", "testGemvhTuneDefault"},  // v0252-c2acc (gfx1201 precise gemvh default = m1_q1)
     {"kernels.moe", "testMoepSchedule"},  // v0251-a7port
+    {"kernels.moe", "testMoeSkipRef"},  // v0252-f5 (moeskip host reference)
     {"model.core", "testValueScope"},
     {"hip.runtime", "testLaunchDigest"},
     {"hip.runtime", "testLaunchDigestLayout"},

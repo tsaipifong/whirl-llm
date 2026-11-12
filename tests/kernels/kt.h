@@ -245,6 +245,7 @@ struct SiluGu {
 };
 std::vector<std::string> siluDumpPaths();
 bool siluRealGu(Ctx& c, const std::string& path, int layer, SiluGu& out, std::string& why);
+void testMoeSkip(Ctx& c);  // "moeskip" (v0252-f5, fast): the moeskip entry points vs moe_topk / the shipped kernels / the host reference
 // v0251-a11port (called by testMoeMx, family "moemx"): fused router moe_router_fused_i* == moe_logits_f32 + moe_topk
 // (bitwise) and vs CPU, presence rows (every code object + host table; v0252-c5port adds gfx1201) (test_moe_router.cpp)
 void testMoeRouter(Ctx& c);

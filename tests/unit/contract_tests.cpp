@@ -72,7 +72,11 @@ void testNumerics() {
         const nu::Request r = nu::parseMode("balance", "t");
         CHECK(r.items == nu::balance_items && !r.custom && r.has(Item::fp8) && r.has(Item::kvq8) && !r.has(Item::kvq4));
         const nu::Request f = nu::parseMode("fast", "t");
-        CHECK(f.items == (nu::balance_items | nu::fast_only_items));
+        // v0252-f5: the opt-in fast items (fast_optin_items: moeskip) are not in a plain --fast request (plan() adds them per
+        // card by the fast default rule); "fast:all" still has them
+        CHECK(f.items == (nu::balance_items | (nu::fast_only_items & ~nu::fast_optin_items)) && !f.has(Item::moeskip));
+        CHECK((nu::fast_optin_items & nu::bit(Item::moeskip)) != 0 && (nu::fast_optin_items & ~nu::fast_only_items) == 0);
+        CHECK(nu::parseMode("fast:all", "t").has(Item::moeskip));
         const nu::Request c = nu::parseMode("balance:fp8, kvq8", "t");
         CHECK(c.custom && c.items == (nu::bit(Item::fp8) | nu::bit(Item::kvq8)));
         const nu::Request c2 = nu::parseMode("fast:kvq4", "t");

@@ -2573,7 +2573,8 @@ void testEnvSnapshot() {
                                      "FDQ8S", "FDQ8S_MIN",  // v0251-a3port: Model::load -> fdqEnv (testFdqEnv)
                                      "ATTN_KGVAR",  // v0252-c1port: numerics loadFlags, not in the exec dump (unit testKgVarFlag)
                                      "ATTN_WS4R",  // v0252-ws4r97b: numerics loadFlags, not in the exec dump (unit testWs4rFlag)
-                                     "ATTN_LSPLIT"};  // v0252-l2split: numerics loadFlags, not in the exec dump (unit testLsplitFlag)
+                                     "ATTN_LSPLIT",  // v0252-l2split: numerics loadFlags, not in the exec dump (unit testLsplitFlag)
+                                     "MOESKIP"};  // v0252-f5: numerics loadOverrides, not in the exec dump (unit testMoeSkipPlan)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -3093,6 +3094,9 @@ nu::Target targetOf(const q::Model& m) {
                  m.k.silu_mul_x8ht != nullptr && m.k.gated_norm_x8t != nullptr && m.k.gated_norm_x8ht != nullptr;
     t.relax_moe_arm = nu::relaxMoeDefaultName(t.gfx1151);  // v0252-f2 (tune.cpp numericsTarget)
     t.k_relax_rank = whirl::device::profile(m.arch).relax_rank_check && m.k.argmax_rank_rows_to != nullptr;  // v0252-f2def(2)
+    // v0252-f5 (moeskip): the routing entry points and the per-card fast default rule (tune.cpp numericsTarget)
+    t.k_moe_skip = m.k.moe_topk_skip != nullptr && m.k.moe_skip_apply != nullptr && m.k.moe_route_skip != nullptr && m.k.moe_combine_skip != nullptr;
+    t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     return t;
 }
 

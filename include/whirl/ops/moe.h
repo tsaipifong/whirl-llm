@@ -8,6 +8,8 @@
 // (moe_f32_row, the precise class: precise rows up to max_verify_rows always get it); balance / fast decode
 // experts take int8 activations (moe_q8_row, every row its own one-token decode); the prefill grouped GEMMs are
 // bit-identical within a numerics class (moe_f16_gemm: fused / gemmr / generic; moe_fp8_gemm).
+// moeskip (fast, v0252-f5 from feat027): MoePlan::skip - the block's routing drops slots (id -1, kept weights renormalized)
+// and every kernel of its path is a skip entry point; the per-row arithmetic class of the kept pairs is the plan's bits.
 
 #pragma once
 
@@ -60,6 +62,10 @@ struct MoeFlags {
     // v0251-a11port / v0252-c5port (feat026-router, numerics::Flags::moe_rfuse: the MoE default, WHIRL_MOE_RFUSE=0 off): router
     // logits + top-k + shared gate in one launch (bit-identical to moe_logits_f32 + moe_topk) when the kernel exists
     bool moe_rfuse = false;
+    // v0252-f5 (moeskip, numerics::Flags::moe_skip_thr / moe_skip_min: fast only): > 0 = drop the routed slots whose
+    // renormalized weight is below it (the top moe_skip_min kept) in a block whose path has every skip entry point
+    float moe_skip_thr = 0.f;
+    std::uint32_t moe_skip_min = 1;
 };
 // v0251-a7pol: precise -> bitwise, balance -> f16, fast -> atomic (owner mode standard 2026-10-26)
 inline MoeFlags::MoepComb moepCombFor(bool precise, bool fast) {
@@ -126,9 +132,15 @@ struct MoePlan {
     bool comb_atomic = false;        // moep, fast candidate: fdn = gemm_moepda_* (x += w * y), shared expert first by
                                      // moe_combine4 with K = 0; no combine launch after
     Dim3 comb_grid{};
+    // v0252-f5 (moeskip): this block drops slots. The routing writes id -1 / weight 0 for them (moe_topk_skip, or
+    // moe_skip_apply after the fused router), gu / down are the skip entry points (decode), and the prefill launches take
+    // moe_route_skip / moe_tiles_skip / moe_combine_skip / moe_combine4_skip (never comb_fused or ydh). false: moe_topk and
+    // the plan above, no id is -1 (precise and balance always; fast where an entry point of the path is missing)
+    bool skip = false;
 };
 // silu_mul_x8h: the fp8 path's activation kernel (MiscKernels; null: no fp8 path). v0251-a7pol: the moep flags apply only
-// when moepWide(n, K, R) (else as moep_gu = moep_dn = -1, moep_comb = 0); COMB 3 / 4 need moep_comb_ok >= f16, COMB 5 atomic
+// when moepWide(n, K, R) (else as moep_gu = moep_dn = -1, moep_comb = 0); COMB 3 / 4 need moep_comb_ok >= f16, COMB 5 atomic.
+// v0252-f5: moe_skip_thr > 0 (and not prec_dec) -> MoePlan::skip where the path has every skip entry point (moeSkipOk)
 MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, Function silu_mul_x8h);
 // v0252-c3port (feat026-moedec L1 + L3, port of feat026-moedec-p25 0ae5530 to gfx1201 only): the fused precise decode
 // launch moe_gus*_f_mxfp4 (kernels/moe_fused.hip) - routed gate/up + SwiGLU and the shared expert's gate/up gemvh tiles

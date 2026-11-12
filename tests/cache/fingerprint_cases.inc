@@ -526,6 +526,7 @@ static void testFingerprintCoversBitsKey() {
         // v0252-f2 / f2def: the loader's fast MoE relaxacc arm and F1's one-pass check (R9700 code object)
         t.relax_moe_arm = nu::relaxMoeDefaultName(s8060);
         t.k_relax_rank = true;  // v0252-f1flip: the one-pass check on both GPUs (device::Profile::relax_rank_check)
+        t.k_moe_skip = true;  // v0252-f5: both code objects have the moeskip entry points (WHIRL_MOESKIP changes bitsKey in fast)
         return t;
     };
     std::vector<std::string> names;

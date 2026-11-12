@@ -222,6 +222,21 @@
 //            gfx1201 object, kernels/moe_combine_h.hip, after gemm8r_moeh / gemm8r_moe32h with W2 = null writing f16 yd)
 //   gemm_moepda_<v>_mxfp4(W, rb, rows_e, X, ncols, tiles, n_tiles, perm, w, x, K): x += w * y by f32
 //            atomics (no yd; order varies run to run); the shared expert added before by moe_combine4, K = 0
+//  moeskip (optional, fast only; v0252-f5 from feat027-moeskip-r1, NEW entry points: no existing kernel changes; host
+//  reference whirl/moe_skip.h). A dropped (token, slot) pair has id -1 / weight 0; the kept slots are a prefix of the K
+//  sorted slots; the kept weights are renormalized:
+//   moe_topk_skip(moe_topk args..., float thr, int min_keep) (both code objects): moe_topk, then the rule in place
+//            (bitwise == moe_topk followed by moe_skip_apply; thr 0 or nothing dropped: moe_topk's ids / weights)
+//   moe_skip_apply(ids, w, n, K, float thr, int min_keep) (both): the rule on n tokens of a router's output in place
+//            (after moe_router_fused_i16 / _i24 on gfx1151); grid ceil(n / 256), block 256
+//   moe_route_skip(moe_route args...) (both): moe_route over the kept pairs; dropped pairs parked at [n_kept, n_pairs)
+//            in perm (a valid pair: the gathers read it), inv -1; tiles cover kept positions only
+//   moe_combine_skip(moe_combine args...) (both): moe_combine with inv -1 slots skipped
+//   moe_gu_skip_mxfp4 / moe_down_skip_mxfp4(moe_gu_<T> / moe_down_<T> args...) (both; generic MXFP4 decode experts):
+//            gate + up returns on id -1, down sums the kept prefix only
+//   moe_gu_skip_mxfp4w / moe_down_skip_mxfp4w (gfx1201 only): the same for the whole-block MXFP4 decode experts
+//   moe_tiles_skip(moe_tiles args...) / moe_combine4_skip(moe_combine4 args...) (gfx1151 only): kept pairs only /
+//            inv -1 slots skipped
 
 #pragma once
 
@@ -745,6 +760,11 @@ struct MoeKernels {
     // balance / fast candidates (f16 expert outputs; atomic scatter)
     std::array<F, kMoepDnN> moep_dh{}, moep_dhc{}, moep_da{};
     F moe_combine4h{};
+    // v0252-f5 moeskip (optional, fast; kernels/moe_skip.hip, kernels/gfx1151/moe_skip.hip, kernels/shared/moe_skip.h)
+    F moe_topk_skip{}, moe_skip_apply{}, moe_route_skip{}, moe_combine_skip{};  // both code objects
+    F moe_gu_skip_mx{}, moe_down_skip_mx{};    // generic MXFP4 decode experts (moe_gu_skip_mxfp4 / moe_down_skip_mxfp4), both
+    F moe_gu_skip_mxw{}, moe_down_skip_mxw{};  // whole-block MXFP4 decode experts (moe_gu_skip_mxfp4w / ...w), gfx1201
+    F moe_tiles_skip{}, moe_combine4_skip{};   // gfx1151 (the moe_tiles / moe_combine4 paths)
 };
 
 struct DeltaNetKernels {
