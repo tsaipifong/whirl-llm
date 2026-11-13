@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace {
@@ -350,10 +351,15 @@ void testOpsGemmFq() {
     shg.row_bytes = 2048 / 256 * 136;
     auto q4 = mat(GgmlType::q4_k, 5120, 5120);
     q4.row_bytes = 5120 / 256 * 144;
-    kn::KernelTable k51 = gemmTable(true, true, false);  // gfx1151-like: no gemmh_f16, gemmfq present
+    // v0252-opsasan: a kn::KernelTable is about 140 KB and under MSVC ASan every local of that type gets its own stack slot;
+    // with six of them this frame was 0.81 MiB of the 1 MB stack (cpu_asan). The tables built once are static (built in
+    // static storage), every table the case changes is a heap copy (same shape as v0252-c1asan, ops_attention_cases.inc).
+    static const kn::KernelTable k51b = gemmTable(true, true, false);  // gfx1151-like: no gemmh_f16 (gemmfq: added below)
+    const auto k51p = std::make_unique<kn::KernelTable>(k51b);
+    kn::KernelTable& k51 = *k51p;
     k51.gemmfq[0] = tag("gemmfq_c2_mxfp4");
     k51.gemmfq[1] = tag("gemmfq_t2_mxfp4");
-    const kn::KernelTable k01 = gemmTable(true, true, true);  // gfx1201-like: gemmh_f16, no gemmfq
+    static const kn::KernelTable k01 = gemmTable(true, true, true);  // gfx1201-like: gemmh_f16, no gemmfq
     const std::uint8_t deq2 = static_cast<std::uint8_t>(G + 2), deq1 = static_cast<std::uint8_t>(G + 1);
     const std::string mx = std::to_string(static_cast<int>(GgmlType::mxfp4)), f16 = std::to_string(static_cast<int>(GgmlType::f16));
     CHECK(kn::kGemmFqCfgs.size() == 2 && std::string(kn::kGemmFqNames[0]) == "c2" && std::string(kn::kGemmFqNames[1]) == "t2");
@@ -408,7 +414,8 @@ void testOpsGemmFq() {
         CHECK(p.kind == ops::GemmKind::gemmh && p.dequant && nameOf(p.f) == "gemmh_f16");
     }
     // one slot missing from the object: that slot falls back, the other still runs
-    kn::KernelTable k1 = k51;
+    const auto k1p = std::make_unique<kn::KernelTable>(k51);
+    kn::KernelTable& k1 = *k1p;
     k1.gemmfq[1] = nullptr;
     CHECK(ops::chooseGemmF16(gate, 2048, deq2, t2, k1).kind == ops::GemmKind::gemmc);
     CHECK(ops::chooseGemmF16(gate, 2048, deq2, c2, k1).kind == ops::GemmKind::gemmfq);
@@ -435,7 +442,8 @@ void testOpsGemmFq() {
     CHECK(p.kind == ops::GemmKind::gemmc && p.dequant && nameOf(p.f) == "gemm_c2_" + f16);
     CHECK(ops::chooseGemmF16(gate, 2048, deq2, bo, k51).kind == ops::GemmKind::gemmfq);
     // the big-row slot missing from the object: the old plan there (never the other slot)
-    kn::KernelTable kc = k51;
+    const auto kcp = std::make_unique<kn::KernelTable>(k51);
+    kn::KernelTable& kc = *kcp;
     kc.gemmfq[0] = nullptr;
     p = ops::chooseGemmF16(gate, 4096, deq2, dv, kc);
     CHECK(p.kind == ops::GemmKind::gemmc && p.dequant);
@@ -453,7 +461,8 @@ void testOpsGemmFq() {
     // gemmfq_<slot>g8_mxfp4: same tile, grid and bits) - the gfx1151 default per model class (device::Profile::fq_grp_dense
     // = t2 bit, fq_grp_moe = c2 bit; job 94 re-judged ADOPT). No bit, no twin in the object or the old plan: unchanged.
     CHECK(t2.fq_grp == 0);
-    kn::KernelTable kg = k51;
+    const auto kgp = std::make_unique<kn::KernelTable>(k51);
+    kn::KernelTable& kg = *kgp;
     kg.gemmfq_grp[0] = tag("gemmfq_c2g8_mxfp4");
     kg.gemmfq_grp[1] = tag("gemmfq_t2g8_mxfp4");
     ops::GemmFlags gd = dv;  // the gfx1151 dense row: t2 twin up to 2304 rows, c2 (plain) from 2305
@@ -476,7 +485,8 @@ void testOpsGemmFq() {
     CHECK(nameOf(ops::chooseGemmF16(gate, 2048, deq2, dv, kg).f) == "gemmfq_t2_mxfp4");
     CHECK(nameOf(ops::chooseGemmF16(gate, 4096, deq2, dv, kg).f) == "gemmfq_c2_mxfp4");
     // a bit without the twin in the object: the slot's product kernel
-    kn::KernelTable kn1 = kg;
+    const auto kn1p = std::make_unique<kn::KernelTable>(kg);
+    kn::KernelTable& kn1 = *kn1p;
     kn1.gemmfq_grp[1] = nullptr;
     p = ops::chooseGemmF16(gate, 2048, deq2, gd, kn1);
     CHECK(p.kind == ops::GemmKind::gemmfq && nameOf(p.f) == "gemmfq_t2_mxfp4" && p.grid.x == 8 && p.grid.y == 136);
