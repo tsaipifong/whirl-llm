@@ -19,6 +19,10 @@ namespace {
 namespace ops = whirl::ops;
 
 // ---- attention (K-3)
+// Stack note (v0252-c1asan, v0252-opsasan): a kn::KernelTable is about 140 KB, and under MSVC ASan (gate step cpu_asan)
+// every local AND every temporary of that type gets its own stack slot in the 1 MB stack. A case that needs more than
+// two or three tables keeps them off the stack: static const for a table built once (the return value is built in
+// static storage), std::make_unique for a copy the case changes; never a table passed or bound as a temporary.
 kn::KernelTable attnTable(bool ws4, bool group1, bool dq4, bool kg) {
     kn::KernelTable k;
     k.attn_split = tag("attn_split");
@@ -157,7 +161,9 @@ void testAttnDecode() {
 // gfx1201 q8 / q8h -> 2 "b", f16 -> 1 "plain"; gfx1151 0 = off, its object has none); WHIRL_ATTN_WS4R (flag attn_ws4r:
 // auto / 0 / 1 / 2) overrides both rows. Fails before phase 2 (the stub profile rows are 0 and chooseAttnDecode never
 // swaps).
-kn::KernelTable ws4rTable(kn::KernelTable k, bool q8) {
+// v0252-opsasan: the base table by reference - a by-value table parameter is one more 140 KB temporary in the caller's frame
+kn::KernelTable ws4rTable(const kn::KernelTable& base, bool q8) {
+    kn::KernelTable k = base;
     const std::string s = q8 ? "_q8" : "";
     k.attn_wsplit1 = tag("attn_wsplit1" + s);
     k.attn_wsplit2 = tag("attn_wsplit2" + s);
@@ -181,13 +187,19 @@ void testAttnDecodeWs4r() {
     namespace dv = whirl::device;
     const auto& p97 = dv::k_profile_gfx1201;
     const auto& p8s = dv::k_profile_gfx1151;
+    // v0252-opsasan: this case's tables are static (built once, in static storage) or on the heap, see the stack note at
+    // attnTable. With 7 table locals and 4 table temporaries its frame was 1.9 MiB under ASan: whirl-ops-tests overflowed
+    // the 1 MB stack on entry (cpu_asan, _alloca_probe). kb / kfb: the gfx1201-like sets before the ws4r kernels (dq4 and
+    // f16 KV); kq / kf: the same with the ws4r kernels (q8 names / plain names).
+    static const kn::KernelTable kb = attnTable(false, false, true, true), kfb = attnTable(false, false, false, true);
+    static const kn::KernelTable kq = ws4rTable(kb, true), kf = ws4rTable(kfb, false);
     // (0) the profile rows (kt verdict): gfx1201 q8 / q8h -> b, f16 -> plain; gfx1151 off
     CHECK(p97.attn_ws4r_q8 == 2 && p97.attn_ws4r_f16 == 1);
     CHECK(p8s.attn_ws4r_q8 == 0 && p8s.attn_ws4r_f16 == 0);
     CHECK(ops::kAttnWs4rAuto == 255);
     // (1) attnWs4rFor: auto -> the profile row; 1 plain, 2 b, anything else none; CG from `wide`
     {
-        const kn::KernelTable k = ws4rTable(attnTable(false, false, true, true), true);
+        const kn::KernelTable& k = kq;
         CHECK(nameOf(ops::attnWs4rFor(ops::kAttnWs4rAuto, 2, false, k)) == "attn_ws4r1b_q8");
         CHECK(nameOf(ops::attnWs4rFor(ops::kAttnWs4rAuto, 1, true, k)) == "attn_ws4r2_q8");
         CHECK(nameOf(ops::attnWs4rFor(ops::kAttnWs4rAuto, 0, false, k)) == "null");
@@ -195,7 +207,7 @@ void testAttnDecodeWs4r() {
         CHECK(nameOf(ops::attnWs4rFor(0, 2, false, k)) == "null" && nameOf(ops::attnWs4rFor(0, 1, true, k)) == "null");
         for (const std::uint32_t v : {3u, 4u, 254u, 256u}) CHECK(nameOf(ops::attnWs4rFor(v, 2, false, k)) == "null");
         // a table without the kernels (the gfx1151 object, a gfx1201 object before phase 1): none
-        const kn::KernelTable k0 = attnTable(false, false, true, true);
+        const kn::KernelTable& k0 = kb;
         CHECK(nameOf(ops::attnWs4rFor(2, 2, false, k0)) == "null" && nameOf(ops::attnWs4rFor(1, 1, true, k0)) == "null");
     }
     ops::AttnDecodeProblem p;
@@ -221,7 +233,6 @@ void testAttnDecodeWs4r() {
     CHECK(fa.attn_ws4r == ops::kAttnWs4rAuto);
     // (2) Swift balance (q8h KV) on the R9700: decode row -> attn_ws4r1b_q8, a 4-row MTP verify (attn_wsplit2 group of 4) ->
     // attn_ws4r2b_q8; the rest of the plan is the attn_wsplit plan (WHIRL_ATTN_WS4R=0)
-    const kn::KernelTable kq = ws4rTable(attnTable(false, false, true, true), true);
     {
         ops::AttnDecodeProblem q = rows(p, 1);
         q.kv_q8 = true;
@@ -255,7 +266,6 @@ void testAttnDecodeWs4r() {
         CHECK(nameOf(ops::chooseAttnDecode(q, fd, kq, kq.caps, p97).f) == "attn_split");
     }
     // (3) Swift / Ornith precise (f16 KV) on the R9700: plain
-    const kn::KernelTable kf = ws4rTable(attnTable(false, false, false, true), false);
     for (const std::uint32_t nkv : {4u, 2u}) {
         ops::AttnDecodeProblem q = rows(p, 1);
         q.n_head = nkv == 4 ? 24 : 16;
@@ -283,8 +293,11 @@ void testAttnDecodeWs4r() {
     // (5) the 8060S: its plan is the same with or without ws4r kernels in the table, under every flag value (row 0; the
     // gfx1151 object has none) - attn_ws4 / attn_ws4g / attn_wsplit1 as before
     for (const bool q8 : {false, true}) {
-        const kn::KernelTable k8 = attnTable(true, true, false, false), k8r = ws4rTable(k8, q8);
-        kn::KernelTable k8b = k8;
+        static const kn::KernelTable k8 = attnTable(true, true, false, false);
+        static const kn::KernelTable k8rs[2] = {ws4rTable(k8, false), ws4rTable(k8, true)};  // by q8
+        const kn::KernelTable& k8r = k8rs[q8 ? 1 : 0];
+        const auto k8bp = std::make_unique<kn::KernelTable>(k8);  // heap: changed below
+        kn::KernelTable& k8b = *k8bp;
         k8b.attn_wsplit1 = k8r.attn_wsplit1;
         k8b.attn_wsplit2 = k8r.attn_wsplit2;
         for (const std::uint32_t n : {1u, 4u}) {
@@ -347,8 +360,9 @@ void testAttnDecodeLsplit() {
     CHECK(f0.attn_lsplit == 0);
     ops::AttnDecodeFlags fa = f0;
     fa.attn_lsplit = A;
-    const kn::KernelTable kq = ws4rTable(attnTable(false, false, true, true), true);
-    const kn::KernelTable kf = ws4rTable(attnTable(false, false, false, true), false);
+    // v0252-opsasan: static, see the stack note at attnTable (this frame was 0.96 MiB of the 1 MB stack under ASan)
+    static const kn::KernelTable kb = attnTable(false, false, true, true), kfb = attnTable(false, false, false, true);
+    static const kn::KernelTable kq = ws4rTable(kb, true), kf = ws4rTable(kfb, false);
     // (1) + (2) Swift q8h on the R9700
     {
         ops::AttnDecodeProblem q = rows(p, 1);
@@ -432,7 +446,7 @@ void testAttnDecodeLsplit() {
         const auto d = ops::chooseAttnDecode(qd, gd, kq, kq.caps, p97);
         CHECK(nameOf(d.f) == "attn_split" && d.grid.y == 64 && samePlan(d, ops::chooseAttnDecode(qd, td, kq, kq.caps, p97)));
         for (const bool q8 : {false, true}) {
-            const kn::KernelTable k8 = attnTable(true, true, false, false);
+            static const kn::KernelTable k8 = attnTable(true, true, false, false);
             for (const std::uint32_t n : {1u, 4u}) {
                 ops::AttnDecodeProblem q8p = rows(p, n);
                 q8p.max_ctx = 32768;
