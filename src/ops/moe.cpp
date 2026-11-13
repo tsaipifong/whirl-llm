@@ -83,11 +83,35 @@ bool skipOk(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k
     if (pl.comb_atomic) return true;  // the down GEMM adds w * y over the tiles' (kept) positions; moe_combine4 K = 0 adds the shared expert
     return pl.comb4 ? k.moe_combine4_skip != nullptr : k.moe_combine_skip != nullptr;
 }
+// v0252-combfix (PLAN V1-119; KB v0252-ornbal:moep-comb3-row-floor-schedule-dependence): the f16 expert-output class
+// (COMB 3: moe_yd stored f16 + moe_combine4h, balance item f16 intermediates) exactly as the CALLER's flags ask for it,
+// decided BEFORE the row floor: a prefill row's MoE numeric class must not follow the row count of the forward it lands in
+// (the server's chunk schedule groups a prompt's chunks into forwards of different sizes; docs/guide/en/kv-and-caching.md
+// section 7). The one predicate both the moep branch (a forward of >= moepWide rows) and the fused_gu branch (below it) of
+// chooseMoe use, as the gfx1201 fp8 kind already takes COMB 3 from f_in. Never in precise (prec_dec, or the mode's bitwise
+// class with WHIRL_Q8DEC=1). fp8: the fp8 kind wins over moep (no gfx1151 object has both).
+bool moepYdh3(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeKernels& k, bool fp8) {
+    return !fp8 && f_in.moep_comb == 3 && !f_in.prec_dec && f_in.moep_comb_ok != MoeFlags::MoepComb::bitwise && moepOk(p, f_in, k) &&
+           k.moep_dh[f_in.moep_dn] != nullptr && k.moe_combine4h != nullptr && p.E % 4 == 0;
+}
+// v0252-combfix: the f16-output down GEMM of a forward below the row floor - the gemm_moepdh variant on gemm_moe32r's
+// 32-token tile (kMoepDn "m128w4n32k64": gemm_moe32r's arguments and tile list, so the fused_gu launch is unchanged and
+// the 0.2.5 tiling of narrow forwards stays, B26-43); the caller's variant when the object lacks that one (moepYdh3
+// guarantees it). Any variant stores the same f16 value: one f16 rounding of the same f32 WMMA chain
+// (kernels/gfx1151/moe_prefill_mt.hip: an output element depends only on its own A row and B column).
+int moepNarrowDh(const MoeFlags& f_in, const kernels::MoeKernels& k) {
+    for (int v = 0; v < kernels::kMoepDnN; ++v)
+        if (kernels::kMoepDn[v].bn == kernels::kMoeBn32 && k.moep_dh[v] != nullptr) return v;
+    return f_in.moep_dn;
+}
 // v0251-a7pol (B26-43): the moep flags only from kMoepMinTokensPerExpert tokens per expert (moepWide, moe.h); below it
-// the shipped 0.2.5 plan (no moep GEMMs, moe_combine). The one place the threshold applies.
-MoeFlags moepFloor(const MoeProblem& p, const MoeFlags& f) {
+// the shipped 0.2.5 TILING (no moep GEMMs). The one place the threshold applies. Bitwise combines (COMB 0 - 2) fall back
+// to moe_combine below it (same bits). v0252-combfix: keep = the caller's f16 class has no narrow-tile path here (no fused
+// gate + up in the object): the moep GEMMs then serve every forward size rather than the class changing with the rows.
+// COMB 4 (f16 + fused combine) and 5 (atomic scatter), env-only candidates, are still dropped below the floor.
+MoeFlags moepFloor(const MoeProblem& p, const MoeFlags& f, bool keep) {
     MoeFlags g = f;
-    if (!moepWide(p.n, p.K, p.R)) {
+    if (!keep && !moepWide(p.n, p.K, p.R)) {
         g.moep_gu = g.moep_dn = -1;
         g.moep_comb = 0;
     }
@@ -98,7 +122,11 @@ MoeFlags moepFloor(const MoeProblem& p, const MoeFlags& f) {
 u32 moeTile(u32 n, u32 K, u32 R) { return n * K < 48 * R ? 32 : moe_bn; }
 
 MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeKernels& k, Function silu_mul_x8h) {
-    const MoeFlags f = moepFloor(p, f_in);
+    // neither depends on the forward's rows or on the moep flags
+    const bool fp8 = fp8Gu(p, f_in, k, silu_mul_x8h), fused = fusedGu(p, k);
+    // v0252-combfix: the caller's COMB 3 survives the row floor (the floor is about the moep tile sharing only)
+    const bool ydh3 = moepYdh3(p, f_in, k, fp8);
+    const MoeFlags f = moepFloor(p, f_in, ydh3 && !fused);
     const u32 n = p.n, E = p.E, K = p.K, F = p.F, R = p.R;
     MoePlan pl;
     // precise mode: every verify / decode batch (up to max_verify_rows rows) takes the decode experts, so a
@@ -141,9 +169,13 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
     }
     // prefill: group (token, slot) pairs by expert, grouped GEMMs, combine
     const u32 pairs = n * K;
-    const bool fp8 = fp8Gu(p, f, k, silu_mul_x8h), fused = fusedGu(p, k);
     const bool moep = !fp8 && moepOk(p, f, k);
-    pl.bn = moep ? static_cast<u32>(kernels::kMoepDn[f.moep_dn].bn) : fused && !fp8 ? 32 : (f.moe_bn_force == 32 || f.moe_bn_force == 64) ? f.moe_bn_force : moeTile(n, K, R);
+    // v0252-combfix: below the row floor with the caller's COMB 3 (ydh3 implies !fp8; not moep = floored, which moepFloor
+    // does only with the fused gate + up present): the fused_gu plan with the f16-output down twin, nh_dv its DN variant
+    const bool narrow_h = ydh3 && !moep;
+    const int nh_dv = narrow_h ? moepNarrowDh(f_in, k) : -1;
+    const u32 bn_plain = fused && !fp8 ? 32 : (f.moe_bn_force == 32 || f.moe_bn_force == 64) ? f.moe_bn_force : moeTile(n, K, R);
+    pl.bn = moep ? static_cast<u32>(kernels::kMoepDn[f.moep_dn].bn) : narrow_h ? static_cast<u32>(kernels::kMoepDn[nh_dv].bn) : bn_plain;
     pl.max_tiles = (pairs + pl.bn - 1) / pl.bn + R;
     const u32 bn = pl.bn, max_tiles = pl.max_tiles;
     // combine: moe_combine4 (same bits) when selected and present
@@ -169,7 +201,9 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
         if (f.moep_comb == 2 && k.moep_dc[dv] != nullptr && cnt_ok) {
             pl.comb_fused = true;
             pl.fdn = k.moep_dc[dv];
-        } else if (lossy_ok && f.moep_comb == 3 && k.moep_dh[dv] != nullptr && k.moe_combine4h != nullptr && E % 4 == 0) {
+        } else if (ydh3) {
+            // v0252-combfix: moepYdh3 (the caller's flags; here f == f_in) - lossy_ok, COMB 3, gemm_moepdh of this DN
+            // variant, moe_combine4h, E % 4; the same predicate gives a forward below the row floor its f16 moe_yd
             pl.ydh = true;
             pl.fdn = k.moep_dh[dv];
         } else if (lossy_ok && f.moep_comb == 4 && k.moep_dhc[dv] != nullptr && cnt_ok) {
@@ -216,6 +250,19 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
         pl.fdn = k.gemm_moe32r[ti(p.down_ty)];
         pl.gu_pgrid = D(pl.max_tiles64 * ((F + 63) / 64));
         pl.dn_pgrid = D(max_tiles * ((E + moe_bm - 1) / moe_bm));
+        if (narrow_h) {
+            // v0252-combfix (PLAN V1-119): the caller's COMB 3 below the moep row floor - the gate + up stays gemm_moegu
+            // (bitwise the moep GU), the down projection is the f16-output moep twin on this plan's tile list (bn above;
+            // gemm_moe32r's arguments, the same launch in ffn.cpp) and moe_combine4h reads it: the stored type of the
+            // expert outputs is the one a forward of >= moepWide rows gets, so a row's bits do not follow the forward size
+            const kernels::MoepDnVariant& vd = kernels::kMoepDn[nh_dv];
+            pl.ydh = true;
+            pl.fdn = k.moep_dh[nh_dv];
+            pl.dn_pgrid = D(max_tiles * ((E + vd.bm - 1) / vd.bm));
+            pl.bits = MoeBits::moe_lossy_gemm;
+            pl.comb4 = true;
+            pl.comb_grid = D((E + 1023) / 1024, n);
+        }
     } else if (gemmrGu(p, f, k)) {
         // MXFP4 experts, f16 activations (precise): gate + up + SwiGLU in one grouped GEMM, then down; row block
         // fastest grid, empty 16-token fragments skipped - every value as the generic path

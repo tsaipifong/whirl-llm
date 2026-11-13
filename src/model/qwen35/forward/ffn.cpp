@@ -313,6 +313,8 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
         // Radeon 8060S: gate + up + SwiGLU in one grouped GEMM over 64-token tiles (A, f16,
         // into the f32 gate buffer: X is still being read), down over 32-token tiles; the
         // same perm positions for both tile lists, every row bit-identical to the path below
+        // v0252-combfix (PLAN V1-119): with pl.ydh (the caller's COMB 3 below the moep row floor) pl.fdn is a
+        // gemm_moepdh twin (the same arguments; moe_route's list has its bn) writing moe_yd as f16 for moe_combine4h
         hip::launch(pl.skip ? k.moe_tiles_skip : k.moe_tiles, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(64), moe_tiles64, moe_ntiles64);
         hip::launch(k.moe_gather_f16, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, I(E), I(K));
         mark(OpClass::misc);

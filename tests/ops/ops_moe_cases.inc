@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -560,6 +561,191 @@ void testOpsMoeSkip(ops::MoeProblem p) {
     }
 }
 
+// v0252-combfix (PLAN V1-119; KB v0252-ornbal:moep-comb3-row-floor-schedule-dependence): 8060S release gate step
+// seq_moe_balance FAIL 2026-11-13 - 2 of 7 server chunk schedules gave other last-row logits bits than the cold reference
+// (Ornith-1.5-35B-A3B MXFP4, balance). Cause: v0252-ornkv2 (PLAN V1-94) made COMB 3 (f16 expert outputs moe_yd +
+// moe_combine4h) the gfx1151 balance default (and the fast one where moeskip is off), but chooseMoe's row floor (moepWide,
+// Ornith: n >= 1024 rows) dropped the combine class together with the moep tiling, so a forward of 284 rows stored moe_yd
+// as f32 and one of 1308 rows as f16: a token's MoE numeric class followed the row count of the forward it landed in.
+// The rule (docs/guide/en/kv-and-caching.md section 7, FIX-TEST-B; the same rule form as testOpsMoeSegJoin): within ONE
+// mode the MoE numeric class of a prefill row is the same for every forward size, on the gfx1151 table as on the gfx1201
+// one. The floor may still change the TILING (fused_gu gate + up below it, the moep GEMMs from it: bitwise equal), never
+// the stored type of the expert outputs. Not a balance == precise requirement: one mode against itself.
+// Fails before the fix (n = 284: bits moe_f16_gemm / ydh 0, n = 1308: moe_lossy_gemm / ydh 1).
+void testOpsMoeCombRows(ops::MoeProblem p) {
+    p.rcnt_buf = true;
+    p.cnt_buf = true;
+    static const kn::KernelTable k97 = moeTable(false);
+    // the gfx1151 code object: every moep variant with all of its epilogue twins (kernels/gfx1151/moe_prefill_mt.hip
+    // MOEPGU_ENTRY / MOEPDN_ENTRY), no whole-block MXFP4 decode experts; heap (a kn::KernelTable is ~140 KB, v0252-f5fix)
+    const std::unique_ptr<kn::KernelTable> k8p(new kn::KernelTable(moeTable(true)));
+    kn::KernelTable& k8 = *k8p;
+    k8.moe_gu_mxw = k8.moe_down_mxw = nullptr;
+    for (int v = 0; v < kn::kMoepGuN; ++v) k8.moep_gu[v] = tag(std::string("gemm_moepgu_") + kn::kMoepGu[v].name + "_mxfp4");
+    for (int v = 0; v < kn::kMoepDnN; ++v) {
+        k8.moep_dn[v] = tag(std::string("gemm_moepdn_") + kn::kMoepDn[v].name + "_mxfp4");
+        k8.moep_dc[v] = tag(std::string("gemm_moepdc_") + kn::kMoepDn[v].name + "_mxfp4");
+        k8.moep_dh[v] = tag(std::string("gemm_moepdh_") + kn::kMoepDn[v].name + "_mxfp4");
+        k8.moep_dhc[v] = tag(std::string("gemm_moepdhc_") + kn::kMoepDn[v].name + "_mxfp4");
+        k8.moep_da[v] = tag(std::string("gemm_moepda_") + kn::kMoepDn[v].name + "_mxfp4");
+    }
+    k8.moe_combine4 = tag("moe_combine4");
+    k8.moe_combine4h = tag("moe_combine4h");
+    // what decides a row's bits: the experts' class, the stored type of the expert outputs and the combine's arithmetic
+    // (moe_combine4 == moe_combine and fused_gu == moep bitwise, so kind / comb4 / tiles are not part of it), and whether
+    // the block drops slots
+    auto cls = [](const ops::MoePlan& a) {
+        return std::string(a.small ? (a.small_q8 ? "q8row" : "f32row") : "gemm") + " bits " + std::to_string(static_cast<int>(a.bits)) + " ydh " +
+               (a.ydh ? "1" : "0") + " fusedh " + (a.ydh && a.comb_fused ? "1" : "0") + " atomic " + (a.comb_atomic ? "1" : "0") + " skip " +
+               (a.skip ? "1" : "0");
+    };
+    const unsigned gu1 = static_cast<unsigned>(kn::kMoepDefault.gu) + 1, dn1 = static_cast<unsigned>(kn::kMoepDefault.dn) + 1;
+    // the three flag sets that reach COMB 3 on the 8060S (numerics.cpp moepCombDefault): balance; fast with moeskip off;
+    // fast with moeskip on and an explicit WHIRL_MOEP_COMB=3 (the screen's other arm)
+    ops::MoeFlags bal, fst, fsk;
+    for (ops::MoeFlags* f : {&bal, &fst, &fsk}) ops::setMoep(*f, gu1, dn1, 3);
+    bal.moep_comb_ok = ops::moepCombFor(false, false);
+    fst.moep_comb_ok = fsk.moep_comb_ok = ops::moepCombFor(false, true);
+    fsk.moe_skip_thr = 0.05f;
+    const struct {
+        const char* name;
+        const ops::MoeFlags* f;
+    } arms[] = {{"balance", &bal}, {"fast, moeskip off", &fst}, {"fast, moeskip on + COMB 3", &fsk}};
+    for (const auto& arm : arms) {
+        const ops::MoeFlags& f = *arm.f;
+        // the two forward sizes of the failing gate run: [9216,9500] = 284 rows and [8192,9500] = 1308 rows
+        p.n = 284;
+        const ops::MoePlan a = ops::chooseMoe(p, f, k8, k8.silu_mul_x8h);
+        p.n = 1308;
+        const ops::MoePlan b = ops::chooseMoe(p, f, k8, k8.silu_mul_x8h);
+        CHECK_DETAIL(a.bits == b.bits && a.ydh == b.ydh,
+                     std::string(arm.name) + ": n=284 [" + cls(a) + "] n=1308 [" + cls(b) + "]");
+        CHECK_DETAIL(cls(a) == cls(b), std::string(arm.name) + ": n=284 [" + cls(a) + "] n=1308 [" + cls(b) + "]");
+        // every prefill forward size (above the decode experts' rows) against the wide one
+        std::uint32_t bad = 0, first_bad = 0;
+        for (std::uint32_t n = f.small_max + 1; n <= 4096; ++n) {
+            p.n = n;
+            if (cls(ops::chooseMoe(p, f, k8, k8.silu_mul_x8h)) != cls(b)) {
+                if (bad++ == 0) first_bad = n;
+            }
+        }
+        CHECK_DETAIL(bad == 0u, std::string(arm.name) + ": " + std::to_string(bad) + " prefill forward sizes of 17..4096 with another class than n=1308, first n=" +
+                                    std::to_string(first_bad));
+        // the wide forward keeps the V1-94 plan: the moep GEMMs, gemm_moepdh of the default DN variant, moe_combine4h's grid
+        CHECK_DETAIL(b.kind == ops::MoePrefillKind::moep && b.ydh && b.comb4 && !b.comb_fused && !b.comb_atomic && !b.skip &&
+                         b.bits == ops::MoeBits::moe_lossy_gemm && nameOf(b.fgu) == "gemm_moepgu_g64n64k64_mxfp4" &&
+                         nameOf(b.fdn) == "gemm_moepdh_m128w4n128k64_mxfp4" && b.bn == 128 && b.comb_grid.x == 2 && b.comb_grid.y == 1308,
+                     std::string(arm.name) + ": wide plan " + nameOf(b.fgu) + " / " + nameOf(b.fdn));
+        // the narrow forward keeps the 0.2.5 tiling (B26-43: the fused gate + up over 64-token tiles, the down GEMM over
+        // 32-token tiles) and takes the f16-output down twin of that tile (gemm_moepdh_m128w4n32k64 = gemm_moe32r's tile,
+        // gemm_moe32r's arguments, so ffn.cpp's fused_gu launch is unchanged) + moe_combine4h
+        CHECK_DETAIL(a.kind == ops::MoePrefillKind::fused_gu && a.ydh && a.comb4 && !a.comb_fused && !a.comb_atomic && !a.skip &&
+                         a.bits == ops::MoeBits::moe_lossy_gemm && nameOf(a.fgu) == "gemm_moegu_mxfp4" &&
+                         nameOf(a.fdn) == "gemm_moepdh_m128w4n32k64_mxfp4",
+                     std::string(arm.name) + ": narrow plan " + nameOf(a.fgu) + " / " + nameOf(a.fdn));
+        CHECK(a.bn == 32 && a.max_tiles == (284 * 8 + 31) / 32 + 256 && a.max_tiles64 == (284 * 8 + 63) / 64 + 256 &&
+              a.gu_pgrid.x == a.max_tiles64 * 8 && a.dn_pgrid.x == a.max_tiles * 16 && a.comb_grid.x == 2 && a.comb_grid.y == 284);
+    }
+    // a code object without the 32-token f16 twin: the narrow forward takes the caller's DN variant's (its tile list, its
+    // row blocks) - the class never waits for a kernel the wide path does not need
+    {
+        const auto kmp = std::make_unique<kn::KernelTable>(k8);
+        kn::KernelTable& km = *kmp;
+        for (int v = 0; v < kn::kMoepDnN; ++v)
+            if (v != kn::kMoepDefault.dn) km.moep_dh[v] = nullptr;
+        p.n = 284;
+        const ops::MoePlan a = ops::chooseMoe(p, bal, km, km.silu_mul_x8h);
+        CHECK_DETAIL(a.kind == ops::MoePrefillKind::fused_gu && a.ydh && a.comb4 && a.bits == ops::MoeBits::moe_lossy_gemm &&
+                         nameOf(a.fgu) == "gemm_moegu_mxfp4" && nameOf(a.fdn) == "gemm_moepdh_m128w4n128k64_mxfp4" && a.bn == 128 &&
+                         a.max_tiles == (284 * 8 + 127) / 128 + 256 && a.dn_pgrid.x == a.max_tiles * 16,
+                     "narrow plan without the 32-token twin: " + nameOf(a.fdn) + " bn " + std::to_string(a.bn));
+    }
+    // a code object with the moep GEMMs but no fused gate + up (none ships): no narrow-tile plan can carry the f16 class, so
+    // the moep GEMMs serve every forward size (moepFloor keep) rather than the class changing with the rows
+    {
+        const auto kmp = std::make_unique<kn::KernelTable>(k8);
+        kn::KernelTable& km = *kmp;
+        km.gemm_moegu[ti(GgmlType::mxfp4)] = nullptr;
+        p.n = 284;
+        const ops::MoePlan a = ops::chooseMoe(p, bal, km, km.silu_mul_x8h);
+        p.n = 1308;
+        const ops::MoePlan b = ops::chooseMoe(p, bal, km, km.silu_mul_x8h);
+        CHECK_DETAIL(a.kind == ops::MoePrefillKind::moep && a.ydh && cls(a) == cls(b) && nameOf(a.fgu) == "gemm_moepgu_g64n64k64_mxfp4" &&
+                         nameOf(a.fdn) == "gemm_moepdh_m128w4n128k64_mxfp4" && a.fgu == b.fgu && a.fdn == b.fdn,
+                     "no fused gate + up: n=284 [" + cls(a) + "] " + nameOf(a.fdn) + " n=1308 [" + cls(b) + "] " + nameOf(b.fdn));
+        // the bitwise default (COMB 1) is still floored there: the generic grouped GEMM below the floor, the same bits
+        ops::MoeFlags c1 = bal;
+        c1.moep_comb = 1;
+        p.n = 284;
+        const ops::MoePlan c = ops::chooseMoe(p, c1, km, km.silu_mul_x8h);
+        CHECK_DETAIL(c.kind == ops::MoePrefillKind::generic && !c.ydh && c.bits == ops::MoeBits::moe_f16_gemm,
+                     "no fused gate + up, COMB 1: n=284 [" + cls(c) + "]");
+    }
+    // where the wide forward does not get the f16 class, the narrow one does not either (and the other way round):
+    // precise (prec_dec, or the bitwise class with WHIRL_Q8DEC=1), no gemm_moepdh of the caller's variant, no moe_combine4h,
+    // the moep variants off, E % 4 != 0 - and the bit-identical combines 0 / 1 / 2 keep the 0.2.5.1 plans on both sides
+    {
+        struct Case {
+            std::string name;
+            ops::MoeFlags f;
+            std::unique_ptr<kn::KernelTable> k;
+            ops::MoeProblem p;
+        };
+        std::vector<Case> cs;
+        auto add = [&](const std::string& name, const ops::MoeFlags& f) -> Case& {
+            cs.push_back(Case{name, f, std::make_unique<kn::KernelTable>(k8), p});
+            return cs.back();
+        };
+        ops::MoeFlags pre = bal;
+        pre.prec_dec = true;
+        pre.moep_comb_ok = ops::moepCombFor(true, false);
+        add("precise", pre);
+        ops::MoeFlags q8p = bal;
+        q8p.moep_comb_ok = ops::moepCombFor(true, false);
+        add("precise + WHIRL_Q8DEC=1", q8p);
+        add("no gemm_moepdh of the DN variant", bal).k->moep_dh[kn::kMoepDefault.dn] = nullptr;
+        add("no moe_combine4h", bal).k->moe_combine4h = nullptr;
+        ops::MoeFlags nogu = bal;
+        nogu.moep_gu = -1;
+        add("WHIRL_MOEP_GU=0", nogu);
+        add("E % 4 != 0", bal).p.E = 2050;
+        for (const unsigned cm : {0u, 1u, 2u}) {
+            ops::MoeFlags c = bal;
+            c.moep_comb = cm;
+            add("COMB " + std::to_string(cm), c);
+            ops::MoeFlags s = fsk;  // fast with moeskip: COMB 1 is its default (numerics.cpp moepCombMoeSkip)
+            s.moep_comb = cm;
+            add("fast moeskip COMB " + std::to_string(cm), s);
+        }
+        for (Case& c : cs) {
+            c.p.n = 284;
+            const ops::MoePlan a = ops::chooseMoe(c.p, c.f, *c.k, c.k->silu_mul_x8h);
+            c.p.n = 1308;
+            const ops::MoePlan b = ops::chooseMoe(c.p, c.f, *c.k, c.k->silu_mul_x8h);
+            CHECK_DETAIL(!a.ydh && !b.ydh && a.bits == ops::MoeBits::moe_f16_gemm && b.bits == ops::MoeBits::moe_f16_gemm &&
+                             a.kind == ops::MoePrefillKind::fused_gu && nameOf(a.fdn) == "gemm_moe32r_mxfp4" && a.bn == 32,
+                         c.name + ": n=284 [" + cls(a) + "] " + nameOf(a.fdn) + " n=1308 [" + cls(b) + "] " + nameOf(b.fdn));
+        }
+    }
+    // the gfx1201 table (R9700): COMB 3 from the caller's flag at any prefill n (v0252-moedf16), unchanged
+    {
+        const auto k97p = std::make_unique<kn::KernelTable>(k97);
+        k97p->moe_combine4h = tag("moe_combine4h");
+        ops::MoeFlags r = bal;
+        ops::setMoep(r, 0, 0, 3);
+        r.moe_fp8 = true;
+        std::uint32_t bad = 0;
+        p.n = 1308;
+        const std::string want = cls(ops::chooseMoe(p, r, *k97p, k97p->silu_mul_x8h));
+        for (std::uint32_t n = r.small_max + 1; n <= 4096; ++n) {
+            p.n = n;
+            const ops::MoePlan a = ops::chooseMoe(p, r, *k97p, k97p->silu_mul_x8h);
+            if (cls(a) != want || !a.ydh || a.kind != ops::MoePrefillKind::fp8) ++bad;
+        }
+        CHECK_EQ(bad, 0u);
+    }
+}
+
 void testOpsMoe() {
     ops::MoeProblem p;  // Ornith-like: E 2048, 8 of 256 experts, F 512, all MXFP4 with row exponents
     p.E = 2048;
@@ -828,6 +1014,7 @@ void testOpsMoe() {
     testOpsMoeSegJoin(p, k97, k8);  // v0252-precfix (fails before the fix: moeSegJoinMin is a stub returning 16)
     testOpsMoeYdh(p, k97, k8);   // v0252-moedf16 (fails before the change: the fp8 kind never sets ydh)
     testOpsMoeSkip(p);  // v0252-f5
+    testOpsMoeCombRows(p);  // v0252-combfix (fails before the fix: the row floor drops COMB 3 below 1024 rows)
 }
 
 }  // namespace

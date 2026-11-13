@@ -79,6 +79,10 @@ inline MoeFlags::MoepComb moepCombFor(bool precise, bool fast) {
 // prefill, moep vs 0.2.5): 4 tokens / expert (pp128) -3.4 % balance / -2.0 % precise, 16 (pp512) -1.0 / -0.5 %,
 // 32 (pp1024) +1.5 / +1.3 %, 64 (pp2048) +2.4 / +2.7 %. The same rule form as moeTile and llama.cpp's RDNA MoE tile
 // choice (mmq.cu ncols_opt = tokens per expert).
+// v0252-combfix (PLAN V1-119): the floor decides the TILING only. The caller's COMB 3 (f16 expert outputs, not bitwise
+// equal to the f32 ones) is kept below it - the fused_gu plan then takes the f16-output down twin on the 32-token tile
+// (gemm_moepdh_m128w4n32k64) and moe_combine4h - so a prefill row's MoE numeric class is the same in a forward of any
+// size (the 8060S gate step seq_moe_balance failed 2 of 7 chunk schedules when COMB 3 stopped at this floor, V1-94).
 inline constexpr std::uint32_t kMoepMinTokensPerExpert = 32;
 inline constexpr bool moepWide(std::uint32_t n, std::uint32_t K, std::uint32_t R) {
     return static_cast<std::uint64_t>(n) * K >= static_cast<std::uint64_t>(kMoepMinTokensPerExpert) * R;
@@ -128,6 +132,7 @@ struct MoePlan {
     bool comb_fused = false;         // moep: fdn is the gemm_moepdc_* twin; no moe_combine launch
     bool comb4 = false;              // moe_combine4 instead of moe_combine (any prefill kind)
     bool ydh = false;                // moep, balance / fast: expert outputs stored f16 (moe_combine4h or the fused f16 twin);
+                                     // v0252-combfix: also the fused_gu kind below the moep row floor with COMB 3 (fdn = a gemm_moepdh twin);
                                      // v0252-moedf16: also the fp8 kind with COMB 3 (fdn = gemm8r_moeh / _moe32h, W2 = null)
     bool comb_atomic = false;        // moep, fast candidate: fdn = gemm_moepda_* (x += w * y), shared expert first by
                                      // moe_combine4 with K = 0; no combine launch after
@@ -139,7 +144,8 @@ struct MoePlan {
     bool skip = false;
 };
 // silu_mul_x8h: the fp8 path's activation kernel (MiscKernels; null: no fp8 path). v0251-a7pol: the moep flags apply only
-// when moepWide(n, K, R) (else as moep_gu = moep_dn = -1, moep_comb = 0); COMB 3 / 4 need moep_comb_ok >= f16, COMB 5 atomic.
+// when moepWide(n, K, R) (else as moep_gu = moep_dn = -1, moep_comb = 0 - except COMB 3, which v0252-combfix keeps at every
+// prefill n: MoePlan::ydh on the fused_gu kind); COMB 3 / 4 need moep_comb_ok >= f16, COMB 5 atomic.
 // v0252-f5: moe_skip_thr > 0 (and not prec_dec) -> MoePlan::skip where the path has every skip entry point (moeSkipOk)
 MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, Function silu_mul_x8h);
 // v0252-c3port (feat026-moedec L1 + L3, port of feat026-moedec-p25 0ae5530 to gfx1201 only): the fused precise decode
