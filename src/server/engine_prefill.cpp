@@ -334,6 +334,7 @@ void PrefillPhase::finishPrefill(Slot& sl) {
     sl.last_row = 0;
     sl.e1_rows = 0;  // v0252-e1p1b: the first decode cycle takes host inputs (the prefill's pend row)
     sl.e1_hid = 0;   // v0252-e1p1c: no ring cycle yet
+    sl.e1_len_off = false;  // v0252-e1len: a new request says the length transition again when it reaches it
     sl.logits_ok = true;
     sl.td0 = Clock::now();
     sl.last_log_t = sl.td0;

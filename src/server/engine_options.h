@@ -86,6 +86,16 @@ inline E1Choice chooseE1(const std::optional<std::string>& env, std::uint32_t de
     if (site.spec_acc_env && !e1KeepsSpecAcc(def, *site.spec_acc_env)) return {0u, false, true, true};
     return {def, false, true, false};
 }
+// v0252-e1len (PLAN V1-93): the length-aware DEFAULT. The limit whirl-server puts into EngineOptions::e1_ctx_max for a
+// choice: `def_ctx_max` (qwen35::e1_default_ctx_max) for a default that actually runs E1, else 0 = no limit. Only a
+// DEFAULT is length-aware - an explicitly set WHIRL_E1 is the user's order and runs at every length - and a default that
+// is 0 (not usable, or yielded to an explicit WHIRL_SPEC_ACC) has nothing to limit.
+inline std::uint32_t e1DefaultCtxMax(const E1Choice& c, std::uint32_t def_ctx_max) {
+    return c.by_default && c.e1 != 0 ? def_ctx_max : 0u;
+}
+// A decode cycle of a slot at context length `pos` (prompt + generated so far) may use E1: below the limit, or no limit
+// (0). At or above it the cycle runs the ordinary way - see qwen35::e1_default_ctx_max for the measurements.
+inline bool e1LenAllows(std::uint32_t ctx_max, std::uint32_t pos) { return ctx_max == 0 || pos < ctx_max; }
 
 struct EngineOptions {
     std::string model_name;
@@ -152,6 +162,13 @@ struct EngineOptions {
     // v0252-e1def: whirl-server sets it with chooseE1 (WHIRL_E1, else the device profile's default for the model class:
     // 2 for MoE models on the R9700, 0 elsewhere); the engine's own default stays 0.
     std::uint32_t e1 = 0;
+    // v0252-e1len (PLAN V1-93): the length-aware DEFAULT - a decode cycle of a slot whose context length (prompt +
+    // generated so far) is at or above this does NOT use E1 and runs the ordinary way, decided per cycle so a session
+    // that grows past it leaves E1 behind and a short one keeps it (--ctx is a cap, not the request's length).
+    // 0 = no limit: what an explicitly set WHIRL_E1 gets (the user's order runs at every length), and the engine's own
+    // default. whirl-server fills it with e1DefaultCtxMax(chooseE1(...), qwen35::e1_default_ctx_max), where the
+    // measurements behind the value are written down.
+    std::uint32_t e1_ctx_max = 0;
     // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)
     std::uint32_t slot_drafts = 0;
     bool trace_nd = false;

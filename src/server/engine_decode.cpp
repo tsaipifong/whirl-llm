@@ -319,8 +319,28 @@ void SpecCycle::layoutBatch(Cycle& cy) {
     // image), DeltaNet replay mode, no profiling events. Engine::allocState kept opt_.e1 only with the model's E1 path and a
     // device accept mode. Any other cycle: host inputs as before (a slot's device inputs are then not used, and its accept
     // takes them back to the host: acceptSlot)
-    cy.e1 = opt_.e1 != 0 && opt_.use_mtp && cy.A == 1 && cy.n_mtp == 1 && !opt_.use_dflash && m_.gdnReplay() && !(cy.p && cy.p->events) &&
-            cy.act[0]->greedy && !relaxes(cy, 0) && (cy.act[0]->job == nullptr || cy.act[0]->job->vis == nullptr);
+    const bool e1_site = opt_.e1 != 0 && opt_.use_mtp && cy.A == 1 && cy.n_mtp == 1 && !opt_.use_dflash && m_.gdnReplay() &&
+                         !(cy.p && cy.p->events) && cy.act[0]->greedy && !relaxes(cy, 0) &&
+                         (cy.act[0]->job == nullptr || cy.act[0]->job->vis == nullptr);
+    // v0252-e1len (PLAN V1-93): the length-aware DEFAULT. At or above opt_.e1_ctx_max this cycle runs the ordinary way:
+    // what E1 removes is a fixed per-cycle boundary idle, a shrinking share of a cycle whose attention over the KV grows
+    // with the length, while its own per-cycle cost grows with it - so the sign flips with length (the measurements and
+    // the boundary: qwen35::e1_default_ctx_max; the regression: experiment v0252-e1long:regression-root-cause). Decided
+    // per cycle from THIS slot's own context length (prompt + generated so far), because --ctx is a cap, not the
+    // request's length: one server answers a 2k and a 256k request, and a single session crosses the boundary while it
+    // generates. An explicitly set WHIRL_E1 has e1_ctx_max == 0 and runs at every length (the user's order).
+    // Turning E1 off for a cycle is the path a multi-slot / image / n-gram / profiling cycle already takes: acceptSlot
+    // clears sl.e1_rows and commits the replay count on the host, so the next cycle takes host inputs. The sampled
+    // token is unchanged either way (E1 moves WHEN a cycle is submitted, not what it computes), so precise stays
+    // bit-identical.
+    cy.e1 = e1_site && e1LenAllows(opt_.e1_ctx_max, cy.act[0]->pos);
+    if (e1_site && !cy.e1 && !cy.act[0]->e1_len_off) {
+        // said once per request (never per cycle): this slot has grown past the boundary
+        cy.act[0]->e1_len_off = true;
+        logI("decode: slot {} | the default E1 lookahead stops at this length: context {} tokens >= {}; this request's cycles now run the "
+             "ordinary way (the length-aware default; an explicitly set WHIRL_E1 runs at every length)",
+             cy.act[0]->id, cy.act[0]->pos, opt_.e1_ctx_max);
+    }
     // MTP steps r >= 1 run on the MTP slots with more than r drafts: MTP slots
     // sorted by draft count (descending) at the front of the batch
     {
@@ -817,6 +837,10 @@ std::shared_ptr<SpecCycle::Cycle> SpecCycle::aheadBuild(Slot& sl, const Cycle* f
     namespace sr = spec::rules;
     // ---- the drain rules: any "no" = this cycle is not submitted through the ring
     if (!sb_.aheadOk() || !opt_.use_mtp || opt_.use_dflash || opt_.relax.on || !m_.gdnReplay()) return nullptr;
+    // v0252-e1len (PLAN V1-93): the length-aware DEFAULT, as a drain rule - at or above the boundary no cycle is
+    // submitted through the ring (layoutBatch decides the same for cy.e1 below; this rule is what keeps the host
+    // bookkeeping of a cycle that would be thrown away from running once per cycle at long context)
+    if (!e1LenAllows(opt_.e1_ctx_max, sl.pos)) return nullptr;
     if (sl.phase != Phase::decode || !sl.greedy || sl.done || sl.st.gone || (sl.job != nullptr && sl.job->vis != nullptr)) return nullptr;
     if (spec_.prof && spec_.prof->events) return nullptr;
     // another request is being admitted, prefilled, restored or decoded: its work goes between this slot's cycles
@@ -1003,12 +1027,25 @@ void SpecCycle::specAccSetup() {
         } else if (opt_.e1 >= 2 && sb_.allocAhead(opt_.parallel, max_small_batch)) {
             // v0252-e1p1c (PLAN V1-93 P1c)
             opt_.e1 = 2;
-            logI("decode: WHIRL_E1=2 (one cycle ahead: the next draft cycle of a greedy request is submitted before the host reads the "
-                 "last one; ring of 2 pinned control areas, {})",
-                 specAccName(opt_.spec_acc));
+            // v0252-e1len: a length-aware DEFAULT says so and names its boundary; an explicitly set WHIRL_E1 has no
+            // boundary (e1_ctx_max == 0) and keeps the line it always had
+            if (opt_.e1_ctx_max != 0)
+                logI("decode: WHIRL_E1=2 by default below {} tokens of context (one cycle ahead: the next draft cycle of a greedy request is "
+                     "submitted before the host reads the last one; ring of 2 pinned control areas, {}); at or above {} tokens a cycle runs "
+                     "the ordinary way, because the lookahead's measured gain turns into a loss as the context grows",
+                     opt_.e1_ctx_max, specAccName(opt_.spec_acc), opt_.e1_ctx_max);
+            else
+                logI("decode: WHIRL_E1=2 (one cycle ahead: the next draft cycle of a greedy request is submitted before the host reads the "
+                     "last one; ring of 2 pinned control areas, {})",
+                     specAccName(opt_.spec_acc));
         } else {
             opt_.e1 = 1;
-            logI("decode: WHIRL_E1=1 (the next cycle's inputs from the device accept result; one cycle at a time)");
+            if (opt_.e1_ctx_max != 0)
+                logI("decode: WHIRL_E1=1 by default below {} tokens of context (the next cycle's inputs from the device accept result; one "
+                     "cycle at a time); at or above {} tokens a cycle runs the ordinary way",
+                     opt_.e1_ctx_max, opt_.e1_ctx_max);
+            else
+                logI("decode: WHIRL_E1=1 (the next cycle's inputs from the device accept result; one cycle at a time)");
         }
     }
 }

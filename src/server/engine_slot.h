@@ -75,6 +75,11 @@ struct SlotData : SlotPrefix, SlotTier {
     // kernel's control words, the replay count, the hidden rows of all e1_rows = nd + 1 verify rows): an E1 cycle may take
     // them (MSeg::e1_rows, VSeg::dev); 0 = host inputs (set by acceptSlot, cleared by the prefill of a request)
     std::uint32_t e1_rows = 0;
+    // v0252-e1len (PLAN V1-93): true = this request has already been told, in one log line, that it grew past the
+    // length-aware default's boundary (EngineOptions::e1_ctx_max) and its cycles now run the ordinary way. Keeps the
+    // transition to one line per request instead of one per cycle; cleared by the prefill of a request, so the next
+    // request on this slot says it again.
+    bool e1_len_off = false;
     // v0252-e1p1c (E1 lookahead): != 0 = the slot's last decode cycle was read through the lookahead ring. Its hidden rows
     // are kept at this address (SampleBuffers::aheadHid; row r at + r * n_embd * 4) while the model's MTP-input and logits
     // rows may already hold a later cycle: the gen-end checkpoint takes its hidden row from here and saves no logits row

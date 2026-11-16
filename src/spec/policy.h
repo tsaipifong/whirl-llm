@@ -43,6 +43,22 @@ MtpDefaults mtpDefaults(bool moe, hip::Arch arch = device::k_default_arch);
 // v0252-e1def (PLAN V1-93): the WHIRL_E1 value of a server that does not set it, for the model class on this code object
 // (device::Profile::e1_dense / e1_moe: 2 = the one-cycle lookahead for MoE models on the R9700, 0 elsewhere)
 std::uint32_t e1Default(bool moe, hip::Arch arch = device::k_default_arch);
+// v0252-e1len (PLAN V1-93): the context length (a slot's prompt + what it has generated so far) at or ABOVE which the
+// DEFAULT E1 of e1Default does not run. An explicitly set WHIRL_E1 is unaffected (the user's order runs at every
+// length).
+// Measured on ONE release build (branch v0252-b5 @40b0506, Ornith-1.5-35B-A3B MXFP4, R9700 gfx1201, -np 1, 4 rounds at
+// 8k/32k/64k and 2 at 128k/256k, verdicts by progress/tools/verdict.py under ADR-0019; data
+// scratch/v0252_dx256k/ab_e1_curve_ornith.tsv and ab_e1_ornith_256k.tsv, experiment
+// v0252-e1long:regression-root-cause). Turning this default OFF changed balance decode tok/s by:
+//     8192  -3.77 % +-3.59 LOSS (the default is genuinely BETTER there)   32768  +1.56 % +-2.82 OPEN
+//     65536 +18.13 % +-5.48 GAIN   131072 +32.07 % +-5.72 GAIN   262144 +49.88 % +-5.72 GAIN
+//     (precise 262144 +42.28 % +-4.04 GAIN; prefill FLAT +0.02 % +-0.10 in every cell)
+// The value is therefore the SMALLEST measured length at which keeping the default is PROVEN harmful: 65536. It is not
+// widened to 32768, whose cell is OPEN rather than proven (ADR-0019 forbids a hand-written band), and it is not lowered,
+// because 8192 proves the default helps below it. Cause (same experiment): the fixed per-cycle boundary idle the
+// lookahead removes is a shrinking share of a cycle whose attention over the KV grows with the length, while the
+// lookahead's own per-cycle cost grows with it - so the sign flips with length and one global default cannot be right.
+inline constexpr std::uint32_t e1_default_ctx_max = 65536;
 
 // ---- draft-head vocabulary subset (T5-1b): WHIRL_DRAFT_VOCAB = 48k | 64k | <file> | off | N
 // File for a WHIRL_DRAFT_VOCAB value: "48k" / "64k" / ... -> <dir>/subset_48k.bin, anything else
