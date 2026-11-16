@@ -176,6 +176,12 @@ void testE1Default() {
     ISO_CHECK(e1Default(true) == e1Default(true, device::k_default_arch) && e1Default(false) == 0u);
     for (const hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151})
         ISO_CHECK(e1Default(true, a) == device::profile(a).e1_moe && e1Default(false, a) == device::profile(a).e1_dense);
+    // v0252-e1len (PLAN V1-93): the length boundary of that default - the smallest MEASURED length at which keeping it
+    // is proven harmful (65536: turning it off there gave +18.13 % +-5.48, a GAIN beyond the error), not the OPEN cell
+    // below it (32768: +1.56 % +-2.82) and not below 8192, where the default is proven better (-3.77 % +-3.59 to turn
+    // it off). The measurements are cited at the constant (src/spec/policy.h); whirl-server-tests pins that citation.
+    ISO_CHECK(e1_default_ctx_max == 65536u);
+    ISO_CHECK(e1_default_ctx_max > 32768u);  // never widened to the OPEN cell
 }
 
 void testNgram() {

@@ -144,6 +144,35 @@ void testStateStarts() {
         }
         ISO_CHECK(!d.yielded && !s::E1Site{}.spec_acc_env.has_value());
     }
+    // v0252-e1len (PLAN V1-93): the length-aware DEFAULT. e1DefaultCtxMax gives the limit only to a default that runs
+    // E1; an explicitly set WHIRL_E1, a default of 0 and a yielded default get 0 = every length. e1LenAllows is the
+    // per-cycle test: below the limit yes, AT the limit and above no, no limit (0) always yes.
+    {
+        ISO_CHECK(s::EngineOptions{}.e1_ctx_max == 0u);  // the engine's own default: no limit
+        const s::E1Site ok1{.mtp = true, .dflash = false, .relax = false, .fast = false, .model_ok = true};
+        for (const std::uint32_t lim : {0u, 1u, 65536u}) {
+            for (const std::uint32_t def : {1u, 2u}) {
+                // a default that runs: limited
+                ISO_CHECK(s::e1DefaultCtxMax(s::chooseE1(std::nullopt, def, ok1), lim) == lim);
+                // the user's order: never limited, whatever the value
+                for (const char* v : {"0", "1", "2"})
+                    ISO_CHECK(s::e1DefaultCtxMax(s::chooseE1(std::optional<std::string>(v), def, ok1), lim) == 0u);
+                // a default that is off at this site, and a default that yielded to an explicit WHIRL_SPEC_ACC
+                s::E1Site no_model = ok1;
+                no_model.model_ok = false;
+                ISO_CHECK(s::e1DefaultCtxMax(s::chooseE1(std::nullopt, def, no_model), lim) == 0u);
+                s::E1Site yld = ok1;
+                yld.spec_acc_env = 0u;
+                const s::E1Choice y = s::chooseE1(std::nullopt, def, yld);
+                ISO_CHECK(y.e1 == 0u && y.yielded && s::e1DefaultCtxMax(y, lim) == 0u);
+            }
+            ISO_CHECK(s::e1DefaultCtxMax(s::chooseE1(std::nullopt, 0u, ok1), lim) == 0u);
+        }
+        ISO_CHECK(s::e1LenAllows(0u, 0u) && s::e1LenAllows(0u, 262144u));  // no limit: every length
+        ISO_CHECK(s::e1LenAllows(65536u, 0u) && s::e1LenAllows(65536u, 8192u) && s::e1LenAllows(65536u, 65535u));
+        ISO_CHECK(!s::e1LenAllows(65536u, 65536u) && !s::e1LenAllows(65536u, 131072u));  // AT the limit: off
+        ISO_CHECK(s::e1LenAllows(1u, 0u) && !s::e1LenAllows(1u, 1u));
+    }
 
     s::FloorState f;
     ISO_CHECK(f.epoch == s::TimePoint{} && f.log_t == s::TimePoint{});

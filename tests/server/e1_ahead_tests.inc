@@ -23,6 +23,10 @@
 //                      decision that is in range is followed (gpu-zc: same text); a check-mode disagreement on a consumed word
 //                      with the next cycle already submitted fails the request loudly (HTTP 500), the server stays up
 //   e1_ahead_env       WHIRL_E1=0|1|2 in the env table, docs/usage.md and the parser
+//   e1_ahead_len       v0252-e1len: the length-aware DEFAULT (EngineOptions::e1_ctx_max) - a request above the boundary runs no
+//                      E1 cycle, one below keeps the lookahead, one that grows past it leaves it mid-reply, all three replying
+//                      with the greedy reference; the boundary is a named constant citing its measurements; one log line per
+//                      request at the transition, and the startup line names the boundary
 // SPDX-License-Identifier: Apache-2.0
 
 namespace e1ahead {
@@ -611,6 +615,114 @@ void testE1AheadEnv() {
         CHECK_EQ(g_log.count("WHIRL_E1=2: the model has no E1 path (DeltaNet snapshot mode); E1 off"), 1u);
         CHECK_EQ(g_log.count("decode: WHIRL_E1="), 0u);
         CHECK_EQ(srv.model().specAccepts(), 0u);
+        CHECK_EQ(srv.engine().stats().acc_ring, 0u);
+    }
+}
+
+// v0252-e1len (PLAN V1-93): the length-aware DEFAULT. EngineOptions::e1_ctx_max = the context length (prompt +
+// generated so far) at or above which the DEFAULT E1 does not run; 0 = no limit, what an explicitly set WHIRL_E1 gets.
+// The decision is per decode cycle from that slot's own position, so a request that starts above the boundary never
+// uses E1, one that stays below keeps it, and one that grows past it leaves it behind mid-reply - in every case the
+// reply is the greedy reference, because E1 only moves WHEN a cycle is submitted (the regression this fixes:
+// experiment v0252-e1long:regression-root-cause; the boundary and its measurements: qwen35::e1_default_ctx_max).
+void testE1AheadLen() {
+#ifdef WHIRL_SOURCE_DIR
+    const auto slurp = [](const char* rel_path) {
+        std::ifstream in(std::string(WHIRL_SOURCE_DIR) + rel_path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string pol = slurp("/src/spec/policy.h");
+    const std::string sm = slurp("/src/server/server_main.cpp");
+    const std::string dec = slurp("/src/server/engine_decode.cpp");
+    const std::string doc = slurp("/docs/usage.md");
+    const std::string rel0 = slurp("/src/release/release.cpp");
+    CHECK(!pol.empty() && !sm.empty() && !dec.empty() && !doc.empty() && !rel0.empty());
+    // the boundary is a NAMED constant whose comment cites the measurements it comes from (never a bare round number)
+    CHECK(pol.find("e1_default_ctx_max = 65536") != std::string::npos);
+    CHECK(pol.find("ab_e1_curve_ornith.tsv") != std::string::npos);
+    CHECK(pol.find("ab_e1_ornith_256k.tsv") != std::string::npos);
+    CHECK(pol.find("v0252-e1long:regression-root-cause") != std::string::npos);
+    for (const char* v : {"+18.13", "+1.56", "-3.77", "+49.88", "+42.28"}) CHECK(pol.find(v) != std::string::npos);
+    // whirl-server gives the limit to the DEFAULT only; the per-cycle test is in the decode cycle (both paths)
+    CHECK(sm.find("e1DefaultCtxMax(e1c, qwen35::e1_default_ctx_max)") != std::string::npos);
+    CHECK(dec.find("e1LenAllows(opt_.e1_ctx_max") != std::string::npos);
+    CHECK(doc.find("below `65536` tokens of context") != std::string::npos);  // the default's boundary, in the env table
+    CHECK(rel0.find("below 65536 tokens of context") != std::string::npos);   // and in the release A/B list
+#else
+    CHECK(false);  // whirl-server-tests is built with WHIRL_SOURCE_DIR (cmake/server.cmake): the source checks must run
+#endif
+    // ---- the runtime arms. All with the lookahead on (e1 = 2) and the same prompts, so the only difference is the limit
+    struct Case {
+        const char* name;
+        std::uint32_t lim;       // EngineOptions::e1_ctx_max
+        std::uint32_t prompt;    // prompt tokens (= the slot's position at its first decode cycle)
+        std::uint32_t max_tok;
+        bool want_e1;            // the lookahead ran at all (ring cycles)
+        bool want_stop_log;      // the once-per-request transition line
+    };
+    const std::uint32_t lim = 512;
+    const Case cases[] = {
+        // the control: the SAME long request with no limit is today's behaviour, so the limit is what changes the rest
+        {"no limit, long prompt", 0, 1200, 60, true, false},
+        // a request that starts above the boundary: no E1 cycle at all, said once
+        {"limited, above from the start", lim, 1200, 60, false, true},
+        // a request that stays below it: the lookahead as before, nothing said
+        {"limited, below throughout", lim, 300, 100, true, false},
+        // a request that grows past it mid-reply: E1 at the start, then the ordinary path, said once
+        {"limited, crosses mid-reply", lim, 460, 200, true, true},
+    };
+    for (const Case& c : cases) {
+        ServerSetup su = e1ahead::setup(2, 1);
+        su.eo.e1_ctx_max = c.lim;
+        g_log.clear();
+        TestServer srv(su);
+        const std::vector<std::uint32_t> p = makePrompt(c.prompt, 970 + c.prompt);
+        const HttpResult r = srv.post("/v1/completions", e1test::greedyBody(p, c.max_tok, true));
+        CHECK_EQ(r.status, 200);
+        const e1ahead::ReqOut o = e1ahead::reqOut(r);
+        // the reply is the greedy reference in every arm: the limit moves when a cycle is submitted, not what it computes
+        const std::string want = decode(srv.model().greedyReference(p, c.max_tok, true));
+        if (o.text != want) std::printf("  e1_len case %s: the reply differs from the greedy reference\n", c.name);
+        CHECK_EQ(o.text, want);
+        const Engine::Stats es = srv.engine().stats();
+        const MockModel::E1Counts ec = srv.model().e1Counts();
+        std::printf("  e1_len %s (limit %u, prompt %u): ring cycles %llu, ahead %llu, lookahead segs %llu; stop line %u\n", c.name, c.lim,
+                    c.prompt, static_cast<unsigned long long>(es.acc_ring), static_cast<unsigned long long>(es.acc_ahead),
+                    static_cast<unsigned long long>(ec.ahead_segs), static_cast<unsigned>(g_log.count("the default E1 lookahead stops")));
+        CHECK_EQ(srv.model().poison(), 0u);
+        CHECK_EQ(srv.model().hidMismatch(), 0u);
+        CHECK_EQ(ec.disagree, 0u);
+        CHECK_EQ(es.acc_fallback, 0u);
+        CHECK_EQ(es.acc_mismatch, 0u);
+        CHECK_EQ(g_log.count("decode: WHIRL_E1=2"), 1u);  // the lookahead is on either way: the limit is per cycle
+        if (c.want_e1) {
+            CHECK(es.acc_ring > 0u);
+            CHECK(ec.ahead_segs > 0u);
+        } else {
+            CHECK_EQ(es.acc_ring, 0u);
+            CHECK_EQ(es.acc_ahead, 0u);
+            CHECK_EQ(es.acc_discard, 0u);
+            CHECK_EQ(ec.ahead_segs, 0u);
+        }
+        // the transition is said once per request, never per cycle
+        CHECK_EQ(g_log.count("the default E1 lookahead stops"), c.want_stop_log ? 1u : 0u);
+        // the startup line is honest about the length-aware default and names the boundary
+        if (c.lim != 0) CHECK_EQ(g_log.count(std::format("below {} tokens of context", c.lim)), 1u);
+        else CHECK_EQ(g_log.count("tokens of context"), 0u);
+    }
+    // a second request on the same slot says it again (the flag is per request, not per server)
+    {
+        ServerSetup su = e1ahead::setup(2, 1);
+        su.eo.e1_ctx_max = lim;
+        g_log.clear();
+        TestServer srv(su);
+        const std::vector<std::uint32_t> p = makePrompt(1200, 964);
+        for (std::uint32_t i = 0; i < 2; ++i) {
+            const HttpResult r = srv.post("/v1/completions", e1test::greedyBody(p, 40, true));
+            CHECK_EQ(r.status, 200);
+            CHECK_EQ(e1ahead::reqOut(r).text, decode(srv.model().greedyReference(p, 40, true)));
+        }
+        CHECK_EQ(g_log.count("the default E1 lookahead stops"), 2u);
         CHECK_EQ(srv.engine().stats().acc_ring, 0u);
     }
 }

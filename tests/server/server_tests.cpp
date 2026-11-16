@@ -9964,6 +9964,7 @@ int main(int argc, char** argv) {
         {"e1_ahead_drain", testE1AheadDrain},
         {"e1_ahead_fallback", testE1AheadFallback},
         {"e1_ahead_env", testE1AheadEnv},
+        {"e1_ahead_len", testE1AheadLen},  // v0252-e1len (the length-aware default)
         {"fr_tool_truncated", testFrToolTruncated},
         {"fr_nonstream_disconnect", testFrNonStreamDisconnect},
         {"fr_pool_prefill", testFrPoolPrefill},
