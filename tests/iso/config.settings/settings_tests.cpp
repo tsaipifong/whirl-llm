@@ -469,6 +469,32 @@ void testVisModeFrom() {
     std::printf("vision mode: %zu cases == c1ca7ce\n", n);
 }
 
+// v0252-probe (PLAN V1-123 / V1-119, probe build only): two R9700 0.2.5.2 compile-time defaults get a runtime switch.
+// relaxRankCheck(def) / tailCkInFwd(def): unset = the caller's default (device::Profile) passes through unchanged, both
+// ways; "0" turns it off and any other value on, whatever the default (envFlag's rule).
+void testProbeFlags() {
+    namespace st = whirl::settings;
+    whirl::platform::env::set("WHIRL_RELAX_RANK_CHECK", "");
+    whirl::platform::env::set("WHIRL_TAIL_CK_IN_FWD", "");
+    ISO_CHECK(st::relaxRankCheck(true) && !st::relaxRankCheck(false));
+    ISO_CHECK(st::tailCkInFwd(true) && !st::tailCkInFwd(false));
+    whirl::platform::env::set("WHIRL_RELAX_RANK_CHECK", "0");
+    whirl::platform::env::set("WHIRL_TAIL_CK_IN_FWD", "0");
+    ISO_CHECK(!st::relaxRankCheck(true) && !st::relaxRankCheck(false));
+    ISO_CHECK(!st::tailCkInFwd(true) && !st::tailCkInFwd(false));
+    whirl::platform::env::set("WHIRL_RELAX_RANK_CHECK", "1");
+    whirl::platform::env::set("WHIRL_TAIL_CK_IN_FWD", "1");
+    ISO_CHECK(st::relaxRankCheck(true) && st::relaxRankCheck(false));
+    ISO_CHECK(st::tailCkInFwd(true) && st::tailCkInFwd(false));
+    // each reads its own name only
+    whirl::platform::env::set("WHIRL_TAIL_CK_IN_FWD", "");
+    ISO_CHECK(st::relaxRankCheck(false) && !st::tailCkInFwd(false));
+    whirl::platform::env::set("WHIRL_RELAX_RANK_CHECK", "");
+    whirl::platform::env::set("WHIRL_TAIL_CK_IN_FWD", "0");
+    ISO_CHECK(st::relaxRankCheck(true) && !st::tailCkInFwd(true));
+    whirl::platform::env::set("WHIRL_TAIL_CK_IN_FWD", "");
+}
+
 int main(int argc, char** argv) {
-    return iso::run("config.settings", {{"u32", testU32}, {"mtp_adapt", testMtpAdapt}, {"env", testEnv}, {"pool_reserve", testPoolReserve}, {"spec_vis", testSpecVis}, {"server_leg8", testServerLeg8}, {"vis_mode_from", testVisModeFrom}}, argc, argv);
+    return iso::run("config.settings", {{"u32", testU32}, {"mtp_adapt", testMtpAdapt}, {"env", testEnv}, {"pool_reserve", testPoolReserve}, {"spec_vis", testSpecVis}, {"server_leg8", testServerLeg8}, {"vis_mode_from", testVisModeFrom}, {"probe_flags", testProbeFlags}}, argc, argv);
 }

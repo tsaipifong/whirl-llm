@@ -122,6 +122,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_RELAX_DELTA",  // src/common/numerics.cpp
     "WHIRL_RELAX_EPS",  // src/common/numerics.cpp
     "WHIRL_RELAX_K",  // src/common/numerics.cpp
+    "WHIRL_RELAX_RANK_CHECK",  // src/config/env_get.h (v0252-probe: F1 one-pass check on/off, fast only; hashed - conservative)
     "WHIRL_SERVE_CKPTS",  // src/server/server_main.cpp
     "WHIRL_SLOT_DRAFTS",  // src/server/server_main.cpp
     "WHIRL_SNAP_SETS",  // src/server/server_main.cpp
@@ -130,6 +131,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_SYS_CKPTS",  // src/server/server_main.cpp
     "WHIRL_SYS_MIN",  // src/cli/common.cpp
     "WHIRL_TAIL_CK",  // src/cli/common.cpp
+    "WHIRL_TAIL_CK_IN_FWD",  // src/config/run_settings.h (v0252-probe: TAIL-CK inside the forward, same bits; hashed - conservative)
     "WHIRL_THINK",  // src/cli/common.cpp
     "WHIRL_TUNE_COLD",  // src/cli/build_model.cpp
     "WHIRL_TUNE_MASK",  // src/cli/build_model.cpp
