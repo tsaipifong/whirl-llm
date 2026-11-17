@@ -227,6 +227,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // WHIRL_ARGMAX_MB from this load's snapshot), once per load and before allocScratch places the workspace
     // (Context::allocCtl). v0252-b5 round 3 (PLAN V1-117): the default is the model class's row value in fast mode only
     m.setArgmaxMb(Model::argmaxMbMode(device::profile(m.arch), cfg.moe, opt.numerics.mode == numerics::Mode::fast, env.argmax_mb));
+    // v0252-probe: relaxacc's one-pass rank check, WHIRL_RELAX_RANK_CHECK over the profile default (unset = the profile's)
+    m.relax_rank_check = settings::relaxRankCheck(device::profile(m.arch).relax_rank_check);
     // MXFP4 routed experts: process-level switches (as WHIRL_KV), read by CLI and server alike
     // per-model-type request (numerics::forModel; MoE balance = dense balance items since MODES-MXFP4)
     m.num_req = numerics::forModel(opt.numerics, cfg.moe);

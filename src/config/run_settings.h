@@ -40,6 +40,11 @@ inline bool mtp() { return envFlag("MTP", true); }
 inline bool mtpQ4() { return envFlag("MTP_Q4", true); }
 // WHIRL_TAIL_CK: the prefill's tail checkpoint forward end (default on; 0 = off, debug knob).
 inline bool tailCk() { return envFlag("TAIL_CK", true); }
+// v0252-probe (PLAN V1-123 / V1-119; probe branch): runtime switches for two R9700 0.2.5.2 compile-time defaults. `def` is the
+// device::Profile field, so with the variable unset the read is exactly the profile's; "0" = off, any other value = on.
+// WHIRL_TAIL_CK_IN_FWD: the TAIL-CK checkpoint written inside a prefill forward (device::Profile::tail_ck_in_forward).
+inline bool tailCkInFwd(bool def) { return envFlag("TAIL_CK_IN_FWD", def); }
+// WHIRL_RELAX_RANK_CHECK: settings::relaxRankCheck(def) in config/env_get.h (the model layer reads it; it includes that header only).
 // WHIRL_DRAFT_HEAD=q4: the older Q4_K draft head instead of the 2-bit one.
 inline bool draftHeadQ4() { return envGet("DRAFT_HEAD").value_or("") == "q4"; }
 // WHIRL_DRAFT_MODEL / WHIRL_DRAFT_VOCAB / WHIRL_MODE: passed as text to their resolvers

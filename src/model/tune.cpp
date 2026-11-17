@@ -833,7 +833,7 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     t.relax_moe_arm = whirl::numerics::relaxMoeDefaultName(t.gfx1151);
     // v0252-b5 round 3 (PLAN V1-97): the dense fast arm of this GPU (gfx1201 k8a02; gfx1151 none)
     t.relax_dense_arm = whirl::numerics::relaxDenseDefaultName(t.gfx1151);
-    t.k_relax_rank = prof.relax_rank_check && m.k.argmax_rank_rows_to != nullptr;
+    t.k_relax_rank = settings::relaxRankCheck(prof.relax_rank_check) && m.k.argmax_rank_rows_to != nullptr;  // v0252-probe: WHIRL_RELAX_RANK_CHECK
     // v0252-f5 (moeskip): the routing / grouping / combine entry points (both code objects) and the per-card fast default rule
     t.k_moe_skip = m.k.moe_topk_skip != nullptr && m.k.moe_skip_apply != nullptr && m.k.moe_route_skip != nullptr && m.k.moe_combine_skip != nullptr;
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;

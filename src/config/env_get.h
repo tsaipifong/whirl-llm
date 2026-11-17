@@ -17,6 +17,11 @@ namespace whirl::settings {
 std::optional<std::string> envGet(std::string_view name);
 // WHIRL_<name> set and not "0"; `def` when unset (the former envFlag / envOn).
 bool envFlag(std::string_view name, bool def = false);
+// v0252-probe (PLAN V1-123 / V1-119; probe branch): WHIRL_RELAX_RANK_CHECK, the runtime switch of relaxacc's one-pass rank
+// check. `def` = device::Profile::relax_rank_check, so unset = the profile's value; "0" = off, any other value = on. Read at
+// the load (src/model/loader.cpp -> Context::relax_rank_check, read by Context::setRelaxRank / relaxRankEnqueue) and at
+// src/model/tune.cpp k_relax_rank, so host side and kernel choice agree. Here and not in run_settings.h: the model layer includes this header only.
+inline bool relaxRankCheck(bool def) { return envFlag("RELAX_RANK_CHECK", def); }
 
 }  // namespace whirl::settings
 

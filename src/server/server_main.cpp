@@ -1035,7 +1035,7 @@ void ServerRun::makeEngine() {
     eo.n_ck = lm.n_ck;
     eo.tail_ck = settings::tailCk();  // debug knob: WHIRL_TAIL_CK=0 turns the tail checkpoint off
     // v0252-n10: the tail checkpoint written inside the prefill forward (R9700 only in 0.2.5.2; the 8060S row is false)
-    eo.tail_ck_in_forward = device::profile(model.arch).tail_ck_in_forward;
+    eo.tail_ck_in_forward = settings::tailCkInFwd(device::profile(model.arch).tail_ck_in_forward);  // v0252-probe: WHIRL_TAIL_CK_IN_FWD
     eo.n_spe = startfit::sharedCkpts(lm.n_ck, lm.no_pc, [&] { return lm.n_spe_plan; });  // (module server.kv_fit, arch025-lane1 leg 10)
     eo.ckpt_host = settings::envFlag("CKPT_HOST", false);
     eo.prefill_exec = lm.prefill_exec;

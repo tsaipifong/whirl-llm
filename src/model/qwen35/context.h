@@ -188,6 +188,11 @@ public:
     bool head_gemvx = false;
     bool prec_gemvh = true;
     int prec_gs = -1;
+    // v0252-probe (PLAN V1-123 / V1-119; probe branch): relaxacc's one-pass rank check as Model::load decided it
+    // (settings::relaxRankCheck: WHIRL_RELAX_RANK_CHECK over device::Profile::relax_rank_check). nullopt (a Context no
+    // load set, the iso tests) = the profile's value, so with the variable unset every read is the profile's as before.
+    std::optional<bool> relax_rank_check;
+    bool relaxRankOn() const { return relax_rank_check.value_or(device::profile(arch).relax_rank_check); }
     // fused-dequant MXFP4 prefill GEMM (gemmfq, v0251-a3port): WHIRL_FDQ8S / WHIRL_FDQ8S_MIN of the load's snapshot
     // (qwen35::fdqEnv, set by Model::load); gemmFlags reads them. fdq: -1 = the device default
     // (device::Profile::fdq_default), 0 = the old dequant + f16 GEMM, 1 / 2 = slot c2 / t2 (kernels::kGemmFqNames)
