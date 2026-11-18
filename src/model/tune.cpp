@@ -242,7 +242,7 @@ bool Model::checkGemvq(std::string& log) {
     bool done[n_types] = {};
     bool ok_all = true;
     for (const Layer& L : layers)
-        for (const Mat& w : layerMats(L).slice()) {
+        for (const MatList lm = layerMats(L); const Mat& w : lm.slice()) {
             const std::size_t t = ti(w.ty) % n_types;
             if (done[t] || k.gemvq[t] == nullptr) continue;
             done[t] = true;
@@ -395,7 +395,7 @@ bool Model::checkPrefillInvariance(std::string& log) {
     bool done[n_types] = {};
     bool all_ok = true;
     for (const Layer& L : layers)
-        for (const Mat& w0 : layerMats(L).slice()) {
+        for (const MatList lm = layerMats(L); const Mat& w0 : lm.slice()) {
             const std::size_t t = ti(w0.ty) % n_types;
             if (done[t] || k.gemmc[0][t] == nullptr) continue;
             done[t] = true;

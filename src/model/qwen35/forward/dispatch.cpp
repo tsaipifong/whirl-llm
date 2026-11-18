@@ -400,7 +400,7 @@ std::string Context::precMissing() const {
         return std::string();
     };
     for (const Layer& L : layers) {
-        for (const Mat& w : layerMats(L).slice())
+        for (const MatList lm = layerMats(L); const Mat& w : lm.slice())
             if (!gemmOk(w)) return "the f16 GEMM for " + tyName(w.ty) + " weights";
         if (L.moe) {
             if (auto m = moeOk(*L.moe); !m.empty()) return m;
