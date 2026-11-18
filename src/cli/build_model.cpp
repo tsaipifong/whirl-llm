@@ -6,6 +6,7 @@
 
 #include "cli/cli.h"
 #include "config/device_choice.h"  // the GPU choice shared with the server (arch025-N15b)
+#include "platform/env.h"  // AMD_SERIALIZE_KERNEL (v0252-kgcrash)
 
 namespace cli {
 
@@ -107,6 +108,12 @@ void applyRuntimeEnv(q::Model& m, bool gdn_v0) {
     namespace nu = whirl::numerics;
     nu::RuntimeValues rv;
     for (const auto& e : nu::RuntimeValues::names()) rv.*e.field = envGet(e.name);
+    // v0252-kgcrash: AMD_SERIALIZE_KERNEL with bit 2 turns the decode graph off (the WHIRL_NO_GRAPH path), said once
+    if (auto note = nu::serializeKernelNoGraph(whirl::platform::env::get("AMD_SERIALIZE_KERNEL"), rv)) {
+        static bool said = false;
+        if (!said) std::fprintf(stderr, "note: %s\n", note->c_str());
+        said = true;
+    }
     if (!gdn_v0) rv.gdn_v0.reset();
     hip::Function fv0 = nullptr;
     if (rv.gdn_v0) fv0 = m.module.getFunctionOpt("gdn_step_norm_v0");

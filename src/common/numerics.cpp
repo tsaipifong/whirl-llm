@@ -881,6 +881,19 @@ Plan plan(const Request& r_in, const Target& t) {
 
 void applyFront(Plan& p, Front f, const RuntimeValues& v, bool k_gdn_v0) { runtimeFlags(f, v, k_gdn_v0, p.flags); }
 
+// v0252-kgcrash (numerics.h)
+std::optional<std::string> serializeKernelNoGraph(const Raw& amd_serialize_kernel, RuntimeValues& v) {
+    if (!amd_serialize_kernel || v.no_graph) return std::nullopt;
+    const char* s = amd_serialize_kernel->c_str();
+    char* end = nullptr;
+    const unsigned long x = std::strtoul(s, &end, 0);
+    if (end == s || (x & 2ul) == 0) return std::nullopt;
+    v.no_graph = std::string("1");
+    return std::format("AMD_SERIALIZE_KERNEL={}: decode hip graph off (as WHIRL_NO_GRAPH=1): the HIP runtime corrupts the heap "
+                       "replaying a graph when it waits after each launch (bit 2); WHIRL_NO_GRAPH=0 keeps the graph",
+                       *amd_serialize_kernel);
+}
+
 void setQ8dec(Plan& p, bool q8, const std::string& env) {
     p.q8dec = q8;
     const bool def = p.q8dec_default;

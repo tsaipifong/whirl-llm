@@ -494,6 +494,13 @@ void loaderFlags(const Request& r, Flags& F);
 // Front::none: the same rules plan() applies for r.front / r.runtime (plan(r) with a front == plan(r without) then this).
 // k_gdn_v0 = Target::k_gdn_v0. Front::none: no change.
 void applyFront(Plan& p, Front f, const RuntimeValues& v, bool k_gdn_v0);
+// v0252-kgcrash (PLAN V1-127): AMD_SERIALIZE_KERNEL (the HIP runtime's switch; its leading number, base 0 as strtoul, an
+// unparsable value = 0) with bit 2 set (2 = wait for completion after each enqueue, 3 = both) makes the runtime corrupt the
+// host heap inside hipGraphLaunch of a graph with ~128+ kernel nodes (amdhip64_7.dll 10.0.3683.0; a WHIRL-free repro,
+// progress/v0252-graphfix.HANDOFF.md section 2). For the CLI's decode graph: when v.no_graph is unset (an explicit
+// WHIRL_NO_GRAPH, 0 or 1, wins as before), sets v.no_graph = "1" (the WHIRL_NO_GRAPH path) and returns the one line the
+// front end prints; otherwise returns nullopt and leaves v alone. The graph replays the same launches: output unchanged.
+std::optional<std::string> serializeKernelNoGraph(const Raw& amd_serialize_kernel, RuntimeValues& v);
 // Per-item override from the environment: `forced` = the effective value after the variable.
 // Records "WHIRL_X=v: item on (lossy, user-requested)" or "... item off" when it differs.
 void applyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable);
