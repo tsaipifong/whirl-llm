@@ -708,6 +708,49 @@ void testSwitchZeroIsOff() {
     }
 }
 
+// v0252-kgcrash (PLAN V1-127): AMD_SERIALIZE_KERNEL with bit 2 ("wait for completion after enqueue", values 2 / 3) makes the
+// HIP runtime corrupt the host heap inside hipGraphLaunch (scratch/v0252_graphfix/iso_graph, a WHIRL-free repro). The CLI then
+// turns the decode graph off through the WHIRL_NO_GRAPH path and says so once; an explicit WHIRL_NO_GRAPH wins; unset / 0 / 1 /
+// unparsable leave everything as today. Fails to build before the change (no serializeKernelNoGraph).
+void testSerializeKernelNoGraph() {
+    struct Row {
+        nu::Raw amd, no_graph;
+        bool note, graph;
+    };
+    const Row rows[] = {
+        {std::nullopt, std::nullopt, false, true}, {std::string("0"), std::nullopt, false, true},
+        {std::string("1"), std::nullopt, false, true}, {std::string("2"), std::nullopt, true, false},
+        {std::string("3"), std::nullopt, true, false}, {std::string("garbage"), std::nullopt, false, true},
+        {std::string(""), std::nullopt, false, true}, {std::string("6"), std::nullopt, true, false},
+        {std::string("0x2"), std::nullopt, true, false}, {std::string("3x"), std::nullopt, true, false},
+        {std::string("3"), std::string("0"), false, true},   // explicit WHIRL_NO_GRAPH=0 wins (graph on, as today)
+        {std::string("3"), std::string("1"), false, false},  // explicit WHIRL_NO_GRAPH=1: off as today, no extra line
+        {std::nullopt, std::string("1"), false, false},     {std::string("0"), std::string("0"), false, true},
+    };
+    for (const Row& r : rows) {
+        const std::string tag = std::format("AMD_SERIALIZE_KERNEL={} WHIRL_NO_GRAPH={}", r.amd ? "'" + *r.amd + "'" : "unset",
+                                            r.no_graph ? "'" + *r.no_graph + "'" : "unset");
+        nu::RuntimeValues v;
+        v.no_graph = r.no_graph;
+        const std::optional<std::string> note = nu::serializeKernelNoGraph(r.amd, v);
+        NCHECK(note.has_value() == r.note, "kgcrash {}: note {}", tag, note.has_value());
+        if (note) {
+            NCHECK(note->find("AMD_SERIALIZE_KERNEL=" + *r.amd) != std::string::npos, "kgcrash {}: the line names the variable: {}", tag, *note);
+            NCHECK(note->find("graph") != std::string::npos && note->find('\n') == std::string::npos, "kgcrash {}: one line on the graph: {}",
+                   tag, *note);
+            NCHECK(v.no_graph && *v.no_graph == "1", "kgcrash {}: takes the WHIRL_NO_GRAPH path", tag);
+        } else {
+            NCHECK(v.no_graph == r.no_graph, "kgcrash {}: WHIRL_NO_GRAPH unchanged", tag);
+        }
+        for (const nu::Front fr : {nu::Front::cli, nu::Front::server}) {
+            nu::Plan p;
+            nu::applyFront(p, fr, v, true);
+            const bool want = fr == nu::Front::server ? false : r.graph;
+            NCHECK(p.flags.use_graph == want, "kgcrash {} front {}: use_graph {}", tag, fr == nu::Front::cli ? "cli" : "server", p.flags.use_graph);
+        }
+    }
+}
+
 void testN2bR1() {
     const nu::Target t = target(k_cards[0], "swift", false);
     // n2b-q8dec-empty: WHIRL_Q8DEC= (empty) must not decide prec_dec (tune.cpp:955). Needs a mode whose default is f16 decode
@@ -1990,6 +2033,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port); v0252-c3bdef (the R9700 MoE default rows fail before c3bdef)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
+    testSerializeKernelNoGraph();  // v0252-kgcrash (fails to build before the change)
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)
     testFastOnlyRefusal();  // bug-fastonly: refusal notes, fast unchanged
     testRelaxMoeArms();  // v0252-f2 (fails before the port: no arm is known)
