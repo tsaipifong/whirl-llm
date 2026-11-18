@@ -44,7 +44,7 @@ void Model::allocScratch(u32 fd_splits_) {
     // ffn_g / ffn_u double as autotune / bench scratch for every matrix
     u32 ffs = cfg.n_ff;
     for (const Layer& L : m.layers)
-        for (const Mat& w : m.layerMats(L).slice()) ffs = std::max(ffs, std::max(w.nrows, w.ncols));
+        for (const MatList lm = m.layerMats(L); const Mat& w : lm.slice()) ffs = std::max(ffs, std::max(w.nrows, w.ncols));
     m.ff_scratch = ffs;
     m.ffn_g = m.alloc(B * ffs * f4);
     m.ffn_u = m.alloc(B * ffs * f4);
@@ -75,7 +75,7 @@ void Model::allocScratch(u32 fd_splits_) {
     if (m.dq_st_ml == 0 && m.k.attn_pws != nullptr) m.dq_st_ml = m.alloc(B * cfg.n_head * 2 * f4);
     {
         for (const Layer& L : m.layers)
-            for (const Mat& w : m.layerMats(L).slice()) max_elems = std::max(max_elems, static_cast<u64>(w.ncols) * w.nrows);
+            for (const MatList lm = m.layerMats(L); const Mat& w : lm.slice()) max_elems = std::max(max_elems, static_cast<u64>(w.ncols) * w.nrows);
         m.w16 = m.alloc(max_elems * 2);
     }
     {

@@ -41,9 +41,17 @@ void Context::prefillWithMtp(std::span<const u32> tokens) {
 // (copy on write, page_pool.cpp), so the drafts - and with relaxacc the fast-mode text - depended on earlier requests.
 // As llama.cpp (common/speculative.cpp: pending_h starts as zeros) and ik_llama.cpp (speculative.cpp: the previous
 // hidden of a fresh prompt is zeros) the row pairs a ZERO hidden with token 0 (progress\v0252-mtpkv0.PRIOR_ART.md). It
-// runs on its own before the forward, as the boundary row: row 0 comes only from this cold path (a resume reads it
-// from the cached prefix), so cold and resumed MTP KV stay the same bits. The zero row is written into mtp_h, which
-// the chunk's last hidden replaces at the end.
+// runs on its own (one row, as the boundary row): row 0 comes only from this cold path (a resume reads it from the
+// cached prefix), so cold and resumed MTP KV stay the same bits. The zero row is written into mtp_h, which the chunk's
+// last hidden replaces at the end.
+// v0252-fix2k (PLAN V1-127): that one-row pass runs AFTER the chunk's trunk forward (still before the rows 1.. that read
+// it), as llama.cpp / ik_llama.cpp run their first MTP row after the target batch. Before the forward it cost ~2 ms per
+// cold request on the R9700 (Swift balance 2k): the trunk's synchronous token upload (setTokens) waited for it on the GPU
+// and its launches went out one by one on an idle queue; after the forward they queue behind the trunk's work. The row is
+// the same one-row mtpForward of the same zero hidden and token 0 at position 0, and its attention reads only position 0
+// (which it writes), so its MTP KV bits are unchanged. Not folded into the rows-1.. batch (llama.cpp's shape): a row
+// inside a batch is not bitwise the one-row pass (see above). The memset stays before the forward: the queue is idle there
+// (Context::reset's synchronous memsets just ran), and the forward does not write mtp_h.
 void Context::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t off, std::size_t n, std::optional<DevPtr> prev_hidden) {
     const u64 E = cfg.n_embd;
     const u32 cap = ck_cap_row;  // (forward() clears it; cleared here too on every exit)
@@ -53,11 +61,12 @@ void Context::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t
     } cap_reset{ck_cap_row};
     if (off == 0 && prev_hidden) hip::copyAsync(mtp_h, *prev_hidden, E * 4, stream);
     // mtp_h: the previous chunk's last hidden (off > 0) or the checkpoint's (resume)
+    bool row0 = false;  // v0252-fix2k: the MTP row 0 of a cold sequence, run after the trunk forward
     if (off > 0 || prev_hidden) {
         (void)mtpForward(mtp_h, tokens.subspan(off, 1), pos0 + static_cast<u32>(off), false);
     } else if (pos0 == 0 && n > 0) {  // (n == 0: forward() refuses the chunk, as before)
         hip::memset(mtp_h, 0, static_cast<std::size_t>(E) * 4);  // the MTP row 0: a zero hidden with token 0
-        (void)mtpForward(mtp_h, tokens.subspan(0, 1), 0, false);
+        row0 = true;
     }
     const u32 p = pos0 + static_cast<u32>(off);
     keep_hidden = true;
@@ -68,6 +77,7 @@ void Context::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t
         throw;
     }
     keep_hidden = false;
+    if (row0) (void)mtpForward(mtp_h, tokens.subspan(0, 1), 0, false);
     if (cap > 0 && cap < n) {
         if (cap > 1) (void)mtpForward(hn, tokens.subspan(off + 1, cap - 1), p + 1, false);
         hip::copyAsync(mtp_h, hn + static_cast<u64>(cap - 1) * E * 4, E * 4, stream);

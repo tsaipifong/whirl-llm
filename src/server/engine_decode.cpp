@@ -337,9 +337,13 @@ void SpecCycle::layoutBatch(Cycle& cy) {
     if (e1_site && !cy.e1 && !cy.act[0]->e1_len_off) {
         // said once per request (never per cycle): this slot has grown past the boundary
         cy.act[0]->e1_len_off = true;
+        // v0252-graphfix (PLAN V1-128): the boundary is read into a local first. logI takes forwarding references
+        // (log.h), and binding opt_'s member to one is what the engine-cut census books as a write of the core.shared
+        // opt_ (clang ExprMutationAnalyzer); this cycle only reads its options, so it stays out of shared_writers
+        const std::uint32_t ctx_max = opt_.e1_ctx_max;
         logI("decode: slot {} | the default E1 lookahead stops at this length: context {} tokens >= {}; this request's cycles now run the "
              "ordinary way (the length-aware default; an explicitly set WHIRL_E1 runs at every length)",
-             cy.act[0]->id, cy.act[0]->pos, opt_.e1_ctx_max);
+             cy.act[0]->id, cy.act[0]->pos, ctx_max);
     }
     // MTP steps r >= 1 run on the MTP slots with more than r drafts: MTP slots
     // sorted by draft count (descending) at the front of the batch

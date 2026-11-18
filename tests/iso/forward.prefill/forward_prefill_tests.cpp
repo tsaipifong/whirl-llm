@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -125,6 +126,7 @@ struct StopAtAttn {};
 struct AttnCall {
     std::int32_t win = 0;
     std::vector<std::int32_t> pos;
+    std::size_t launches = 0;  // v0252-fix2k: kernel launches recorded before this attention block's entry
 };
 std::vector<AttnCall> g_attn;
 
@@ -133,6 +135,7 @@ void attnRowsHook(void* ctx, std::int32_t win) {
     AttnCall a;
     a.win = win;
     for (std::uint32_t r = 0; r < c->row_n; ++r) a.pos.push_back(c->row_pos[r]);
+    a.launches = fake::recordedLaunches().size();
     g_attn.push_back(a);
     throw StopAtAttn{};
 }
@@ -233,12 +236,62 @@ void testMtpLaterChunkBoundaryRow() {
     ISO_CHECK(stopped3 && !g_attn.empty() && g_attn[0].pos == std::vector<std::int32_t>{301});
 }
 
+// v0252-fix2k (PLAN V1-127): the cold MTP row 0 runs AFTER the chunk's trunk forward (still before the rows 1.. that
+// read it), not between the request start and the trunk forward. Before, the trunk forward's synchronous token upload
+// waited for the row-0 MTP block on the GPU and its ~25 launches went out one by one on an idle queue: about 2 ms per cold
+// request on the R9700 (Swift balance 2k, -0.30 % +- 0.04 vs 0.2.5.1; WHIRL_MTP=0 -0.08 % +- 0.05). After the forward the
+// row's launches queue behind the trunk's work. Same row: the same one-row mtpForward of (zero hidden, token 0) at
+// position 0 (its attention reads only position 0, which it writes), so the MTP KV row 0 bits are unchanged.
+// Observed on the link double: the launches recorded before the first (MTP, position 0) attention entry are the trunk
+// forward's launches plus the row-0 block's own prefix, measured on fresh contexts.
+std::size_t launchesOf(const std::function<void()>& f) {
+    g_attn.clear();
+    fake::recordLaunches(true);
+    try {
+        f();
+    } catch (const StopAtAttn&) {
+    } catch (const std::exception&) {
+        // a device call of the link double: the count stays what was launched before it
+    }
+    fake::recordLaunches(false);
+    return g_attn.empty() ? fake::recordedLaunches().size() : g_attn[0].launches;
+}
+
+void testMtpRow0AfterTrunkForward() {
+    const std::vector<std::uint32_t> toks = {11, 12};
+    // the trunk forward of the chunk alone, keeping the hidden rows as prefillMtpChunk's forward does (no attention layer
+    // in this context: it runs to its end on the double)
+    auto cf = mtpContext(1);
+    cf->keep_hidden = true;
+    const std::size_t n_fwd = launchesOf([&] { cf->forward(toks, 0); });
+    cf->keep_hidden = false;
+    // the row-0 MTP block alone, up to its attention entry
+    auto cm = mtpContext(1);
+    const std::size_t n_row0 = launchesOf([&] { (void)cm->mtpForward(cm->mtp_h, std::span<const std::uint32_t>(toks).subspan(0, 1), 0, false); });
+    ISO_CHECK(n_fwd > 0 && n_row0 > 0);
+    auto c = mtpContext(1);
+    const bool stopped = runToAttn([&] { c->prefillMtpChunk(toks, 0, 0, toks.size(), std::nullopt); });
+    ISO_CHECK(stopped && !g_attn.empty() && g_attn[0].win == kWin && g_attn[0].pos == std::vector<std::int32_t>{0});
+    // V1-127: the row-0 block ran first (n_row0 launches), the trunk forward after it
+    ISO_CHECK(!g_attn.empty() && g_attn[0].launches == n_fwd + n_row0);
+    // the CLI's chunk loop the same
+    auto c2 = mtpContext(1);
+    const bool stopped2 = runToAttn([&] { c2->prefillWithMtp(toks); });
+    ISO_CHECK(stopped2 && !g_attn.empty() && g_attn[0].launches == n_fwd + n_row0);
+    // not cold (a later chunk's boundary row): unchanged, its MTP row still runs before that chunk's forward
+    auto c3 = mtpContext(1);
+    const std::vector<std::uint32_t> four = {11, 12, 13, 14};
+    const bool stopped3 = runToAttn([&] { c3->prefillMtpChunk(four, 0, 2, 2, std::nullopt); });
+    ISO_CHECK(stopped3 && !g_attn.empty() && g_attn[0].launches == n_row0);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     return iso::run("forward.prefill",
                     {{"can_segment", testCanSegment}, {"prefill_segs_batch", testPrefillSegsBatch}, {"seg_logits_to_front", testSegLogitsToFront},
                      {"prefill_chunks", testPrefillChunks}, {"mtp_row0_cold_chunk", testMtpRow0ColdChunk},
-                     {"mtp_row0_segmented_prefill", testMtpRow0SegmentedPrefill}, {"mtp_later_chunk_boundary_row", testMtpLaterChunkBoundaryRow}},
+                     {"mtp_row0_segmented_prefill", testMtpRow0SegmentedPrefill}, {"mtp_later_chunk_boundary_row", testMtpLaterChunkBoundaryRow},
+                     {"mtp_row0_after_trunk_forward", testMtpRow0AfterTrunkForward}},
                     argc, argv);
 }

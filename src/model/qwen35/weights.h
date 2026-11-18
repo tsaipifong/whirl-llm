@@ -100,7 +100,11 @@ struct Layer {
 struct MatList {
     std::array<Mat, 8> items{};
     std::size_t len = 0;
-    std::span<const Mat> slice() const { return {items.data(), len}; }
+    // v0252-graphfix: a span INTO this list; deleted on a temporary, where it would dangle after the full expression (the
+    // range-for `for (... : layerMats(L).slice())` read a dead MatList: ASan stack-use-after-scope). Name the list first:
+    // `for (const MatList lm = layerMats(L); const Mat& w : lm.slice())`. Pinned by tests/iso/forward.state (SliceOf).
+    std::span<const Mat> slice() const& { return {items.data(), len}; }
+    std::span<const Mat> slice() const&& = delete;
     void add(const Mat& m) { items[len++] = m; }
 };
 

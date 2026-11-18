@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "../forward/forward_state_cases.inc"
@@ -171,6 +172,17 @@ void testReset() {
     }
     ISO_CHECK(refused);
 }
+
+// v0252-graphfix: MatList::slice() is a span INTO the list, so it must not be taken from a temporary. The range-for
+// `for (const Mat& w : layerMats(L).slice())` (loader, dispatch, model_scratch, tune) kept only the span alive: the MatList
+// temporary ended with the range initializer, and every w read a dead stack object (ASan stack-use-after-scope in
+// Model::allocScratch, model_scratch.cpp:47, on `whirl bench`; scratch/v0252_graphfix/gpu_A1_asan_default_normal.log).
+// slice() on an rvalue is deleted; this pins that (fails to compile before the fix).
+template <class T>
+concept SliceOf = requires(T&& t) { std::forward<T>(t).slice(); };
+static_assert(SliceOf<const whirl::qwen35::MatList&>, "slice() of a named MatList");
+static_assert(!SliceOf<whirl::qwen35::MatList>, "slice() of a temporary MatList would dangle (v0252-graphfix)");
+static_assert(!SliceOf<const whirl::qwen35::MatList>, "slice() of a const temporary MatList would dangle (v0252-graphfix)");
 
 void testLayerMats() {
     const auto c = smallModel();

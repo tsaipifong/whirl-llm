@@ -394,7 +394,7 @@ void Model::requantMtpQ4() {
         if (nw.ptr == w->ptr) continue;
         Mat tuned = nw;
         for (const Layer& L : layers)
-            for (const Mat& lw : layerMats(L).slice())
+            for (const MatList lm = layerMats(L); const Mat& lw : lm.slice())
                 if (lw.ty == GgmlType::q4_k && lw.nrows == nw.nrows && lw.ncols == nw.ncols) tuned.tune = lw.tune;
         const DevPtr old = w->ptr;
         *w = tuned;
