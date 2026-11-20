@@ -50,12 +50,14 @@ public:
     Value argmax_mb;
     // numerics::loadFlags (v0252-strixc2): WHIRL_ATTN_SX=0 turns the gfx1151 balance attn_sx prefill attention off
     Value attn_sx;
+    // Model::load (v0252-kvlong2, O1): WHIRL_DQ_FULL=0 keeps the q8 / q8h / q4 prefill dequant copy FFN-sized (the plan before O1)
+    Value dq_full;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 69;
+    static constexpr std::size_t n_names = 70;
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

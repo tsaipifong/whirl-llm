@@ -296,7 +296,11 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
 
     // the prefill / decode buffers (qwen35::Scratch) and the sizing self-check: Model::allocScratch
     // (src/model/qwen35/scratch.cpp, arch025-M3; the block moved verbatim, same allocation order)
-    m.allocScratch(fdSplitsOf(m.kv_fmt, env));
+    // v0252-kvlong2 (O1): q8 / q8h / q4 size the prefill dequant copy for one sequence's keys (the server: its
+    // per-request context in LoadOptions::dq_ctx; the CLI: max_ctx_req)
+    // WHIRL_DQ_FULL=0: the FFN-sized copy (the plan before O1)
+    const bool dq_full = !(env.dq_full && *env.dq_full == "0");
+    m.allocScratch(fdSplitsOf(m.kv_fmt, env), !dq_full ? 0u : opt.dq_ctx != 0 ? opt.dq_ctx : max_ctx_req);
     // KV pool for max_ctx tokens, one sequence with an identity page table (the
     // server loads with max_ctx 0 and allocates its shared pool later). The format chosen above
     // must fit next to what the CLI still allocates (MTP snapshot sets for 8 drafts, the 2-bit

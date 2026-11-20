@@ -27,6 +27,20 @@ inline constexpr std::uint64_t am_ws_bytes = 512;
 // fd_splits: attention split-K partials (resolveFdSplits: 64, 256 with q4 KV, WHIRL_FD_SPLITS).
 std::uint64_t bufferBytes(const Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint64_t max_elems, std::uint32_t fd_splits = 64);
 
+// v0252-kvlong2 (O1, PLAN V1-137): the f16 copy of a sequence's K / V that q8 / q8h / q4 prefill attention reads lives in
+// ffn_g / ffn_u (Model::allocScratch). rows: keys it holds (dq_rows); bytes_each: the size of ffn_g and of ffn_u; extra:
+// what both add over the FFN scratch (B * ffs * 4 each). ctx: keys one sequence may reach (CLI --ctx, the server's
+// per-request context; 0 = the FFN scratch size, the plan before O1). Capped at ops::kDqMaxKeys (the page table).
+struct DqCopy {
+    std::uint32_t rows = 0;
+    std::uint64_t bytes_each = 0;
+    std::uint64_t extra = 0;
+};
+DqCopy dqCopyPlan(const Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint32_t ctx);
+// the grown copy is taken only when its extra bytes, what the load still allocates (still) and a 1 GiB margin fit in
+// the free VRAM; else the FFN-sized copy (key ranges past it, attn_kgs) as before O1
+bool dqCopyFits(std::uint64_t extra, std::uint64_t free, std::uint64_t still);
+
 struct Scratch {
     DevPtr x = 0, h = 0, qf = 0, kv_k = 0, kv_v = 0, attn_out = 0, qkv = 0, conv_out = 0, z = 0, beta = 0, alpha = 0, ba_buf = 0,
            gdn_out = 0, ffn_g = 0, ffn_u = 0, logits = 0, scores = 0, ids = 0, pos_buf = 0, out_tok = 0;

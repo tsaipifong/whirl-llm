@@ -96,6 +96,9 @@ struct LoadOptions {
     // Ignored when the code object lacks the DFlash2 kernels (Model::mtp_skipped stays false):
     // the caller then falls back to the MTP drafts.
     bool no_mtp = false;
+    // v0252-kvlong2 (O1): keys one sequence may reach, for the q8 / q8h / q4 prefill dequant copy (Model::allocScratch);
+    // 0 = max_ctx_req (the CLI). The server loads with max_ctx 0 and passes its per-request context here.
+    std::uint32_t dq_ctx = 0;
     // The load's WHIRL_* environment (arch025-N1, src/config/env_snapshot.h). Null: Model::load reads one at its
     // start. Model::load keeps it (Model::env_snap) for loadOrTune, applyGemvEnv and the selftest checks.
     std::shared_ptr<const whirl::config::EnvSnapshot> env;
@@ -241,7 +244,9 @@ public:
 
 private:
     // Model::load's prefill / decode buffers (Scratch) and the sizing self-check (src/model/qwen35/scratch.cpp)
-    void allocScratch(std::uint32_t fd_splits_);
+    // dq_ctx (v0252-kvlong2, O1): keys one sequence may reach; q8 / q8h / q4 KV size their prefill dequant copy for it
+    // (qwen35::dqCopyPlan) when it fits, 0 = the FFN-sized copy as before
+    void allocScratch(std::uint32_t fd_splits_, std::uint32_t dq_ctx = 0);
     Mat requantQ4k(const Mat& w);
     std::vector<Mat*> tuneMats(Layer& L);
 };

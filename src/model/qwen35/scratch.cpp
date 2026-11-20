@@ -87,4 +87,27 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits
     return n;
 }
 
+DqCopy dqCopyPlan(const Config& cfg, u32 B, u64 ffs, u32 ctx) {
+    DqCopy d;
+    const u64 row_bytes = static_cast<u64>(cfg.n_head_kv) * cfg.head_dim * 2;  // one key's f16 K (or V) row
+    const u64 base = static_cast<u64>(B) * ffs * 4;                            // ffn_g / ffn_u for the FFN
+    d.bytes_each = base;
+    if (row_bytes == 0) return d;
+    // the plan before O1: the rows the FFN scratch holds (ctx 0, or a context it already covers)
+    d.rows = static_cast<u32>(std::min<u64>(base / row_bytes, 1u << 30)) / 256 * 256;
+    const u64 want = std::min<u64>((static_cast<u64>(ctx) + 255) / 256 * 256, ops::kDqMaxKeys);
+    if (want > d.rows) {
+        d.rows = static_cast<u32>(want);
+        if (want * row_bytes > base) {
+            d.bytes_each = want * row_bytes;
+            d.extra = 2 * (d.bytes_each - base);
+        }
+    }
+    return d;
+}
+
+bool dqCopyFits(u64 extra, u64 free, u64 still) {
+    return extra == 0 || free >= extra + still + (1ull << 30);
+}
+
 }  // namespace whirl::qwen35

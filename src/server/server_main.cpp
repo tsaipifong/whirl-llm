@@ -629,6 +629,8 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         exec_req = settings::prefillChunk(nullptr);  // (arch025-N15: the shared number rule; malformed = unset)
         logI("prefill forward up to {} rows requested (WHIRL_PREFILL_CHUNK)", exec_req.value_or(0));
     }
+    // v0252-kvlong2 (O1): the q8 / q8h / q4 prefill dequant copy covers one request's context (the pool is sized after the load)
+    lo.dq_ctx = slot_ctx;
     std::unique_ptr<qwen35::Model>& mp = b.mp = model::loadServerModel(*am, f, 0, stats, lo);  // the arch module's load (X-16)
     qwen35::Model& model = *mp;
     // whole schedule chunks that fit the prefill batch (a forward never exceeds the batch:

@@ -21,7 +21,7 @@ using u32 = std::uint32_t;
 
 }  // namespace
 
-void Model::allocScratch(u32 fd_splits_) {
+void Model::allocScratch(u32 fd_splits_, u32 dq_ctx) {
     Model& m = *this;
     const Config& cfg = m.cfg;
     const u64 f4 = 4;
@@ -46,8 +46,35 @@ void Model::allocScratch(u32 fd_splits_) {
     for (const Layer& L : m.layers)
         for (const MatList lm = m.layerMats(L); const Mat& w : lm.slice()) ffs = std::max(ffs, std::max(w.nrows, w.ncols));
     m.ff_scratch = ffs;
-    m.ffn_g = m.alloc(B * ffs * f4);
-    m.ffn_u = m.alloc(B * ffs * f4);
+    // q8 / q8h / q4 prefill attention: f16 copies of a sequence's K / V in ffn_g / ffn_u (Model::prefillAttn).
+    // v0252-kvlong2 (O1, PLAN V1-137): sized for dq_ctx keys (qwen35::dqCopyPlan) when that fits next to what the load
+    // still allocates, so a prompt past the FFN scratch (131072 keys on Ornith) keeps one dequant range and attn_kgk
+    // instead of key ranges with attn_kgs; else the FFN-sized copy as before (one launch line says so). f16 KV
+    // (precise) never takes this branch: dq_ctx is 0 for it and ffn_g / ffn_u keep B * ffs * 4.
+    const bool dq_copy = kvQuant(m.kv_fmt) && !kvKf16(m.kv_fmt) && (kvIs4bit(m.kv_fmt) ? m.k.kv_dq_rows_r != nullptr : m.k.kv_dq_rows != nullptr);
+    DqCopy dq = dqCopyPlan(cfg, m.max_batch, ffs, dq_copy ? dq_ctx : 0);
+    if (dq.extra > 0) {
+        u64 me = 0;
+        for (const Layer& L : m.layers)
+            for (const MatList lm = m.layerMats(L); const Mat& w : lm.slice()) me = std::max(me, static_cast<u64>(w.ncols) * w.nrows);
+        const u64 est = bufferBytes(cfg, m.max_batch, ffs, me, fd_splits_), done = m.alloc_total - buffers_from;
+        // still to come: the rest of these buffers and one sequence's KV for dq_ctx keys
+        const u64 still = (est > done ? est - done : 0) + static_cast<u64>(dq_ctx) * m.kvBytesPerToken();
+        const hip::MemInfo mi = hip::memInfo();
+        const double mib = 1024.0 * 1024.0;
+        if (dqCopyFits(dq.extra, mi.free, still)) {
+            m.load_note += "prefill attention: the f16 copy of the " + std::string(kvFormatName(m.kv_fmt)) + " KV covers " + std::to_string(dq.rows) +
+                           " keys (+" + std::to_string(static_cast<u64>(dq.extra / mib)) + " MiB)\n";
+        } else {
+            const DqCopy d0 = dqCopyPlan(cfg, m.max_batch, ffs, 0);
+            m.load_note += "prefill attention: no VRAM for an f16 KV copy of " + std::to_string(dq.rows) + " keys (+" +
+                           std::to_string(static_cast<u64>(dq.extra / mib)) + " MiB, " + std::to_string(static_cast<u64>(mi.free / mib)) +
+                           " MiB free): keys past " + std::to_string(d0.rows) + " are walked in ranges (slower prefill)\n";
+            dq = d0;
+        }
+    }
+    m.ffn_g = m.alloc(dq.bytes_each);
+    m.ffn_u = m.alloc(dq.bytes_each);
     m.logits = m.alloc(static_cast<u64>(max_verify_rows) * cfg.n_vocab * f4);
     m.hn = m.alloc(B * cfg.n_embd * f4);
     m.mtp_cat = m.alloc(B * 2 * cfg.n_embd * f4);
@@ -61,9 +88,10 @@ void Model::allocScratch(u32 fd_splits_) {
     const u64 n_split = m.fd_splits;
     m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
     m.part_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
-    if (kvQuant(m.kv_fmt) && !kvKf16(m.kv_fmt) && (kvIs4bit(m.kv_fmt) ? m.k.kv_dq_rows_r != nullptr : m.k.kv_dq_rows != nullptr)) {
-        // q8 / q8h / q4 prefill attention: f16 copies of a sequence's K / V in ffn_g / ffn_u (Model::prefillAttn)
-        m.dq_rows = static_cast<u32>(std::min<u64>(B * ffs * f4 / (static_cast<u64>(cfg.n_head_kv) * cfg.head_dim * 2), 1u << 30)) / 256 * 256;
+    if (dq_copy) {
+        // q8 / q8h / q4 prefill attention: f16 copies of a sequence's K / V in ffn_g / ffn_u (Model::prefillAttn); without
+        // dq_ctx the same rows as before O1 (B * ffs * 4 / row bytes, whole 256-row pages)
+        m.dq_rows = dq.rows;
         if (m.k.kv_dq_rows_r != nullptr) m.dq_st_ml = m.alloc(B * cfg.n_head * 2 * f4);
         // identity pages for every key position (the key ranges of attn_kgs index it by sequence position)
         std::vector<std::int32_t> id(std::max<u64>(m.dq_rows, kDqMaxKeys) / 256 + 1);
@@ -129,7 +157,8 @@ void Model::allocScratch(u32 fd_splits_) {
     }
     // sizing self-check: the pre-load estimate (bufferBytes, the server's auto-shrink) must cover what was just
     // allocated; a shortfall means an allocation was added without updating the estimate
-    if (const u64 used = m.alloc_total - buffers_from, est = bufferBytes(cfg, m.max_batch, ffs, max_elems, m.fd_splits); used > est)
+    // (+ the O1 copy's extra bytes when it was taken: bufferBytes is the batch-only estimate)
+    if (const u64 used = m.alloc_total - buffers_from, est = bufferBytes(cfg, m.max_batch, ffs, max_elems, m.fd_splits) + dq.extra; used > est)
         m.load_note += "warning: the VRAM estimate for the prefill buffers (" + std::to_string(est >> 20) + " MiB) is below what was allocated (" +
                        std::to_string(used >> 20) + " MiB); please report\n";
 }
