@@ -82,6 +82,15 @@ void testFlagAndForwardEnv() {
     ISO_CHECK(!f.head_gemvx && !f.prec_gemvh && f.prec_gs == 0);
     const auto d = whirl::config::forwardEnv(EnvSnapshot::fromValues({}));
     ISO_CHECK(!d.head_gemvx && d.prec_gemvh && d.prec_gs == -1);
+    // v0252-pp2k2: WHIRL_GEMM_TAIL (the GEMM token-tail split): unset / "" -> -1 (the device profile's default), "0" -> 0
+    // (off), anything else -> 1 (on for any family)
+    using whirl::config::gemmTailEnv;
+    ISO_CHECK(gemmTailEnv(EnvSnapshot::fromValues({})) == -1);
+    ISO_CHECK(gemmTailEnv(EnvSnapshot::fromValues({{"GEMM_TAIL", std::string("")}})) == -1);
+    ISO_CHECK(gemmTailEnv(EnvSnapshot::fromValues({{"GEMM_TAIL", std::string("0")}})) == 0);
+    ISO_CHECK(gemmTailEnv(EnvSnapshot::fromValues({{"GEMM_TAIL", std::string("1")}})) == 1);
+    ISO_CHECK(gemmTailEnv(EnvSnapshot::fromValues({{"GEMM_TAIL", std::string("on")}})) == 1);
+    ISO_CHECK(EnvSnapshot::fromValues({{"GEMM_TAIL", std::string("0")}}).get("GEMM_TAIL") == std::string("0"));
 }
 
 // arch025-N6 (lane 1 leg 11): whirl::envGet / envFlag are config.settings' functions (one definition), and they read

@@ -36,6 +36,7 @@ void testProfiles() {
     // Context::argmaxMbMode), off for dense models and on gfx1151 (no twins in that object)
     CHECK(!a.argmax_mb_dense && a.argmax_mb_moe && !b.argmax_mb_dense && !b.argmax_mb_moe);
     CHECK(!a.attn_sx_balance && b.attn_sx_balance);  // v0252-strixc2: the balance attn_sx prefill attention on the 8060S only
+    CHECK(a.gemm_tail && !b.gemm_tail);  // v0252-pp2k2 (F1): the GEMM token-tail split on the R9700 only (8060S unchanged)
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
     // v0252-ch4k2 (PLAN V1-75): gfx1201 MoE 4096-row forwards in the fill form, as gfx1151 (v0252-ch4k timed A/B)
