@@ -30,6 +30,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_DFLASH_PMIN",  // include/whirl/dflash_policy.h
     "WHIRL_DFLASH_WARM",  // include/whirl/dflash_policy.h
     "WHIRL_DQ4_DYN",  // src/common/numerics.cpp
+    "WHIRL_DQ_FULL",  // src/model/loader.cpp (v0252-kvlong2: =0 the FFN-sized prefill dequant copy; q8h may take other kernels)
     "WHIRL_DRAFT_HEAD",  // src/cli/cmd_bench.cpp
     "WHIRL_DRAFT_MODEL",  // src/cli/build_model.cpp
     "WHIRL_DRAFT_VOCAB",  // src/cli/build_model.cpp

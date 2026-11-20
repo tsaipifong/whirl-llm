@@ -1235,6 +1235,43 @@ void testAttnFastQ4Kgk() {
         CHECK(nameOf(ops::chooseAttnPrefill(p, fa, kv).steps.back().f) == (sh.np == 4 ? "attn_kgf4" : "attn_kgk6"));
     }
     std::printf("  fast q4 one-range prefill: %zu shape x length x chunk cells\n", cells);
+    // v0252-kvlong2 (O1, PLAN V1-137): past 131072 keys (a 256k prompt's later chunks, here 200000 keys) the plan is ONE
+    // dequant range + attn_kgk and no attn_kgs when the copy holds every key (dq_rows >= rows: the context-sized copy of
+    // qwen35::dqCopyPlan); a copy smaller than the keys (a card that cannot afford it) keeps the key ranges + attn_kgs.
+    for (const Shape sh : {Shape{16, 2, 4}, Shape{24, 4, 6}}) {
+        const std::string s = std::to_string(sh.np);
+        ops::AttnPrefillProblem p;
+        p.n = 4096;
+        p.pos0 = 200000 - 4096;
+        p.head_dim = 256;
+        p.n_head = sh.heads;
+        p.n_head_kv = sh.kv;
+        p.scale = 1.0f / 16.0f;
+        p.kv_q8 = true;
+        p.dq_ptab = p.dq_st_ml = true;
+        ops::AttnPrefillFlags fa;
+        fa.attn_kg_var = ops::kAttnKgVarAuto;
+        for (const std::uint32_t dq : {200192u, 262144u}) {
+            p.dq_rows = dq;
+            const auto pl = ops::chooseAttnPrefill(p, fa, kq4);
+            std::size_t dqs = 0, kgk = 0, other = 0;
+            bool one = !pl.steps.empty() && pl.steps[0].op == ops::AttnStep::Op::dq_rows_r && pl.steps[0].r0 == 0 && pl.steps[0].nrows == 200000;
+            for (const auto& st : pl.steps) {
+                dqs += st.op == ops::AttnStep::Op::dq_rows_r;
+                if (st.op == ops::AttnStep::Op::attn) (nameOf(st.f) == "attn_kgk" + s && st.from_copy && !st.ranged ? kgk : other) += 1;
+            }
+            if (!(one && dqs == 1 && kgk >= 1 && other == 0)) std::printf("  kvlong2 NP %s dq_rows %u: not one range + attn_kgk\n", s.c_str(), dq);
+            CHECK(one && dqs == 1 && kgk >= 1 && other == 0 && kgShapesMatch(pl));
+        }
+        p.dq_rows = 131072;  // the FFN-sized copy (before O1, or no VRAM for the grown one): two ranges, attn_kgs
+        const auto pl = ops::chooseAttnPrefill(p, fa, kq4);
+        std::size_t dqs = 0, kgs = 0, other = 0;
+        for (const auto& st : pl.steps) {
+            dqs += st.op == ops::AttnStep::Op::dq_rows_r;
+            if (st.op == ops::AttnStep::Op::attn) (nameOf(st.f) == "attn_kgs" + s && st.ranged ? kgs : other) += 1;
+        }
+        CHECK(dqs == 2 && kgs >= 2 && other == 0 && kgShapesMatch(pl));
+    }
 }
 
 // the attention-prep / attention-core rules (arch025-n8b1: the block of testGdnChoice that calls only src/ops/attention.cpp,
