@@ -106,6 +106,8 @@ enum class GemvWide : std::uint8_t { gemvx, head_split, pieces };
 GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::MatmulKernels& k, bool head_gemvx);
 // smallest batch that takes gemmh_f16 instead of the tuned f16 GEMM (= tune.cpp's candidate rule)
 inline constexpr std::uint32_t gemmh_min = 512;
+// token tile of gemmh_f16 / gemmhh_f16 / gemmhq_<T> (kernels/shared/gemmh_impl.h BN): grid x = (n + gemmh_bn - 1) / gemmh_bn
+inline constexpr std::uint32_t gemmh_bn = 256;
 
 // grid of the wide kernels for one matrix (rows of a head chunk for head_split)
 Dim3 gemvxGrid(std::uint32_t nrows);
@@ -142,6 +144,9 @@ struct GemmFlags {
     // tile, grid and bits) when the object has it. Context::gemmFlags: device::Profile::fq_grp_dense / fq_grp_moe
     std::uint8_t fq_grp = 0;
     std::uint32_t gv_max = 16;
+    // v0252-pp2k2 (F1): the token-tail split of planGemmF16. Context::gemmFlags: device::Profile::gemm_tail unless
+    // WHIRL_GEMM_TAIL sets it (config::gemmTailEnv at the load: "0" off, other values on)
+    bool gemm_tail = false;
 };
 enum class GemmKind : std::uint8_t { gemvh, gemms, gemmhq, gemmh, gemmc, gemmfq };
 struct GemmPlan {
@@ -152,12 +157,32 @@ struct GemmPlan {
     Function dq = nullptr;
     Dim3 dq_grid{};
     BitClass bits = BitClass::f16_gemm;
+    // v0252-pp2k2: the kernel writes f16 outputs (an h16 twin: gemmhh_f16 / gemm_ch / gemmhqh / gemmsh); set for the
+    // gemmh / gemmhq / gemms plans (the kinds planGemmF16 splits or launches as a tail), false otherwise
+    bool y_h16 = false;
 };
 // the tuned choice code for n rows: [0, G) fused gemm_c on the quantized bytes, [G, 2G) dequant + f16 gemm_c,
 // [2G, 2G + S) gemms slot (G = kGemmCfgs.size(), S = kGemmsCfgs.size())
 std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k);
 // w.row_bytes is read (an f16 matrix whose rows are padded is not gemmh's layout)
 GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k);
+// v0252-pp2k2 (PLAN V1-139, F1 GEMM tail split): the launches of an f16 GEMM of n token rows, in order. One piece = the
+// chooseGemmF16 plan over all rows. Two pieces when f.gemm_tail is on, the plan is gemmh / gemmhq (256-token tile) and the
+// r = n mod gemmh_bn rows past the last full tile fit a gemms token tile: rows [0, n - r) with that plan on (n - r) / 256
+// tiles, then rows [n - r, n) with precChoice's gemms slot for r rows (the narrowest tile that holds r; WHIRL_PREC_GS's
+// slot when it holds r) on the raw quantized weights, the gemmsh twin when the main kernel writes f16 (y_h16). No split
+// when that slot or twin is missing, no gemms tile holds r, or r == 0. A piece's rows are rows [row0, row0 + rows) of x
+// and y (row-major per token: x + row0 * ncols f16, y + row0 * nrows outputs). Bits: every plan is class f16_gemm and a
+// token split changes no output element's k order, so the pieces give the one-launch bits (checkPrefillInvariance).
+struct GemmPiece {
+    std::uint32_t row0 = 0, rows = 0;
+    GemmPlan plan;
+};
+struct GemmPieces {
+    std::array<GemmPiece, 2> p{};
+    std::size_t n = 0;
+};
+GemmPieces planGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k);
 // v0252-c3port (feat026-moedec L1): the f32-input twin of a gemvh plan p of weight type ty - gemvhf_<T> for gemvh_<T>,
 // gemvhf2_<T> for gemvh2_<T> - when enabled (Flags::gemvh_f32, WHIRL_GEMVH_F32), the grid is one block per 16 rows
 // (no gemvh_cap) and the code object has the kernel (gfx1201 only); else null = f32_to_f16 + p.f (the 0.2.5.1 path).

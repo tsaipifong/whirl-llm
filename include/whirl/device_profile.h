@@ -112,6 +112,10 @@ struct Profile {
     // WHIRL_E1 = 0 / 1 / 2 always wins). 0 = the host-input cycle, 2 = the E1 one-cycle lookahead (EngineOptions::e1).
     // The lookahead changes when a cycle is submitted, never what it computes: the reply is the same in the same mode
     std::uint8_t e1_dense, e1_moe;
+    // v0252-pp2k2 (PLAN V1-139, F1): ops::GemmFlags::gemm_tail default - a gemmh / gemmhq f16 GEMM whose rows are just past a
+    // 256 multiple runs its tail rows on the narrowest gemms tile (ops::planGemmF16; same bits). WHIRL_GEMM_TAIL=0 / 1
+    // overrides it. gfx1201 only: the gfx1151 prefill GEMMs are gemmfq with other grids (physical-isolation rule)
+    bool gemm_tail;
     // ---- vision
     unsigned vision_attn_threads;  // kernels/vision/vision.hip vis_attn2 block size of this code object
 };
@@ -176,6 +180,9 @@ inline constexpr Profile k_profile_gfx1201{
     // lookahead; its relaxed acceptance never looks ahead)
     .e1_dense = 0,
     .e1_moe = 2,
+    // v0252-pp2k2: the 2k cell's 2058-row forward ran a 9th 256-token tile for 10 rows (+10.4 % time for +0.8 % rows,
+    // KB v0252-pp2k:r97-precise-pp2k-tile-tail); screen progress/pp2k-gemmtail.json decides it
+    .gemm_tail = true,
     .vision_attn_threads = 128,
 };
 
@@ -227,6 +234,7 @@ inline constexpr Profile k_profile_gfx1151{
     // v0252-e1def: the 8060S verifies with DeltaNet snapshot sets (no E1 path: ServerModel::e1InputsOk), nothing measured
     .e1_dense = 0,
     .e1_moe = 0,
+    .gemm_tail = false,  // v0252-pp2k2: the 8060S keeps the 0.2.5.1 GEMM plans (object compare only)
     .vision_attn_threads = 256,
 };
 

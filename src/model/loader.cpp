@@ -155,6 +155,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         const FdqEnv fq = fdqEnv(env);
         m.fdq = fq.fdq;
         m.fdq_min = fq.fdq_min;
+        // v0252-pp2k2: the GEMM token-tail split switch (read by Context::gemmFlags)
+        m.gemm_tail = whirl::config::gemmTailEnv(env);
     }
     m.cfg = Config::fromGguf(f);
     const Config& cfg = m.cfg;
