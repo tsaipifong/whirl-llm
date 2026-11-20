@@ -109,6 +109,58 @@ void testTailInside() {
     ISO_CHECK(inside > 0);
 }
 
+// v0252-tailck8s (PLAN V1-138): the Radeon 8060S row takes the TAIL-CK checkpoint inside the forward as the R9700 does.
+// The precise pp 2k cell (2058 tokens, COLD-RESUME tail @1024) on the 8060S's own forward sizes (Swift dense 2048, Ornith
+// MoE 4096 in the fill form, batch 4096): one 2058-row forward with the capture after row 1024, not 1024 + 1034. A long
+// prompt (131072 tokens, tail @130048 = a forward start on both exec sizes) and a medium one (8200) plan as the R9700.
+void testTailInside8060S() {
+    namespace d = whirl::device;
+    const d::Profile& strix = d::profile(whirl::hip::Arch::gfx1151);
+    ISO_CHECK(strix.tail_ck_in_forward);
+    const Sizes none;
+    for (const bool moe : {false, true}) {
+        const std::size_t ex = s::prefillExec(std::nullopt, strix, moe, 4096);
+        const std::size_t t2k = s::tailPoint(2058, 0, 0, k_noimg);
+        ISO_CHECK(t2k == 1024);
+        const s::TailForward a = s::tailInside(2058, 0, 0, k_noimg, 0, ex, none, t2k, 4096);
+        ISO_CHECK(a.len == 2058 && a.cap == 1024);
+        // the 0.2.5.1 plan on this card: the tail stop ends the first forward
+        const Sizes st = {t2k};
+        ISO_CHECK(s::forwardEnds(2058, 0, 0, k_noimg, 0, ex, st, 4096) == (Sizes{1024, 2058}));
+        // 131072 tokens: tail @130048 lies inside the last forward ([129024, 131072) for 2048 rows, [126976, 131072) for
+        // 4096): exactly one capture, at the tail point
+        const std::size_t tl = s::tailPoint(131072, 0, 0, k_noimg);
+        ISO_CHECK(tl == 130048);
+        std::size_t caps = 0, at = 0;
+        for (std::size_t cur = 0; cur < 131072;) {
+            const s::TailForward r = s::tailInside(131072, 0, 0, k_noimg, cur, ex, none, tl, 4096);
+            if (r.cap > 0) {
+                ++caps;
+                at = cur + r.cap;
+            }
+            cur += r.len;
+        }
+        ISO_CHECK(caps == 1 && at == 130048);
+        // 8200 tokens: tail @7168. Swift (2048): the forward [6144, 8200) holds it (cap 1024). Ornith (4096): [4096, 8200)
+        // would be 4104 rows > the 4096 batch, so the forward is [4096, 7168) and ends at the tail point by itself (no capture)
+        const std::size_t t8 = s::tailPoint(8200, 0, 0, k_noimg);
+        ISO_CHECK(t8 == 7168);
+        std::size_t c8 = 0, cap8 = 0;
+        for (std::size_t cur = 0; cur < 8200;) {
+            const s::TailForward r = s::tailInside(8200, 0, 0, k_noimg, cur, ex, none, t8, 4096);
+            if (r.cap > 0) {
+                ++c8;
+                cap8 = cur + r.cap;
+            }
+            cur += r.len;
+        }
+        if (moe)
+            ISO_CHECK(c8 == 0);
+        else
+            ISO_CHECK(c8 == 1 && cap8 == 7168);
+    }
+}
+
 void testExecSize() {
     ISO_CHECK(s::prefillExecFor(2048, 4096) == 2048);
     ISO_CHECK(s::prefillExecFor(8192, 4096) == 3072);              // a forward + the merged tail must fit the batch
@@ -213,6 +265,7 @@ int main(int argc, char** argv) {
                      {"schedule_points", testSchedulePoints},
                      {"forwards", testForwards},
                      {"tail_inside", testTailInside},
+                     {"tail_inside_8060s", testTailInside8060S},
                      {"exec_size", testExecSize},
                      {"splits_from_tokens", testSplitsFromTokens},
                      {"chat_token_facts", testChatTokenFacts},

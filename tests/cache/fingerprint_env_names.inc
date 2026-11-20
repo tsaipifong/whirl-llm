@@ -131,6 +131,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_SYS_CKPTS",  // src/server/server_main.cpp
     "WHIRL_SYS_MIN",  // src/cli/common.cpp
     "WHIRL_TAIL_CK",  // src/cli/common.cpp
+    "WHIRL_TAIL_CK_IN_FWD",  // src/config/run_settings.h (v0252-tailck8s: the in-forward TAIL-CK A/B switch; same bits, hashed like WHIRL_TAIL_CK - conservative)
     "WHIRL_THINK",  // src/cli/common.cpp
     "WHIRL_TUNE_COLD",  // src/cli/build_model.cpp
     "WHIRL_TUNE_MASK",  // src/cli/build_model.cpp

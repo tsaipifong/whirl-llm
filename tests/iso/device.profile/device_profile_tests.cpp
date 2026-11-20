@@ -56,9 +56,11 @@ void testProfiles() {
     const std::array<std::uint8_t, 17> kb = {0, 0, 0, 0, 7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, k0{};
     CHECK(b.gemvk_dense == kb);
     CHECK(b.gemvk_moe == k0 && a.gemvk_dense == k0 && a.gemvk_moe == k0);
-    // v0252-n10: the TAIL-CK checkpoint inside the prefill forward on the R9700 only (0.2.5.2 leaves the 8060S as 0.2.5.1)
+    // v0252-n10: the TAIL-CK checkpoint inside the prefill forward on the R9700; v0252-tailck8s (PLAN V1-138, ADR-0022
+    // supplement 4): on the 8060S too (precise f32 chunked DeltaNet scan; balance / fast keep the forward end there because
+    // the GDN-8S strix chunks refuse the capture, Context::stateCaptureOk)
     CHECK(a.tail_ck_in_forward);
-    CHECK(!b.tail_ck_in_forward);
+    CHECK(b.tail_ck_in_forward);
     // v0252-ws4r97b (PLAN V1-87 phase 2): attn_ws4r in place of attn_wsplit per KV format (0 off, 1 plain, 2 b): the R9700
     // kt verdict q8=KEEP-b f16=KEEP-plain (q7 9525u); the 8060S off (its object has no attn_ws4r; attn_ws4 / ws4g there)
     CHECK(a.attn_ws4r_q8 == 2 && a.attn_ws4r_f16 == 1);

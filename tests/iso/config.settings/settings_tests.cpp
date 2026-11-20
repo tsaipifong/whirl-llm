@@ -130,6 +130,21 @@ void testEnv() {
     for (const char* n : k_names) whirl::platform::env::set(n, "");
 }
 
+// v0252-tailck8s (PLAN V1-138): WHIRL_TAIL_CK_IN_FWD, the A/B switch of the in-forward TAIL-CK checkpoint: unset = the
+// device profile's value (the caller's def), "0" = off (the forward ends at the tail point, 0.2.5.1), any other value = on
+void testTailCkInFwd() {
+    whirl::platform::env::set("WHIRL_TAIL_CK_IN_FWD", "");
+    ISO_CHECK(st::tailCkInForward(true));
+    ISO_CHECK(!st::tailCkInForward(false));
+    whirl::platform::env::set("WHIRL_TAIL_CK_IN_FWD", "0");
+    ISO_CHECK(!st::tailCkInForward(true));
+    ISO_CHECK(!st::tailCkInForward(false));
+    whirl::platform::env::set("WHIRL_TAIL_CK_IN_FWD", "1");
+    ISO_CHECK(st::tailCkInForward(true));
+    ISO_CHECK(st::tailCkInForward(false));
+    whirl::platform::env::set("WHIRL_TAIL_CK_IN_FWD", "");
+}
+
 // arch025-N10 (lane 1 leg 6): the two small-card / KV-room settings whirl-server read by hand (536d470 server_main.cpp:397-398,
 // :512-513, :954-955, :1302-1307): references are the old expressions.
 void testPoolReserve() {
@@ -470,5 +485,5 @@ void testVisModeFrom() {
 }
 
 int main(int argc, char** argv) {
-    return iso::run("config.settings", {{"u32", testU32}, {"mtp_adapt", testMtpAdapt}, {"env", testEnv}, {"pool_reserve", testPoolReserve}, {"spec_vis", testSpecVis}, {"server_leg8", testServerLeg8}, {"vis_mode_from", testVisModeFrom}}, argc, argv);
+    return iso::run("config.settings", {{"u32", testU32}, {"mtp_adapt", testMtpAdapt}, {"env", testEnv}, {"tail_ck_in_fwd", testTailCkInFwd}, {"pool_reserve", testPoolReserve}, {"spec_vis", testSpecVis}, {"server_leg8", testServerLeg8}, {"vis_mode_from", testVisModeFrom}}, argc, argv);
 }
