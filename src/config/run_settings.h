@@ -40,6 +40,10 @@ inline bool mtp() { return envFlag("MTP", true); }
 inline bool mtpQ4() { return envFlag("MTP_Q4", true); }
 // WHIRL_TAIL_CK: the prefill's tail checkpoint forward end (default on; 0 = off, debug knob).
 inline bool tailCk() { return envFlag("TAIL_CK", true); }
+// v0252-tailck8s (PLAN V1-138): WHIRL_TAIL_CK_IN_FWD, whirl-server's TAIL-CK checkpoint written inside the prefill forward
+// (EngineOptions::tail_ck_in_forward): unset = `def` (device::Profile::tail_ck_in_forward), "0" = off (the forward ends at
+// the tail point, as 0.2.5.1), other values on. A/B switch only: either way the same output bits.
+inline bool tailCkInForward(bool def) { return envFlag("TAIL_CK_IN_FWD", def); }
 // WHIRL_DRAFT_HEAD=q4: the older Q4_K draft head instead of the 2-bit one.
 inline bool draftHeadQ4() { return envGet("DRAFT_HEAD").value_or("") == "q4"; }
 // WHIRL_DRAFT_MODEL / WHIRL_DRAFT_VOCAB / WHIRL_MODE: passed as text to their resolvers

@@ -44,7 +44,7 @@ std::size_t PrefillPhase::chunkLen(const Slot& sl) const {
     return sched::execLen(N, sl.sys_split, sl.pf_split, imgs, cur, execRows(sl), stops, m_.maxBatch());
 }
 
-// v0252-n10 (gfx1201: EngineOptions::tail_ck_in_forward): a solo forward that holds the TAIL-CK point runs whole and
+// v0252-n10 (EngineOptions::tail_ck_in_forward: gfx1201, and gfx1151 since v0252-tailck8s): a solo forward that holds the TAIL-CK point runs whole and
 // writes the checkpoint inside (sched::tailInside; the model's state capture), instead of ending at the tail point.
 // The same bits: the trunk by whole-chunk grouping (docs/guide/en/kv-and-caching.md section 7), the DeltaNet state and
 // the MTP rows split at the tail row exactly as before (ServerModel::setStateCapture; progress/v0252-n10.DESIGN.md).

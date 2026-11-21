@@ -396,14 +396,19 @@ int cmdSeqtest(const Args& a) {
     }
     out(fmt("  CLI-SCHED: %u/%u CLI prefills differ from the server's forwards\n", cli_bad, cli_total));
     ok = ok && cli_bad == 0;
-    // v0252-n10 gate (part of ok where device::Profile::tail_ck_in_forward, the R9700; nothing runs or prints elsewhere):
+    // v0252-n10 gate (part of ok where device::Profile::tail_ck_in_forward: the R9700, and the 8060S since v0252-tailck8s):
     // whirl-server writes the TAIL-CK checkpoint inside the forward that holds the tail point (sched::tailInside +
     // Model::setStateCapture). That state must be bitwise the state a forward ending at the tail point leaves (0.2.5.1's
     // server, and the CLI): conv + recurrent state of every DeltaNet layer; the whole prompt's last-row logits equal;
     // a resume from the captured state gives the cold reference; with MTP (prefillMtpChunk splits its rows at the tail
     // row) also the checkpoint's hidden row (hn row cap - 1). Control: a capture one 64-row chunk later must differ.
+    // v0252-tailck8s: on the Radeon 8060S too. There balance / fast run the GDN-8S strix chunks, which Model::stateCaptureOk
+    // refuses, so whirl-server keeps the forward end (PrefillPhase::soloLen) and the forward-end schedule above is what runs:
+    // the section says so and checks nothing. Any other refusal is still a FAIL ("capture taken" below).
     u32 n10_bad = 0, n10_total = 0;
-    if (device::profile(m.arch).tail_ck_in_forward && slot_ctx < long_n + 64) {
+    if (device::profile(m.arch).tail_ck_in_forward && m.nf().gdn_strix) {
+        out("  N10: not taken here (GDN-8S strix DeltaNet chunks: the model refuses the capture, the server keeps the forward end)\n");
+    } else if (device::profile(m.arch).tail_ck_in_forward && slot_ctx < long_n + 64) {
         out(fmt("  N10: needs --slot-ctx >= %u (got %u)\n", long_n + 64, slot_ctx));
         ok = false;
     } else if (device::profile(m.arch).tail_ck_in_forward) {

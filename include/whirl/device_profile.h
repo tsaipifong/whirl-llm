@@ -105,7 +105,9 @@ struct Profile {
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
     // v0252-n10: whirl-server writes the TAIL-CK checkpoint inside the solo prefill forward that contains the tail point
     // (sched::tailInside, EngineOptions::tail_ck_in_forward) instead of ending a forward there; the CLI keeps its forward
-    // end (same bits: docs/guide/en/kv-and-caching.md section 7, progress/v0252-n10.DESIGN.md). 0.2.5.2: gfx1201 only
+    // end (same bits: docs/guide/en/kv-and-caching.md section 7, progress/v0252-n10.DESIGN.md). Both rows on since
+    // v0252-tailck8s (the model still refuses where it cannot capture: Context::stateCaptureOk); WHIRL_TAIL_CK_IN_FWD
+    // (settings::tailCkInForward) overrides the row in whirl-server
     bool tail_ck_in_forward;
     // v0252-e1def (PLAN V1-93): the WHIRL_E1 value whirl-server starts with when the variable is not set, per model class
     // (dense / MoE; qwen35::e1Default picks the row's value, server::chooseE1 applies it only where a cycle can use it;
@@ -230,7 +232,11 @@ inline constexpr Profile k_profile_gfx1151{
     .attn_sx_balance = true,  // v0252-strixc2: balance prefill attention (acceptance: progress/v0252-strixc2.HANDOFF.md)
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
-    .tail_ck_in_forward = false,  // v0252-n10: 0.2.5.2 does not touch the Radeon 8060S (the 0.2.5.1 forward end stays)
+    .tail_ck_in_forward = true,  // v0252-tailck8s (PLAN V1-138, ADR-0022 supplement 4; was false = the 0.2.5.1 forward end)
+    // v0252-tailck8s: precise pp 2k one 2058-row forward instead of 1024 + 1034. Precise runs the f32 chunked DeltaNet scan
+    // on this card (gdnwmma is a balance item), which the capture splits as on the R9700; balance / fast run the GDN-8S
+    // strix chunks, which Context::stateCaptureOk refuses, so they keep the forward end (the 0.2.5.1 schedule).
+    // WHIRL_TAIL_CK_IN_FWD=0 turns it off (A/B arm)
     // v0252-e1def: the 8060S verifies with DeltaNet snapshot sets (no E1 path: ServerModel::e1InputsOk), nothing measured
     .e1_dense = 0,
     .e1_moe = 0,

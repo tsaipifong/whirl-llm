@@ -96,7 +96,7 @@ inline std::size_t tailPoint(std::size_t n, std::size_t sys, std::size_t think, 
 
 // rows of the forward that starts at cur: whole chunks up to exec (+ merged tail), at most max_rows
 // rows (the prefill batch; 0 = exec + prefill_merge), not past the next forced split, never across a
-// stop (a kept checkpoint; v0252-n10: on gfx1201 the TAIL-CK point is not a stop for a solo forward, tailInside);
+// stop (a kept checkpoint; v0252-n10: where tail_ck_in_forward, the TAIL-CK point is not a stop for a solo forward, tailInside);
 // exec <= prefill_chunk = one chunk per forward
 inline std::size_t execLen(std::size_t n, std::size_t sys, std::size_t think, std::span<const std::uint32_t> imgs, std::size_t cur,
                            std::size_t exec, std::span<const std::size_t> stops, std::size_t max_rows = 0) {
@@ -117,7 +117,7 @@ inline std::size_t execLen(std::size_t n, std::size_t sys, std::size_t think, st
     return len;
 }
 
-// v0252-n10 (gfx1201 only: device::Profile::tail_ck_in_forward): the TAIL-CK checkpoint taken inside a forward instead
+// v0252-n10 (device::Profile::tail_ck_in_forward: gfx1201, and gfx1151 since v0252-tailck8s): the TAIL-CK checkpoint taken inside a forward instead
 // of ending one. len = the rows execLen gives the forward that starts at cur when the tail point is not a stop (the
 // other stops, a shared-prefix checkpoint, still are); cap = the tail point's row in that forward when it lies strictly
 // inside it (0 < cap < len: the forward writes the checkpoint state after its first cap rows), else 0 (the tail point is
