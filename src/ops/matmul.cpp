@@ -219,14 +219,17 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
         p.f = f.out_h16 ? k.gemmsh[si][t] : k.gemms[si][t];
         p.grid = Dim3{static_cast<unsigned>((n + sc.bn - 1) / sc.bn), static_cast<unsigned>((w.nrows + sc.bm - 1) / sc.bm), 1};
         p.block = D(sc.nth);
+        p.y_h16 = f.out_h16;
         return p;
     }
-    const Function hq = (f.out_h16 && k.gemmch[gcfg] != nullptr) ? k.gemmhqh[t] : k.gemmhq[t];
+    const bool hq_h16 = f.out_h16 && k.gemmch[gcfg] != nullptr;
+    const Function hq = hq_h16 ? k.gemmhqh[t] : k.gemmhq[t];
     if (choice >= G && w.ty != GgmlType::f16 && f.gemmh_on && f.gemmhq_on && hq != nullptr && n >= gemmh_min && w.ncols % 32 == 0) {
         // dequant fused into the fragment-order f16 GEMM (bitwise == dequant_f16 + gemm_cN_f16)
         p.kind = GemmKind::gemmhq;
         p.f = hq;
-        p.grid = Dim3{(n + 255) / 256, (w.nrows + 127) / 128, 1};
+        p.grid = Dim3{(n + gemmh_bn - 1) / gemmh_bn, (w.nrows + 127) / 128, 1};
+        p.y_h16 = hq_h16;
         return p;
     }
     // v0251-a3fix: from fdq_big_min rows the slot is fdq_big (-1 = fdq): gfx1151 c2 there, t2 below (GemmFlags)
@@ -262,7 +265,8 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
         // 128 rows x 256 tokens, bitwise the same as gf
         p.kind = GemmKind::gemmh;
         p.f = hf;
-        p.grid = Dim3{(n + 255) / 256, (w.nrows + 127) / 128, 1};
+        p.grid = Dim3{(n + gemmh_bn - 1) / gemmh_bn, (w.nrows + 127) / 128, 1};
+        p.y_h16 = use_ch;
     } else {
         p.kind = GemmKind::gemmc;
         p.f = gf;
@@ -270,6 +274,40 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
         p.block = D(c.nth);
     }
     return p;
+}
+
+// v0252-pp2k2 (F1 GEMM tail split; rule and bits in matmul.h). Prior art: progress/v0252-pp2k.PRIOR_ART.md (llama.cpp picks
+// one tile width per call, hipfire splits a partial grid into an interior and one guarded tail launch; here the tail goes
+// to the narrower gemms kernel because the loss is the work of a 256-wide tile for <= the widest gemms tile of tokens).
+GemmPieces planGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k) {
+    GemmPieces out;
+    const GemmPlan p = chooseGemmF16(w, n, tuned, f, k);
+    out.p[0] = GemmPiece{0, n, p};
+    out.n = 1;
+    if (!f.gemm_tail || (p.kind != GemmKind::gemmh && p.kind != GemmKind::gemmhq)) return out;
+    const std::uint32_t r = n % gemmh_bn;
+    if (r == 0 || n < gemmh_bn) return out;
+    // the tail's slot: precChoice for r rows (raw quantized bytes; none for f16 / f32 weights or ncols % 256 != 0)
+    const std::size_t G = kernels::kGemmCfgs.size();
+    const std::uint32_t c = precChoice(w, r, tuned, f, k);
+    if (c < 2 * G) return out;
+    const std::size_t si = c - 2 * G;
+    const kernels::GemmCfg sc = k.gemms_geom[si];
+    if (static_cast<std::uint32_t>(sc.bn) < r) return out;  // no gemms tile holds r (or WHIRL_PREC_GS forces a narrower one): the old plan
+    const std::size_t t = ti(w.ty);
+    const Function tf = p.y_h16 ? k.gemmsh[si][t] : k.gemms[si][t];
+    if (tf == nullptr) return out;
+    GemmPlan tail;
+    tail.kind = GemmKind::gemms;
+    tail.f = tf;
+    tail.grid = Dim3{static_cast<unsigned>((r + sc.bn - 1) / sc.bn), static_cast<unsigned>((w.nrows + sc.bm - 1) / sc.bm), 1};
+    tail.block = D(sc.nth);
+    tail.y_h16 = p.y_h16;
+    out.p[0].rows = n - r;
+    out.p[0].plan.grid.x = (n - r) / gemmh_bn;
+    out.p[1] = GemmPiece{n - r, r, tail};
+    out.n = 2;
+    return out;
 }
 
 // v0252-c3port (feat026-moedec-p25 0ae5530 forward/dispatch.cpp, as a pure rule): the plan's gemvh kernel of this type

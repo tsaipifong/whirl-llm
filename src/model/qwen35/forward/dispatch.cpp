@@ -201,9 +201,24 @@ void Context::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate)
 }
 
 // The f16-activation GEMM of matmul: y[t][:] (+)= W x16in[t][:] (x16in: n rows of w.ncols f16; not registered in
-// the x16 cache). The kernel, the optional dequant into w16 and the grids come from ops::chooseGemmF16 (K-2).
+// the x16 cache). The kernel, the optional dequant into w16 and the grids come from ops::chooseGemmF16 (K-2); since
+// v0252-pp2k2 through ops::planGemmF16, which may split the rows into the 256-tile bulk and a gemms tail (same bits):
+// each piece launches on its rows of x16in and y (row-major per token), in order.
 void Context::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
-    const ops::GemmPlan p = ops::chooseGemmF16(matShape(w), n, w.tune[tuneBucket(n)], gemmFlags(), k);
+    const ops::GemmPieces pc = ops::planGemmF16(matShape(w), n, w.tune[tuneBucket(n)], gemmFlags(), k);
+    for (std::size_t i = 0; i < pc.n; ++i) {
+        const ops::GemmPiece& g = pc.p[i];
+        if (pc.n == 1) {
+            gemmPlanLaunch(g.plan, w, x16in, y, n, acc);
+        } else {
+            const u64 y_el = g.plan.y_h16 ? 2 : 4;
+            gemmPlanLaunch(g.plan, w, x16in + static_cast<u64>(g.row0) * w.ncols * 2, y + static_cast<u64>(g.row0) * w.nrows * y_el, g.rows, acc);
+        }
+    }
+}
+
+// one launch of an f16 GEMM plan over n rows (the body of gemmF16 before v0252-pp2k2, unchanged)
+void Context::gemmPlanLaunch(const ops::GemmPlan& p, const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
     const i32 ncols = I(w.ncols);
     const i32 nrows = I(w.nrows);
     switch (p.kind) {
@@ -258,6 +273,8 @@ ops::GemmFlags Context::gemmFlags() const {
     // WHIRL_FQ_RASTER set leaves MatmulKernels::gemmfq_grp empty, so the bits select nothing then)
     f.fq_grp = cfg.moe ? device::profile(arch).fq_grp_moe : device::profile(arch).fq_grp_dense;
     f.gv_max = gvMax();
+    // v0252-pp2k2: the GEMM token-tail split, WHIRL_GEMM_TAIL when set (Model::load -> gemm_tail >= 0), else the device default
+    f.gemm_tail = gemm_tail >= 0 ? gemm_tail != 0 : device::profile(arch).gemm_tail;
     return f;
 }
 

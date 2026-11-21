@@ -193,6 +193,9 @@ public:
     // (device::Profile::fdq_default), 0 = the old dequant + f16 GEMM, 1 / 2 = slot c2 / t2 (kernels::kGemmFqNames)
     int fdq = -1;
     std::uint32_t fdq_min = 1025;
+    // v0252-pp2k2 (F1 GEMM tail split): WHIRL_GEMM_TAIL of the load's snapshot (config::gemmTailEnv, set by Model::load);
+    // gemmFlags reads it. -1 = the device default (device::Profile::gemm_tail), 0 = off, 1 = on
+    int gemm_tail = -1;
     // precise decode: the kernels every weight type of this model needs; "" = all present
     std::string precMissing() const;
 
@@ -468,6 +471,7 @@ protected:
     void matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n);
     void matmul(const Mat& w, DevPtr xin, DevPtr y, std::uint32_t n, bool accumulate);
     void gemmF16(const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);
+    void gemmPlanLaunch(const ops::GemmPlan& p, const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);
     bool gdnIn2(const GdnW& g, std::uint32_t n) const;
     // x16b: f16 sub-buffer of x16 past the fp8 rows (tiled fp8 pads to 16 rows), 256-aligned
     std::uint64_t x16bOff() const { return ((static_cast<std::uint64_t>((max_batch + 15) / 16 * 16) * cfg.n_embd) + 255) & ~std::uint64_t(255); }

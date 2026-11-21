@@ -1843,6 +1843,7 @@ void testForwardSplit() {
         {"void Context::injectRows(", 3},
         // F1 dispatch.cpp
         {"void Context::mark(", 4}, {"void Context::gemvLaunch(", 4}, {"void Context::matmul(", 4}, {"void Context::gemmF16(", 4},
+        {"void Context::gemmPlanLaunch(", 4},  // v0252-pp2k2: one launch of a gemmF16 piece
         {"ops::GemmFlags Context::gemmFlags(", 4}, {"bool Context::fused(", 4},
         // F2 attn.cpp / ffn.cpp
         {"void Context::draftAttn(", 5}, {"void Context::attnBlock(", 5}, {"void Context::prefillAttn(", 5},
@@ -2582,7 +2583,8 @@ void testEnvSnapshot() {
                                      "MOESKIP",  // v0252-f5: numerics loadOverrides, not in the exec dump (unit testMoeSkipPlan)
                                      "ARGMAX_MB",  // v0252-f1arg3: Model::load -> Context::argmaxMbMode (iso forward.mtp_verify argmax_mb)
                                      "ATTN_SX",  // v0252-strixc2: numerics loadFlags, not in the exec dump (unit testAttnSxFlag)
-                                     "DQ_FULL"};  // v0252-kvlong2: Model::load -> allocScratch dq_ctx (iso model.scratch dq_copy_covers_context)  // v0252-strixc2: numerics loadFlags, not in the exec dump (unit testAttnSxFlag)
+                                     "DQ_FULL",  // v0252-kvlong2: Model::load -> allocScratch dq_ctx (iso model.scratch dq_copy_covers_context)
+                                     "GEMM_TAIL"};  // v0252-pp2k2: Model::load -> config::gemmTailEnv (iso env_snapshot, forward.dispatch gemm_tail_launches)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -3311,6 +3313,7 @@ void testPlanVsLoadOrTune() {
         {"FDQ8S_MIN", "loader.cpp Model::load -> fdqEnv: gemmfq row threshold (v0251-a3port)"},
         {"DQ_FULL", "loader.cpp Model::load -> allocScratch: WHIRL_DQ_FULL=0 keeps the q8 / q4 prefill dequant copy FFN-sized (v0252-kvlong2), no numerics flag"},
         {"ARGMAX_MB", "loader.cpp Model::load -> Context::argmaxMbMode / setArgmaxMb: the gfx1201 multi-block verify argmax twins, bitwise the one-block kernels, no numerics flag (v0252-f1arg3)"},
+        {"GEMM_TAIL", "loader.cpp Model::load -> config::gemmTailEnv -> Context::gemm_tail: the f16 GEMM token-tail split (ops::planGemmF16), class f16_gemm = same bits, no numerics flag (v0252-pp2k2)"},
     };
     for (const auto& e : EnvSnapshot::names()) {
         nu::EnvValues v;

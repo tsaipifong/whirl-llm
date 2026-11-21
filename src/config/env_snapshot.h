@@ -52,12 +52,14 @@ public:
     Value attn_sx;
     // Model::load (v0252-kvlong2, O1): WHIRL_DQ_FULL=0 keeps the q8 / q8h / q4 prefill dequant copy FFN-sized (the plan before O1)
     Value dq_full;
+    // Model::load (v0252-pp2k2, through gemmTailEnv below): the f16 GEMM token-tail split (ops::GemmFlags::gemm_tail)
+    Value gemm_tail;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 70;
+    static constexpr std::size_t n_names = 71;
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 
@@ -96,6 +98,13 @@ inline ForwardEnv forwardEnv(const EnvSnapshot& env) {
     f.prec_gemvh = !env.prec_gemvh || env.prec_gemvh->c_str()[0] != '0';
     f.prec_gs = env.prec_gs && env.prec_gs->c_str()[0] != 0 ? std::atoi(env.prec_gs->c_str()) : -1;
     return f;
+}
+
+// v0252-pp2k2: WHIRL_GEMM_TAIL, read once per load (Model::load -> Context::gemm_tail): not set / "" -> -1 (the device
+// profile's gemm_tail), "0" -> 0 (off), any other value -> 1 (on, on any family)
+inline int gemmTailEnv(const EnvSnapshot& env) {
+    if (!env.gemm_tail || env.gemm_tail->empty()) return -1;
+    return *env.gemm_tail == "0" ? 0 : 1;
 }
 
 // The snapshot of the load that made `m` (LoadOptions::env, kept by Model::load). A Model that did not come from

@@ -9,8 +9,10 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -569,6 +571,136 @@ void testGemvhF32() {
         CHECK(ops::gemvhF32(p, GgmlType::mxfp4, true, pre, k) == nullptr);
         const ops::GemmPlan p2 = ops::chooseGemmF16(mx, 4, 0, pre, k);
         CHECK(ops::gemvhF32(p2, GgmlType::q4_k, true, pre, k) == nullptr);  // wrong type index
+    }
+}
+
+
+// v0252-pp2k2 (PLAN V1-139, F1 "GEMM tail split"): a precise f16 prefill GEMM on the 256-token tile (gemmh_f16 / gemmhq) whose
+// rows r = n mod 256 past the last full tile fit the widest gemms token tile runs as two pieces: rows [0, n - r) on the
+// unchanged 256 plan (grid x (n - r) / 256) and rows [n - r, n) on precChoice's narrowest gemms slot holding r (raw
+// quantized bytes, the h16 twin when the main kernel writes f16). Same bits (class f16_gemm: each output element keeps its
+// k order), so the rule only moves speed. Shapes: Swift ffn_gate 17408 x 5120 MXFP4, tuned dequant choice; gfx1201 gemms
+// geometry (kGemmsCfgs: bn 32 / 32 / 48 / 64 / 16 / 64 / 96 / 128).
+void testOpsGemmTail() {
+    const std::uint32_t G = static_cast<std::uint32_t>(kn::kGemmCfgs.size());
+    auto gate = mat(GgmlType::mxfp4, 17408, 5120);
+    gate.row_bytes = 5120 / 256 * 136;
+    auto f16 = mat(GgmlType::f16, 4096, 5120);
+    f16.row_bytes = 5120 * 2;
+    static const kn::KernelTable kb = gemmTable(true, true, true);  // gemmh_f16, gemms slots 0 / 1 / 4
+    const auto kp = std::make_unique<kn::KernelTable>(kb);
+    kn::KernelTable& k = *kp;
+    const std::string mx = std::to_string(static_cast<int>(GgmlType::mxfp4));
+    const std::string f16s = std::to_string(static_cast<int>(GgmlType::f16));
+    for (std::size_t c = 0; c < kn::kGemmsCfgs.size(); ++c) {
+        k.gemms[c][ti(GgmlType::mxfp4)] = tag("gemms_c" + std::to_string(c) + "_" + mx);
+        k.gemmsh[c][ti(GgmlType::mxfp4)] = tag("gemmsh_c" + std::to_string(c) + "_" + mx);
+    }
+    const std::uint8_t deq2 = static_cast<std::uint8_t>(G + 2);
+    ops::GemmFlags on;  // a prefill (the f16 GEMM path) with the split on
+    on.gemm_tail = true;
+    ops::GemmFlags off = on;
+    off.gemm_tail = false;
+    CHECK(ops::GemmFlags{}.gemm_tail == false);  // off unless the caller (device profile / WHIRL_GEMM_TAIL) turns it on
+    CHECK(ops::gemmh_bn == 256);
+    // expected pieces: {row0, rows, kernel name, grid x}
+    struct Want {
+        std::uint32_t row0, rows;
+        std::string f;
+        unsigned gx;
+    };
+    auto check = [&](const ops::MatShape& w, std::uint32_t n, std::uint8_t tuned, const ops::GemmFlags& f, const std::vector<Want>& want,
+                     const char* what) {
+        const ops::GemmPieces pc = ops::planGemmF16(w, n, tuned, f, k);
+        bool ok = pc.n == want.size();
+        for (std::size_t i = 0; ok && i < want.size(); ++i) {
+            const ops::GemmPiece& g = pc.p[i];
+            ok = g.row0 == want[i].row0 && g.rows == want[i].rows && nameOf(g.plan.f) == want[i].f && g.plan.grid.x == want[i].gx &&
+                 g.plan.bits == ops::BitClass::f16_gemm;
+        }
+        if (!ok)
+            std::printf("  gemm tail: %s (n %u): %zu pieces, first %s rows %u grid %u\n", what, n, pc.n, nameOf(pc.p[0].plan.f).c_str(),
+                        pc.p[0].rows, pc.p[0].plan.grid.x);
+        CHECK(ok);
+    };
+    const std::string c4 = "gemms_c4_" + mx;  // 128 x 16: the narrowest tile
+    // the 2k cell's prompt: 8 full tiles + a 10-row gemms tail (was 9 tiles of 256)
+    check(gate, 2058, deq2, on, {{0, 2048, "gemmh_f16", 8}, {2048, 10, c4, 1}}, "2058");
+    {
+        const ops::GemmPieces pc = ops::planGemmF16(gate, 2058, deq2, on, k);
+        CHECK(pc.n == 2 && pc.p[0].plan.dequant && nameOf(pc.p[0].plan.dq) == "dequant_f16_" + mx && pc.p[0].plan.grid.y == 136);
+        CHECK(pc.n == 2 && pc.p[1].plan.kind == ops::GemmKind::gemms && !pc.p[1].plan.dequant && pc.p[1].plan.grid.y == 136 &&
+              pc.p[1].plan.block.x == static_cast<unsigned>(kn::kGemmsCfgs[4].nth) && !pc.p[1].plan.y_h16 && !pc.p[0].plan.y_h16);
+    }
+    check(gate, 2058, deq2, off, {{0, 2058, "gemmh_f16", 9}}, "2058 split off (WHIRL_GEMM_TAIL=0 / gfx1151)");
+    check(gate, 2048, deq2, on, {{0, 2048, "gemmh_f16", 8}}, "2048: whole tiles");
+    check(gate, 2049, deq2, on, {{0, 2048, "gemmh_f16", 8}, {2048, 1, c4, 1}}, "2049");
+    check(gate, 1033, deq2, on, {{0, 1024, "gemmh_f16", 4}, {1024, 9, c4, 1}}, "1033 (the MTP batch after the capture row)");
+    check(gate, 4096, deq2, on, {{0, 4096, "gemmh_f16", 16}}, "4096");
+    check(gate, 4097, deq2, on, {{0, 4096, "gemmh_f16", 16}, {4096, 1, c4, 1}}, "4097");
+    check(gate, 2041, deq2, on, {{0, 2041, "gemmh_f16", 8}}, "2041: 249-row last tile, wider than every gemms tile");
+    // below gemmh_min the plan is gemm_c (its own tile): no split
+    const unsigned c2bn = static_cast<unsigned>(kn::kGemmCfgs[2].bn);
+    check(gate, 257, deq2, on, {{0, 257, "gemm_c2_" + f16s, (257 + c2bn - 1) / c2bn}}, "257");
+    check(gate, 255, deq2, on, {{0, 255, "gemm_c2_" + f16s, (255 + c2bn - 1) / c2bn}}, "255");
+    // the narrowest slot that holds r (then the smaller row block): 20 -> c0 (64 x 32), 40 -> c2 (48), 60 -> c5 (64 x 64),
+    // 90 -> c6 (96), 128 -> c7 (128); 129 -> no gemms tile holds it: the old plan
+    check(gate, 2048 + 20, deq2, on, {{0, 2048, "gemmh_f16", 8}, {2048, 20, "gemms_c0_" + mx, 1}}, "r 20");
+    check(gate, 2048 + 40, deq2, on, {{0, 2048, "gemmh_f16", 8}, {2048, 40, "gemms_c2_" + mx, 1}}, "r 40");
+    check(gate, 2048 + 60, deq2, on, {{0, 2048, "gemmh_f16", 8}, {2048, 60, "gemms_c5_" + mx, 1}}, "r 60");
+    check(gate, 2048 + 90, deq2, on, {{0, 2048, "gemmh_f16", 8}, {2048, 90, "gemms_c6_" + mx, 1}}, "r 90");
+    check(gate, 2048 + 128, deq2, on, {{0, 2048, "gemmh_f16", 8}, {2048, 128, "gemms_c7_" + mx, 1}}, "r 128");
+    check(gate, 2048 + 129, deq2, on, {{0, 2177, "gemmh_f16", 9}}, "r 129");
+    // the widest gemms tile is a kernel property (KernelTable::gemms_geom), not a number of the rule
+    {
+        const auto k2p = std::make_unique<kn::KernelTable>(k);
+        k2p->gemms_geom[7] = kn::GemmCfg{64, 160, 256};
+        const ops::GemmPieces pc = ops::planGemmF16(gate, 2048 + 150, deq2, on, *k2p);
+        CHECK(pc.n == 2 && pc.p[1].rows == 150 && nameOf(pc.p[1].plan.f) == "gemms_c7_" + mx);
+    }
+    // gemmhq (dequant fused into gemmh) is split the same way
+    k.gemmhq[ti(GgmlType::mxfp4)] = tag("gemmhq_" + mx);
+    ops::GemmFlags hq = on;
+    hq.gemmhq_on = true;
+    check(gate, 2058, deq2, hq, {{0, 2048, "gemmhq_" + mx, 8}, {2048, 10, c4, 1}}, "gemmhq 2058");
+    // f16 outputs: the h16 main kernel's tail is the gemmsh twin; without that twin, no split
+    k.gemmhqh[ti(GgmlType::mxfp4)] = tag("gemmhqh_" + mx);
+    k.gemmch[2] = tag("gemm_ch2_f16");
+    ops::GemmFlags h = hq;
+    h.out_h16 = true;
+    check(gate, 2058, deq2, h, {{0, 2048, "gemmhqh_" + mx, 8}, {2048, 10, "gemmsh_c4_" + mx, 1}}, "gemmhqh 2058");
+    {
+        const ops::GemmPieces pc = ops::planGemmF16(gate, 2058, deq2, h, k);
+        CHECK(pc.n == 2 && pc.p[0].plan.y_h16 && pc.p[1].plan.y_h16);
+        const auto k3p = std::make_unique<kn::KernelTable>(k);
+        k3p->gemmsh[4][ti(GgmlType::mxfp4)] = nullptr;
+        CHECK(ops::planGemmF16(gate, 2058, deq2, h, *k3p).n == 1);
+    }
+    // f16 weights (no gemms kernel for the type), a fused gemm_c choice, a tuned gemms choice: one piece, the old plan
+    check(f16, 2058, 1, on, {{0, 2058, "gemmh_f16", 9}}, "f16 weights");
+    CHECK(ops::planGemmF16(gate, 2058, 2, on, k).n == 1);
+    CHECK(ops::planGemmF16(gate, 2058, static_cast<std::uint8_t>(2 * G + 1), on, k).n == 1);
+    // WHIRL_PREC_GS forces a slot: used when it holds r, else no split
+    ops::GemmFlags gs = on;
+    gs.prec_gs = 1;
+    check(gate, 2058, deq2, gs, {{0, 2048, "gemmh_f16", 8}, {2048, 10, "gemms_c1_" + mx, 1}}, "PREC_GS=1");
+    gs.prec_gs = 4;
+    check(gate, 2048 + 40, deq2, gs, {{0, 2088, "gemmh_f16", 9}}, "PREC_GS=4 cannot hold 40");
+    // every row count of a forward: the pieces cover [0, n) in order, the main piece is whole 256 tiles, the tail fits one
+    // gemms tile, and a one-piece plan is exactly chooseGemmF16's
+    for (std::uint32_t n = 1; n <= 4096 + 300; ++n) {
+        const ops::GemmPieces pc = ops::planGemmF16(gate, n, deq2, on, k);
+        const ops::GemmPlan one = ops::chooseGemmF16(gate, n, deq2, on, k);
+        bool ok = pc.n >= 1 && pc.n <= 2 && pc.p[0].row0 == 0;
+        if (ok && pc.n == 1) ok = pc.p[0].rows == n && pc.p[0].plan.f == one.f && pc.p[0].plan.grid.x == one.grid.x;
+        if (ok && pc.n == 2)
+            ok = pc.p[0].rows % 256 == 0 && pc.p[0].plan.grid.x * 256 == pc.p[0].rows && pc.p[1].row0 == pc.p[0].rows &&
+                 pc.p[0].rows + pc.p[1].rows == n && pc.p[1].rows > 0 && pc.p[1].plan.grid.x == 1 && pc.p[0].plan.f == one.f;
+        if (!ok) {
+            std::printf("  gemm tail: cover rule fails at n %u\n", n);
+            CHECK(false);
+            break;
+        }
     }
 }
 

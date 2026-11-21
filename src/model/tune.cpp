@@ -432,6 +432,64 @@ bool Model::checkPrefillInvariance(std::string& log) {
             log += fmt("    GEMM %-7s %ux%u, %u rows: configs differing from cfg 0: %u (first %d), 40-row subset %s %s\n", tyName(w.ty).c_str(), w.nrows,
                        w.ncols, n, bad_cfg, first_bad, sub_ok ? "same" : "DIFFERENT", bad_cfg == 0 && sub_ok ? "ok" : "FAIL");
         }
+    // v0252-pp2k2 (F1 GEMM tail split): a 256-token-tile f16 GEMM (gemmh_f16 / gemmhq, a dequant choice from 512 rows) whose
+    // rows are just past a 256 multiple runs as the full tiles + one gemms launch for the tail (ops::planGemmF16). Per type
+    // with a gemms kernel: 2058 rows (the 2k cell) and 1033 (the MTP batch after the capture row), split on vs one launch,
+    // every output bitwise equal, and the plan must really be split (2 pieces), else the comparison proves nothing. The f16
+    // GEMM path is forced as in checkPreciseDecode (a balance / fast load would take the fp8 GEMM for MXFP4 matrices).
+    // Rows past the scratch (max_batch) are skipped and logged.
+    {
+        bool tdone[n_types] = {};
+        const int saved_tail = gemm_tail;
+        const bool saved_fp8 = nf().fp8_prefill, saved_out_h16 = out_h16;
+        num_plan.flags.fp8_prefill = false;
+        out_h16 = false;
+        for (const Layer& L : layers)
+            for (const MatList lm = layerMats(L); const Mat& w0 : lm.slice()) {
+                const std::size_t t = ti(w0.ty) % n_types;
+                if (tdone[t] || w0.ty == GgmlType::f16 || w0.ty == GgmlType::f32 || w0.ncols % 256 != 0) continue;
+                bool has_gemms = false;
+                for (std::size_t s = 0; s < k.gemms.size(); ++s) has_gemms = has_gemms || k.gemms[s][t] != nullptr;
+                if (!has_gemms || k.gemmh_f16 == nullptr) continue;
+                tdone[t] = true;
+                Mat w = w0;
+                // a dequant choice whose f16 kernel exists: from 512 rows its plan is gemmh_f16 (or gemmhq when on)
+                int deq = -1;
+                for (std::size_t c = 0; c < gemm_cfgs.size() && deq < 0; ++c)
+                    if (k.gemmc[c][ti(GgmlType::f16)] != nullptr) deq = static_cast<int>(gemm_cfgs.size() + c);
+                if (deq < 0) continue;
+                w.tune.fill(static_cast<std::uint8_t>(deq));
+                for (const u32 nt : {2058u, 1033u}) {
+                    if (nt > max_batch || static_cast<std::uint64_t>(nt) * std::max(w.ncols, w.nrows) > static_cast<std::uint64_t>(max_batch) * ff_scratch) {
+                        log += fmt("    GEMM tail %-7s %u rows: skipped (scratch holds %u rows)\n", tyName(w.ty).c_str(), nt, max_batch);
+                        continue;
+                    }
+                    const std::vector<float> xt = randomNormal(static_cast<std::size_t>(nt) * w.ncols, 11);
+                    std::vector<float> one(static_cast<std::size_t>(nt) * w.nrows), split(one.size());
+                    hip::upload(ffn_g, xt.data(), xt.size() * 4);
+                    const ops::GemmPieces pc = ops::planGemmF16(matShape(w), nt, w.tune[tuneBucket(nt)], [&] {
+                        ops::GemmFlags f = gemmFlags();
+                        f.gemm_tail = true;
+                        return f;
+                    }(), k);
+                    for (const int on : {0, 1}) {
+                        gemm_tail = on;
+                        xq_src = 0;
+                        x16_src = 0;
+                        matmul(w, ffn_g, ffn_u, nt, false);
+                        hip::download((on ? split : one).data(), ffn_u, one.size() * 4);
+                    }
+                    const bool same = std::memcmp(one.data(), split.data(), one.size() * 4) == 0;
+                    if (!same || pc.n != 2) all_ok = false;
+                    log += fmt("    GEMM tail %-7s %ux%u, %u rows: %zu launch piece(s) (tail %u rows) vs one launch: %s\n", tyName(w.ty).c_str(), w.nrows,
+                               w.ncols, nt, pc.n, pc.n == 2 ? pc.p[1].rows : 0u,
+                               pc.n != 2 ? "NOT SPLIT FAIL" : same ? "same ok" : "DIFFERENT FAIL");
+                }
+            }
+        gemm_tail = saved_tail;
+        num_plan.flags.fp8_prefill = saved_fp8;
+        out_h16 = saved_out_h16;
+    }
     // MoE: tile 32 vs 64, and the first 40 tokens alone
     for (const Layer& L : layers) {
         if (!L.moe) continue;

@@ -17,6 +17,7 @@ int main(int argc, char** argv) {
                      {"gemv_wide", testGemvWide},
                      {"gemm", testOpsGemm},
                      {"gemmfq", testOpsGemmFq},
-                     {"gemvhf32", testGemvhF32}},  // v0252-c3port
+                     {"gemvhf32", testGemvhF32},  // v0252-c3port
+                     {"gemm_tail", testOpsGemmTail}},  // v0252-pp2k2 (F1 GEMM tail split)
                     argc, argv);
 }
