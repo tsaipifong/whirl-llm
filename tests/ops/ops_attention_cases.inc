@@ -8,11 +8,13 @@
 #include "ops_fakes.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -1352,6 +1354,221 @@ void testAttnPrepRules() {
         CHECK(ops::chooseAttnCore(17, 16, 128, false) == ops::AttnCore::naive && ops::chooseAttnCore(512, 16, 256, true) == ops::AttnCore::naive);
         CHECK(ops::chooseAttnCore(32, 32, 256, true) == ops::AttnCore::decode);
     }
+}
+
+// v0252-8sq4 (PLAN V1-140 / V1-109, F8; fast = the only mode with q4 KV). Two opt-in switches on the attn_dq4 path:
+//  - dq4_order (WHIRL_DQ4_ORDER, profile attn_dq4_row_order): attn_dq4o = attn_dq4 with the gfx1201 block order (the verify
+//    row fastest), so the MTP verify rows of one (head, split) read the same q4 K / V tiles back to back (L2) instead of
+//    one DRAM pass per row. Same arguments, grid, block and partials (the CPU model below: the order is a bijection).
+//  - dq4_min_keys (WHIRL_DQ4_MINKEYS, profile dq4_min_keys): the split count from the longest row and a target of keys per
+//    split (ops::dq4MinKeysSplits): power of two >= ceil(n_max / min_keys), in [8, today's]. 0 = today's rule.
+// Fails to build before the change (no AttnDecodeFlags::dq4_order / dq4_min_keys, AttnKernels::attn_dq4o,
+// dq4MinKeysSplits, Profile fields).
+// gfx1201 ADQ_GRID (kernels/attn.hip:559), the order attn_dq4o takes on gfx1151: block (bx, by, bz) -> (g, split, z)
+std::array<std::int32_t, 3> kDq4oMap(std::int32_t bx, std::int32_t by, std::int32_t bz, std::int32_t gx, std::int32_t gy, std::int32_t gz) {
+    const std::int32_t lin = bx + gx * (by + gy * bz);
+    const std::int32_t z = lin % gz, gs = lin / gz;
+    return {gs % gx, gs / gx, z};
+}
+void testAttnDq4F8() {
+    const auto& p97 = whirl::device::k_profile_gfx1201;
+    const auto& p8s = whirl::device::k_profile_gfx1151;
+    // profile rows: both off (opt-in until the main session's screen shows a gain beyond its error, ADR-0019); a default
+    // flip is one line in device_profile.h plus these CHECKs
+    CHECK(!p97.attn_dq4_row_order && !p8s.attn_dq4_row_order);
+    CHECK(p97.dq4_min_keys == 0 && p8s.dq4_min_keys == 0);
+    // ops defaults: off (a caller that does not pass the plan's flags keeps today's kernel and grid)
+    {
+        const ops::AttnDecodeFlags d;
+        CHECK(!d.dq4_order && d.dq4_min_keys == 0);
+    }
+    // --- the block order is a bijection of the grid (each (g, split, z) exactly once), for Ornith (2 kv heads), Swift (4),
+    // 1..4 verify rows and the split counts the rules give (8 .. 256)
+    long long maps = 0, map_bad = 0;
+    for (const std::int32_t gx : {2, 4})
+        for (const std::int32_t gz : {1, 2, 3, 4})
+            for (const std::int32_t gy : {8, 16, 32, 64, 100, 128, 256}) {
+                std::vector<unsigned char> seen(static_cast<std::size_t>(gx * gy * gz), 0);
+                for (std::int32_t bz = 0; bz < gz; ++bz)
+                    for (std::int32_t by = 0; by < gy; ++by)
+                        for (std::int32_t bx = 0; bx < gx; ++bx) {
+                            const auto m = kDq4oMap(bx, by, bz, gx, gy, gz);
+                            maps += 1;
+                            if (m[0] < 0 || m[0] >= gx || m[1] < 0 || m[1] >= gy || m[2] < 0 || m[2] >= gz) {
+                                map_bad += 1;
+                                continue;
+                            }
+                            seen[static_cast<std::size_t>((m[2] * gy + m[1]) * gx + m[0])] += 1;
+                        }
+                for (const unsigned char c : seen)
+                    if (c != 1) map_bad += 1;
+                // consecutive hardware block ids (x fastest) of one (g, split) are its verify rows: the L2 sharing
+                if (gz > 1) {
+                    const auto a = kDq4oMap(0, 0, 0, gx, gy, gz), b = kDq4oMap(1, 0, 0, gx, gy, gz);
+                    if (!(a[0] == b[0] && a[1] == b[1] && b[2] == a[2] + 1)) map_bad += 1;
+                }
+            }
+    CHECK(maps > 0 && map_bad == 0);
+    // --- the plan: Ornith-like shape (16 / 2 heads, GQA 8), q4 KV, 2 verify rows at 128k on the 8060S kernel set
+    ops::AttnDecodeProblem p;
+    p.n = 2;
+    p.head_dim = 256;
+    p.n_head = 16;
+    p.n_head_kv = 2;
+    p.max_ctx = 262144;
+    p.kv_q4 = true;
+    p.rows_known = true;
+    const std::int32_t base[4] = {0, 0, 0, 0};
+    const std::int32_t pos128[2] = {131071, 131072};
+    p.row_pos = pos128;
+    p.row_base = base;
+    ops::AttnDecodeFlags f;
+    f.fd_splits = 256;
+    // tables off the stack (stack note at attnTable): statics built once, one heap copy the case changes
+    static const kn::KernelTable s8 = attnTable(true, true, true, false), s8f = attnTable(true, true, false, false),
+                                 s97 = attnTable(false, false, true, true);
+    auto k8 = std::make_unique<kn::KernelTable>(s8);
+    auto plan = [&](const ops::AttnDecodeFlags& ff, const whirl::device::Profile& pr) { return ops::chooseAttnDecode(p, ff, *k8, k8->caps, pr); };
+    // off: today's kernel and dynamic grid (nothing changes without the switch)
+    const ops::AttnDecodePlan off = plan(f, p8s);
+    CHECK(nameOf(off.f) == "attn_dq4" && off.n_split == ops::dq4Splits(std::span<const std::int32_t>(pos128, 2), 0, 256));
+    // dq4_order without attn_dq4o in the code object (gfx1201 has none: its attn_dq4 has the order already): attn_dq4
+    {
+        ops::AttnDecodeFlags fo = f;
+        fo.dq4_order = true;
+        CHECK(nameOf(plan(fo, p8s).f) == "attn_dq4");
+    }
+    k8->attn_dq4o = tag("attn_dq4o");
+    {
+        CHECK(nameOf(plan(f, p8s).f) == "attn_dq4");  // the kernel alone does not switch
+        ops::AttnDecodeFlags fo = f;
+        fo.dq4_order = true;
+        const ops::AttnDecodePlan on = plan(fo, p8s);
+        // same grid, block, groups, split count and combine: only the kernel entry differs
+        CHECK(nameOf(on.f) == "attn_dq4o" && on.kind == ops::AttnDecodeKind::dq4 && on.n_split == off.n_split);
+        CHECK(on.grid.x == off.grid.x && on.grid.y == off.grid.y && on.grid.z == off.grid.z && on.block.x == off.block.x);
+        CHECK(on.groups.count[0] == off.groups.count[0] && on.groups.first[1] == off.groups.first[1] && on.combine_q8 == off.combine_q8);
+        // never outside the attn_dq4 choice: f16 / q8h KV (balance / precise) keep their kernels whatever the flag says
+        ops::AttnDecodeProblem pf = p;
+        pf.kv_q4 = false;
+        const kn::KernelTable* kf = &s8f;
+        ops::AttnDecodeFlags f64 = fo;
+        f64.fd_splits = 64;
+        const std::string nf = nameOf(ops::chooseAttnDecode(pf, f64, *kf, kf->caps, p8s).f);
+        CHECK(nf.rfind("attn_ws4", 0) == 0);
+        // WHIRL_ATTN_DQ4=0 (attn_dq4 off): no attn_dq4o either
+        ops::AttnDecodeFlags fd = fo;
+        fd.attn_dq4 = false;
+        const std::string nd = nameOf(plan(fd, p8s).f);
+        CHECK(nd != "attn_dq4o" && nd != "attn_dq4");
+    }
+    // --- dq4_min_keys: the grid from the longest row and the keys-per-split target
+    // 128k: ceil(131073 / 1024) = 129 -> 256, capped at DQ_MAXS 128 (the kernel's dq_per never uses more): today's grid,
+    // so at 128k only the block order changes anything
+    CHECK(ops::dq4MinKeysSplits(std::span<const std::int32_t>(pos128, 2), 0, 256, 1024) == 128);
+    CHECK(ops::dq4MinKeysSplits(std::span<const std::int32_t>(pos128, 2), 0, 256, 1024) == ops::dq4Splits(std::span<const std::int32_t>(pos128, 2), 0, 256));
+    {
+        const std::int32_t p32[2] = {32767, 32768}, p64[2] = {65535, 65536}, p2[2] = {2047, 2048}, p1[1] = {100};
+        // 32k: ceil(32769 / 1024) = 33 -> 64 splits (power of two at or above), per = dq_per(32769, 64) = 576
+        CHECK(ops::dq4MinKeysSplits(std::span<const std::int32_t>(p32, 2), 0, 256, 1024) == 64);
+        CHECK(ops::dq4MinKeysSplits(std::span<const std::int32_t>(p32, 1), 0, 256, 1024) == 32);  // 32768 keys: exactly 32
+        CHECK(ops::dq4MinKeysSplits(std::span<const std::int32_t>(p64, 1), 0, 256, 1024) == 64);
+        CHECK(ops::dq4MinKeysSplits(std::span<const std::int32_t>(p32, 1), 0, 256, 2048) == 16);
+        // short rows: never under 8 splits (the dq4Splits floor), never over today's grid
+        CHECK(ops::dq4MinKeysSplits(std::span<const std::int32_t>(p2, 2), 0, 256, 1024) == 8);
+        CHECK(ops::dq4MinKeysSplits(std::span<const std::int32_t>(p1, 1), 0, 256, 1024) == 8);
+        CHECK(ops::dq4MinKeysSplits(std::span<const std::int32_t>(p32, 1), 0, 16, 512) == 16);
+        // min_keys 0: today's grid untouched
+        CHECK(ops::dq4MinKeysSplits(std::span<const std::int32_t>(p32, 1), 0, 256, 0) == 256);
+    }
+    // the plan takes it (8060S and R9700 sets alike: a host rule, "the R9700 can take it later" = its profile row)
+    {
+        const std::int32_t p32[2] = {32767, 32768};
+        ops::AttnDecodeProblem q = p;
+        q.row_pos = p32;
+        ops::AttnDecodeFlags fm = f;
+        fm.dq4_min_keys = 1024;
+        const ops::AttnDecodePlan a = ops::chooseAttnDecode(q, fm, *k8, k8->caps, p8s);
+        CHECK(nameOf(a.f) == "attn_dq4" && a.n_split == 64 && a.grid.y == 64);
+        const kn::KernelTable* k97 = &s97;
+        CHECK(ops::chooseAttnDecode(q, fm, *k97, k97->caps, p97).n_split == 64);
+        // rows the host does not know: today's fixed grid (a graph replays it)
+        ops::AttnDecodeProblem qu = q;
+        qu.rows_known = false;
+        qu.row_pos = {};
+        qu.row_base = {};
+        CHECK(ops::chooseAttnDecode(qu, fm, *k8, k8->caps, p8s).n_split == 256);
+        // with both switches: attn_dq4o on the min-keys grid
+        fm.dq4_order = true;
+        const ops::AttnDecodePlan b = ops::chooseAttnDecode(q, fm, *k8, k8->caps, p8s);
+        CHECK(nameOf(b.f) == "attn_dq4o" && b.n_split == 64);
+        // f16 KV: the min-keys rule never touches the ws4 grid
+        ops::AttnDecodeProblem qf = q;
+        qf.kv_q4 = false;
+        const kn::KernelTable* kf = &s8f;
+        ops::AttnDecodeFlags f64 = fm;
+        f64.fd_splits = 64;
+        CHECK(ops::chooseAttnDecode(qf, f64, *kf, kf->caps, p8s).n_split == 64);
+    }
+    // --- kernel model: under the min-keys grid every key of every row is in exactly one launched split, no keyed split is
+    // past the grid, and (window off) every keyed split holds at least min(n_pos, min_keys / 2) keys: n_pos 1 .. 256k,
+    // targets 512 / 1024 / 2048, the four windows of testDq4Partition
+    const std::int32_t wins[4] = {0, dq4WinArg(16384, 65536), dq4WinArg(4096, 0), dq4WinArg(1024, 16384)};
+    long long rows = 0, cover_bad = 0, small_bad = 0, fewer = 0;
+    for (const std::uint32_t mk : {512u, 1024u, 2048u})
+        for (const std::int32_t win : wins)
+            for (std::int32_t n_pos = 1; n_pos <= 262144; n_pos += (win == 0 ? 1 : 13)) {
+                const std::int32_t pos = n_pos - 1;
+                const std::uint32_t s = ops::dq4MinKeysSplits(std::span<const std::int32_t>(&pos, 1), win, 256, mk);
+                rows += 1;
+                if (s < ops::dq4Splits(std::span<const std::int32_t>(&pos, 1), win, 256)) fewer += 1;
+                std::int32_t covered = 0, prev_end = -1;
+                bool ok = s >= 1 && s <= 256;
+                std::int32_t min_keyed = 1 << 30;
+                for (std::uint32_t i = 0; ok && i < 256; ++i) {
+                    if (i >= s) {
+                        // a split past the grid must hold no key (it is never launched)
+                        const KRange r = kRange(n_pos, static_cast<std::int32_t>(i), static_cast<std::int32_t>(s), win);
+                        if (r.b0 < n_pos && r.b1 > r.b0) ok = false;
+                        continue;
+                    }
+                    const KRange r = kRange(n_pos, static_cast<std::int32_t>(i), static_cast<std::int32_t>(s), win);
+                    if (r.b0 >= n_pos) continue;  // empty split: the kernel writes (-inf, 0), the combine skips it
+                    if (r.b0 < prev_end) ok = false;  // overlap
+                    covered += r.b1 - r.b0;
+                    prev_end = r.b1;
+                    if (i > 0) min_keyed = std::min(min_keyed, r.b1 - r.b0);
+                }
+                if (!ok) {
+                    cover_bad += 1;
+                    continue;
+                }
+                // window off: all keys; window on: the sink + the window's keys (kRange's own key set)
+                std::int32_t want = n_pos;
+                if (win != 0) {
+                    const std::int32_t w = (win & 0xffff) * 64, min_pos = (win >> 16) * 1024;
+                    const std::int32_t w0 = std::max<std::int32_t>(256, (n_pos - w) & ~63);
+                    if (n_pos >= min_pos && w0 > 256) want = 256 + (n_pos - w0);
+                }
+                if (covered != want) cover_bad += 1;
+                // window off, more than one keyed split: the last split may be short, the others hold >= min_keys / 2
+                if (win == 0 && s > 8 && min_keyed != (1 << 30)) {
+                    std::int32_t keyed = 0, short_ok = 0;
+                    for (std::uint32_t i = 0; i + 1 < s; ++i) {
+                        const KRange r = kRange(n_pos, static_cast<std::int32_t>(i), static_cast<std::int32_t>(s), win);
+                        const KRange nx = kRange(n_pos, static_cast<std::int32_t>(i + 1), static_cast<std::int32_t>(s), win);
+                        if (r.b0 < n_pos && nx.b0 < n_pos) {
+                            keyed += 1;
+                            if (r.b1 - r.b0 >= static_cast<std::int32_t>(mk / 2)) short_ok += 1;
+                        }
+                    }
+                    if (short_ok != keyed) small_bad += 1;
+                }
+            }
+    CHECK(rows > 0 && cover_bad == 0);
+    CHECK(small_bad == 0);
+    CHECK(fewer > 0);  // the rule launches fewer splits than today somewhere (32k / 64k)
+    std::printf("  testAttnDq4F8: %lld block maps, %lld min-keys rows (%lld with fewer splits than today)\n", maps, rows, fewer);
 }
 
 }  // namespace

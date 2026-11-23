@@ -31,6 +31,8 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_DFLASH_PMIN",  // include/whirl/dflash_policy.h
     "WHIRL_DFLASH_WARM",  // include/whirl/dflash_policy.h
     "WHIRL_DQ4_DYN",  // src/common/numerics.cpp
+    "WHIRL_DQ4_MINKEYS",  // src/common/numerics.cpp (v0252-8sq4 F8 split: another q4 decode partition in fast; hashed like FD_SPLITS)
+    "WHIRL_DQ4_ORDER",  // src/common/numerics.cpp (v0252-8sq4 F8 order: attn_dq4o, same partials; hashed like DQ4_DYN)
     "WHIRL_DQ_FULL",  // src/model/loader.cpp (v0252-kvlong2: =0 the FFN-sized prefill dequant copy; q8h may take other kernels)
     "WHIRL_DRAFT_HEAD",  // src/cli/cmd_bench.cpp
     "WHIRL_DRAFT_MODEL",  // src/cli/build_model.cpp
@@ -38,6 +40,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_DRAFT_WINDOW",  // src/common/numerics.cpp
     "WHIRL_DRAFT_WINDOW_MIN",  // src/common/numerics.cpp
     "WHIRL_E1",  // src/config/run_settings.h (v0252-e1p1b, E1 device inputs: hashed like WHIRL_SPEC_ACC - conservative; the reply does not depend on it)
+    "WHIRL_FAST_KVQ8H",  // src/config/env_snapshot.cpp (v0252-8sq4 fallback: fast MoE KV format q8h instead of q4)
     "WHIRL_FDQ8S",  // src/config/env_snapshot.cpp (v0251-a3port: gemmfq slot; bitwise-equal, hashed like ACT_FUSE / GEMMH)
     "WHIRL_FDQ8S_MIN",  // src/config/env_snapshot.cpp (v0251-a3port: gemmfq row threshold)
     "WHIRL_FD_SPLITS",  // src/config/env_snapshot.cpp

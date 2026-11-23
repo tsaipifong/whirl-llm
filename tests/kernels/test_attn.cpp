@@ -492,6 +492,71 @@ void dq4Long(Ctx& c) {
             }
         }
     }
+    // v0252-8sq4 (PLAN V1-140 / V1-109, F8 order): attn_dq4o (gfx1151 object: attn_dq4 with the verify row fastest) gives
+    // attn_dq4's ml / acc of every split and the combined output bit for bit, two verify rows per case, the production
+    // split count (ops::dq4Splits), without and with the default MTP draft window. gfx1201: skipped (no attn_dq4o; its
+    // attn_dq4 already has this order). 3 rows per case: ml, acc, combined.
+    {
+        const hip::Function fo = c.fnOpt("attn_dq4o");
+        if (!fo) {
+            c.rep.skip("attndq4", "attn_dq4o == attn_dq4 [kv q4 order]", "attn_dq4o not in this code object (gfx1201: attn_dq4 has the order)");
+        } else {
+            const int win_def = winArg(16384, 65536);
+            std::vector<int> octx = {1100, 8193, 33000, 70001, 131072 + 77, 262144};
+            if (c.quick) octx = {1100, 70001, 131072 + 77};
+            for (const int ctx : octx) {
+                const std::vector<int> pos = {ctx - 1, ctx - 2};
+                for (const int win : {0, win_def}) {
+                    if (win != 0 && ctx < 65536) continue;
+                    const std::int32_t pr[2] = {pos[0], pos[1]};
+                    const int s = static_cast<int>(whirl::ops::dq4Splits(std::span<const std::int32_t>(pr, 2), win, 256));
+                    const std::string tag = " (ctx " + std::to_string(ctx) + (win ? ", draft window" : "") + ", grid.y " + std::to_string(s) + ") [kv q4 order]";
+                    const Out a = run(pos, s, win), b = run(pos, s, win, fo);
+                    c.rep.add(cmpExact("attn_dq4o ml == attn_dq4" + tag, b.ml, a.ml, Kind::exact));
+                    c.rep.add(cmpExact("attn_dq4o acc == attn_dq4" + tag, b.acc, a.acc, Kind::exact));
+                    c.rep.add(cmpExact("attn_dq4o + combine == attn_dq4 + combine" + tag, b.o, a.o, Kind::exact));
+                }
+            }
+        }
+    }
+    // v0252-8sq4 (F8 min keys, fast only): the split count ops::dq4MinKeysSplits gives for a keys-per-split target is a new
+    // partition (another combine order than today's), so its rows are tolerance rows against the CPU reference (same
+    // tolerance as the long cases above), on attn_dq4 and (gfx1151) attn_dq4o. Targets 512 / 1024 / 2048 at 33000; 1024
+    // elsewhere; plus the draft window at 70001.
+    {
+        struct Mk {
+            int ctx, mk, win;
+        };
+        const int win_def = winArg(16384, 65536);
+        std::vector<Mk> mks = {{2048, 1024, 0}, {8193, 1024, 0}, {33000, 512, 0}, {33000, 1024, 0}, {33000, 2048, 0}, {65600, 1024, 0},
+                               {70001, 1024, win_def}, {131072 + 77, 1024, 0}};
+        if (c.quick) mks = {{33000, 1024, 0}, {70001, 1024, win_def}};
+        const hip::Function fo = c.fnOpt("attn_dq4o");
+        for (const Mk& m : mks) {
+            const std::vector<int> pos = {m.ctx - 1, m.ctx - 2};
+            const std::int32_t pr[2] = {pos[0], pos[1]};
+            const int s = static_cast<int>(whirl::ops::dq4MinKeysSplits(std::span<const std::int32_t>(pr, 2), m.win, 256, static_cast<std::uint32_t>(m.mk)));
+            const std::string tag = " (ctx " + std::to_string(m.ctx) + (m.win ? ", draft window" : "") + ", min keys " + std::to_string(m.mk) +
+                                    ", grid.y " + std::to_string(s) + ") [kv q4 minkeys]";
+            int win_lo = 0;
+            if (m.win != 0) {
+                const int w64 = 16384, np = pos[0] + 1, s0 = std::max(256, (np - w64) & ~63), np1 = pos[1] + 1, s1 = std::max(256, (np1 - w64) & ~63);
+                if (s0 != s1) {
+                    c.rep.skip("attndq4", "attn_dq4 min-keys grid" + tag, "the two rows' window starts differ");
+                    continue;
+                }
+                win_lo = s0;
+            }
+            std::vector<double> ro, rs;
+            ref(pos, win_lo, ro, rs);
+            const Out o = run(pos, s, m.win);
+            c.rep.add(cmpTol("attn_dq4 min-keys grid + combine vs CPU" + tag, o.o, ro, rs, 1e-2, 1e-4));
+            if (fo) {
+                const Out oo = run(pos, s, m.win, fo);
+                c.rep.add(cmpExact("attn_dq4o min-keys grid == attn_dq4 min-keys grid (combined)" + tag, oo.o, o.o, Kind::exact));
+            }
+        }
+    }
 }
 
 }  // namespace

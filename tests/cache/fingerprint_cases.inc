@@ -528,6 +528,8 @@ static void testFingerprintCoversBitsKey() {
         t.moep_guw_profile = 0u;  // v0252-8smoe (B: device::Profile::moep_guw; v0252-8sopen: opt-in, 0 on both rows)
         t.moep_dhs_profile = t.moep_fq_profile = false;  // v0252-8smoe2 (C / E: opt-in, off on both rows)
         t.moep_dna_profile = 0u;                         // v0252-8smoe2 (D: opt-in, 0 on both rows)
+        t.dq4_order_profile = false;                     // v0252-8sq4 (F8 order: opt-in, off on both rows)
+        t.dq4_min_keys_profile = 0u;                     // v0252-8sq4 (F8 split: opt-in, 0 on both rows)
         t.gdn_strix_shape = true;
         // v0252-f2 / f2def: the loader's fast MoE relaxacc arm and F1's one-pass check (R9700 code object)
         t.relax_moe_arm = nu::relaxMoeDefaultName(s8060);
