@@ -89,6 +89,8 @@ nu::Target target(const CardFake& c, std::string_view model, bool kv_explicit) {
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     t.attn_sx_profile = c.prof.attn_sx_balance;  // v0252-strixc2 (tune.cpp numericsTarget)
     t.attn_i4qk_profile = c.prof.attn_i4qk_fast;  // v0252-8sfp (tune.cpp numericsTarget)
+    t.moep_comb_fast_skip_profile = c.prof.moep_comb_fast_skip;  // v0252-8smoe (A, tune.cpp numericsTarget)
+    t.moep_guw_profile = c.prof.moep_guw;  // v0252-8smoe (B, tune.cpp numericsTarget)
     return t;
 }
 
@@ -850,6 +852,7 @@ void testFastOnlyOverrides() {
         // v0251-a7fix: WHIRL_MOEP_COMB 0-2 are bitwise, 3 / 4 are f16 intermediates (L); 5 (atomic scatter) is fast-only
         // through the plan's refusal (v0251-a7pol B26-41, testMoepCombMode), so the variable's class stays 'L'.
         {"MOEP_GU", 'B'},  {"MOEP_DN", 'B'},   {"MOEP_COMB", 'L'},
+        {"MOEP_GUW", 'B'},  // v0252-8smoe: the routing-aware wide moep gate + up variant, every variant the same bits (kt moemx)
         {"MOE_RFUSE", 'B'},  // v0251-a11port: fused router, bit-identical to moe_logits_f32 + moe_topk (kt moemx, golden)
         {"ATTN_KGVAR", 'B'},  // v0252-c1port: attn_kgv / attn_kgk, designed bit-identical to attn_kg (kt attn, golden)
         // v0252-c3port (feat026-moedec): fused precise MoE decode / gemvh on f32 input, bit-identical (kt moefuse, golden)
@@ -1177,7 +1180,8 @@ static void testMoepDefault() {
                 const bool on = std::string_view(c.name) == "8060s" && std::string_view(model) == "moe";
                 // v0252-ornkv2: balance 3. v0252-b5 round 3 (PLAN V1-116 / V1-95): the default fast plan has moeskip k6 on, whose
                 // prefill path needs the non-f16 combine: 1 here (and 3 once WHIRL_MOESKIP=0 turns moeskip off, below)
-                const unsigned c8 = std::string_view(mode) == "balance" ? 3u : 1u;
+                // v0252-8smoe (A, PLAN V1-95): the fast moeskip plan takes the 8060S row device::Profile::moep_comb_fast_skip = 5
+                const unsigned c8 = std::string_view(mode) == "balance" ? 3u : std::string_view(mode) == "fast" ? 5u : 1u;
                 // v0252-moedf16: the R9700 MoE MXFP4 balance default is COMB 3 (f16 moe_yd on the fp8 kind), no moep; fast the
                 // same only with moeskip off - the default fast plan (moeskip k6 on) takes the f32 moe_yd, COMB 0
                 const bool r97m = std::string_view(c.name) == "r9700" && std::string_view(model) == "moe";
@@ -1186,6 +1190,9 @@ static void testMoepDefault() {
                        : ydh ? f.moep_gu == 0 && f.moep_dn == 0 && f.moep_comb == 3
                              : f.moep_gu == 0 && f.moep_dn == 0 && f.moep_comb == 0,
                        "moep default {} {} {}: gu {} dn {} comb {}", c.name, model, mode, f.moep_gu, f.moep_dn, f.moep_comb);
+                // v0252-8smoe (B, PLAN V1-147): the routing-aware wide gate + up tile; v0252-8sopen: opt-in (off on every plan)
+                const unsigned guw = 0u;
+                NCHECK(f.moep_guw == guw, "moep_guw default {} {} {}: {} (want {})", c.name, model, mode, f.moep_guw, guw);
                 // fast with moeskip turned off: the f16 combine on both cards' MoE plans (item (d) on the 8060S, moedf16 on the R9700)
                 if (std::string_view(mode) == "fast") {
                     const nu::Flags z = fl(t, mode, {{"MOESKIP", "0"}});
@@ -1197,7 +1204,8 @@ static void testMoepDefault() {
     const nu::Target t8 = target(card("8060s"), "moe", false);
     for (const char* mode : {"precise", "balance", "fast"}) {
         const nu::Flags g0 = fl(t8, mode, {{"MOEP_GU", "0"}}), d0 = fl(t8, mode, {{"MOEP_DN", ""}}), c0 = fl(t8, mode, {{"MOEP_COMB", "0"}});
-        const unsigned cd = std::string_view(mode) == "balance" ? 3u : 1u;  // v0252-ornkv2: the mode's combine default
+        // v0252-ornkv2: the mode's combine default; v0252-8smoe (A): fast (moeskip on) 5
+        const unsigned cd = std::string_view(mode) == "balance" ? 3u : std::string_view(mode) == "fast" ? 5u : 1u;
         NCHECK(g0.moep_gu == 0 && g0.moep_dn == 3 && g0.moep_comb == cd, "8060s moe {}: WHIRL_MOEP_GU=0 turns the gate + up variant off", mode);
         NCHECK(d0.moep_gu == 1 && d0.moep_dn == 0 && d0.moep_comb == cd, "8060s moe {}: WHIRL_MOEP_DN= (empty) turns the down variant off", mode);
         NCHECK(c0.moep_gu == 1 && c0.moep_dn == 3 && c0.moep_comb == 0, "8060s moe {}: WHIRL_MOEP_COMB=0 = moe_combine", mode);
@@ -1267,8 +1275,9 @@ static void testMoepCombMode() {
     const nu::Target t8 = target(card("8060s"), "moe", false);
     for (const char* mode : {"precise", "balance", "fast"}) {
         const nu::Plan d = planOf(mode, t8, {});
-        NCHECK(d.flags.moep_gu == 1 && d.flags.moep_dn == 3 && d.flags.moep_comb == (std::string_view(mode) == "balance" ? 3u : 1u) && d.ignored.empty(),
-               "B26-41 8060s moe {}: default plan changed", mode);
+        // v0252-8smoe (A): fast (moeskip on) 5
+        const unsigned cd = std::string_view(mode) == "balance" ? 3u : std::string_view(mode) == "fast" ? 5u : 1u;
+        NCHECK(d.flags.moep_gu == 1 && d.flags.moep_dn == 3 && d.flags.moep_comb == cd && d.ignored.empty(), "B26-41 8060s moe {}: default plan changed", mode);
     }
 }
 
@@ -1322,12 +1331,13 @@ static void testMoeYdhDefault() {
     // GU / DN defaults; screen KEEP: Ornith balance prefill 8k +1.00 %, 32k +1.14 %); precise and fast keep kMoepDefault
     // 1 / 3 / 1 (fast was not screened). A/B: WHIRL_MOEP_COMB=1 (A, the f32 moe_yd) / 3 (B). Fails before the change.
     for (const char* mode : {"precise", "balance", "fast"}) {
-        const bool bal = std::string_view(mode) == "balance";
+        const bool bal = std::string_view(mode) == "balance", fst = std::string_view(mode) == "fast";
         const nu::Plan d = planOf(mode, t8, {});
-        NCHECK(d.flags.moep_gu == 1 && d.flags.moep_dn == 3 && d.flags.moep_comb == (bal ? 3u : 1u) && d.ignored.empty(),
-               "ornkv2 8060s moe {}: default comb {} (want {})", mode, d.flags.moep_comb, bal ? 3 : 1);
+        const unsigned want = bal ? 3u : fst ? 5u : 1u;  // v0252-8smoe (A): fast (moeskip on) 5
+        NCHECK(d.flags.moep_gu == 1 && d.flags.moep_dn == 3 && d.flags.moep_comb == want && d.ignored.empty(),
+               "ornkv2 8060s moe {}: default comb {} (want {})", mode, d.flags.moep_comb, want);
         const nu::Plan a = planOf(mode, t8, {{"MOEP_COMB", "1"}});
-        NCHECK(a.flags.moep_comb == 1 && a.ignored.empty() && (a.bitsKey() != d.bitsKey()) == bal,
+        NCHECK(a.flags.moep_comb == 1 && a.ignored.empty() && (a.bitsKey() != d.bitsKey()) == (bal || fst),
                "ornkv2 8060s moe {}: WHIRL_MOEP_COMB=1 = the A arm (f32 moe_yd)", mode);
         NCHECK(planOf(mode, target(card("8060s"), "swift", false), {}).flags.moep_comb == 0, "ornkv2 8060s swift {}: dense model unchanged", mode);
     }
@@ -1525,6 +1535,65 @@ static void testAttnSxFlag() {
 // plan's with attn_i4qk false, same log line, no +overrides, never lossy); any other value keeps the plan's choice; a
 // non-"0" value in precise / balance adds exactly one Plan::ignored note. Every OTHER flag of every plan is the one it
 // was before the flag existed (the plan with attn_i4qk cleared == the WHIRL_ATTN_I4QK=0 plan). Fails before the port.
+// v0252-8smoe (B, PLAN V1-147): WHIRL_MOEP_GUW / device::Profile::moep_guw - the routing-aware wide moep gate + up tile.
+// Default = the card's row on the 8060S MoE MXFP4 plan in balance / fast (2 = g64n128k64), 0 elsewhere (precise, R9700,
+// dense, non-MXFP4 experts); the variable names a kMoepGu variant in any mode (class B: same bits), "0" / "" / unknown = 0.
+// WHIRL_MOEP_GUW=0 is the A arm: only moep_guw changes (bitsKey differs exactly where the default is on).
+// v0252-8sopen: no shipped row sets it any more (screen 8smoe-screen OPEN, ADR-0019): the shipped plans are all off and
+// WHIRL_MOEP_GUW=g64n128k64 is the opt-in (on in balance / fast on the 8060S MoE MXFP4 plan); the profile rule above is
+// pinned through targets with moep_guw_profile forced to 2.
+static void testMoepGuwFlag() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    NCHECK(std::string(whirl::kernels::kMoepGu[1].name) == "g64n128k64" && whirl::kernels::kMoepGu[1].bn == 128, "kMoepGu[1] = g64n128k64 (bn 128)");
+    // v0252-8sopen: the shipped rows (both 0) and the three switch states on the 8060S MoE MXFP4 plan
+    for (const CardFake& c : k_cards) NCHECK(c.prof.moep_guw == 0u, "moep_guw {}: profile row {} (want 0 since v0252-8sopen)", c.name, c.prof.moep_guw);
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target ts = target(c, model, false);
+                const nu::Plan d = pl(ts, mode, {}), z = pl(ts, mode, {{"MOEP_GUW", "0"}}), o = pl(ts, mode, {{"MOEP_GUW", whirl::kernels::kMoepGu[1].name}});
+                NCHECK(d.flags.moep_guw == 0u && z.flags.moep_guw == 0u && o.flags.moep_guw == 2u && z.bitsKey() == d.bitsKey() && o.bitsKey() != d.bitsKey() &&
+                           !o.lossy_override,
+                       "moep_guw shipped {} {} {}: unset {} / 0 {} / g64n128k64 {} (want 0 / 0 / 2)", c.name, model, mode, d.flags.moep_guw, z.flags.moep_guw,
+                       o.flags.moep_guw);
+            }
+    std::size_t on_cells = 0;
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                nu::Target t = target(c, model, false);
+                t.moep_guw_profile = 2u;  // a row with the wide tile on (the rule; no shipped row since v0252-8sopen)
+                const bool want = std::string_view(mode) != "precise" && std::string_view(model) == "moe" && c.prof.numerics_8060s;
+                const nu::Plan d = pl(t, mode, {});
+                NCHECK(d.flags.moep_guw == (want ? 2u : 0u), "moep_guw profile rule {} {} {}: {}", c.name, model, mode, d.flags.moep_guw);
+                on_cells += want;
+                const nu::Plan z = pl(t, mode, {{"MOEP_GUW", "0"}});
+                nu::Flags a = d.flags;
+                a.moep_guw = 0;
+                NCHECK(z.flags == a && z.overrides == d.overrides && z.ignored == d.ignored && nu::logLine(z) == nu::logLine(d),
+                       "moep_guw {} {} {}: WHIRL_MOEP_GUW=0 turns only moep_guw off", c.name, model, mode);
+                NCHECK((z.bitsKey() != d.bitsKey()) == want, "moep_guw {} {} {}: the arms default / =0 must differ exactly where it is on", c.name, model,
+                       mode);
+                for (const char* off : {"", "bogus", "g64n128"})
+                    NCHECK(pl(t, mode, {{"MOEP_GUW", off}}).flags.moep_guw == 0u, "moep_guw {} {} {}: '{}' = off", c.name, model, mode, off);
+                NCHECK(pl(t, mode, {{"MOEP_GUW", "g64n128k64"}}).flags.moep_guw == 2u && pl(t, mode, {{"MOEP_GUW", "g64n256k32"}}).flags.moep_guw == 5u,
+                       "moep_guw {} {} {}: a variant by name (any mode: bitwise)", c.name, model, mode);
+                if (want)
+                    NCHECK(pl(t, mode, {{"MOEP_GUW", "g64n128k64"}}).bitsKey() == d.bitsKey(), "moep_guw {} {} {}: =g64n128k64 is the default", c.name, model,
+                           mode);
+            }
+    NCHECK(on_cells == 2, "moep_guw on in {} cells (want 2: 8060S moe balance / fast)", on_cells);
+    nu::Target tq = target(card("8060s"), "moe", false);
+    tq.moep_guw_profile = 2u;
+    tq.moe_mxfp4 = false;
+    NCHECK(pl(tq, "balance", {}).flags.moep_guw == 0u, "moep_guw: non-MXFP4 routed experts off");
+}
+
 static void testAttnI4qkFlag() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -1975,8 +2044,11 @@ static std::string msKey(const nu::Target& t, const char* mode, std::vector<std:
 static void testMoeSkipDefaultCell(const CardFake& c, const char* model) {
     using Item = nu::Item;
     const bool g51 = c.prof.numerics_8060s, moe = std::string_view(model) == "moe";
-    const std::uint32_t comb_skip = g51 ? whirl::kernels::kMoepDefault.comb : 0u;  // the non-f16 combine of the card
+    // the combine of the fast moeskip plan: v0252-8smoe (A) the card's row device::Profile::moep_comb_fast_skip (8060S 5,
+    // the atomic scatter), else the non-f16 combine of the card (R9700 0)
+    const std::uint32_t comb_skip = c.prof.moep_comb_fast_skip != 0 ? c.prof.moep_comb_fast_skip : g51 ? whirl::kernels::kMoepDefault.comb : 0u;
     const std::string cell = std::format("b5 moeskip default {} {}", c.name, model);
+    NCHECK(comb_skip == (g51 ? 5u : 0u), "{}: the fast moeskip combine of the card", cell);
     const nu::Target t = target(c, model, false);
     nu::Target t0 = t;  // the default rule off (the state before round 3)
     t0.moeskip_default = false;
@@ -2009,7 +2081,9 @@ static void testMoeSkipDefaultCell(const CardFake& c, const char* model) {
 static void testMoeSkipDefaultEnv(const CardFake& c) {
     using Item = nu::Item;
     const bool g51 = c.prof.numerics_8060s;
-    const std::uint32_t comb_skip = g51 ? whirl::kernels::kMoepDefault.comb : 0u;
+    // v0252-8smoe (A): the fast moeskip combine = the card's row (8060S 5); comb_f32 = the non-f16 combine without moeskip
+    const std::uint32_t comb_f32 = g51 ? whirl::kernels::kMoepDefault.comb : 0u;
+    const std::uint32_t comb_skip = g51 ? 5u : 0u;
     const std::string cell = std::format("b5 moeskip default {} moe", c.name);
     const nu::Target t = target(c, "moe", false);
     nu::Target t0 = t;
@@ -2050,7 +2124,13 @@ static void testMoeSkipDefaultEnv(const CardFake& c) {
     NCHECK(msKey(t, "fast", {{"MOEP_COMB", "3"}}) != msKey(t, "fast"), "{} fast: the arms 'k6 + non-f16 combine' and 'WHIRL_MOEP_COMB=3' share a bitsKey", cell);
     NCHECK(msKey(t, "fast", {{"MOESKIP", "0"}}) != msKey(t, "fast"), "{} fast: the arms 'k6' and 'WHIRL_MOESKIP=0' share a bitsKey", cell);
     // a fast list without the item h16 (f16 intermediates) and without moeskip: the f32 combine
-    NCHECK(msFlags(t, "fast:kvq4").moep_comb == comb_skip && msFlags(t, "fast:kvq4").moe_skip_thr == 0.f, "{} fast:kvq4: comb without h16", cell);
+    NCHECK(msFlags(t, "fast:kvq4").moep_comb == comb_f32 && msFlags(t, "fast:kvq4").moe_skip_thr == 0.f, "{} fast:kvq4: comb without h16", cell);
+    // v0252-8smoe (A): WHIRL_MOEP_COMB=1 is the 0.2.5.1 arm of the fast moeskip plan (the 8060S default is 5 now: another bitsKey)
+    // (the R9700 default stays 0: WHIRL_MOEP_COMB=0 is its default there)
+    NCHECK(!g51 || msKey(t, "fast", {{"MOEP_COMB", "1"}}) != msKey(t, "fast"), "{} fast: WHIRL_MOEP_COMB=1 vs the default", cell);
+    NCHECK(msKey(t, "fast", {{"MOEP_COMB", g51 ? "5" : "0"}}) == msKey(t, "fast"), "{} fast: WHIRL_MOEP_COMB={} = the default", cell, g51 ? 5 : 0);
+    // fast without moeskip keeps its own rule (3, item h16): the new row is the moeskip plan's only
+    NCHECK(msFlags(t, "fast", {{"MOESKIP", "0"}}).moep_comb == 3u, "{} fast WHIRL_MOESKIP=0: comb 3", cell);
 }
 static void testMoeSkipDefault() {
     for (const CardFake& c : k_cards) {
@@ -2085,6 +2165,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testLsplitFlag();  // v0252-l2split (fails to build before the change: no attn_lsplit / parseLsplit)
     testAttnSxFlag();  // v0252-strixc2 (fails before the port: loadFlags never sets attn_sx)
     testAttnI4qkFlag();  // v0252-8sfp (fails before the port: loadFlags never sets attn_i4qk)
+    testMoepGuwFlag();  // v0252-8smoe (B; fails to build before the change: no Flags::moep_guw / EnvValues::moep_guw)
     testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port); v0252-c3bdef (the R9700 MoE default rows fail before c3bdef)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)

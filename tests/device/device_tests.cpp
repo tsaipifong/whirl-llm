@@ -182,6 +182,11 @@ void testProfiles() {
     CHECK(!a.attn_sx_balance && b.attn_sx_balance);  // v0252-strixc2: the balance attn_sx prefill attention on the 8060S only
     CHECK(!a.attn_i4qk_fast && b.attn_i4qk_fast);  // v0252-8sfp: the fast int4 Q.K^T prefill attention on the 8060S only
     CHECK(a.gemm_tail && !b.gemm_tail);  // v0252-pp2k2 (F1): the GEMM token-tail split on the R9700 only (8060S unchanged)
+    // v0252-8smoe (A, PLAN V1-95): the 8060S fast moeskip MoE prefill combine = 5 (atomic scatter); the R9700 keeps its rule
+    CHECK(a.moep_comb_fast_skip == 0 && b.moep_comb_fast_skip == 5);
+    // v0252-8smoe (B, PLAN V1-147): the routing-aware wide moep gate + up tile is opt-in on both cards (v0252-8sopen: screen
+    // 8smoe-screen OPEN, ADR-0019; WHIRL_MOEP_GUW=g64n128k64 turns it on)
+    CHECK(a.moep_guw == 0 && b.moep_guw == 0);
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
     // v0252-ch4k2 (PLAN V1-75): gfx1201 MoE 4096-row forwards in the fill form, as gfx1151 (v0252-ch4k timed A/B)
