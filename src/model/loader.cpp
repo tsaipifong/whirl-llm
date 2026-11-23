@@ -174,7 +174,10 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             // although its q8 / q4 cache fits (REVIEW-022 F6)
             const std::optional<KvFormat> kvm_est = opt.kv_req ? opt.kv_req : kvRequestOf(env);
             // (WHIRL_DUMP_KV: one "D kv: site=loader.uma_est" line, arch025-S0a)
-            const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::loader_uma, opt.numerics, cfg.moe, kvm_est);
+            // v0252-8sq4: the fallback's decision with the same inputs as the load below (UMA = the 8060S row)
+            const bool q8h_moe_est = numerics::fastKvQ8hMoe(device::profile(device::k_uma_estimate_arch).fast_kv_q8h_moe_ctx, env.fast_kvq8h,
+                                                            opt.dq_ctx != 0 ? opt.dq_ctx : max_ctx_req);
+            const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::loader_uma, opt.numerics, cfg.moe, kvm_est, q8h_moe_est);
             hip::UmaNeed n;
             n.weights = est.weights;
             n.fixed = est.weights + est.state +
@@ -215,7 +218,11 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         const kernels::Caps caps = kernels::Caps::probe(m.module);
         // the device row gives fast_q8h and (v0252-ornkv2) moe_q8: int8 KV on MoE models in balance, gfx1151 only
         const bool row_8060s = device::profile(m.arch).numerics_8060s;
-        const numerics::KvCaps kv_caps{caps.kv_q8h, caps.kv_q8v, caps.kv_q4, row_8060s, row_8060s};
+        // v0252-8sq4 (fallback): fast MoE q8h from the row's context threshold / WHIRL_FAST_KVQ8H and this load's per-request
+        // context (the server's dq_ctx, else max_ctx_req); inert where fast_q8h is false (chooseKv)
+        const bool q8h_moe = numerics::fastKvQ8hMoe(device::profile(m.arch).fast_kv_q8h_moe_ctx, env.fast_kvq8h,
+                                                    opt.dq_ctx != 0 ? opt.dq_ctx : max_ctx_req);
+        const numerics::KvCaps kv_caps{caps.kv_q8h, caps.kv_q8v, caps.kv_q4, row_8060s, row_8060s, q8h_moe};
         m.kv_choice = dump::kv("loader.load", opt.numerics, cfg.moe, kv_caps, kvm,
                                numerics::chooseKv(opt.numerics, cfg.moe, kv_caps, kvm));  // (WHIRL_DUMP_KV)
         m.fixFormat(m.kv_choice.kv);  // the KV pool's format, fixed here once (arch025-M2: KvPool, read-only after)

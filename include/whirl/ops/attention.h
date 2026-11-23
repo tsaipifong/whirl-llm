@@ -57,6 +57,13 @@ struct AttnDecodeFlags {
     // v0252-l2split: numerics flag attn_lsplit (WHIRL_ATTN_LSPLIT; numerics plan: precise 0, balance / fast auto). The ops
     // default is 0 (today's split count): a caller that does not pass the mode's flag keeps today's bits
     std::uint32_t attn_lsplit = 0;
+    // v0252-8sq4 (PLAN V1-140 / V1-109, F8; q4 KV = fast only). Numerics flags dq4_order (WHIRL_DQ4_ORDER, device::Profile::
+    // attn_dq4_row_order) and dq4_min_keys (WHIRL_DQ4_MINKEYS, Profile::dq4_min_keys); ops defaults off = today's kernel / grid.
+    //   dq4_order: attn_dq4o (gfx1151 object: attn_dq4 with the gfx1201 block order, verify row fastest; same partials) in
+    //     place of attn_dq4 where the code object has it
+    //   dq4_min_keys: > 0 = the attn_dq4 split count from the longest host-known row (dq4MinKeysSplits), else today's rule
+    bool dq4_order = false;
+    std::uint32_t dq4_min_keys = 0;
 };
 enum class AttnDecodeKind : std::uint8_t { ws4, ws4g, wsplit, dq4, split };
 struct AttnDecodePlan {
@@ -86,6 +93,11 @@ std::uint32_t lsplitCount(std::uint32_t n_split, std::uint32_t n_head_kv, std::u
 // split rule helpers (kept in step with the kernels)
 std::int32_t awPer(std::int32_t n_pos, std::uint32_t n_split);
 std::uint32_t dq4Splits(std::span<const std::int32_t> row_pos, std::int32_t win, std::uint32_t full);
+// v0252-8sq4 (F8): the attn_dq4 grid for a keys-per-split target: the power of two at or above ceil(n_max / min_keys)
+// (n_max = the longest row's key count), clamped to [8, min(full, 128)] (8 = dq4Splits' floor, which also keeps the
+// MTP draft window branch on; 128 = the kernel's DQ_MAXS: dq_per never uses more). min_keys 0 or no rows: full.
+// Each row's partition is the kernel's dq_per(n_pos, grid): another split / combine order than today's (fast only).
+std::uint32_t dq4MinKeysSplits(std::span<const std::int32_t> row_pos, std::int32_t win, std::uint32_t full, std::uint32_t min_keys);
 
 // ---- prefill (n > small_max rows), one sequence region (or one segment of a segmented prefill)
 struct AttnPrefillProblem {

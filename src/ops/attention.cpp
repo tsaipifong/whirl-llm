@@ -59,6 +59,18 @@ u32 dq4Splits(std::span<const i32> row_pos, i32 win, u32 full) {
     return full;
 }
 
+// v0252-8sq4 (F8): attention.h
+u32 dq4MinKeysSplits(std::span<const i32> row_pos, i32 win, u32 full, u32 min_keys) {
+    (void)win;  // the kernel's window branch keys on the grid only (grid >= 8 keeps it on, as dq4Splits' grids)
+    if (min_keys == 0 || row_pos.empty()) return full;
+    i32 n_max = 0;
+    for (const i32 p : row_pos) n_max = std::max(n_max, p + 1);
+    const u64 want = (static_cast<u64>(n_max) + min_keys - 1) / min_keys;
+    u32 s = 8;
+    while (s < want && s < 128) s *= 2;
+    return std::min(s, full);
+}
+
 // attn_split / attn_wsplit split size for n_pos positions (whole FD_CH chunks).
 i32 awPer(i32 n_pos, u32 n_split) {
     const i32 span = static_cast<i32>(n_split * fd_chunk);
@@ -86,8 +98,13 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
     // profile row says where it is on (the 8060S since FAST-8S-1, the R9700 since v0252-n2).
     // (the same conditions as the wsplit branch below, REVIEW-022 F10; they select attn_dq4 there: q4 KV + attn_dq4 +
     // GQA <= 8 make every row its own group (dq4_rows), so no caps.attn_group1 test is needed - gfx1201 has no such marker)
-    if (prof.attn_dq4_dynamic_splits && !ws4_path && p.kv_q4 && f.attn_dq4 && f.dq4_dyn && k.attn_dq4 != nullptr && grp_q <= 8 &&
-        p.rows_known && k.attn_wsplit1 != nullptr && hd == 256 && (f.dbg_flags & 2) == 0)
+    // v0252-8sq4 (F8, fast only: q4 KV): with dq4_min_keys the split count comes from the longest row and the keys-per-split
+    // target instead (another partition and combine order: output may change, which fast allows); same conditions
+    const bool dq4_rule = !ws4_path && p.kv_q4 && f.attn_dq4 && k.attn_dq4 != nullptr && grp_q <= 8 && p.rows_known && k.attn_wsplit1 != nullptr &&
+                          hd == 256 && (f.dbg_flags & 2) == 0;
+    if (dq4_rule && f.dq4_min_keys != 0)
+        n_split = dq4MinKeysSplits(p.row_pos.first(n), p.win, n_split, f.dq4_min_keys);
+    else if (dq4_rule && prof.attn_dq4_dynamic_splits && f.dq4_dyn)
         n_split = dq4Splits(p.row_pos.first(n), p.win, n_split);
     // v0252-l2split (PLAN V1-88): f16 / q8 / q8h KV on the attn_wsplit / attn_ws4r branch below (the conditions of that
     // branch; never q4 / attn_dq4, never the gfx1151 attn_ws4 path, never attn_split): the split count by machine fill
@@ -179,6 +196,8 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
         const bool dq4 = !wide && max_q1 == 1 && f.attn_dq4 && k.attn_dq4 != nullptr && grp_q <= 8;
         pl.kind = dq4 ? AttnDecodeKind::dq4 : AttnDecodeKind::wsplit;
         pl.f = dq4 ? k.attn_dq4 : aw;
+        // v0252-8sq4 (F8 order): the gfx1151 twin with the verify row fastest (same arguments, grid, block and partials)
+        if (dq4 && f.dq4_order && k.attn_dq4o != nullptr) pl.f = k.attn_dq4o;
         // v0252-ws4r97b (PLAN V1-87 phase 2): on a family whose profile row names a variant (gfx1201: q8 / q8h -> b, f16
         // -> plain; WHIRL_ATTN_WS4R overrides), the 4-wave pipelined attn_ws4r1 / attn_ws4r2 runs in place of the
         // attn_wsplit1 / attn_wsplit2 just chosen: same arguments, groups, grid, 128 threads and partial bits (kt ws4r,

@@ -193,6 +193,11 @@ void testProfiles() {
     // v0252-8sflip: C and E are the 8060S default (screens 8smoe2-e / -c / -ec-bands / -e-precise KEEP; same bits as the
     // kernels they replace); the R9700 object has no moep kernels (off); D stays opt-in (OPEN)
     CHECK(!a.moep_dhs && b.moep_dhs && a.moep_dna == 0 && b.moep_dna == 0 && !a.moep_fq && b.moep_fq);
+    // v0252-8sq4 (F8 split, fallback q8h): opt-in on both rows (a default flip changes this CHECK). v0252-8sflip2: F8 order
+    // (attn_dq4o) is the 8060S default (screens 8sq4-order / -long: fast tg 131072 +10.49 % +- 9.08, tg 32768 +3.89 % +- 3.34);
+    // gfx1201 stays off (its attn_dq4 already has the order; no attn_dq4o in its object)
+    CHECK(!a.attn_dq4_row_order && b.attn_dq4_row_order && a.dq4_min_keys == 0 && b.dq4_min_keys == 0);
+    CHECK(a.fast_kv_q8h_moe_ctx == 0 && b.fast_kv_q8h_moe_ctx == 0);
     // v0252-8sdec (PLAN V1-142): the precise grouped gemvh (gemvhg, gfx1151 object only) is opt-in on both cards
     // (v0252-8sopen: screens 8sdec-screen2 / -bands OPEN, ADR-0019; WHIRL_GEMVH_GRP=1 turns it on)
     CHECK(!a.gemvh_group_dense && !b.gemvh_group_dense);

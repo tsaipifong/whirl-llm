@@ -145,6 +145,10 @@ struct EnvValues {
     // a kernels::kMoepDn name = the COMB 5 atomic down variant, class L as MOEP_COMB), moep_fq (WHIRL_MOEP_FQ: the
     // fused-dequant moep twins, class B); bool ones: "0" / "" = off, any other value on
     Raw moep_dhs, moep_dna, moep_fq;
+    // v0252-8sq4 (PLAN V1-140 / V1-109, F8; q4 KV = fast only): dq4_order (WHIRL_DQ4_ORDER: attn_dq4o, the verify-row-first
+    // block order, class B: same partials) and dq4_min_keys (WHIRL_DQ4_MINKEYS: the attn_dq4 split count from a keys-per-split
+    // target, class F: another partition and combine order). Applied in fast only; "0" / "" = off
+    Raw dq4_order, dq4_min_keys;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -152,7 +156,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 46;  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
+    static constexpr std::size_t n_fields = 48;  // v0252-8sq4: + dq4_order, dq4_min_keys (46 -> 48)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -265,6 +269,9 @@ struct Target {
     bool moep_dhs_profile = false;
     std::uint32_t moep_dna_profile = 0;
     bool moep_fq_profile = false;
+    // v0252-8sq4 (F8): device::Profile attn_dq4_row_order / dq4_min_keys (opt-in rows; the fast plan's dq4_order / dq4_min_keys)
+    bool dq4_order_profile = false;
+    std::uint32_t dq4_min_keys_profile = 0;
     // v0252-8sdec (PLAN V1-142): device::Profile::gemvh_group_dense (the gfx1151 row): numerics flag gemvh_grp on dense models
     bool gemvh_grp_profile = false;
 };
@@ -435,7 +442,7 @@ struct ItemState {
     X(U, moe_skip_min, 1, "")                                    \
     X(B, attn_sx, false, "")                                     \
     X(B, attn_i4qk, false, "")                                   \
-    X(U, moep_guw, 0, "")                                            X(B, moep_dhs, false, "")                                        X(U, moep_dna, 0, "")                                            X(B, moep_fq, false, "")
+    X(U, moep_guw, 0, "")                                            X(B, moep_dhs, false, "")                                        X(U, moep_dna, 0, "")                                            X(B, moep_fq, false, "")                                         X(B, dq4_order, false, "")                                       X(U, dq4_min_keys, 0, "")
 
 struct Flags {
 #define WHIRL_NF_B bool
@@ -517,6 +524,14 @@ inline constexpr std::uint32_t kAttnLsplitAuto = 0xFFFFFFFFu;
 // v0252-l2split: WHIRL_ATTN_LSPLIT -> "auto" = kAttnLsplitAuto, a whole decimal 0..4096 = that block target (0 = today's split
 // count); anything else ("", "x", "64b", "-1", "4097") = std::nullopt (invalid: the mode's default stays, Plan::ignored notes it)
 std::optional<std::uint32_t> parseLsplit(std::string_view s);
+// v0252-8sq4 (F8 split): WHIRL_DQ4_MINKEYS -> a whole decimal 1 .. 1048576 = that keys-per-split target; "0", "" and
+// anything else ("x", "1k", "-1", "1048577") = 0 (today's attn_dq4 split rule)
+std::uint32_t parseDq4MinKeys(std::string_view s);
+// v0252-8sq4 (fallback): does fast mode on a MoE model take q8h KV at this load (KvCaps::fast_q8h_moe)? row =
+// device::Profile::fast_kv_q8h_moe_ctx (0 off, N = from N tokens of per-request context), env = WHIRL_FAST_KVQ8H (unset = the
+// row; a whole decimal: 0 off, N the same meaning; anything else = the row), ctx = the load's per-request context (0 =
+// unknown: true for any threshold > 0, the larger format - a pre-load estimate never undersizes the pool)
+bool fastKvQ8hMoe(std::uint32_t row, const std::optional<std::string>& env, std::uint32_t ctx);
 // arch025-N2b-r2: the five flags every load decides (Model::load, before loadOrTune; before N2b loader.cpp:537-540 and
 // :730): fp8_prefill = the item fp8; moe_fp8 = WHIRL_MOE_FP8 (r.env) else the item moefp8; moe_mxw / moe_wide / moe_rbf =
 // WHIRL_MOE_MXW / _WIDE / _RBF else true / false / true. WHIRL_FP8 is not applied here (plan() applies it in loadOrTune, as
@@ -581,13 +596,20 @@ struct KvCaps {
     // decode q8h vs f16 +7.9 % at 32k, +15.5 % at 64k, 2k and prefill inside the band; the R9700 keeps f16 KV on
     // MoE models: its screen was a DROP, decode 128k -3.60 %). Not in the "D kv:" dump line (its format is pinned).
     bool moe_q8 = false;
+    // v0252-8sq4 (fallback, PLAN V1-140): where fast_q8h holds, MoE models too take q8h in fast (balance's KV format and
+    // decode / verify path) - decided per load by numerics::fastKvQ8hMoe (device::Profile::fast_kv_q8h_moe_ctx,
+    // WHIRL_FAST_KVQ8H); opt-in (false). Not in the "D kv:" dump line either (the "kv pool:" log line shows the format)
+    bool fast_q8h_moe = false;
 };
 // The KV caps the pre-load VRAM estimates assume, before any code object is loaded (Model::load's UMA check,
 // the server's dGPU and UMA estimates; arch025-N3: were the literals {true, true, true(, true)} at each site):
 // every KV kernel (both shipped code objects have q8h / q8v / q4 since FAST-1c / FC-1c) and fast_q8h / moe_q8 on an
 // integrated GPU (the Radeon 8060S, device::Profile::numerics_8060s). whirl-tests testKvEstimateCaps checks the
 // choice made with these equals the choice Model::load makes with each GPU's real caps.
-constexpr KvCaps kvCapsEstimate(bool integrated) { return KvCaps{true, true, true, integrated, integrated}; }
+// v0252-8sq4: fast_q8h_moe = the site's numerics::fastKvQ8hMoe (with ctx 0 when the site does not know it: the larger format)
+constexpr KvCaps kvCapsEstimate(bool integrated, bool fast_q8h_moe = false) {
+    return KvCaps{true, true, true, integrated, integrated, integrated && fast_q8h_moe};
+}
 struct KvChoice {
     KvFormat kv = KvFormat::f16;
     bool debug = false;  // WHIRL_KV chose it (debug override: no fit check, sizing as before)
@@ -613,7 +635,7 @@ std::optional<KvFormat> kvEstimateRequest(const std::optional<std::string>& kv_e
 // The KV format a pre-load estimate sizes for: chooseKv(r, moe, kvCapsEstimate(kvEstSiteIntegrated(site)), req),
 // with one "D kv: site=<kvEstSiteName(site)>" line under WHIRL_DUMP_KV (dump::kv). whirl-tests testKvEstimateCaps
 // checks it per site against the load's choice with that site's GPU caps.
-KvFormat kvEstimate(KvEstSite site, const Request& r, bool moe, std::optional<KvFormat> req);
+KvFormat kvEstimate(KvEstSite site, const Request& r, bool moe, std::optional<KvFormat> req, bool fast_q8h_moe = false);
 // The request's KV format: WHIRL_KV (forced) wins, except a 4-bit format (q4, fast-only) outside fast (bug-fastonly):
 // that is ignored (the mode's own choice below, debug = false) and the why starts with fastOnlyIgnoredNote; else kvq4 -> q4 (where the kernels exist,
 // else f16: R9700 has no q4 KV kernels yet, and int8 is no stand-in), dense and MoE, except a dense

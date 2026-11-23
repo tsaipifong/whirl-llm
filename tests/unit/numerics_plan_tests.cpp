@@ -95,6 +95,8 @@ nu::Target target(const CardFake& c, std::string_view model, bool kv_explicit) {
     t.moep_dna_profile = c.prof.moep_dna;  // v0252-8smoe2 (D)
     t.moep_fq_profile = c.prof.moep_fq;    // v0252-8smoe2 (E)
     t.gemvh_grp_profile = c.prof.gemvh_group_dense;  // v0252-8sdec (tune.cpp numericsTarget)
+    t.dq4_order_profile = c.prof.attn_dq4_row_order;  // v0252-8sq4 (F8 order, tune.cpp numericsTarget)
+    t.dq4_min_keys_profile = c.prof.dq4_min_keys;     // v0252-8sq4 (F8 split)
     return t;
 }
 
@@ -875,6 +877,9 @@ void testFastOnlyOverrides() {
         {"MOESKIP", 'F'},     // v0252-f5: moeskip, fast-only (applyFastOnlyOverride; drops routed experts)
         {"ATTN_SX", 'L'},  // v0252-strixc2: attn_sx<NP> (strix fattn-rdna35), not bitwise: balance only (testAttnSxFlag)
         {"ATTN_I4QK", 'F'},  // v0252-8sfp: int4 Q.K^T prefill attention, not bitwise: fast only (testAttnI4qkFlag)
+        // v0252-8sq4 (F8): q4 KV decode attention switches, fast only (q4 KV exists only there; testDq4F8Flags). ORDER keeps the
+        // partials (attn_dq4o), MINKEYS changes the partition (another combine order)
+        {"DQ4_ORDER", 'F'}, {"DQ4_MINKEYS", 'F'},
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -1745,6 +1750,101 @@ static void testMoep2Flags() {
     NCHECK(!q.flags.moep_dhs && q.flags.moep_dna == 0u && !q.flags.moep_fq, "moep2: non-MXFP4 routed experts off");
 }
 
+// v0252-8sq4 (PLAN V1-140 / V1-109, F8): device::Profile attn_dq4_row_order / dq4_min_keys and WHIRL_DQ4_ORDER / _MINKEYS.
+// The rows (Target::dq4_*_profile) apply in fast only, on both cards and both models (the flags matter only on the attn_dq4
+// path, ops::chooseAttnDecode); the variables override them in fast: ORDER "0" / "" off, other values on; MINKEYS a whole
+// decimal 1 .. 1048576, anything else 0. Outside fast the flags stay off and a non-"0" value is noted once (Plan::ignored).
+// Each switch changes only its own flag, and bitsKey exactly where the flag changes. The rows are read from k_cards (the
+// shipped rows, then forced on): a default flip is the profile line plus the device pins. Fails to build before the change
+// (no Flags::dq4_order / dq4_min_keys, EnvValues fields, Target::dq4_*_profile, parseDq4MinKeys).
+static void testDq4F8Flags() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    NCHECK(nu::parseDq4MinKeys("1024") == 1024u && nu::parseDq4MinKeys("1") == 1u && nu::parseDq4MinKeys("1048576") == 1048576u, "parseDq4MinKeys values");
+    for (const char* bad : {"", "0", "x", "1k", "-1", "1048577", "99999999", " 512"})
+        NCHECK(nu::parseDq4MinKeys(bad) == 0u, "parseDq4MinKeys('{}') = 0", bad);
+    std::size_t on_o = 0, on_m = 0;
+    for (const bool forced : {false, true})
+        for (const char* mode : {"precise", "balance", "fast"})
+            for (const CardFake& c : k_cards)
+                for (const char* model : {"swift", "moe"}) {
+                    nu::Target t = target(c, model, false);
+                    if (forced) {
+                        t.dq4_order_profile = true;
+                        t.dq4_min_keys_profile = 1024u;
+                    }
+                    const bool fast = std::string_view(mode) == "fast";
+                    const bool want_o = fast && t.dq4_order_profile;
+                    const std::uint32_t want_m = fast ? t.dq4_min_keys_profile : 0u;
+                    const nu::Plan d = pl(t, mode, {});
+                    const std::string cell = std::format("{} {} {} {}", forced ? "forced" : "shipped", c.name, model, mode);
+                    NCHECK(d.flags.dq4_order == want_o && d.flags.dq4_min_keys == want_m, "dq4 F8 default {}: {} {}", cell, d.flags.dq4_order,
+                           d.flags.dq4_min_keys);
+                    on_o += forced && want_o;
+                    on_m += forced && want_m != 0;
+                    struct Sw {
+                        const char* name;
+                        const char* on;
+                    };
+                    for (const Sw& s : {Sw{"DQ4_ORDER", "1"}, Sw{"DQ4_MINKEYS", "2048"}}) {
+                        const bool order = std::string_view(s.name) == "DQ4_ORDER";
+                        const nu::Plan z = pl(t, mode, {{s.name, "0"}}), o = pl(t, mode, {{s.name, s.on}});
+                        nu::Flags fz = d.flags, fo = d.flags;
+                        if (fast) {
+                            if (order) {
+                                fz.dq4_order = false;
+                                fo.dq4_order = true;
+                            } else {
+                                fz.dq4_min_keys = 0u;
+                                fo.dq4_min_keys = 2048u;
+                            }
+                        }
+                        NCHECK(z.flags == fz && o.flags == fo && z.ignored == d.ignored && nu::logLine(z) == nu::logLine(d) && !o.lossy_override,
+                               "dq4 F8 {} WHIRL_{}: =0 / ={} change only their own flag", cell, s.name, s.on);
+                        NCHECK((z.bitsKey() != d.bitsKey()) == !(z.flags == d.flags), "dq4 F8 {} WHIRL_{}=0: bitsKey differs exactly where a flag changes", cell,
+                               s.name);
+                        NCHECK((o.bitsKey() != d.bitsKey()) == !(o.flags == d.flags), "dq4 F8 {} WHIRL_{}={}: bitsKey differs exactly where a flag changes",
+                               cell, s.name, s.on);
+                        std::size_t notes = 0;
+                        for (const std::string& n : o.ignored) notes += n.rfind(std::string("WHIRL_") + s.name + "=" + s.on + " ignored", 0) == 0;
+                        NCHECK(notes == (fast ? 0u : 1u) && o.ignored.size() == d.ignored.size() + (fast ? 0u : 1u), "dq4 F8 {} WHIRL_{}={}: {} ignored notes",
+                               cell, s.name, s.on, notes);
+                        NCHECK(pl(t, mode, {{s.name, ""}}).flags == fz, "dq4 F8 {} WHIRL_{}='' = off", cell, s.name);
+                    }
+                    for (const char* bogus : {"x", "1k", "-1"})
+                        NCHECK(pl(t, mode, {{"DQ4_MINKEYS", bogus}}).flags.dq4_min_keys == 0u, "dq4 F8 {} WHIRL_DQ4_MINKEYS='{}' = 0", cell, bogus);
+                }
+    // forced rows: fast on both cards and both models (4 cells each)
+    NCHECK(on_o == 4 && on_m == 4, "dq4 F8 rule cells order {} min keys {} (want 4 / 4: fast x 2 cards x 2 models)", on_o, on_m);
+    // v0252-8sflip2 (pinned, not read from the rows): the SHIPPED defaults. 8060S fast (both models) unset -> dq4_order on,
+    // "0" / "" -> off (the previous kernel attn_dq4, the reference arm of later screens), "1" -> on; precise / balance never on
+    // (q4 KV is fast-only); the R9700 never on by default (no attn_dq4o in its object). dq4_min_keys stays 0 everywhere.
+    std::size_t pinned = 0;
+    for (const CardFake& c : k_cards)
+        for (const char* model : {"swift", "moe"})
+            for (const char* mode : {"precise", "balance", "fast"}) {
+                const nu::Target t = target(c, model, false);
+                const bool fast = std::string_view(mode) == "fast", s8 = std::string_view(c.name) == "8060s";
+                const std::string cell = std::format("shipped pin {} {} {}", c.name, model, mode);
+                const nu::Plan d = pl(t, mode, {});
+                NCHECK(d.flags.dq4_order == (fast && s8) && d.flags.dq4_min_keys == 0u, "dq4 F8 {}: unset order {} min keys {}", cell,
+                       d.flags.dq4_order, d.flags.dq4_min_keys);
+                NCHECK(!pl(t, mode, {{"DQ4_ORDER", "0"}}).flags.dq4_order && !pl(t, mode, {{"DQ4_ORDER", ""}}).flags.dq4_order,
+                       "dq4 F8 {}: WHIRL_DQ4_ORDER=0 / '' = off", cell);
+                NCHECK(pl(t, mode, {{"DQ4_ORDER", "1"}}).flags.dq4_order == fast, "dq4 F8 {}: WHIRL_DQ4_ORDER=1 = on in fast only", cell);
+                if (fast && s8) {
+                    const nu::Plan z = pl(t, mode, {{"DQ4_ORDER", "0"}});
+                    NCHECK(z.bitsKey() != d.bitsKey(), "dq4 F8 {}: the default 8060S fast key differs from the WHIRL_DQ4_ORDER=0 key", cell);
+                    pinned += 1;
+                }
+            }
+    NCHECK(pinned == 2, "dq4 F8 shipped pin: {} 8060S fast cells (want 2: swift, moe)", pinned);
+}
+
 static void testAttnI4qkFlag() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -2317,6 +2417,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testAttnSxFlag();  // v0252-strixc2 (fails before the port: loadFlags never sets attn_sx)
     testAttnI4qkFlag();  // v0252-8sfp (fails before the port: loadFlags never sets attn_i4qk)
     testMoepGuwFlag();  // v0252-8smoe (B; fails to build before the change: no Flags::moep_guw / EnvValues::moep_guw)
+    testDq4F8Flags();  // v0252-8sq4 (fails to build before the change: no Flags::dq4_order / dq4_min_keys, parseDq4MinKeys)
     testMoep2Flags();  // v0252-8smoe2 (C / D / E; fails to build before the change: no Flags::moep_dhs / moep_dna / moep_fq)
     testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port); v0252-c3bdef (the R9700 MoE default rows fail before c3bdef)
     testN2bR1();  // arch025-n2b-r1

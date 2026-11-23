@@ -2148,10 +2148,10 @@ void testBaselineDumps() {
     _putenv_s("WHIRL_S0A_DUMP_T", "");
     BCHECK(!whirl::dump::dumpOnly());  // only the --dump-only argument sets it
     // bug-cli-dumponly: the commands that reach loadOrTune take --dump-only, the others refuse it (naming the command)
-    for (const char* c : {"chat", "bench", "seqtest", "golden", "serve"}) BCHECK(whirl::dump::dumpOnlyRefusal(c).empty());
-    for (const char* c : {"selftest", "devices", "dflash-check", "vis-encode"}) {
-        const std::string why = whirl::dump::dumpOnlyRefusal(c);
-        BCHECK(why.find("does not support --dump-only") != std::string::npos && why.find(c) != std::string::npos);
+    for (const char* cmd : {"chat", "bench", "seqtest", "golden", "serve"}) BCHECK(whirl::dump::dumpOnlyRefusal(cmd).empty());
+    for (const char* cmd : {"selftest", "devices", "dflash-check", "vis-encode"}) {
+        const std::string why = whirl::dump::dumpOnlyRefusal(cmd);
+        BCHECK(why.find("does not support --dump-only") != std::string::npos && why.find(cmd) != std::string::npos);
         BCHECK(why.find('\n') == std::string::npos);
     }
     BCHECK(!whirl::dump::dumpOnly());  // asking does not set it
@@ -2586,6 +2586,8 @@ void testEnvSnapshot() {
                                      "ATTN_I4QK",  // v0252-8sfp: numerics loadFlags, not in the exec dump (unit testAttnI4qkFlag)
                                      "MOEP_GUW",  // v0252-8smoe: numerics loadFlags, not in the exec dump (unit testMoepGuwFlag)
                                      "MOEP_DHS", "MOEP_DNA", "MOEP_FQ",  // v0252-8smoe2: numerics loadFlags (unit testMoep2Flags)
+                                     "DQ4_ORDER", "DQ4_MINKEYS",  // v0252-8sq4: numerics loadFlags (unit testDq4F8Flags)
+                                     "FAST_KVQ8H",  // v0252-8sq4: Model::load -> numerics::fastKvQ8hMoe (contract testFastKvQ8hMoe)
                                      "DQ_FULL",  // v0252-kvlong2: Model::load -> allocScratch dq_ctx (iso model.scratch dq_copy_covers_context)
                                      "GEMM_TAIL"};  // v0252-pp2k2: Model::load -> config::gemmTailEnv (iso env_snapshot, forward.dispatch gemm_tail_launches)
     for (const auto& e : names) {
@@ -3119,6 +3121,8 @@ nu::Target targetOf(const q::Model& m) {
     t.moep_dna_profile = whirl::device::profile(m.arch).moep_dna;  // v0252-8smoe2 (D)
     t.moep_fq_profile = whirl::device::profile(m.arch).moep_fq;    // v0252-8smoe2 (E)
     t.gemvh_grp_profile = whirl::device::profile(m.arch).gemvh_group_dense;  // v0252-8sdec
+    t.dq4_order_profile = whirl::device::profile(m.arch).attn_dq4_row_order;  // v0252-8sq4 (F8 order)
+    t.dq4_min_keys_profile = whirl::device::profile(m.arch).dq4_min_keys;     // v0252-8sq4 (F8 split)
     return t;
 }
 
@@ -3324,6 +3328,10 @@ void testPlanVsLoadOrTune() {
         {"FDQ8S_MIN", "loader.cpp Model::load -> fdqEnv: gemmfq row threshold (v0251-a3port)"},
         {"DQ_FULL", "loader.cpp Model::load -> allocScratch: WHIRL_DQ_FULL=0 keeps the q8 / q4 prefill dequant copy FFN-sized (v0252-kvlong2), no numerics flag"},
         {"ARGMAX_MB", "loader.cpp Model::load -> Context::argmaxMbMode / setArgmaxMb: the gfx1201 multi-block verify argmax twins, bitwise the one-block kernels, no numerics flag (v0252-f1arg3)"},
+        // v0252-8sq4 (fallback): read in Model::load before the plan, as a KV-caps input (numerics::fastKvQ8hMoe -> KvCaps::fast_q8h_moe,
+        // next to the code object's kernel caps and the device row), not a numerics flag: chooseKv sees it through the caps; the plan
+        // only sees the KV format the load fixed (like CODE_OBJECT decides which kernels exist)
+        {"FAST_KVQ8H", "loader.cpp Model::load -> numerics::fastKvQ8hMoe -> KvCaps::fast_q8h_moe: fast MoE KV format q8h instead of q4 at load (v0252-8sq4), no numerics flag"},
         {"GEMM_TAIL", "loader.cpp Model::load -> config::gemmTailEnv -> Context::gemm_tail: the f16 GEMM token-tail split (ops::planGemmF16), class f16_gemm = same bits, no numerics flag (v0252-pp2k2)"},
     };
     for (const auto& e : EnvSnapshot::names()) {

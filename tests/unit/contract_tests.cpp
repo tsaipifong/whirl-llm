@@ -591,6 +591,33 @@ void testKvChoice() {
         CHECK(nu::chooseKv(fast, false, s8060f, std::nullopt).kv == K::q8h);
         CHECK(nu::chooseKv(fast, false, s8060f, std::nullopt).why == "fast, dense model: q8h (Radeon 8060S: faster decode than q4)");
         CHECK(nu::chooseKv(fast, true, s8060f, std::nullopt).kv == K::q4);
+        // v0252-8sq4 (fallback): with KvCaps::fast_q8h_moe (fastKvQ8hMoe at load) a MoE model in fast takes q8h too, with the
+        // RC6 reason; balance / precise unchanged; inert without fast_q8h (the R9700 row); WHIRL_KV still wins
+        {
+            nu::KvCaps m8 = s8060f;
+            m8.fast_q8h_moe = true;
+            CHECK(nu::chooseKv(fast, true, m8, std::nullopt).kv == K::q8h);
+            CHECK(nu::chooseKv(fast, true, m8, std::nullopt).why == "fast, MoE model: q8h (Radeon 8060S: faster decode than q4)");
+            CHECK(nu::chooseKv(fast, false, m8, std::nullopt).kv == K::q8h);
+            CHECK(nu::chooseKv(bal, true, m8, std::nullopt).kv == nu::chooseKv(bal, true, s8060f, std::nullopt).kv);
+            CHECK(nu::chooseKv(pre, true, m8, std::nullopt).kv == K::f16);
+            CHECK(nu::chooseKv(fast, true, m8, K::q4).kv == K::q4);
+            nu::KvCaps r97m{true, true, true, false};
+            r97m.fast_q8h_moe = true;
+            CHECK(nu::chooseKv(fast, true, r97m, std::nullopt).kv == K::q4);
+            // the load-time rule: row threshold, WHIRL_FAST_KVQ8H override, per-request context (0 = unknown -> on)
+            CHECK(!nu::fastKvQ8hMoe(0, std::nullopt, 131072));
+            CHECK(nu::fastKvQ8hMoe(1, std::nullopt, 2048));
+            CHECK(!nu::fastKvQ8hMoe(65536, std::nullopt, 32768) && nu::fastKvQ8hMoe(65536, std::nullopt, 65536));
+            CHECK(nu::fastKvQ8hMoe(0, std::string("1"), 2048) && !nu::fastKvQ8hMoe(1, std::string("0"), 2048));
+            CHECK(nu::fastKvQ8hMoe(0, std::string("65536"), 0) && !nu::fastKvQ8hMoe(0, std::string("65536"), 32768));
+            CHECK(!nu::fastKvQ8hMoe(0, std::string("x"), 131072) && nu::fastKvQ8hMoe(1, std::string("x"), 131072));  // not a number: the row
+            CHECK(!nu::fastKvQ8hMoe(0, std::string(""), 131072));
+            // the estimate's caps carry it on the integrated site only
+            CHECK(nu::kvCapsEstimate(true, true).fast_q8h_moe && !nu::kvCapsEstimate(false, true).fast_q8h_moe && !nu::kvCapsEstimate(true).fast_q8h_moe);
+            // both rows off today (opt-in; a default flip changes this CHECK and the device pins)
+            CHECK(whirl::device::k_profile_gfx1151.fast_kv_q8h_moe_ctx == 0 && whirl::device::k_profile_gfx1201.fast_kv_q8h_moe_ctx == 0);
+        }
         CHECK(nu::chooseKv(bal, false, s8060f, std::nullopt).kv == K::q8h);
         CHECK(nu::chooseKv(pre, false, s8060f, std::nullopt).kv == K::f16);
         CHECK(nu::chooseKv(fast, false, s8060f, K::q4).kv == K::q4);

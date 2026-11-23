@@ -70,6 +70,25 @@ struct Profile {
     // auto / 0 / N overrides it. 0 = today's split count. gfx1201: 32 WGPs x 2 attn_ws4r blocks (LDS 47.8 / 58.4 KB of
     // 128 KB per WGP) = 64 = one machine wave (libr4d decode_splits / TRT-LLM MMHA law, progress/v0252-l2split.PRIOR_ART.md)
     std::uint16_t attn_lsplit_blocks;
+    // v0252-8sq4 (PLAN V1-140 / V1-109; fast only, opt-in until the main session's screen shows a gain beyond its error,
+    // ADR-0019; a default flip is one line here plus the pinned CHECKs in tests/device, tests/iso/device.profile,
+    // tests/ops testAttnDq4F8 and tests/unit testDq4F8Flags' shipped pin). v0252-8sflip2: attn_dq4_row_order is the gfx1151
+    // default; dq4_min_keys and fast_kv_q8h_moe_ctx stay opt-in:
+    //   attn_dq4_row_order (F8 order): q4 KV decode / verify runs attn_dq4o (gfx1151 object: attn_dq4 with the gfx1201 block
+    //     order, verify row fastest, so the MTP verify rows share the q4 K / V tiles through L2; same partials). Numerics
+    //     flag dq4_order (numerics::Target::dq4_order_profile); WHIRL_DQ4_ORDER = 0 off / any other value on. A family whose
+    //     object has no attn_dq4o (gfx1201: its attn_dq4 has the order already) runs attn_dq4 whatever the row says
+    //   dq4_min_keys (F8 split): the attn_dq4 split count from the longest row and this keys-per-split target
+    //     (ops::dq4MinKeysSplits; 0 = today's rule, dq4Splits). Flag dq4_min_keys; WHIRL_DQ4_MINKEYS = 0 off / N keys.
+    //     A host rule: the R9700 takes it later by its own row value
+    //   fast_kv_q8h_moe_ctx (fallback): fast mode on a MoE model takes q8h KV (balance's format and decode / verify path,
+    //     KvCaps::fast_q8h_moe; the 8060S dense rule RC6 extended to MoE) when the load's per-request context is at least
+    //     this many tokens (1 = every load); 0 = off (q4). Fixed per KV pool at load (Model::load), never per session or
+    //     per length. numerics::fastKvQ8hMoe; WHIRL_FAST_KVQ8H = 0 off / N tokens. Only where KvCaps::fast_q8h holds
+    //     (gfx1151): the R9700 row is inert until its code path is chosen there
+    bool attn_dq4_row_order;
+    std::uint16_t dq4_min_keys;
+    std::uint32_t fast_kv_q8h_moe_ctx;
     // ---- tuning (src/model/tune.cpp)
     bool tune_fast;                 // each kernel timed once per shape, slow candidates rejected early
     // tune cache file name suffix (table revision). A change to what the tuner times on this family (candidates, slots,
@@ -180,6 +199,9 @@ inline constexpr Profile k_profile_gfx1201{
     // v0252-l2split: one machine wave (64 blocks: Swift 4 kv heads -> 16 splits, Ornith 2 -> 32; today 64 each); the R9700
     // kt lsplit sweep (scratch/v0252_l2split/proposed) and the e2e A/B decide whether it stays
     .attn_lsplit_blocks = 64,
+    .attn_dq4_row_order = false,  // v0252-8sq4: no attn_dq4o in the gfx1201 object (attn_dq4 has the order)
+    .dq4_min_keys = 0,            // v0252-8sq4 F8 split: opt-in (R9700 fast tg 96k inversion: its own screen later)
+    .fast_kv_q8h_moe_ctx = 0,     // v0252-8sq4 fallback: opt-in (KvCaps::fast_q8h is false here, so inert today)
     .tune_fast = false,
     .tune_cache_suffix = "",
     .tune_time_hint = "2 minutes (a few seconds for MXFP4 models)",
@@ -257,6 +279,16 @@ inline constexpr Profile k_profile_gfx1151{
     .attn_ws4r_q8 = 0,  // v0252-ws4r97b: the gfx1151 object has no attn_ws4r (attn_ws4 / attn_ws4g there)
     .attn_ws4r_f16 = 0,
     .attn_lsplit_blocks = 0,  // v0252-l2split: the gfx1151 decode path is attn_ws4 (constant 64 splits, DES-ATTN-8S); unchanged
+    // v0252-8sq4: opt-in until the screens progress/8sq4-order.json / 8sq4-minkeys.json / 8sq4-kvq8h.json show a gain beyond
+    // the error (ADR-0019). On: attn_dq4_row_order = true, dq4_min_keys = the screened target, fast_kv_q8h_moe_ctx = 1 (or
+    // the context the screen supports)
+    // v0252-8sflip2: F8 order ON by default (fast plans with q4 KV run attn_dq4o; same partials as attn_dq4: kt attndq4
+    // exact 54/54, [kv q4 order] 27/27). Screens scratch/abscreen/8sq4-order and 8sq4-order-long (Ornith fast, same exe,
+    // default vs WHIRL_DQ4_ORDER=1): tg 131072 +10.49 % +- 9.08 (gain, 4 rounds), tg 32768 +3.89 % +- 3.34 (gain),
+    // tg 65536 +9.69 % +- 10.24 (open), tg 8192 -1.53 % +- 5.78 (open), prefill guards flat. WHIRL_DQ4_ORDER=0 = attn_dq4
+    .attn_dq4_row_order = true,
+    .dq4_min_keys = 0,            // WHIRL_DQ4_MINKEYS=1024 turns it on
+    .fast_kv_q8h_moe_ctx = 0,     // WHIRL_FAST_KVQ8H=1 turns it on (every load)
     .tune_fast = true,
     .tune_cache_suffix = "-gfx1151r3",  // r3: gemmfq in the dequant family (v0251-a3key; tests/model testTuneCacheKey)
     .tune_time_hint = "8 minutes on the Radeon 8060S (less for MXFP4 models)",

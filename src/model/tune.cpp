@@ -901,6 +901,8 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     t.moep_guw_profile = prof.moep_guw;  // v0252-8smoe (B): the routing-aware wide moep gate + up tile (flag moep_guw)
     t.moep_dhs_profile = prof.moep_dhs;  // v0252-8smoe2 (C): coalesced f16 down epilogue (flag moep_dhs)
     t.moep_dna_profile = prof.moep_dna;  // v0252-8smoe2 (D): COMB 5 atomic down variant (flag moep_dna)
+    t.dq4_order_profile = prof.attn_dq4_row_order;  // v0252-8sq4 (F8 order)
+    t.dq4_min_keys_profile = prof.dq4_min_keys;     // v0252-8sq4 (F8 split)
     t.moep_fq_profile = prof.moep_fq;    // v0252-8smoe2 (E): fused-dequant moep twins (flag moep_fq)
     t.gemvh_grp_profile = prof.gemvh_group_dense;  // v0252-8sdec: the gfx1151 precise grouped gemvh (numerics flag gemvh_grp)
     return t;

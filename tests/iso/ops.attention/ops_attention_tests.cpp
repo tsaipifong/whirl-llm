@@ -12,6 +12,7 @@ int main(int argc, char** argv) {
                      {"attn_decode_ws4r", testAttnDecodeWs4r},  // v0252-ws4r97b
                      {"attn_decode_lsplit", testAttnDecodeLsplit},  // v0252-l2split
                      {"dq4_partition", testDq4Partition},  // v0252-n2
+                     {"attn_dq4_f8", testAttnDq4F8},  // v0252-8sq4
                      {"attn_prefill", testAttnPrefill},
                      {"attn_kgvar", testAttnKgVariant},  // v0252-c1port
                      {"attn_sx", testAttnSx},  // v0252-strixc2

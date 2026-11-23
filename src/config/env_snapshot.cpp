@@ -91,6 +91,9 @@ constexpr std::array<S::Entry, S::n_names> k_names{{
     {"MOEP_DHS", &S::moep_dhs},  // v0252-8smoe2 (C)
     {"MOEP_DNA", &S::moep_dna},  // v0252-8smoe2 (D)
     {"MOEP_FQ", &S::moep_fq},    // v0252-8smoe2 (E)
+    {"DQ4_ORDER", &S::dq4_order},  // v0252-8sq4 (F8 order)
+    {"DQ4_MINKEYS", &S::dq4_min_keys},  // v0252-8sq4 (F8 split)
+    {"FAST_KVQ8H", &S::fast_kvq8h},  // v0252-8sq4 (fallback, Model::load)
 }};
 // every field is in the table (a field added without an entry would never be read)
 static_assert(sizeof(EnvSnapshot) == S::n_names * sizeof(S::Value));

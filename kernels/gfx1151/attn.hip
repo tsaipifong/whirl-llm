@@ -543,6 +543,17 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
 #define ADQ_GRID const int g = blockIdx.x, split = blockIdx.y, n_split = gridDim.y, z = blockIdx.z;
 #include "shared/attn_dq4.h"  // attn_dq4, both kernel sets (ADR-0005)
 #undef ADQ_GRID
+// v0252-8sq4 (PLAN V1-140 / V1-109, F8 order): attn_dq4o = the same kernel with the gfx1201 block order (kernels/attn.hip
+// ADQ_GRID: the verify row fastest), so the MTP verify rows of one (head, split) run back to back and the second reads the
+// q4 K / V tiles from L2 instead of DRAM (with the order above, row 1's blocks start after every row-0 block: at 128k the
+// layer's q4 KV, Ornith 75 MB, is past the 32 MB MALL). A bijection of the grid: every block's partial is attn_dq4's
+// (tests/ops testAttnDq4F8 models the map; kt attndq4 compares the bits). The host picks it (ops::chooseAttnDecode,
+// numerics flag dq4_order). The name is a macro over the shared source so attn_dq4 above keeps its text and code.
+#define attn_dq4 attn_dq4o
+#define ADQ_GRID const int lin = blockIdx.x + gridDim.x * (blockIdx.y + gridDim.y * blockIdx.z); const int z = lin % gridDim.z, gs = lin / gridDim.z; const int g = gs % gridDim.x, split = gs / gridDim.x, n_split = gridDim.y;
+#include "shared/attn_dq4.h"  // attn_dq4o (gfx1151 only)
+#undef ADQ_GRID
+#undef attn_dq4
 
 
 

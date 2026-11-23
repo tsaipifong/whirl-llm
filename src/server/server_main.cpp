@@ -576,7 +576,10 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         const std::uint64_t st1 = ssb.st1;
         const std::uint64_t pend1 = ssb.pend1;
         // (WHIRL_DUMP_KV: one "D kv: site=server.est_uma" line)
-        const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::server_uma, nreq, cfg.moe, numerics::kvEstimateRequest(settings::envGet("KV")));
+        // v0252-8sq4 (fallback): the per-request context is not settled here; ctx 0 = the larger format when the switch is on
+        const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::server_uma, nreq, cfg.moe, numerics::kvEstimateRequest(settings::envGet("KV")),
+                                                     numerics::fastKvQ8hMoe(device::profile(device::k_uma_estimate_arch).fast_kv_q8h_moe_ctx,
+                                                                            settings::envGet("FAST_KVQ8H"), 0));
         hip::UmaNeed need;
         need.weights = est.weights + (use_dflash && dfile ? am->sizing.dflashWeightBytes(*dfile) : 0);
         const std::uint64_t bufs =
