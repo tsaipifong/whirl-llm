@@ -524,6 +524,7 @@ static void testFingerprintCoversBitsKey() {
         t.strix_profile = t.k_gdn_sx = s8060;
         t.attn_sx_profile = s8060;  // v0252-strixc2 (device::Profile::attn_sx_balance)
         t.attn_i4qk_profile = s8060;  // v0252-8sfp (device::Profile::attn_i4qk_fast)
+        t.attn_i4pf_profile = s8060;  // v0252-8sattn3 (device::Profile::attn_i4_qlds_pf: the gfx1151 row on, gfx1201 off)
         t.moep_comb_fast_skip_profile = s8060 ? 5u : 0u;  // v0252-8smoe (A: device::Profile::moep_comb_fast_skip)
         t.moep_guw_profile = 0u;  // v0252-8smoe (B: device::Profile::moep_guw; v0252-8sopen: opt-in, 0 on both rows)
         t.moep_dhs_profile = t.moep_fq_profile = s8060;  // v0252-8smoe2 (C / E); v0252-8sflip: on in the gfx1151 row, off in gfx1201

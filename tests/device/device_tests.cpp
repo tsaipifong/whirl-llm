@@ -181,6 +181,9 @@ void testProfiles() {
     CHECK(!a.argmax_mb_dense && a.argmax_mb_moe && !b.argmax_mb_dense && !b.argmax_mb_moe);
     CHECK(!a.attn_sx_balance && b.attn_sx_balance);  // v0252-strixc2: the balance attn_sx prefill attention on the 8060S only
     CHECK(!a.attn_i4qk_fast && b.attn_i4qk_fast);  // v0252-8sfp: the fast int4 Q.K^T prefill attention on the 8060S only
+    // v0252-8sattn3 (PLAN V1-148): the fast int4 prefill attention with Q codes in LDS + K / V prefetch (same bits as the int4
+    // kernel) on the 8060S by default since round 3; the gfx1201 object has no such kernel (WHIRL_ATTN_I4PF=0 = the old one)
+    CHECK(!a.attn_i4_qlds_pf && b.attn_i4_qlds_pf);
     CHECK(a.gemm_tail && !b.gemm_tail);  // v0252-pp2k2 (F1): the GEMM token-tail split on the R9700 only (8060S unchanged)
     // v0252-8smoe (A, PLAN V1-95): the 8060S fast moeskip MoE prefill combine = 5 (atomic scatter); the R9700 keeps its rule
     CHECK(a.moep_comb_fast_skip == 0 && b.moep_comb_fast_skip == 5);

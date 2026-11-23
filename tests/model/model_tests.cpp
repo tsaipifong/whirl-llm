@@ -2584,6 +2584,7 @@ void testEnvSnapshot() {
                                      "ARGMAX_MB",  // v0252-f1arg3: Model::load -> Context::argmaxMbMode (iso forward.mtp_verify argmax_mb)
                                      "ATTN_SX",  // v0252-strixc2: numerics loadFlags, not in the exec dump (unit testAttnSxFlag)
                                      "ATTN_I4QK",  // v0252-8sfp: numerics loadFlags, not in the exec dump (unit testAttnI4qkFlag)
+                                     "ATTN_I4PF",  // v0252-8sattn3: numerics loadFlags, not in the exec dump (unit testAttnI4pfFlag)
                                      "MOEP_GUW",  // v0252-8smoe: numerics loadFlags, not in the exec dump (unit testMoepGuwFlag)
                                      "MOEP_DHS", "MOEP_DNA", "MOEP_FQ",  // v0252-8smoe2: numerics loadFlags (unit testMoep2Flags)
                                      "DQ4_ORDER", "DQ4_MINKEYS",  // v0252-8sq4: numerics loadFlags (unit testDq4F8Flags)
@@ -3115,6 +3116,7 @@ nu::Target targetOf(const q::Model& m) {
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     t.attn_sx_profile = whirl::device::profile(m.arch).attn_sx_balance;  // v0252-strixc2
     t.attn_i4qk_profile = whirl::device::profile(m.arch).attn_i4qk_fast;  // v0252-8sfp
+    t.attn_i4pf_profile = whirl::device::profile(m.arch).attn_i4_qlds_pf;  // v0252-8sattn3
     t.moep_comb_fast_skip_profile = whirl::device::profile(m.arch).moep_comb_fast_skip;  // v0252-8smoe (A)
     t.moep_guw_profile = whirl::device::profile(m.arch).moep_guw;  // v0252-8smoe (B)
     t.moep_dhs_profile = whirl::device::profile(m.arch).moep_dhs;  // v0252-8smoe2 (C)
