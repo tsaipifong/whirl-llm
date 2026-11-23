@@ -1656,7 +1656,8 @@ static void testMoepGuwFlag() {
 }
 
 // v0252-8smoe2 (PLAN V1-147, levers C / D / E): device::Profile moep_dhs / moep_dna / moep_fq and WHIRL_MOEP_DHS / _DNA / _FQ.
-// The row (Target::*_profile) applies on the 8060S MoE MXFP4 plan: C and E in balance / fast, D in fast; 0 elsewhere. The
+// The row (Target::*_profile) applies on the 8060S MoE MXFP4 plan: C in balance / fast, E in every mode (v0252-8sflip), D in
+// fast; 0 elsewhere. The
 // variables override it in any mode: DHS / FQ "0" / "" off, any other value on; DNA a kMoepDn name ("0" / "" / unknown off).
 // Tests follow the profile row: the shipped rows are read from k_cards, so a default flip is the row + the device pin only.
 // Each "=0" arm changes only its own flag; each switch changes bitsKey exactly where it changes its flag. Fails to build before
@@ -1681,7 +1682,10 @@ static void testMoep2Flags() {
                     }
                     const bool moep = std::string_view(model) == "moe" && c.prof.numerics_8060s;
                     const bool bf = moep && std::string_view(mode) != "precise", fa = moep && std::string_view(mode) == "fast";
-                    const bool want_c = bf && t.moep_dhs_profile, want_e = bf && t.moep_fq_profile;
+                    // v0252-8sflip: E's row applies in every mode (precise too: the twins store the same bits, screen
+                    // 8smoe2-e-precise equal output); C's row where the f16 epilogue can run (balance / fast: precise
+                    // never takes ydh)
+                    const bool want_c = bf && t.moep_dhs_profile, want_e = moep && t.moep_fq_profile;
                     const std::uint32_t want_d = fa ? t.moep_dna_profile : 0u;
                     const nu::Plan d = pl(t, mode, {});
                     const std::string cell = std::format("{} {} {} {}", forced ? "forced" : "shipped", c.name, model, mode);
@@ -1715,8 +1719,24 @@ static void testMoep2Flags() {
                         NCHECK(pl(t, mode, {{"MOEP_DNA", bogus}}).flags.moep_dna == 0u, "moep2 {} WHIRL_MOEP_DNA='{}' = off", cell, bogus);
                     NCHECK(pl(t, mode, {{"MOEP_DNA", "m128w4n64k64"}}).flags.moep_dna == 2u, "moep2 {}: DNA by name", cell);
                 }
-    NCHECK(on_c == 2 && on_e == 2 && on_d == 1, "moep2 rule cells C {} D {} E {} (want 2 / 1 / 2: 8060S moe balance+fast / fast / balance+fast)", on_c,
-           on_d, on_e);
+    NCHECK(on_c == 2 && on_e == 3 && on_d == 1,
+           "moep2 rule cells C {} D {} E {} (want 2 / 1 / 3: 8060S moe balance+fast / fast / precise+balance+fast)", on_c, on_d, on_e);
+    // v0252-8sflip (PLAN V1-147): the SHIPPED defaults, pinned by value (not through the row): 8060S MoE MXFP4 plan - E on in
+    // precise / balance / fast, C on in balance / fast (off in precise: no f16 epilogue there); "0" = the previous kernels,
+    // "1" = on; R9700 and the dense model never by default. D stays off.
+    for (const char* mode : {"precise", "balance", "fast"}) {
+        const bool prec = std::string_view(mode) == "precise";
+        const nu::Target t8 = target(card("8060s"), "moe", false);
+        const nu::Plan d = pl(t8, mode, {});
+        NCHECK(d.flags.moep_fq && d.flags.moep_dhs == !prec && d.flags.moep_dna == 0u, "moep2 shipped 8060s moe {}: fq {} dhs {} dna {}", mode,
+               d.flags.moep_fq, d.flags.moep_dhs, d.flags.moep_dna);
+        const nu::Plan z = pl(t8, mode, {{"MOEP_FQ", "0"}, {"MOEP_DHS", "0"}}), o = pl(t8, mode, {{"MOEP_FQ", "1"}, {"MOEP_DHS", "1"}});
+        NCHECK(!z.flags.moep_fq && !z.flags.moep_dhs && o.flags.moep_fq && o.flags.moep_dhs, "moep2 shipped 8060s moe {}: =0 off, =1 on", mode);
+        for (const auto& [cn, model] : {std::pair{"r9700", "moe"}, std::pair{"r9700", "swift"}, std::pair{"8060s", "swift"}}) {
+            const nu::Plan x = pl(target(card(cn), model, false), mode, {});
+            NCHECK(!x.flags.moep_fq && !x.flags.moep_dhs && x.flags.moep_dna == 0u, "moep2 shipped {} {} {}: off", cn, model, mode);
+        }
+    }
     nu::Target tq = target(card("8060s"), "moe", false);
     tq.moep_dhs_profile = tq.moep_fq_profile = true;
     tq.moep_dna_profile = 4u;
