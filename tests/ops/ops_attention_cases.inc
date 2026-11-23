@@ -1373,9 +1373,9 @@ std::array<std::int32_t, 3> kDq4oMap(std::int32_t bx, std::int32_t by, std::int3
 void testAttnDq4F8() {
     const auto& p97 = whirl::device::k_profile_gfx1201;
     const auto& p8s = whirl::device::k_profile_gfx1151;
-    // profile rows: both off (opt-in until the main session's screen shows a gain beyond its error, ADR-0019); a default
-    // flip is one line in device_profile.h plus these CHECKs
-    CHECK(!p97.attn_dq4_row_order && !p8s.attn_dq4_row_order);
+    // profile rows: v0252-8sflip2: the order is the 8060S default (screens 8sq4-order / -long gained beyond their error,
+    // ADR-0019); gfx1201 off (no attn_dq4o in its object: attn_dq4 has the order). min keys: opt-in on both rows
+    CHECK(!p97.attn_dq4_row_order && p8s.attn_dq4_row_order);
     CHECK(p97.dq4_min_keys == 0 && p8s.dq4_min_keys == 0);
     // ops defaults: off (a caller that does not pass the plan's flags keeps today's kernel and grid)
     {

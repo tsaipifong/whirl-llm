@@ -1800,6 +1800,29 @@ static void testDq4F8Flags() {
                 }
     // forced rows: fast on both cards and both models (4 cells each)
     NCHECK(on_o == 4 && on_m == 4, "dq4 F8 rule cells order {} min keys {} (want 4 / 4: fast x 2 cards x 2 models)", on_o, on_m);
+    // v0252-8sflip2 (pinned, not read from the rows): the SHIPPED defaults. 8060S fast (both models) unset -> dq4_order on,
+    // "0" / "" -> off (the previous kernel attn_dq4, the reference arm of later screens), "1" -> on; precise / balance never on
+    // (q4 KV is fast-only); the R9700 never on by default (no attn_dq4o in its object). dq4_min_keys stays 0 everywhere.
+    std::size_t pinned = 0;
+    for (const CardFake& c : k_cards)
+        for (const char* model : {"swift", "moe"})
+            for (const char* mode : {"precise", "balance", "fast"}) {
+                const nu::Target t = target(c, model, false);
+                const bool fast = std::string_view(mode) == "fast", s8 = std::string_view(c.name) == "8060s";
+                const std::string cell = std::format("shipped pin {} {} {}", c.name, model, mode);
+                const nu::Plan d = pl(t, mode, {});
+                NCHECK(d.flags.dq4_order == (fast && s8) && d.flags.dq4_min_keys == 0u, "dq4 F8 {}: unset order {} min keys {}", cell,
+                       d.flags.dq4_order, d.flags.dq4_min_keys);
+                NCHECK(!pl(t, mode, {{"DQ4_ORDER", "0"}}).flags.dq4_order && !pl(t, mode, {{"DQ4_ORDER", ""}}).flags.dq4_order,
+                       "dq4 F8 {}: WHIRL_DQ4_ORDER=0 / '' = off", cell);
+                NCHECK(pl(t, mode, {{"DQ4_ORDER", "1"}}).flags.dq4_order == fast, "dq4 F8 {}: WHIRL_DQ4_ORDER=1 = on in fast only", cell);
+                if (fast && s8) {
+                    const nu::Plan z = pl(t, mode, {{"DQ4_ORDER", "0"}});
+                    NCHECK(z.bitsKey() != d.bitsKey(), "dq4 F8 {}: the default 8060S fast key differs from the WHIRL_DQ4_ORDER=0 key", cell);
+                    pinned += 1;
+                }
+            }
+    NCHECK(pinned == 2, "dq4 F8 shipped pin: {} 8060S fast cells (want 2: swift, moe)", pinned);
 }
 
 static void testAttnI4qkFlag() {
