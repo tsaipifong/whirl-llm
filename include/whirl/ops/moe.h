@@ -52,6 +52,11 @@ struct MoeFlags {
     // combine; fast candidate: 5 = atomic scatter into x (f32 order varies run to run)
     int moep_gu = -1, moep_dn = -1;
     std::uint32_t moep_comb = 0;
+    // v0252-8smoe (PLAN V1-147; numerics::Flags::moep_guw, WHIRL_MOEP_GUW): index into kMoepGu of the routing-aware wide gate +
+    // up variant (-1 = off). A moep forward whose experts average at least its token tile (n * K >= bn * R) runs it instead
+    // of moep_gu (llama.cpp mmq.cu:197-201 picks its MoE tile against the average tokens per expert on RDNA3 / 3.5 / 4).
+    // Every moep gate + up variant stores the same bits (kt moemx), so the plan's bit class is unchanged.
+    int moep_guw = -1;
     // v0251-a7pol (B26-41): the combine classes the numerics MODE allows (moepCombFor; qwen35::Context::moeBlock sets it
     // from the plan's mode). Not prec_dec: WHIRL_Q8DEC=1 clears prec_dec in precise. Default: bitwise only.
     enum class MoepComb : std::uint8_t {
@@ -103,6 +108,11 @@ inline void setMoep(MoeFlags& f, std::uint32_t plan_gu, std::uint32_t plan_dn, s
     f.moep_dn = static_cast<int>(plan_dn) - 1;
     f.moep_comb = plan_comb;
 }
+// v0252-8smoe: numerics::Flags::moep_guw (variant index + 1, 0 = off) -> MoeFlags::moep_guw (index, -1 = off)
+inline void setMoepGuw(MoeFlags& f, std::uint32_t plan_guw) { f.moep_guw = static_cast<int>(plan_guw) - 1; }
+// v0252-8smoe: the gate + up variant a moep forward of n rows runs - the wide one when it is set, in the code object and the
+// experts average at least its token tile (n * K >= bn * R), else moep_gu. Callers have checked moep_gu (moepOk).
+int moepGuFor(std::uint32_t n, std::uint32_t K, std::uint32_t R, const MoeFlags& f, const kernels::MoeKernels& k);
 enum class MoePrefillKind : std::uint8_t { fp8, fused_gu, gemmr, generic, moep };
 struct MoePlan {
     bool small = false;      // decode experts (else the grouped prefill GEMMs)
