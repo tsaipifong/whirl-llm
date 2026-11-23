@@ -123,6 +123,8 @@ struct EnvValues {
     Raw attn_kgvar;
     // v0252-c3port (feat026-moedec): moe_fuse / gemvh_f32 (WHIRL_MOE_FUSE / WHIRL_GEMVH_F32)
     Raw moe_fuse, gemvh_f32;
+    // v0252-8sdec (PLAN V1-142): gemvh_grp (WHIRL_GEMVH_GRP, the precise grouped gemvh; class B)
+    Raw gemvh_grp;
     // v0252-ws4r97b (PLAN V1-87 phase 2): attn_ws4r (WHIRL_ATTN_WS4R, the gfx1201 attn_ws4r variant; class B)
     Raw attn_ws4r;
     // v0252-l2split (PLAN V1-88): attn_lsplit (WHIRL_ATTN_LSPLIT, the gfx1201 decode / verify split count by machine fill; lossy
@@ -146,7 +148,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 42;  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows)
+    static constexpr std::size_t n_fields = 43;  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -255,6 +257,8 @@ struct Target {
     // v0252-8smoe (B, PLAN V1-147): device::Profile::moep_guw - the routing-aware wide gate + up variant (kMoepGu index + 1,
     // 0 = off) of a balance / fast plan with the moep GEMMs (gfx1151, MXFP4 routed experts)
     std::uint32_t moep_guw_profile = 0;
+    // v0252-8sdec (PLAN V1-142): device::Profile::gemvh_group_dense (the gfx1151 row): numerics flag gemvh_grp on dense models
+    bool gemvh_grp_profile = false;
 };
 
 // ---- v0252-f2: the fast MoE relaxacc arms (the G3a / G4a screen arms) and the shipped default per GPU.
@@ -291,13 +295,14 @@ std::string_view relaxMoeDefaultName(bool gfx1151);
 // ---- v0252-b5 round 3 (PLAN V1-97): the fast DENSE relaxacc arms, the same mechanism (Target::relax_dense_arm). A dense
 // model always ran relaxed acceptance in fast with the Flags defaults (k 4, alpha 0.1): an arm only replaces k / alpha
 // (drafts 0 = the device's draft count, unchanged); WHIRL_RELAX_K / _ALPHA still override, WHIRL_RELAX=0 turns it off.
-// Shipped: gfx1201 (R9700) k8a02 = K 8, alpha 0.02 (Swift fast screen KEEP); gfx1151 (8060S) none - Swift fast there keeps
-// k 4 / alpha 0.1 (its own screen is queued). The A arm on the R9700 = WHIRL_RELAX_K=4 WHIRL_RELAX_ALPHA=0.1.
+// Shipped: gfx1201 (R9700) k8a02 = K 8, alpha 0.02 (Swift fast screen KEEP, KB v0252-k8p1:p1-gate-r9700); gfx1151 (8060S)
+// k8a02 too since v0252-8sdec (PLAN V1-143; its screen progress/8sdec-screen.json; the 8060S keeps its own draft count,
+// slope 0.12). The A arm on either card = WHIRL_RELAX_K=4 WHIRL_RELAX_ALPHA=0.1 (the plan before the arm).
 inline constexpr std::array<RelaxArm, 1> relax_dense_arms{{
     {"k8a02", true, 8, 0.02f, 0},
 }};
 inline constexpr std::string_view relax_dense_default_r9700 = "k8a02";
-inline constexpr std::string_view relax_dense_default_8060s = "";
+inline constexpr std::string_view relax_dense_default_8060s = "k8a02";
 // nullptr for an unknown name ("" included)
 const RelaxArm* relaxDenseArm(std::string_view name);
 // The default dense arm name for the code object (Target::gfx1151): relax_dense_default_8060s / _r9700.
@@ -355,6 +360,9 @@ struct ItemState {
 // bitwise switches, the loader's envFlag rule ("0" off, any other value on), class B (no +overrides label, never lossy);
 // not in the S0b-2 dump (the launch log pins the kernels). v0252-c3bdef: moe_fuse defaults on for MoE models on the
 // gfx1201 code object (R9700 A/B q7 9507 KEEP), off on dense models and on gfx1151; gemvh_f32 default off everywhere.
+// v0252-8sdec (PLAN V1-142): gemvh_grp (WHIRL_GEMVH_GRP: ops::chooseGemvhGroup, the same-input precise gemvh matrices of
+// one matmulGroup in one gemvhg launch): bitwise switch, envFlag rule, class B; default = Target::gemvh_grp_profile on a
+// dense model (gfx1151), off on MoE models and on gfx1201 (no gemvhg there). Only precise decode / verify rows can take it.
 // v0252-f5 (moeskip, feat027): moe_skip_thr = the threshold (Item moeskip on in fast with int8 decode activations, i.e. not
 // prec_dec; 0 = off everywhere else), moe_skip_min = the top slots always kept. ops::chooseMoe takes the skip entry points
 // of a MoE block only when every kernel of that block's path has one (else the block runs moe_topk and no slot id is -1).
@@ -411,6 +419,7 @@ struct ItemState {
     X(B, moe_rfuse, false, "")                                   \
     X(B, moe_fuse, false, "")                                    \
     X(B, gemvh_f32, false, "")                                   \
+    X(B, gemvh_grp, false, "")                                   \
     X(B, gv_group, true, "gv_group")                             \
     X(U, gv_nmax, 0, "gv_nmax")                                  \
     X(B, gdn_v0, false, "")                                      \

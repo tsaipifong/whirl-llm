@@ -39,7 +39,8 @@
     "kernels/gemv_hv.hip",
     "kernels/gemv_hf.hip",
     "kernels/gfx1151/gemm_*.hip",
-    "kernels/gfx1151/gemv_h.hip"
+    "kernels/gfx1151/gemv_h.hip",
+    "kernels/gfx1151/gemv_hg.hip"
    ],
    "deps": [
     "kernels.common",

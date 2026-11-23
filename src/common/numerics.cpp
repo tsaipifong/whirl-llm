@@ -224,6 +224,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"ATTN_KGVAR", &S::attn_kgvar},
         {"MOE_FUSE", &S::moe_fuse},    // v0252-c3port (feat026-moedec)
         {"GEMVH_F32", &S::gemvh_f32},  // v0252-c3port (feat026-moedec)
+        {"GEMVH_GRP", &S::gemvh_grp},  // v0252-8sdec (PLAN V1-142)
         {"ATTN_WS4R", &S::attn_ws4r},  // v0252-ws4r97b (PLAN V1-87 phase 2)
         {"ATTN_LSPLIT", &S::attn_lsplit},  // v0252-l2split (PLAN V1-88)
         {"MOESKIP", &S::moeskip},  // v0252-f5
@@ -425,6 +426,9 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     // everywhere (C3 screen: Swift -10 %). WHIRL_MOE_FUSE=0 / any other value overrides it (the loader's envFlag rule).
     F.moe_fuse = flagOr(e.moe_fuse, !t.gfx1151 && t.moe);
     F.gemvh_f32 = flagOr(e.gemvh_f32, false);
+    // v0252-8sdec (PLAN V1-142): the precise grouped gemvh, default on dense models where the device profile says so
+    // (no row does since v0252-8sopen: opt-in by WHIRL_GEMVH_GRP=1); bitwise (same per-tile kernel body), so every mode carries the flag and only precise rows use it
+    F.gemvh_grp = flagOr(e.gemvh_grp, t.gemvh_grp_profile && !t.moe);
     // tune.cpp:852-861
     if (e.fp8) F.fp8_prefill = *e.fp8 != "0";
     if (e.fp8 && *e.fp8 == "0") F.moe_fp8 = false;
@@ -576,7 +580,7 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
         // v0252-f2: on a MoE model the arm (default or forced by WHIRL_RELAX=1) gives the base k / alpha / drafts; the
         // WHIRL_RELAX_* values below still override them. No arm: the Flags defaults (dense, and MoE forced as before).
         // v0252-b5 round 3 (PLAN V1-97): a dense model takes its own arm the same way (Target::relax_dense_arm: k8a02 on
-        // gfx1201; none on gfx1151 = the Flags defaults k 4 / alpha 0.1)
+        // gfx1201, and on gfx1151 since v0252-8sdec)
         if (const RelaxArm* arm = t.moe ? relaxArm(t.relax_moe_arm) : relaxDenseArm(t.relax_dense_arm); arm != nullptr && arm->on) {
             F.relax_k = arm->k;
             F.relax_alpha = arm->alpha;

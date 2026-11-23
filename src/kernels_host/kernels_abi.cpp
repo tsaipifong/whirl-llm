@@ -320,6 +320,8 @@ void loadMatmul(MatmulKernels& k, const Loader& L) {
         // v0252-c3port (feat026-moedec L1; gfx1201 code object only, no f16 entry): gemvh on f32 x
         k.gemvhf[ti(t)] = L.opt(std::string("gemvhf_") + sfx(t));
         k.gemvhf2[ti(t)] = L.opt(std::string("gemvhf2_") + sfx(t));
+        // v0252-8sdec (gfx1151 code object only, paired types): the grouped gemvh
+        k.gemvhg[ti(t)] = L.opt(std::string("gemvhg_") + sfx(t));
     }
     // Small-batch GEMM (absent configurations stay null).
     for (QType t : {QType::q8_0, QType::q3_k, QType::q4_k, QType::q5_k, QType::q6_k, QType::iq4_nl, QType::iq3_s,

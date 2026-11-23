@@ -59,6 +59,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_GEMMHQ",  // src/common/numerics.cpp
     "WHIRL_GEMM_TAIL",  // src/config/env_snapshot.cpp (v0252-pp2k2: GEMM token-tail split; bitwise-equal, hashed like FDQ8S / GEMMH)
     "WHIRL_GEMVH_F32",  // src/common/numerics.cpp (feat026-moedec, v0252-c3port: other kernels, same bits)
+    "WHIRL_GEMVH_GRP",  // src/common/numerics.cpp (v0252-8sdec: grouped gemvh launch, same bits)
     "WHIRL_GEMVH_WAVES",  // src/kernels_host/kernels_abi.cpp
     "WHIRL_GEMVX_VARIANT",  // src/kernels_host/kernels_abi.cpp
     "WHIRL_GEMV_BITWISE_FLOAT",  // src/config/env_snapshot.cpp

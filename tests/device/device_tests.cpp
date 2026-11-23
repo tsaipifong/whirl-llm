@@ -187,6 +187,9 @@ void testProfiles() {
     // v0252-8smoe (B, PLAN V1-147): the routing-aware wide moep gate + up tile is opt-in on both cards (v0252-8sopen: screen
     // 8smoe-screen OPEN, ADR-0019; WHIRL_MOEP_GUW=g64n128k64 turns it on)
     CHECK(a.moep_guw == 0 && b.moep_guw == 0);
+    // v0252-8sdec (PLAN V1-142): the precise grouped gemvh (gemvhg, gfx1151 object only) is opt-in on both cards
+    // (v0252-8sopen: screens 8sdec-screen2 / -bands OPEN, ADR-0019; WHIRL_GEMVH_GRP=1 turns it on)
+    CHECK(!a.gemvh_group_dense && !b.gemvh_group_dense);
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
     // v0252-ch4k2 (PLAN V1-75): gfx1201 MoE 4096-row forwards in the fill form, as gfx1151 (v0252-ch4k timed A/B)

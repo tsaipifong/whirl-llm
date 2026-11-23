@@ -188,6 +188,21 @@ GemmPieces planGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
 // (no gemvh_cap) and the code object has the kernel (gfx1201 only); else null = f32_to_f16 + p.f (the 0.2.5.1 path).
 // Same bits: the B load rounds each f32 element with (_Float16)v, as f32_to_f16 does.
 Function gemvhF32(const GemmPlan& p, GgmlType ty, bool enabled, const GemmFlags& f, const kernels::MatmulKernels& k);
+// v0252-8sdec (PLAN V1-142; prior art progress/v0252-8sdec.PRIOR_ART.md): the precise grouped gemvh of 2..3 matrices that
+// share one input (Context::matmulGroup). Grouped when enabled (Flags::gemvh_grp, WHIRL_GEMVH_GRP), every matrix has the
+// first one's type and ncols, each would run alone as MatmulPath::gemm_f16 -> chooseGemmF16 kind gemvh with the table's
+// gemvh_<T> (precise rows, n <= 16, no f16 outputs) and the code object has gemvhg_<T> (gfx1151 only). Tiles of 16 rows
+// are numbered matrix by matrix: b1 / b2 = the first tile of matrix 1 / 2 (0x7fffffff = absent, the GvArgs rule), tiles =
+// the total; grid = kernels::gemvhGridCap(tiles * 16, f.gemvh_cap) when the device caps it, else one block per tile.
+// Same bits as one gemvh_<T> per matrix (the kernel runs gemvh_<T>'s per-tile body). f = null: not grouped.
+struct GemvhGroupPlan {
+    Function f = nullptr;
+    Dim3 grid{}, block{32, 1, 1};
+    std::int32_t b1 = 0x7fffffff, b2 = 0x7fffffff;
+    std::uint32_t tiles = 0;
+};
+GemvhGroupPlan chooseGemvhGroup(const MatShape* ws, std::size_t n_mats, std::uint32_t n, bool enabled, const MatmulFlags& mf, const GemmFlags& f,
+                                const kernels::MatmulKernels& k);
 
 // ---- MXFP4 x fp8 GEMM (MatmulPath::gemm_fp8; K-2), class fp8_gemm
 struct Gemm8Plan {

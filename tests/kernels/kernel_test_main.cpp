@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
         }
     }
     const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "moefuse", "silu", "moeskip", "misc", "attnbench",
-                               "gemvh", "gemvhbench", "gemvhv", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk", "attnkgl", "ws4r",
+                               "gemvh", "gemvhg", "gemvhbench", "gemvhv", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk", "attnkgl", "ws4r",
                                "specacc", "specaccz", "e1in"};  // = fams below
     const bool bench = !bo.families.empty();
     if ((!bo.ggemv_nt.empty() || !bo.ggemv_v.empty()) && bo.families.count("ggemv") == 0) {
@@ -277,7 +277,7 @@ int main(int argc, char** argv) {
                         {"moemx", kt::testMoeMx}, {"moef", kt::testMoeF}, {"moefuse", kt::testMoeFused}, {"silu", kt::testSiluW},
                         {"moeskip", kt::testMoeSkip},  // moeskip: v0252-f5
                         {"misc", kt::testMisc},   {"attnbench", kt::benchAttn},
-                        {"gemvh", kt::testGemvh}, {"gemvhbench", kt::benchGemvh}, {"gemvhv", kt::testGemvhv}, {"dflash", kt::testDflash},
+                        {"gemvh", kt::testGemvh}, {"gemvhg", kt::testGemvhg}, {"gemvhbench", kt::benchGemvh}, {"gemvhv", kt::testGemvhv}, {"dflash", kt::testDflash},
                         {"ws4", kt::testAttnWs4}, {"ws4bench", kt::benchAttnWs4},
                         {"ws4g", kt::testAttnWs4g}, {"ws4gbench", kt::benchAttnWs4g},
                         {"vision", kt::testVision}, {"gemvk", kt::testGemvk},  // gemvk: v0251-a6port

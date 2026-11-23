@@ -471,6 +471,8 @@ protected:
     // ---- launch internals (private since arch025-M3; were public "for tests", no caller outside the model)
     void gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc);
     void matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n);
+    // v0252-8sdec: the precise grouped gemvh of matmulGroup (false = not grouped, nothing launched)
+    bool matmulGroupGemvh(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n);
     void matmul(const Mat& w, DevPtr xin, DevPtr y, std::uint32_t n, bool accumulate);
     void gemmF16(const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);
     void gemmPlanLaunch(const ops::GemmPlan& p, const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);

@@ -889,7 +889,7 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     // F1's one-pass check (KernelTable::argmax_rank_rows_to) is in the code object (the R9700 takes the arm only with it)
     // and (v0252-f2def2) the family enables it (device::Profile::relax_rank_check; Context::setRelaxRank reads the same)
     t.relax_moe_arm = whirl::numerics::relaxMoeDefaultName(t.gfx1151);
-    // v0252-b5 round 3 (PLAN V1-97): the dense fast arm of this GPU (gfx1201 k8a02; gfx1151 none)
+    // v0252-b5 round 3 (PLAN V1-97): the dense fast arm of this GPU (gfx1201 k8a02; gfx1151 k8a02 since v0252-8sdec)
     t.relax_dense_arm = whirl::numerics::relaxDenseDefaultName(t.gfx1151);
     t.k_relax_rank = prof.relax_rank_check && m.k.argmax_rank_rows_to != nullptr;
     // v0252-f5 (moeskip): the routing / grouping / combine entry points (both code objects) and the per-card fast default rule
@@ -899,6 +899,7 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     t.attn_i4qk_profile = prof.attn_i4qk_fast;  // v0252-8sfp: the gfx1151 fast int4 Q.K^T prefill attention (flag attn_i4qk)
     t.moep_comb_fast_skip_profile = prof.moep_comb_fast_skip;  // v0252-8smoe (A): the fast moeskip MoE prefill combine
     t.moep_guw_profile = prof.moep_guw;  // v0252-8smoe (B): the routing-aware wide moep gate + up tile (flag moep_guw)
+    t.gemvh_grp_profile = prof.gemvh_group_dense;  // v0252-8sdec: the gfx1151 precise grouped gemvh (numerics flag gemvh_grp)
     return t;
 }
 

@@ -468,6 +468,10 @@
    "kernels.abi"
   ],
   [
+   "kernels.gemm",
+   "kernels.abi"
+  ],
+  [
    "kernels.gdn",
    "kernels.norm"
   ],

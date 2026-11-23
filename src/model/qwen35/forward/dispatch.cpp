@@ -99,6 +99,7 @@ void Context::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u
 // path the matrices of one type run as one grouped launch (bitwise the same).
 void Context::matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n) {
     const bool ok = nf().gv_group && k.gv_grp && n <= gvMax() && !nf().float_gemv && ops::preciseAllows(ops::BitClass::q8_row, nf().prec_dec, n, gvMax());
+    if (!ok && nf().gemvh_grp && matmulGroupGemvh(ws, xin, ys, n)) return;
     bool done[3] = {false, false, false};
     for (std::size_t i = 0; i < ws.size(); ++i) {
         if (done[i]) continue;
@@ -127,6 +128,46 @@ void Context::matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const D
             for (std::size_t j = 0; j < cnt; ++j) prof->matmul_bytes += gw[j].row_bytes * gw[j].nrows;
         mark(head_phase ? OpClass::head : OpClass::matmul);
     }
+}
+
+// v0252-8sdec (PLAN V1-142; rule ops::chooseGemvhGroup, kernel kernels/gfx1151/gemv_hg.hip): precise decode / verify rows
+// of 2..3 matrices on the same input as ONE grouped gemvh launch - the x16 conversion of matmul (shared cache), then
+// gemvhg_<T> over all their 16-row tiles; the same bits as matmul() per matrix (each tile runs gemvh_<T>'s body).
+// false: not grouped (the caller runs matmul per matrix as before). Not with WHIRL_GEMVH_F32 (its own x16-free path).
+bool Context::matmulGroupGemvh(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n) {
+    if (ws.size() < 2 || ws.size() > 3 || nf().gemvh_f32) return false;
+    ops::MatShape sh[3];
+    for (std::size_t i = 0; i < ws.size(); ++i) {
+        if (ws[i].ptr == output.ptr) return false;
+        sh[i] = matShape(ws[i]);
+    }
+    const ops::GemmFlags gf = gemmFlags();
+    const ops::GemvhGroupPlan gp = ops::chooseGemvhGroup(sh, ws.size(), n, true, matmulFlags(), gf, k);
+    if (gp.f == nullptr) return false;
+    const u32 count = n * ws[0].ncols;
+    if (x16_src != xin || x16_count != count || x16_fp8) {
+        hip::launch(k.f32_to_f16, D((count / 4 + 255) / 256), D(256), 0, stream, xin, x16, I(count));
+        x16_src = xin;
+        x16_count = count;
+        x16_fp8 = false;
+    }
+    GvArgs g;
+    for (std::size_t i = 0; i < ws.size(); ++i) {
+        g.w[i] = ws[i].ptr;
+        g.y[i] = ys[i];
+        g.rb[i] = ws[i].row_bytes;
+        g.n[i] = I(ws[i].nrows);
+    }
+    g.b1 = gp.b1;
+    g.b2 = gp.b2;
+    hip::launch(gp.f, gp.grid, gp.block, 0, stream, g, x16, I(ws[0].ncols), I(n), 0);
+    for (std::size_t i = 0; i < ws.size(); ++i) {
+        if (ys[i] == xq_src) xq_src = 0;
+        if (ys[i] == x16_src) x16_src = 0;
+        if (prof) prof->matmul_bytes += ws[i].row_bytes * ws[i].nrows;
+    }
+    mark(head_phase ? OpClass::head : OpClass::matmul);  // one launch, one mark (as the grouped int8 GEMV)
+    return true;
 }
 
 // y[t][:] (+)= W x[t][:] for n tokens: GEMV for small n, tiled GEMM otherwise.

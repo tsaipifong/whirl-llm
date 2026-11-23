@@ -575,6 +575,84 @@ void testGemvhF32() {
 }
 
 
+// v0252-8sdec (PLAN V1-142): ops::chooseGemvhGroup, Context::matmulGroup's precise grouped gemvh - the same-input matrices
+// of one matmulGroup call (GDN {qkv, z}, attention {q, k, v}, FFN {gate, up}) in one gemvhg_<T> launch when enabled
+// (Flags::gemvh_grp, WHIRL_GEMVH_GRP), 2..3 matrices of one type and ncols, each of which would run gemvh_<T> on its own
+// (MatmulPath::gemm_f16 and chooseGemmF16 kind gemvh with the table's gemvh_<T>: precise rows, n <= 16, no f16 outputs),
+// and the code object has gemvhg_<T> (gfx1151 only). Tiles of 16 rows are numbered matrix by matrix (b1 / b2 = first
+// tile of matrix 1 / 2, 0x7fffffff absent, the int8 GvArgs rule); the grid is the single gemvh rule on the total
+// (kernels::gemvhGridCap with the device cap, else one block per tile). Anything else: null = one matmul per matrix
+// (the 0.2.5.1 path). Fails to build before the change (no chooseGemvhGroup / MatmulKernels::gemvhg).
+void testGemvhGroup() {
+    auto mxm = [](std::uint32_t rows, std::uint32_t cols) {
+        auto m = mat(GgmlType::mxfp4, rows, cols);
+        m.row_bytes = cols / 32 * 17;
+        return m;
+    };
+    const ops::MatShape qkv = mxm(10240, 5120), z = mxm(6144, 5120), q = mxm(12288, 5120), kk = mxm(1024, 5120), v = mxm(1024, 5120);
+    const ops::MatShape gate = mxm(17408, 5120), up = mxm(17408, 5120), down = mxm(5120, 17408), odd = mxm(1000, 5120);
+    ops::GemmFlags pre;
+    pre.prec_dec = true;
+    ops::MatmulFlags mpre;
+    mpre.prec_dec = true;
+    mpre.gv_max = 16;
+    const kn::KernelTable k0 = gemmTable(true, true, true);  // the gfx1201 shape: no gemvhg
+    kn::KernelTable k = k0;
+    const std::string smx = std::to_string(static_cast<int>(GgmlType::mxfp4));
+    k.gemvhg[ti(GgmlType::mxfp4)] = tag("gemvhg_" + smx);
+    constexpr std::int32_t none = 0x7fffffff;
+    {
+        const ops::MatShape ws[2] = {qkv, z};
+        for (const std::uint32_t n : {1u, 4u, 9u, 16u}) {
+            if (ops::chooseMatmulPath(qkv, n, mpre, k) != ops::MatmulPath::gemm_f16) continue;  // n = 1 may take gemv1
+            const ops::GemvhGroupPlan p = ops::chooseGemvhGroup(ws, 2, n, true, mpre, pre, k);
+            CHECK(nameOf(p.f) == "gemvhg_" + smx && p.b1 == 640 && p.b2 == none && p.tiles == 1024 && p.grid.x == 1024 && p.block.x == 32);
+            CHECK(ops::chooseGemvhGroup(ws, 2, n, false, mpre, pre, k).f == nullptr);  // WHIRL_GEMVH_GRP=0
+            CHECK(ops::chooseGemvhGroup(ws, 2, n, true, mpre, pre, k0).f == nullptr);   // no gemvhg in the code object
+        }
+    }
+    {
+        const ops::MatShape ws[3] = {q, kk, v};
+        const ops::GemvhGroupPlan p = ops::chooseGemvhGroup(ws, 3, 4, true, mpre, pre, k);
+        CHECK(p.f != nullptr && p.b1 == 768 && p.b2 == 832 && p.tiles == 896 && p.grid.x == 896);
+        ops::GemmFlags cap = pre;
+        cap.gemvh_cap = 640;  // the gfx1151 grid: gemvhGridCap(tiles * 16, cap) = 448 blocks of 2 tiles
+        const ops::GemvhGroupPlan pc = ops::chooseGemvhGroup(ws, 3, 4, true, mpre, cap, k);
+        CHECK(pc.f == p.f && pc.tiles == 896 && pc.grid.x == kn::gemvhGridCap(896 * 16, 640) && pc.grid.x == 448);
+    }
+    {
+        const ops::MatShape ws[2] = {gate, up}, wo[2] = {odd, qkv};
+        const ops::GemvhGroupPlan p = ops::chooseGemvhGroup(ws, 2, 7, true, mpre, pre, k);
+        CHECK(p.f != nullptr && p.b1 == 1088 && p.tiles == 2176);
+        const ops::GemvhGroupPlan po = ops::chooseGemvhGroup(wo, 2, 7, true, mpre, pre, k);  // 1000 rows = 63 tiles (last partial)
+        CHECK(po.f != nullptr && po.b1 == 63 && po.tiles == 63 + 640);
+    }
+    // not grouped: one matrix, other ncols, other type, balance rows, f16 outputs, WHIRL_PREC_GEMVH=0, 17+ rows (gemvh2)
+    {
+        const ops::MatShape one[1] = {qkv}, dif[2] = {qkv, down}, typ[2] = {qkv, mat(GgmlType::q4_k, 6144, 5120)};
+        CHECK(ops::chooseGemvhGroup(one, 1, 4, true, mpre, pre, k).f == nullptr);
+        CHECK(ops::chooseGemvhGroup(dif, 2, 4, true, mpre, pre, k).f == nullptr);
+        CHECK(ops::chooseGemvhGroup(typ, 2, 4, true, mpre, pre, k).f == nullptr);
+        const ops::MatShape ws[2] = {qkv, z};
+        ops::GemmFlags bal;
+        ops::MatmulFlags mbal;
+        mbal.gv_max = 16;
+        CHECK(ops::chooseGemvhGroup(ws, 2, 4, true, mbal, bal, k).f == nullptr);
+        ops::GemmFlags h16 = pre;
+        h16.out_h16 = true;
+        CHECK(ops::chooseGemvhGroup(ws, 2, 4, true, mpre, h16, k).f == nullptr);
+        ops::GemmFlags nog = pre;
+        nog.prec_gemvh = false;
+        CHECK(ops::chooseGemvhGroup(ws, 2, 4, true, mpre, nog, k).f == nullptr);
+        ops::GemmFlags pre32 = pre;
+        pre32.gv_max = 32;
+        ops::MatmulFlags mpre32 = mpre;
+        mpre32.gv_max = 32;
+        CHECK(ops::chooseGemvhGroup(ws, 2, 17, true, mpre32, pre32, k).f == nullptr);
+        CHECK(ops::chooseGemvhGroup(ws, 2, 16, true, mpre32, pre32, k).f != nullptr);
+    }
+}
+
 // v0252-pp2k2 (PLAN V1-139, F1 "GEMM tail split"): a precise f16 prefill GEMM on the 256-token tile (gemmh_f16 / gemmhq) whose
 // rows r = n mod 256 past the last full tile fit the widest gemms token tile runs as two pieces: rows [0, n - r) on the
 // unchanged 256 plan (grid x (n - r) / 256) and rows [n - r, n) on precChoice's narrowest gemms slot holding r (raw

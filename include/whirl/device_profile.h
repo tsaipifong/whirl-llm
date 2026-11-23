@@ -35,6 +35,10 @@ struct Profile {
     std::array<std::uint8_t, 17> gemvk_dense, gemvk_moe;
     // f16-in GEMV grid: kernels::gemvhGrid(nrows) blocks (else one block per 16 rows)
     bool gemvh_grid_by_rows;
+    // v0252-8sdec (PLAN V1-142): precise decode / verify runs the same-input matrices of Context::matmulGroup as one
+    // grouped gemvh launch (gemvhg_<T>, same bits) on dense models: numerics flag gemvh_grp's default (WHIRL_GEMVH_GRP
+    // overrides; ops::chooseGemvhGroup also needs the kernel in the code object, gfx1151 only)
+    bool gemvh_group_dense;
     // f16 GEMM outputs (h16) are decided from the tuner's candidate list, not the tuned choices (the code
     // object has no h16 fused / dequant GEMM; GEMVH-2)
     bool h16_from_candidates;
@@ -146,6 +150,7 @@ inline constexpr Profile k_profile_gfx1201{
     .gemvk_dense = {},  // the gfx1201 object has no gemvk
     .gemvk_moe = {},
     .gemvh_grid_by_rows = false,
+    .gemvh_group_dense = false,  // v0252-8sdec: the gfx1201 object has no gemvhg (unchanged)
     .h16_from_candidates = false,
     .gemms_tie_larger_bm = false,
     .fdq_default = 0,
@@ -220,6 +225,10 @@ inline constexpr Profile k_profile_gfx1151{
     .gemvk_dense = {0, 0, 0, 0, 7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
     .gemvk_moe = {},
     .gemvh_grid_by_rows = true,
+    // v0252-8sdec (PLAN V1-142) / v0252-8sopen: opt-in. Screens progress/8sdec-screen2.json and 8sdec-screen2-bands
+    // (2026-11-23) were OPEN (tg 2048 +1.16 % +-2.46, tg 8192 +1.53 % +-8.66, tg 32768 +2.60 % +-6.61; ADR-0019: not a
+    // default until a cell gains beyond its error).
+    .gemvh_group_dense = false,  // v0252-8sopen: opt-in, WHIRL_GEMVH_GRP=1 turns the grouped gemvh on (same bits)
     .h16_from_candidates = true,
     .gemms_tie_larger_bm = true,
     .fdq_default = 2,  // t2 (v0251-a3port; v0251-judge1 sec 1 screening)

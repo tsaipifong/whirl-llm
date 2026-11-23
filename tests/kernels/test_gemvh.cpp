@@ -156,6 +156,97 @@ void testGemvh(Ctx& c) {
     }
 }
 
+// gemvhg (v0252-8sdec, PLAN V1-142; default run, gfx1151 object only): the grouped precise gemvh gemvhg_<T> (GvArgs, up to 3
+// matrices on one X) against gemvh_<T> launched per matrix at its production grid, bit for bit, for the Swift same-input sets
+// (GDN {qkv 10240, z 6144}, attention {q 12288, k 1024, v 1024}, FFN {gate, up 17408}) and ragged small sets (nrows not a
+// multiple of 16), n in {1, 5, 9, 16}, accumulate 0 / 1, grids = all tiles, kernels::gemvhGridCap(tiles * 16, cap) for the
+// device cap, cap 7 and one block (the blocks loop over the global tiles). A tile routed to the wrong matrix, a wrong tile
+// base or a wrong row count fails it.
+void testGemvhg(Ctx& c) {
+    c.rep.family = "gemvhg";
+    bool any = false;
+    for (QType t : wk::kAllTypes) {
+        const int ti = static_cast<int>(t);
+        if (!c.k.gemvhg[ti] || !c.k.gemvh[ti]) continue;
+        any = true;
+        std::size_t checked = 0, bad = 0;
+        std::string first_bad;
+        struct Set {
+            int ncols;
+            std::vector<int> rows;
+        };
+        std::vector<Set> sets = {{512, {37, 100}}, {512, {7, 16, 1003}}, {768, {17, 33, 1}}};
+        if (!c.quick) {
+            sets.push_back({5120, {10240, 6144}});
+            sets.push_back({5120, {12288, 1024, 1024}});
+            sets.push_back({5120, {17408, 17408}});
+        }
+        for (const Set& s : sets) {
+            std::vector<HostMat> ms;
+            std::vector<Buf> ws;
+            for (int nr : s.rows) {
+                ms.push_back(randomMat(c, t, nr, s.ncols));
+                ws.emplace_back(ms.back().data);
+            }
+            Buf x16 = makeX16(c, 16, s.ncols);
+            unsigned tiles = 0;
+            int base[3] = {0, 0, 0};
+            for (std::size_t i = 0; i < s.rows.size(); ++i) {
+                base[i] = static_cast<int>(tiles);
+                tiles += static_cast<unsigned>(cdiv(s.rows[i], 16));
+            }
+            for (int nt : {1, 5, 9, 16})
+                for (int acc = 0; acc < 2; ++acc) {
+                    std::vector<std::vector<float>> init, ref;
+                    for (int nr : s.rows) init.push_back(c.randn(static_cast<std::size_t>(nt) * nr, 3.0f));
+                    for (std::size_t i = 0; i < s.rows.size(); ++i) {
+                        Buf y(init[i]);
+                        const unsigned g = c.mod.arch() == hip::Arch::gfx1151 ? wk::gemvhGrid(static_cast<unsigned>(s.rows[i])) : static_cast<unsigned>(cdiv(s.rows[i], 16));
+                        hip::launch(c.k.gemvh[ti], {g, 1, 1}, {32, 1, 1}, 0, c.s, ws[i].p(), ms[i].row_bytes, x16.p(), y.p(), s.ncols, s.rows[i], nt, acc);
+                        c.sync();
+                        ref.push_back(y.down<float>(static_cast<std::size_t>(nt) * s.rows[i]));
+                    }
+                    for (const unsigned grid : {tiles, wk::gemvhGridCap(tiles * 16, wk::gemvhCap()), wk::gemvhGridCap(tiles * 16, 7), 1u}) {
+                        std::vector<Buf> ys;
+                        wk::GvArgs g;
+                        for (std::size_t i = 0; i < s.rows.size(); ++i) {
+                            ys.emplace_back(init[i]);
+                            g.w[i] = ws[i].p();
+                            g.y[i] = ys[i].p();
+                            g.rb[i] = ms[i].row_bytes;
+                            g.n[i] = s.rows[i];
+                        }
+                        g.b1 = base[1];
+                        if (s.rows.size() == 3) g.b2 = base[2];
+                        hip::launch(c.k.gemvhg[ti], {grid, 1, 1}, {32, 1, 1}, 0, c.s, g, x16.p(), s.ncols, nt, acc);
+                        c.sync();
+                        for (std::size_t i = 0; i < s.rows.size(); ++i) {
+                            const std::vector<float> y = ys[i].down<float>(static_cast<std::size_t>(nt) * s.rows[i]);
+                            ++checked;
+                            if (std::memcmp(y.data(), ref[i].data(), ref[i].size() * 4) != 0) {
+                                ++bad;
+                                if (first_bad.empty())
+                                    first_bad = "ncols " + std::to_string(s.ncols) + " matrix " + std::to_string(i) + " of " + std::to_string(s.rows.size()) +
+                                                " nrows " + std::to_string(s.rows[i]) + " n " + std::to_string(nt) + " acc " + std::to_string(acc) + " grid " +
+                                                std::to_string(grid);
+                            }
+                        }
+                    }
+                }
+        }
+        Result r;
+        r.name = std::string("gemvhg == gemvh per matrix (same-input sets, ragged rows, n x acc x grids; ") + std::to_string(checked) + " outputs) " +
+                 wk::typeSuffix(t);
+        r.kind = Kind::invariant;
+        r.n = checked;
+        r.mismatches = bad;
+        r.pass = bad == 0 && checked > 0;
+        if (!first_bad.empty()) r.note = "first " + first_bad;
+        c.rep.add(r);
+    }
+    if (!any) c.rep.skip("gemvhg", "gemvhg_<T>", "not in this code object (gfx1151 only)");
+}
+
 // gemvhv (feat026-gemvh, on request: --only gemvhv): the gfx1201 gemvh candidates of a development code object
 // (WHIRL_KT_GEMVH_HSACO = a kernels build with -DWHIRL_GVH_DEV=1; exports gvhd<id>_<type>, any n <= 32) against
 // gemm_c0 bit for bit over the same sweep as "gemvh" (ncols x nrows x n x accumulate) plus the 27B shapes
