@@ -1454,10 +1454,13 @@ static void testKgVarFlag() {
 // changes nothing else (bitsKey = the default plan's with attn_sx false, same log line, no +overrides, never lossy); "1"
 // changes nothing in balance; a non-"0" value in precise / fast leaves the flag off and adds exactly one Plan::ignored
 // note. A custom balance item list without h16 leaves it off. Fails before the port (loadFlags never sets attn_sx).
-// v0252-8sdec (PLAN V1-142): gemvh_grp (the precise grouped gemvh) defaults on for DENSE models on the card whose profile
-// row says so (gfx1151 gemvh_group_dense), every mode (bitwise: only precise rows can take the kernel); off on MoE models and
-// on the R9700; WHIRL_GEMVH_GRP=0 / =1 win both ways and never mark the plan lossy. The other flags do not move. Fails to
-// build before the change (no Target::gemvh_grp_profile / Flags::gemvh_grp).
+// v0252-8sdec (PLAN V1-142): gemvh_grp (the precise grouped gemvh) defaults on for DENSE models on a card whose profile
+// row says so (gemvh_group_dense), every mode (bitwise: only precise rows can take the kernel); off on MoE models;
+// WHIRL_GEMVH_GRP=0 / =1 win both ways and never mark the plan lossy. The other flags do not move. Fails to build before
+// the change (no Target::gemvh_grp_profile / Flags::gemvh_grp).
+// v0252-8sopen: no shipped row sets it any more (screens 8sdec-screen2 / -bands OPEN, ADR-0019), so the default is off on
+// both cards and WHIRL_GEMVH_GRP=1 is the opt-in (on in every mode, precise included, on the 8060S dense plan); the
+// profile rule itself is still pinned through a target with gemvh_grp_profile forced on.
 static void testGemvhGrpDefault() {
     auto planOf = [](const char* mode, const nu::Target& t, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -1469,7 +1472,8 @@ static void testGemvhGrpDefault() {
         for (const char* model : {"swift", "moe"})
             for (const char* mode : {"precise", "balance", "fast"}) {
                 const nu::Target t = target(c, model, false);
-                const bool want = std::string_view(c.name) == "8060s" && std::string_view(model) == "swift";
+                const bool want = false;  // v0252-8sopen: opt-in on both cards
+                NCHECK(!t.gemvh_grp_profile, "gemvh_grp {} {} {}: profile row on (want off since v0252-8sopen)", c.name, model, mode);
                 const nu::Plan p = planOf(mode, t, {});
                 NCHECK(p.flags.gemvh_grp == want, "gemvh_grp {} {} {}: {} (want {})", c.name, model, mode, p.flags.gemvh_grp, want);
                 const nu::Plan off = planOf(mode, t, {{"GEMVH_GRP", "0"}}), on = planOf(mode, t, {{"GEMVH_GRP", "1"}});
@@ -1481,7 +1485,19 @@ static void testGemvhGrpDefault() {
                 nu::Target t0 = t;
                 t0.gemvh_grp_profile = false;
                 NCHECK(!planOf(mode, t0, {}).flags.gemvh_grp, "gemvh_grp {} {} {}: on without the profile row", c.name, model, mode);
+                // the profile rule (a row with gemvh_group_dense on): dense on, MoE off, "0" still wins
+                nu::Target t1 = t;
+                t1.gemvh_grp_profile = true;
+                const bool want1 = std::string_view(model) == "swift";
+                const nu::Plan p1 = planOf(mode, t1, {});
+                NCHECK(p1.flags.gemvh_grp == want1 && !planOf(mode, t1, {{"GEMVH_GRP", "0"}}).flags.gemvh_grp && !p1.lossy_override,
+                       "gemvh_grp {} {} {}: profile row on -> {} (want {}), env 0 off", c.name, model, mode, p1.flags.gemvh_grp, want1);
             }
+    // v0252-8sopen: the three switch states on the 8060S dense MXFP4 plan in precise (the cell the grouped gemvh serves)
+    const nu::Target ts = target(card("8060s"), "swift", false);
+    const bool st_unset = planOf("precise", ts, {}).flags.gemvh_grp, st_0 = planOf("precise", ts, {{"GEMVH_GRP", "0"}}).flags.gemvh_grp,
+               st_1 = planOf("precise", ts, {{"GEMVH_GRP", "1"}}).flags.gemvh_grp;
+    NCHECK(!st_unset && !st_0 && st_1, "gemvh_grp 8060s swift precise: unset {} / 0 {} / 1 {} (want off / off / on)", st_unset, st_0, st_1);
 }
 
 static void testAttnSxFlag() {
