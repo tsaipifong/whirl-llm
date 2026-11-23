@@ -101,6 +101,7 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
     mf.moe_bn_force = nf().moe_bn_force;
     // feat026-moep: the plan keeps variant index + 1 (0 = off); MoeFlags -1 = off (v0251-a7port: gfx1151 default)
     ops::setMoep(mf, nf().moep_gu, nf().moep_dn, nf().moep_comb);
+    ops::setMoepGuw(mf, nf().moep_guw);  // v0252-8smoe: the routing-aware wide gate + up tile (WHIRL_MOEP_GUW)
     // v0251-a7pol (B26-41): the combine classes by the plan's mode (the plan already refuses COMB 3 / 4 in precise, 5
     // outside fast; this keeps chooseMoe from taking them on prec_dec alone)
     mf.moep_comb_ok = ops::moepCombFor(num_plan.mode == numerics::Mode::precise, num_plan.mode == numerics::Mode::fast);

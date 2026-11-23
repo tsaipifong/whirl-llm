@@ -56,12 +56,14 @@ public:
     Value dq_full;
     // Model::load (v0252-pp2k2, through gemmTailEnv below): the f16 GEMM token-tail split (ops::GemmFlags::gemm_tail)
     Value gemm_tail;
+    // numerics::loadFlags (v0252-8smoe, PLAN V1-147): WHIRL_MOEP_GUW, the routing-aware wide moep gate + up variant (or 0 = off)
+    Value moep_guw;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 72;
+    static constexpr std::size_t n_names = 73;  // v0252-8smoe: + moep_guw (72 -> 73; merge: add other branches' rows)
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

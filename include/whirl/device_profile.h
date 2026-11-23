@@ -122,6 +122,19 @@ struct Profile {
     // 256 multiple runs its tail rows on the narrowest gemms tile (ops::planGemmF16; same bits). WHIRL_GEMM_TAIL=0 / 1
     // overrides it. gfx1201 only: the gfx1151 prefill GEMMs are gemmfq with other grids (physical-isolation rule)
     bool gemm_tail;
+    // v0252-8smoe (A, PLAN V1-95): the MoE prefill combine (ops::MoeFlags::moep_comb) of a FAST plan that runs moeskip with
+    // MXFP4 routed experts when WHIRL_MOEP_COMB is not set (numerics::Target::moep_comb_fast_skip_profile, read by
+    // moepCombMoeSkip); 0 = the family's non-f16 combine (gfx1151 kMoepDefault.comb 1, gfx1201 0). 5 = the atomic scatter
+    // fused into the down projection (gemm_moepda_*; f32 add order varies run to run, fast only). WHIRL_MOEP_COMB=1 = the
+    // 0.2.5.1 arm. Fast without moeskip keeps its own rule (moepCombDefault)
+    std::uint8_t moep_comb_fast_skip;
+    // v0252-8smoe (B, PLAN V1-147): the routing-aware gate + up tile of the moep MoE prefill (llama.cpp mmq.cu:197-201: the
+    // tile against the AVERAGE tokens per expert on RDNA3 / 3.5 / 4): kernels::kMoepGu index + 1 of the wide variant a
+    // forward takes when its experts average at least that variant's token tile (n * K >= bn * R; ops::chooseMoe), else
+    // the plan's moep_gu. 0 = off. Every moep gate + up variant stores the same bits (kt moemx), so it is bitwise in
+    // every mode; the default applies in balance / fast (numerics::Target::moep_guw_profile; precise keeps its path until
+    // its own screen arm). WHIRL_MOEP_GUW = a variant name / 0 overrides it
+    std::uint8_t moep_guw;
     // ---- vision
     unsigned vision_attn_threads;  // kernels/vision/vision.hip vis_attn2 block size of this code object
 };
@@ -190,6 +203,8 @@ inline constexpr Profile k_profile_gfx1201{
     // v0252-pp2k2: the 2k cell's 2058-row forward ran a 9th 256-token tile for 10 rows (+10.4 % time for +0.8 % rows,
     // KB v0252-pp2k:r97-precise-pp2k-tile-tail); screen progress/pp2k-gemmtail.json decides it
     .gemm_tail = true,
+    .moep_comb_fast_skip = 0,  // v0252-8smoe: the gfx1201 fast moeskip plan keeps the f32 moe_yd combine 0 (no moep kernels)
+    .moep_guw = 0,             // v0252-8smoe: no moep kernels in the gfx1201 object
     .vision_attn_threads = 128,
 };
 
@@ -248,6 +263,15 @@ inline constexpr Profile k_profile_gfx1151{
     .e1_dense = 0,
     .e1_moe = 0,
     .gemm_tail = false,  // v0252-pp2k2: the 8060S keeps the 0.2.5.1 GEMM plans (object compare only)
+    // v0252-8smoe (A): COMB 5 for Ornith fast (moeskip on). Shipped exe ef5652c, WHIRL_MOEP_COMB=5 against the shipped fast
+    // default (KB v0252-retest:comb5-8s-ship, 4 rounds): pp 8192 +1.08 % +-1.07, pp 32768 +1.31 % +-0.83; the long band
+    // (98304) is spec progress/8smoe-comb5-long.json
+    .moep_comb_fast_skip = 5,
+    // v0252-8smoe (B): g64n128k64 (index 1 + 1) for forwards with >= 128 tokens per expert (Ornith 4096-row forwards: 8k /
+    // 32k; the 2k forward keeps g64n64k64). v0252-8sopen: opt-in - screen progress/8smoe-screen.json (2026-11-23) was OPEN
+    // (balance pp 8192 +0.45 % +-1.05, pp 32768 +0.45 % +-1.08; ADR-0019: not a default until a cell gains beyond its
+    // error); WHIRL_MOEP_GUW=g64n128k64 (a kernels::kMoepGu name) turns it on (same bits)
+    .moep_guw = 0,  // v0252-8sopen: opt-in (was 2 = g64n128k64)
     .vision_attn_threads = 256,
 };
 

@@ -229,6 +229,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOESKIP", &S::moeskip},  // v0252-f5
         {"ATTN_SX", &S::attn_sx},      // v0252-strixc2
         {"ATTN_I4QK", &S::attn_i4qk},  // v0252-8sfp
+        {"MOEP_GUW", &S::moep_guw},    // v0252-8smoe
     }};
     return t;
 }
@@ -361,7 +362,14 @@ std::uint32_t moepCombDefault(const Request& r, const Target& t) {
 // WHIRL_MOEP_COMB is not set = the card's non-f16 one (gfx1151 MXFP4 experts: kMoepDefault.comb = 1; gfx1201: 0), because
 // ops::chooseMoe (skipOk) refuses the moeskip prefill path with the f16 moe_yd combines (pl.ydh: 3 / 4) and with the fused
 // one. An explicit WHIRL_MOEP_COMB wins (with 3 the decode skips and the prefill does not: the screen's other arm).
-std::uint32_t moepCombMoeSkip(const Target& t) { return t.gfx1151 && t.moe_mxfp4 ? kernels::kMoepDefault.comb : 0u; }
+// v0252-8smoe (A, PLAN V1-95): the family's row device::Profile::moep_comb_fast_skip (Target::moep_comb_fast_skip_profile)
+// replaces it where set: the gfx1151 row is 5, the atomic scatter fused into the down projection (skipOk takes the moeskip
+// prefill path with it; fast only, as this function is reached only by a fast plan running moeskip). WHIRL_MOEP_COMB=1 is
+// the 0.2.5.1 arm.
+std::uint32_t moepCombMoeSkip(const Target& t) {
+    if (t.moe_mxfp4 && t.moep_comb_fast_skip_profile != 0) return t.moep_comb_fast_skip_profile;
+    return t.gfx1151 && t.moe_mxfp4 ? kernels::kMoepDefault.comb : 0u;
+}
 
 // loader.cpp:548-553 and :743, then tune.cpp:850-914 (before the numerics block)
 void loadFlags(const Request& r, const Target& t, Flags& F) {
@@ -391,6 +399,16 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
             if (*e.moep_dn == kernels::kMoepDn[i].name) F.moep_dn = static_cast<std::uint32_t>(i) + 1;
     }
     if (e.moep_comb) F.moep_comb = static_cast<std::uint32_t>(std::strtoul(e.moep_comb->c_str(), nullptr, 10));
+    // v0252-8smoe (B, PLAN V1-147): the routing-aware wide gate + up tile (device::Profile::moep_guw) in balance / fast on the
+    // card's moep plan (gfx1151, MXFP4 routed experts); ops::chooseMoe takes it per forward from bn tokens per expert. Every
+    // moep gate + up variant stores the same bits (kt moemx), so WHIRL_MOEP_GUW names a variant in any mode ("0", "" or an
+    // unknown name = off), as WHIRL_MOEP_GU does
+    if (t.gfx1151 && t.moe_mxfp4 && r.mode != Mode::precise) F.moep_guw = t.moep_guw_profile;
+    if (e.moep_guw) {
+        F.moep_guw = 0;
+        for (int i = 0; i < kernels::kMoepGuN; ++i)
+            if (*e.moep_guw == kernels::kMoepGu[i].name) F.moep_guw = static_cast<std::uint32_t>(i) + 1;
+    }
     // v0251-a11port (feat026-router): the fused MoE router by default for MoE models, every mode (bit-identical to
     // moe_logits_f32 + moe_topk: kt moemx, golden); 0.2.5.1 on the gfx1151 code object (Radeon 8060S), v0252-c5port also
     // on the gfx1201 one (R9700): both kernel sets carry it, so the default no longer depends on the card (llama.cpp's

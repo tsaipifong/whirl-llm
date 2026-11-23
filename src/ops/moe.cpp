@@ -121,6 +121,12 @@ MoeFlags moepFloor(const MoeProblem& p, const MoeFlags& f, bool keep) {
 
 u32 moeTile(u32 n, u32 K, u32 R) { return n * K < 48 * R ? 32 : moe_bn; }
 
+int moepGuFor(u32 n, u32 K, u32 R, const MoeFlags& f, const kernels::MoeKernels& k) {
+    const int w = f.moep_guw;
+    if (w < 0 || w >= kernels::kMoepGuN || k.moep_gu[w] == nullptr) return f.moep_gu;
+    return static_cast<u64>(n) * K >= static_cast<u64>(kernels::kMoepGu[w].bn) * R ? w : f.moep_gu;
+}
+
 MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeKernels& k, Function silu_mul_x8h) {
     // neither depends on the forward's rows or on the moep flags
     const bool fp8 = fp8Gu(p, f_in, k, silu_mul_x8h), fused = fusedGu(p, k);
@@ -184,7 +190,9 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
     if (moep) {
         // feat026-moep: several 16-token fragments of one expert per block share every decoded A fragment; every
         // stored value as gemm_moegu / gemm_moe32r (and moe_combine when fused into the down epilogue)
-        const kernels::MoepGuVariant& vg = kernels::kMoepGu[f.moep_gu];
+        // v0252-8smoe: the routing-aware wide gate + up tile (moepGuFor; same bits for every variant)
+        const int gv = moepGuFor(n, K, R, f, k);
+        const kernels::MoepGuVariant& vg = kernels::kMoepGu[gv];
         const kernels::MoepDnVariant& vd = kernels::kMoepDn[f.moep_dn];
         pl.kind = MoePrefillKind::moep;
         pl.bits = MoeBits::moe_f16_gemm;
@@ -196,7 +204,7 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
         const bool lossy_ok = !f.prec_dec && f.moep_comb_ok != MoeFlags::MoepComb::bitwise;
         const bool atomic_ok = !f.prec_dec && f.moep_comb_ok == MoeFlags::MoepComb::atomic;
         const bool cnt_ok = p.cnt_buf && static_cast<u32>(vd.bm) >= kernels::kMoepMinBm;
-        pl.fgu = k.moep_gu[f.moep_gu];
+        pl.fgu = k.moep_gu[gv];
         pl.fdn = k.moep_dn[dv];
         if (f.moep_comb == 2 && k.moep_dc[dv] != nullptr && cnt_ok) {
             pl.comb_fused = true;

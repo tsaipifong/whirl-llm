@@ -13,7 +13,7 @@
 //     bitwise and moe_combine within one f16 rounding of every expert output
 //   * gemm_moepda_<v> (atomic scatter) + moe_combine4 (K = 0) == moe_combine within f32 reassociation
 // Routings: skewed (a hot expert with 1/7 of the pairs: several BNMAX tiles, tiles of 1..BNMAX tokens, empty
-// 16-token fragments) at 200 and 1500 tokens, and a Zipf(1.0) routing at 2048 tokens (no repeated expert per token).
+// 16-token fragments) at 200 and 1500 tokens, and a Zipf(1.0) routing at 2048 and 4096 tokens (no repeated expert per token).
 // SPDX-License-Identifier: Apache-2.0
 
 #include "cpu_ref.h"
@@ -92,7 +92,9 @@ void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& d
         int n;
         bool zipf;
     };
-    for (const Case cs : {Case{200, false}, Case{1500, false}, Case{2048, true}}) {
+    // v0252-8smoe (PLAN V1-147): + 4096 tokens Zipf = the 8060S MoE forward size where the routing-aware wide gate + up tile
+    // (g64n128k64, WHIRL_MOEP_GUW) runs (128 tokens per expert on average: several full 128-token tiles per hot expert)
+    for (const Case cs : {Case{200, false}, Case{1500, false}, Case{2048, true}, Case{4096, true}}) {
         const int n = c.quick && cs.n > 256 ? 256 : cs.n, pairs = n * K;
         std::vector<int> ids;
         if (cs.zipf) {

@@ -524,6 +524,8 @@ static void testFingerprintCoversBitsKey() {
         t.strix_profile = t.k_gdn_sx = s8060;
         t.attn_sx_profile = s8060;  // v0252-strixc2 (device::Profile::attn_sx_balance)
         t.attn_i4qk_profile = s8060;  // v0252-8sfp (device::Profile::attn_i4qk_fast)
+        t.moep_comb_fast_skip_profile = s8060 ? 5u : 0u;  // v0252-8smoe (A: device::Profile::moep_comb_fast_skip)
+        t.moep_guw_profile = 0u;  // v0252-8smoe (B: device::Profile::moep_guw; v0252-8sopen: opt-in, 0 on both rows)
         t.gdn_strix_shape = true;
         // v0252-f2 / f2def: the loader's fast MoE relaxacc arm and F1's one-pass check (R9700 code object)
         t.relax_moe_arm = nu::relaxMoeDefaultName(s8060);

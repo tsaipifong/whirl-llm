@@ -2584,6 +2584,7 @@ void testEnvSnapshot() {
                                      "ARGMAX_MB",  // v0252-f1arg3: Model::load -> Context::argmaxMbMode (iso forward.mtp_verify argmax_mb)
                                      "ATTN_SX",  // v0252-strixc2: numerics loadFlags, not in the exec dump (unit testAttnSxFlag)
                                      "ATTN_I4QK",  // v0252-8sfp: numerics loadFlags, not in the exec dump (unit testAttnI4qkFlag)
+                                     "MOEP_GUW",  // v0252-8smoe: numerics loadFlags, not in the exec dump (unit testMoepGuwFlag)
                                      "DQ_FULL",  // v0252-kvlong2: Model::load -> allocScratch dq_ctx (iso model.scratch dq_copy_covers_context)
                                      "GEMM_TAIL"};  // v0252-pp2k2: Model::load -> config::gemmTailEnv (iso env_snapshot, forward.dispatch gemm_tail_launches)
     for (const auto& e : names) {
@@ -3111,6 +3112,8 @@ nu::Target targetOf(const q::Model& m) {
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     t.attn_sx_profile = whirl::device::profile(m.arch).attn_sx_balance;  // v0252-strixc2
     t.attn_i4qk_profile = whirl::device::profile(m.arch).attn_i4qk_fast;  // v0252-8sfp
+    t.moep_comb_fast_skip_profile = whirl::device::profile(m.arch).moep_comb_fast_skip;  // v0252-8smoe (A)
+    t.moep_guw_profile = whirl::device::profile(m.arch).moep_guw;  // v0252-8smoe (B)
     return t;
 }
 

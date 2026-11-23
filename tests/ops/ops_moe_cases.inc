@@ -746,6 +746,104 @@ void testOpsMoeCombRows(ops::MoeProblem p) {
     }
 }
 
+// v0252-8smoe (B, PLAN V1-147): the routing-aware wide gate + up tile (MoeFlags::moep_guw, ops::moepGuFor): a moep forward
+// whose experts average at least the wide variant's token tile (n * K >= bn * R; Ornith 8 of 256 with g64n128k64: n >= 4096
+// rows) runs the wide gate + up variant (gu_bn, max_tiles64 and the grid follow it); below it, with the flag off (-1), with
+// the wide kernel missing from the code object or an index out of range, the plan is field for field the moep_gu plan.
+// Nothing else moves: the down GEMM, its tile list, the combine (every COMB) and the skip choice. The R9700 table (no moep
+// kernels) is unchanged. Fails to build before the change (no MoeFlags::moep_guw / setMoepGuw / moepGuFor).
+void testOpsMoeGuw(ops::MoeProblem p, const kn::KernelTable& k97, const kn::KernelTable& k8) {
+    const auto kmp = std::make_unique<kn::KernelTable>(k8);  // heap (v0252-f5fix)
+    kn::KernelTable& km = *kmp;
+    for (int v = 0; v < kn::kMoepGuN; ++v) km.moep_gu[v] = tag(std::string("gemm_moepgu_") + kn::kMoepGu[v].name + "_mxfp4");
+    for (int v = 0; v < kn::kMoepDnN; ++v) {
+        km.moep_dn[v] = tag(std::string("gemm_moepdn_") + kn::kMoepDn[v].name + "_mxfp4");
+        km.moep_dh[v] = tag(std::string("gemm_moepdh_") + kn::kMoepDn[v].name + "_mxfp4");
+        km.moep_da[v] = tag(std::string("gemm_moepda_") + kn::kMoepDn[v].name + "_mxfp4");
+    }
+    km.moe_combine4 = tag("moe_combine4");
+    km.moe_combine4h = tag("moe_combine4h");
+    ops::MoeFlags f0;  // the 8060S default moep plan (g64n64k64 + m128w4n128k64 + moe_combine4)
+    ops::setMoep(f0, 1, 3, 1);
+    CHECK(f0.moep_guw == -1);
+    ops::setMoepGuw(f0, 0);
+    CHECK(f0.moep_guw == -1);
+    ops::MoeFlags fw = f0;
+    ops::setMoepGuw(fw, 2);  // the profile row: g64n128k64
+    CHECK(fw.moep_guw == 1 && kn::kMoepGu[1].bn == 128);
+    auto same = [](const ops::MoePlan& a, const ops::MoePlan& b) {
+        return a.kind == b.kind && a.bits == b.bits && a.bn == b.bn && a.max_tiles == b.max_tiles && a.max_tiles64 == b.max_tiles64 && a.fgu == b.fgu &&
+               a.fdn == b.fdn && a.gu_bn == b.gu_bn && a.comb4 == b.comb4 && a.comb_fused == b.comb_fused && a.ydh == b.ydh &&
+               a.comb_atomic == b.comb_atomic && a.comb_grid.x == b.comb_grid.x && a.comb_grid.y == b.comb_grid.y && a.gu_pgrid.x == b.gu_pgrid.x &&
+               a.dn_pgrid.x == b.dn_pgrid.x && a.skip == b.skip;
+    };
+    // the threshold: n * 8 >= 128 * 256 <=> n >= 4096 (the 8060S MoE forward size); 2058 = the pp 2k forward
+    CHECK(ops::moepGuFor(4095, 8, 256, fw, km) == 0 && ops::moepGuFor(4096, 8, 256, fw, km) == 1 && ops::moepGuFor(2058, 8, 256, fw, km) == 0);
+    CHECK(ops::moepGuFor(0xffffffffu, 8, 256, fw, km) == 1);  // no u32 overflow in n * K
+    CHECK(ops::moepGuFor(1u << 20, 8, 256, f0, km) == 0);     // off
+    for (const unsigned mode : {0u, 1u, 2u}) {  // precise / balance / fast class (prec_dec, moep_comb_ok)
+        ops::MoeFlags a = f0, b = fw;
+        for (ops::MoeFlags* x : {&a, &b}) {
+            x->prec_dec = mode == 0;
+            x->moep_comb_ok = ops::moepCombFor(mode == 0, mode == 2);
+        }
+        for (const unsigned comb : {0u, 1u, 2u, 3u, 5u}) {
+            a.moep_comb = b.moep_comb = comb;
+            for (const float skip : {0.f, 1.f}) {
+                a.moe_skip_thr = b.moe_skip_thr = mode == 2 ? skip : 0.f;
+                a.moe_skip_min = b.moe_skip_min = 6;
+                for (const unsigned n : {33u, 1023u, 1024u, 2058u, 4095u, 4096u, 4106u, 8192u, 32768u}) {
+                    ops::MoeProblem q = p;
+                    q.n = n;
+                    q.cnt_buf = true;
+                    const ops::MoePlan pa = ops::chooseMoe(q, a, km, km.silu_mul_x8h), pb = ops::chooseMoe(q, b, km, km.silu_mul_x8h);
+                    const std::string cell = "guw mode " + std::to_string(mode) + " comb " + std::to_string(comb) + " skip " +
+                                             std::to_string(static_cast<int>(skip)) + " n " + std::to_string(n);
+                    if (pa.kind == ops::MoePrefillKind::moep && n >= 4096) {
+                        CHECK_DETAIL(pb.kind == ops::MoePrefillKind::moep && nameOf(pb.fgu) == "gemm_moepgu_g64n128k64_mxfp4" && pb.gu_bn == 128 &&
+                                         pb.max_tiles64 == (n * 8 + 127) / 128 + 256 && pb.gu_pgrid.x == pb.max_tiles64 * (512 / 64),
+                                     cell + ": the wide gate + up tile");
+                        CHECK_DETAIL(nameOf(pa.fgu) == "gemm_moepgu_g64n64k64_mxfp4" && pa.gu_bn == 64, cell + ": the A arm keeps g64n64k64");
+                        // everything but the gate + up launch is the A arm's
+                        CHECK_DETAIL(pa.bits == pb.bits && pa.bn == pb.bn && pa.max_tiles == pb.max_tiles && pa.fdn == pb.fdn && pa.comb4 == pb.comb4 &&
+                                         pa.comb_fused == pb.comb_fused && pa.ydh == pb.ydh && pa.comb_atomic == pb.comb_atomic &&
+                                         pa.comb_grid.x == pb.comb_grid.x && pa.comb_grid.y == pb.comb_grid.y && pa.dn_pgrid.x == pb.dn_pgrid.x &&
+                                         pa.skip == pb.skip,
+                                     cell + ": only the gate + up launch moves");
+                    } else {
+                        CHECK_DETAIL(same(pa, pb), cell + ": the plan of moep_gu");
+                    }
+                }
+            }
+        }
+    }
+    // the wide kernel not in the code object, or an index outside kMoepGu: the moep_gu plan
+    ops::MoeProblem q = p;
+    q.n = 8192;
+    const ops::MoePlan base = ops::chooseMoe(q, f0, km, km.silu_mul_x8h);
+    {
+        const auto kxp = std::make_unique<kn::KernelTable>(km);
+        kxp->moep_gu[1] = nullptr;
+        CHECK(same(ops::chooseMoe(q, fw, *kxp, kxp->silu_mul_x8h), ops::chooseMoe(q, f0, *kxp, kxp->silu_mul_x8h)));
+        ops::MoeFlags fx = f0;
+        fx.moep_guw = kn::kMoepGuN;
+        CHECK(same(ops::chooseMoe(q, fx, km, km.silu_mul_x8h), base));
+    }
+    // another wide variant by WHIRL_MOEP_GUW (g64n256k32: from 256 tokens per expert = 8192 rows)
+    ops::MoeFlags f256 = f0;
+    ops::setMoepGuw(f256, 5);
+    CHECK(ops::moepGuFor(8191, 8, 256, f256, km) == 0 && ops::moepGuFor(8192, 8, 256, f256, km) == 4);
+    CHECK(nameOf(ops::chooseMoe(q, f256, km, km.silu_mul_x8h).fgu) == "gemm_moepgu_g64n256k32_mxfp4");
+    // GU off (WHIRL_MOEP_GU=0): no moep plan, the wide flag alone changes nothing
+    ops::MoeFlags g0 = fw;
+    g0.moep_gu = -1;
+    ops::MoeFlags g00 = f0;
+    g00.moep_gu = -1;
+    CHECK(same(ops::chooseMoe(q, g0, km, km.silu_mul_x8h), ops::chooseMoe(q, g00, km, km.silu_mul_x8h)));
+    // the R9700 table (no moep kernels): unchanged
+    CHECK(same(ops::chooseMoe(q, fw, k97, k97.silu_mul_x8h), ops::chooseMoe(q, f0, k97, k97.silu_mul_x8h)));
+}
+
 void testOpsMoe() {
     ops::MoeProblem p;  // Ornith-like: E 2048, 8 of 256 experts, F 512, all MXFP4 with row exponents
     p.E = 2048;
@@ -1015,6 +1113,7 @@ void testOpsMoe() {
     testOpsMoeYdh(p, k97, k8);   // v0252-moedf16 (fails before the change: the fp8 kind never sets ydh)
     testOpsMoeSkip(p);  // v0252-f5
     testOpsMoeCombRows(p);  // v0252-combfix (fails before the fix: the row floor drops COMB 3 below 1024 rows)
+    testOpsMoeGuw(p, k97, k8);  // v0252-8smoe (fails to build before the change: no MoeFlags::moep_guw)
 }
 
 }  // namespace

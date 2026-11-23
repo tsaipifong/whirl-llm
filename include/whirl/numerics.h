@@ -136,6 +136,9 @@ struct EnvValues {
     // v0252-8sfp (PLAN V1-144): attn_i4qk (WHIRL_ATTN_I4QK: "0" turns the fast gfx1151 int4 Q.K^T prefill attention off;
     // any other value keeps the plan's choice; never on in precise / balance - Plan::ignored notes a non-"0" value there)
     Raw attn_i4qk;
+    // v0252-8smoe (PLAN V1-147): moep_guw (WHIRL_MOEP_GUW: a kernels::kMoepGu variant name = the routing-aware wide gate + up
+    // tile; "0", "" or an unknown name = off; class B: every moep gate + up variant stores the same bits)
+    Raw moep_guw;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -143,7 +146,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 41;
+    static constexpr std::size_t n_fields = 42;  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows)
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -246,6 +249,12 @@ struct Target {
     bool attn_sx_profile = false;
     // v0252-8sfp (PLAN V1-144): device::Profile::attn_i4qk_fast (the gfx1151 row): fast prefill attention int4 Q.K^T
     bool attn_i4qk_profile = false;
+    // v0252-8smoe (A, PLAN V1-95): device::Profile::moep_comb_fast_skip - the MoE prefill combine of a fast plan that runs
+    // moeskip (MXFP4 routed experts, no WHIRL_MOEP_COMB); 0 = the family's non-f16 combine (moepCombMoeSkip)
+    std::uint32_t moep_comb_fast_skip_profile = 0;
+    // v0252-8smoe (B, PLAN V1-147): device::Profile::moep_guw - the routing-aware wide gate + up variant (kMoepGu index + 1,
+    // 0 = off) of a balance / fast plan with the moep GEMMs (gfx1151, MXFP4 routed experts)
+    std::uint32_t moep_guw_profile = 0;
 };
 
 // ---- v0252-f2: the fast MoE relaxacc arms (the G3a / G4a screen arms) and the shipped default per GPU.
@@ -408,7 +417,8 @@ struct ItemState {
     X(F, moe_skip_thr, 0.f, "")                                  \
     X(U, moe_skip_min, 1, "")                                    \
     X(B, attn_sx, false, "")                                     \
-    X(B, attn_i4qk, false, "")
+    X(B, attn_i4qk, false, "")                                   \
+    X(U, moep_guw, 0, "")
 
 struct Flags {
 #define WHIRL_NF_B bool
