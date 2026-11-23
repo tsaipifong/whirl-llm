@@ -128,6 +128,11 @@ struct Profile {
     // 2x its f16 rate; the gfx1201 object has no such kernel); not bitwise, so the numerics plan takes it in fast only
     // (numerics::Target::attn_i4qk_profile); WHIRL_ATTN_I4QK=0 turns it off
     bool attn_i4qk_fast;
+    // v0252-8sattn3 (PLAN V1-148): the second form of that int4 kernel (attn_prefill_wmma_i4p / _s_i4p: int4 Q codes in LDS +
+    // K / V register prefetch, bit-identical to attn_prefill_wmma_i4 / _s_i4; gfx1151 object only), taken only where
+    // attn_i4qk is on (numerics::Target::attn_i4pf_profile, flag attn_i4pf); WHIRL_ATTN_I4PF: "0" / "" off, other on;
+    // round 3: on in the gfx1151 row (fast default), off in the gfx1201 row (no such kernel there)
+    bool attn_i4_qlds_pf;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
     // v0252-n10: whirl-server writes the TAIL-CK checkpoint inside the solo prefill forward that contains the tail point
@@ -223,6 +228,7 @@ inline constexpr Profile k_profile_gfx1201{
     .argmax_mb_moe = true,  // gfx1201 MoE: on in fast (PLAN V1-117)
     .attn_sx_balance = false,  // v0252-strixc2: no attn_sx in the gfx1201 code object
     .attn_i4qk_fast = false,   // v0252-8sfp: no attn_prefill_wmma_i4 in the gfx1201 code object (fp8 there, iu4 not used)
+    .attn_i4_qlds_pf = false,  // v0252-8sattn3: no attn_prefill_wmma_i4p in the gfx1201 code object
     // v0252-ch4k (PLAN V1-75): MoE solo prefills run 4096-row forwards in the 8060S fill form (whole chunks up to the
     // batch 4096; no extra memory, the prefill buffers are sized for the batch). Timed e2e A/B on the R9700 (Ornith
     // MXFP4, 4 ABBA rounds, 4096-row forwards vs 2048, scratch/v0252_ch4k/gpu/20261111-0310/summary.md): precise pp 8k
@@ -307,6 +313,9 @@ inline constexpr Profile k_profile_gfx1151{
     .attn_sx_balance = true,  // v0252-strixc2: balance prefill attention (acceptance: progress/v0252-strixc2.HANDOFF.md)
     // v0252-8sfp: on (fast only); screen progress/8sfp-screen.json decides it (8060S Swift fast pp 8k / 32k)
     .attn_i4qk_fast = true,
+    // v0252-8sattn3: on (same bits; kt attn 14 _i4p rows exact, whirl bench Ornith fast hash equal). Kernel time V6/V1 -1.8..-7.8 % at L 2k-96k on both models (attnpv);
+    // end to end open, no loss: Ornith fast pp 32k +0.21 % +- 1.24, 96k +0.76 % +- 1.13; Swift pp 8k -0.22 % +- 0.97, 32k +0.60 % +- 0.70. WHIRL_ATTN_I4PF=0 = old kernel
+    .attn_i4_qlds_pf = true,
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = true,  // v0252-tailck8s (PLAN V1-138, ADR-0022 supplement 4; was false = the 0.2.5.1 forward end)

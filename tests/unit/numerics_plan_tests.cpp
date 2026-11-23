@@ -89,6 +89,7 @@ nu::Target target(const CardFake& c, std::string_view model, bool kv_explicit) {
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     t.attn_sx_profile = c.prof.attn_sx_balance;  // v0252-strixc2 (tune.cpp numericsTarget)
     t.attn_i4qk_profile = c.prof.attn_i4qk_fast;  // v0252-8sfp (tune.cpp numericsTarget)
+    t.attn_i4pf_profile = c.prof.attn_i4_qlds_pf;  // v0252-8sattn3 (tune.cpp numericsTarget)
     t.moep_comb_fast_skip_profile = c.prof.moep_comb_fast_skip;  // v0252-8smoe (A, tune.cpp numericsTarget)
     t.moep_guw_profile = c.prof.moep_guw;  // v0252-8smoe (B, tune.cpp numericsTarget)
     t.moep_dhs_profile = c.prof.moep_dhs;  // v0252-8smoe2 (C, tune.cpp numericsTarget)
@@ -880,6 +881,9 @@ void testFastOnlyOverrides() {
         // v0252-8sq4 (F8): q4 KV decode attention switches, fast only (q4 KV exists only there; testDq4F8Flags). ORDER keeps the
         // partials (attn_dq4o), MINKEYS changes the partition (another combine order)
         {"DQ4_ORDER", 'F'}, {"DQ4_MINKEYS", 'F'},
+        // v0252-8sattn3: the int4 prefill attention with Q codes in LDS + K / V prefetch, bit-identical to the int4 kernel but
+        // only reachable where the fast-only attn_i4qk is on (testAttnI4pfFlag)
+        {"ATTN_I4PF", 'F'},
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -1861,10 +1865,12 @@ static void testAttnI4qkFlag() {
                 const nu::Plan d = pl(t, mode, {});
                 NCHECK(d.flags.attn_i4qk == want, "attn_i4qk default {} {} {}: {} (want {})", c.name, model, mode, d.flags.attn_i4qk, want);
                 on_cells += d.flags.attn_i4qk;
-                // "0": off, nothing else moves
+                // "0": off, nothing else moves except its second form (v0252-8sattn3: attn_i4pf rides on attn_i4qk; since the
+                // round-3 default flip the 8060S fast plan has it on, and WHIRL_ATTN_I4QK=0 takes it off with the int4 form)
                 const nu::Plan z = pl(t, mode, {{"ATTN_I4QK", "0"}});
                 nu::Plan a = d;
                 a.flags.attn_i4qk = false;
+                a.flags.attn_i4pf = false;
                 NCHECK(!z.flags.attn_i4qk && a.bitsKey() == z.bitsKey() && nu::logLine(z) == nu::logLine(d) && z.overrides == d.overrides &&
                            z.lossy_override == d.lossy_override && z.ignored.empty(),
                        "attn_i4qk {} {} {}: WHIRL_ATTN_I4QK=0 turns only the attn_i4qk flag off", c.name, model, mode);
@@ -1887,6 +1893,90 @@ static void testAttnI4qkFlag() {
         nu::Target tq = target(card("8060s"), model, false);
         tq.has_mxfp4 = false;
         NCHECK(!pl(tq, "fast", {}).flags.attn_i4qk, "attn_i4qk {}: a model without MXFP4 tensors -> off", model);
+    }
+}
+
+// v0252-8sattn3 (PLAN V1-148): the plan flag attn_i4pf picks the second int4 form of the fast gfx1151 prefill attention
+// (attn_prefill_wmma_i4p / _s_i4p: int4 Q codes in LDS + K / V register prefetch, bit-identical to attn_prefill_wmma_i4 /
+// _s_i4). It can only be on where attn_i4qk is on (fast, 8060S, MXFP4). Round 3 (default flip): device::Profile::
+// attn_i4_qlds_pf is TRUE in the gfx1151 row and false in the gfx1201 row, so a default 8060S fast plan takes it (both
+// models); WHIRL_ATTN_I4PF "0" / "" off (the previous kernel, the reference arm), any other value on, unset = the row.
+// WHIRL_ATTN_I4QK=0 turns both off. A non-"0" WHIRL_ATTN_I4PF in precise / balance is noted once and changes nothing.
+// Fails before the flip: the gfx1151 row is false and the default plan has attn_i4pf off.
+static void testAttnI4pfFlag() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    for (const CardFake& c : k_cards)
+        NCHECK(c.prof.attn_i4_qlds_pf == (std::string_view(c.name) == "8060s"), "attn_i4pf: device row {} = {} (want on for the 8060S only)", c.name,
+               c.prof.attn_i4_qlds_pf);
+    std::size_t on_default = 0, on_env = 0, on_prof = 0;
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const bool i4 = std::string_view(mode) == "fast" && c.prof.attn_i4qk_fast;  // where the int4 form runs
+                const bool want = i4 && c.prof.attn_i4_qlds_pf;                             // the shipped default
+                nu::Target t0 = t;  // the row off (the plan before the flip)
+                t0.attn_i4pf_profile = false;
+                const nu::Plan d = pl(t, mode, {}), d0 = pl(t0, mode, {});
+                NCHECK(d.flags.attn_i4pf == want, "attn_i4pf default {} {} {}: {} (want {})", c.name, model, mode, d.flags.attn_i4pf, want);
+                NCHECK(!d0.flags.attn_i4pf, "attn_i4pf row-off {} {} {}: on", c.name, model, mode);
+                on_default += d.flags.attn_i4pf;
+                nu::Plan da = d;
+                da.flags.attn_i4pf = false;
+                NCHECK(da.bitsKey() == d0.bitsKey() && nu::logLine(d) == nu::logLine(d0) && d.overrides == d0.overrides && d.lossy_override == d0.lossy_override,
+                       "attn_i4pf default {} {} {}: only the attn_i4pf flag moves", c.name, model, mode);
+                // "0" and "": off (the previous kernel), nothing else moves; no note for "0" (a non-"0" value, "" too, is noted once
+                // in precise / balance - the WHIRL_DQ4_ORDER rule)
+                for (const char* v : {"0", ""}) {
+                    const nu::Plan z = pl(t, mode, {{"ATTN_I4PF", v}});
+                    const std::size_t z_notes = std::string_view(v) == "0" || std::string_view(mode) == "fast" ? 0 : 1;
+                    NCHECK(!z.flags.attn_i4pf && z.bitsKey() == d0.bitsKey() && nu::logLine(z) == nu::logLine(d0) && z.overrides == d0.overrides &&
+                               z.ignored.size() == z_notes,
+                           "attn_i4pf {} {} {}: WHIRL_ATTN_I4PF='{}' = the previous kernel only", c.name, model, mode, v);
+                    NCHECK((d.bitsKey() != z.bitsKey()) == want, "attn_i4pf {} {} {}: the arms default / ='{}' differ exactly where it runs", c.name,
+                           model, mode, v);
+                }
+                // the profile row forced on: exactly the int4 cells
+                nu::Target tp = t;
+                tp.attn_i4pf_profile = true;
+                const nu::Plan p = pl(tp, mode, {});
+                NCHECK(p.flags.attn_i4pf == i4, "attn_i4pf profile-on {} {} {}: {} (want {})", c.name, model, mode, p.flags.attn_i4pf, i4);
+                on_prof += p.flags.attn_i4pf;
+                // any other value with the row off: on exactly where the int4 form runs; elsewhere one ignored note in
+                // precise / balance and nothing else
+                for (const char* v : {"1", "x"}) {
+                    const nu::Plan o = pl(t0, mode, {{"ATTN_I4PF", v}});
+                    NCHECK(o.flags.attn_i4pf == i4, "attn_i4pf {} {} {}: WHIRL_ATTN_I4PF='{}' -> {} (want {})", c.name, model, mode, v, o.flags.attn_i4pf, i4);
+                    if (std::string_view(v) == "1") on_env += o.flags.attn_i4pf;
+                    nu::Plan oa = o;
+                    oa.flags.attn_i4pf = false;
+                    NCHECK(oa.bitsKey() == d0.bitsKey() && o.overrides == d0.overrides && o.lossy_override == d0.lossy_override,
+                           "attn_i4pf {} {} {}: WHIRL_ATTN_I4PF='{}' moves only the attn_i4pf flag", c.name, model, mode, v);
+                    std::size_t notes = 0;
+                    for (const std::string& n : o.ignored) notes += n.rfind(std::string("WHIRL_ATTN_I4PF=") + v + " ignored", 0) == 0;
+                    const std::size_t want_notes = std::string_view(mode) == "fast" ? 0 : 1;
+                    NCHECK(notes == want_notes && o.ignored.size() == want_notes, "attn_i4pf {} {} {}: WHIRL_ATTN_I4PF='{}': {} ignored notes (want {})",
+                           c.name, model, mode, v, notes, want_notes);
+                    // with the shipped row: on where the int4 form runs
+                    NCHECK(pl(t, mode, {{"ATTN_I4PF", v}}).flags.attn_i4pf == i4, "attn_i4pf {} {} {}: WHIRL_ATTN_I4PF='{}' on the shipped row", c.name,
+                           model, mode, v);
+                }
+                // WHIRL_ATTN_I4QK=0 turns the int4 form off, and with it this one
+                NCHECK(!pl(t, mode, {{"ATTN_I4QK", "0"}}).flags.attn_i4pf && !pl(t, mode, {{"ATTN_I4PF", "1"}, {"ATTN_I4QK", "0"}}).flags.attn_i4pf,
+                       "attn_i4pf {} {} {}: needs attn_i4qk", c.name, model, mode);
+            }
+    NCHECK(on_default == 2 && on_env == 2 && on_prof == 2,
+           "attn_i4pf: on in exactly 2 cells (8060S fast, both models) by default {} / by env {} / by profile {}", on_default, on_env, on_prof);
+    for (const char* model : {"swift", "moe"}) {
+        nu::Target tq = target(card("8060s"), model, false);
+        tq.has_mxfp4 = false;
+        NCHECK(!pl(tq, "fast", {}).flags.attn_i4pf && !pl(tq, "fast", {{"ATTN_I4PF", "1"}}).flags.attn_i4pf,
+               "attn_i4pf {}: a model without MXFP4 tensors -> off", model);
     }
 }
 
@@ -2416,6 +2506,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testLsplitFlag();  // v0252-l2split (fails to build before the change: no attn_lsplit / parseLsplit)
     testAttnSxFlag();  // v0252-strixc2 (fails before the port: loadFlags never sets attn_sx)
     testAttnI4qkFlag();  // v0252-8sfp (fails before the port: loadFlags never sets attn_i4qk)
+    testAttnI4pfFlag();  // v0252-8sattn3 (port: fails without the flag; round 3: fails while the gfx1151 row is off)
     testMoepGuwFlag();  // v0252-8smoe (B; fails to build before the change: no Flags::moep_guw / EnvValues::moep_guw)
     testDq4F8Flags();  // v0252-8sq4 (fails to build before the change: no Flags::dq4_order / dq4_min_keys, parseDq4MinKeys)
     testMoep2Flags();  // v0252-8smoe2 (C / D / E; fails to build before the change: no Flags::moep_dhs / moep_dna / moep_fq)

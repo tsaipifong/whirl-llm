@@ -52,6 +52,8 @@ public:
     Value attn_sx;
     // numerics::loadFlags (v0252-8sfp): WHIRL_ATTN_I4QK=0 turns the gfx1151 fast int4 Q.K^T prefill attention off
     Value attn_i4qk;
+    // numerics::loadFlags (v0252-8sattn3): WHIRL_ATTN_I4PF, the int4 Q-in-LDS + prefetch form of that kernel (opt-in)
+    Value attn_i4pf;
     // Model::load (v0252-kvlong2, O1): WHIRL_DQ_FULL=0 keeps the q8 / q8h / q4 prefill dequant copy FFN-sized (the plan before O1)
     Value dq_full;
     // Model::load (v0252-pp2k2, through gemmTailEnv below): the f16 GEMM token-tail split (ops::GemmFlags::gemm_tail)
@@ -68,7 +70,7 @@ public:
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 80;  // v0252-8sq4: + dq4_order, dq4_min_keys, fast_kvq8h (77 -> 80)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (74 -> 77)  // v0252-8smoe: + moep_guw (72 -> 73; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (73 -> 74)
+    static constexpr std::size_t n_names = 81;  // v0252-8sattn3: + attn_i4pf (80 -> 81)  // v0252-8sq4: + dq4_order, dq4_min_keys, fast_kvq8h (77 -> 80)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (74 -> 77)  // v0252-8smoe: + moep_guw (72 -> 73; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (73 -> 74)
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

@@ -746,6 +746,71 @@ void testAttnI4qk() {
     }
 }
 
+// v0252-8sattn3 (PLAN V1-148): the second int4 form (attn_pwf_i4p / attn_pws_i4p = attn_prefill_wmma_i4p / _s_i4p: int4 Q
+// codes in LDS + K / V register prefetch, bit-identical to the int4 kernels). With attn_i4qk_on AND attn_i4pf_on and both
+// i4p kernels in the table, the KG-3 copy path launches them in place of attn_pwf_i4 / attn_pws_i4 with the same steps,
+// grids, blocks, head ranges and key ranges. attn_i4pf_on alone (int4 off) never picks anything; either i4p kernel missing:
+// the int4 kernels exactly as before (the old kernel stays the reference arm); the f16-cache paths never take it.
+void testAttnI4pf() {
+    ops::AttnPrefillProblem p;
+    p.n = 512;
+    p.head_dim = 256;
+    p.n_head = 24;
+    p.n_head_kv = 4;
+    p.scale = 1.0f / 16.0f;
+    p.kv_q8 = true;
+    p.dq_rows = 8192;
+    p.dq_ptab = true;
+    p.dq_st_ml = true;
+    ops::AttnPrefillFlags i4, pf, pf_only;
+    i4.attn_i4qk_on = true;
+    pf.attn_i4qk_on = true;
+    pf.attn_i4pf_on = true;
+    pf_only.attn_i4pf_on = true;
+    kn::KernelTable k = attnTable(true, true, true, false);
+    k.attn_pwf_i4 = tag("attn_pwf_i4");
+    k.attn_pws_i4 = tag("attn_pws_i4");
+    k.attn_pwf_i4p = tag("attn_pwf_i4p");
+    k.attn_pws_i4p = tag("attn_pws_i4p");
+    auto same = [](const ops::AttnPrefillPlan& a, const ops::AttnPrefillPlan& b, const char* fa, const char* fb) {
+        bool ok = a.steps.size() == b.steps.size();
+        for (std::size_t i = 0; ok && i < a.steps.size(); ++i) {
+            const ops::AttnStep &x = a.steps[i], &y = b.steps[i];
+            ok = x.op == y.op && x.grid.x == y.grid.x && x.grid.y == y.grid.y && x.grid.z == y.grid.z && x.block.x == y.block.x && x.head0 == y.head0 &&
+                 x.from_copy == y.from_copy && x.ranged == y.ranged && x.r0 == y.r0 && x.r1 == y.r1;
+            if (ok && x.op == ops::AttnStep::Op::attn) ok = nameOf(x.f) == fa && nameOf(y.f) == fb;
+        }
+        return ok;
+    };
+    CHECK(same(ops::chooseAttnPrefill(p, i4, k), ops::chooseAttnPrefill(p, pf, k), "attn_pwf_i4", "attn_pwf_i4p"));
+    CHECK(same(ops::chooseAttnPrefill(p, i4, k), ops::chooseAttnPrefill(p, {}, k), "attn_pwf_i4", "attn_pwf"));  // sanity: f16 off
+    CHECK(same(ops::chooseAttnPrefill(p, {}, k), ops::chooseAttnPrefill(p, pf_only, k), "attn_pwf", "attn_pwf"));
+    p.pos0 = 20000;  // keys past the scratch: the series
+    CHECK(same(ops::chooseAttnPrefill(p, i4, k), ops::chooseAttnPrefill(p, pf, k), "attn_pws_i4", "attn_pws_i4p"));
+    CHECK(same(ops::chooseAttnPrefill(p, {}, k), ops::chooseAttnPrefill(p, pf_only, k), "attn_pws", "attn_pws"));
+    p.pos0 = 32768;  // head ranges, one range
+    p.n = 4096;
+    p.dq_rows = 40960;
+    CHECK(same(ops::chooseAttnPrefill(p, i4, k), ops::chooseAttnPrefill(p, pf, k), "attn_pwf_i4", "attn_pwf_i4p"));
+    // either i4p kernel missing (an object without them): the int4 kernels
+    for (int miss = 0; miss < 2; ++miss) {
+        kn::KernelTable km = k;
+        (miss == 0 ? km.attn_pwf_i4p : km.attn_pws_i4p) = nullptr;
+        CHECK(same(ops::chooseAttnPrefill(p, i4, km), ops::chooseAttnPrefill(p, pf, km), "attn_pwf_i4", "attn_pwf_i4"));
+    }
+    // the f16 cache read in place and the attn_kg table: untouched
+    p.kv_q8 = false;
+    p.dq_ptab = false;
+    p.dq_rows = 0;
+    p.pos0 = 0;
+    p.n = 512;
+    for (const kn::KernelTable& kk : {k, attnTable(false, false, false, true)}) {
+        const auto a = ops::chooseAttnPrefill(p, {}, kk), b = ops::chooseAttnPrefill(p, pf, kk);
+        CHECK(a.steps.size() == b.steps.size());
+        for (std::size_t i = 0; i < a.steps.size() && i < b.steps.size(); ++i) CHECK(a.steps[i].f == b.steps[i].f && nameOf(b.steps[i].f).find("_i4") == std::string::npos);
+    }
+}
+
 // v0252-strixc2 (PLAN V1-09): the balance gfx1151 prefill attention attn_sx<NP> (strix-llama.cpp fattn-rdna35, not bitwise).
 // (1) attnSxFor: NP = the first of 8 / 4 / 2 dividing the GQA ratio (fattn-rdna35.cu:863-870), only when it also divides
 // the heads of the launch, head_dim 256, and the code object has that NP's kernel; exhaustive (never another NP's kernel).

@@ -1029,6 +1029,65 @@ void testAttn(Ctx& c) {
                         }
                     }
                 }
+                // v0252-8sattn3 (PLAN V1-148): attn_prefill_wmma_i4p / _s_i4p (gfx1151, fast opt-in WHIRL_ATTN_I4PF: int4 Q codes in
+                // LDS + K / V register prefetch) move the query codes and the loads, never a value: bitwise == attn_prefill_wmma_i4 /
+                // _s_i4 (one launch, two head-range launches, and the key-range series of 64 / 1024 keys with the softmax state
+                // carried). Shapes (24, 4) Swift and (16, 2) Ornith at pos L - n and 0; n = 200 / 130: a partial last query tile.
+                // A code object that has attn_prefill_wmma_i4 but not the i4p pair is the build before this item: FAIL, not skip.
+                {
+                    auto f4 = c.fnOpt("attn_prefill_wmma_i4"), f4s = c.fnOpt("attn_prefill_wmma_s_i4");
+                    auto fp = c.fnOpt("attn_prefill_wmma_i4p"), fps = c.fnOpt("attn_prefill_wmma_s_i4p");
+                    if (!f4 || !f4s) {
+                        c.rep.skip("attn", "attn_prefill_wmma_i4p / _s_i4p" + tag, "attn_prefill_wmma_i4 / _s_i4 not in this code object");
+                    } else if (!fp || !fps) {
+                        Result r;
+                        r.name = "attn_prefill_wmma_i4p / _s_i4p present next to attn_prefill_wmma_i4" + tag;
+                        r.pass = false;
+                        r.note = "the int4 Q-in-LDS + prefetch forms are missing from this code object";
+                        c.rep.add(r);
+                    } else {
+                        for (const auto& [nh, nkv] : {std::pair{24, 4}, std::pair{16, 2}}) {
+                            const std::size_t cnt = static_cast<std::size_t>(n) * nh * kHd;
+                            for (const int p0 : {L - n, 0}) {
+                                Buf dpos(std::vector<int>{p0});
+                                const std::string where =
+                                    " (" + std::to_string(nh) + " / " + std::to_string(nkv) + " heads) at pos " + std::to_string(p0) + tag;
+                                Buf o4(static_cast<std::size_t>(n) * kHeads * kHd * 4), op(o4.bytes()), oh(o4.bytes());
+                                for (Buf* b : {&o4, &op, &oh}) b->fill(0x7f);
+                                auto launch1 = [&](hip::Function fn, Buf& o, int h0, int nh_launch) {
+                                    hip::launch(fn, {cdiv(n, 128), static_cast<unsigned>(nh_launch), 1}, {256, 1, 1}, 0, c.s, dqp.p(), pool.args(), o.p(), nh,
+                                                nkv, kQStride, dpos.p(), n, kScale, h0);
+                                };
+                                launch1(f4, o4, 0, nh);
+                                launch1(fp, op, 0, nh);
+                                for (const int h0 : {0, nh / 2}) launch1(fp, oh, h0, nh / 2);
+                                c.sync();
+                                const auto v4 = o4.down<float>(cnt);
+                                c.rep.add(cmpExact("attn_prefill_wmma_i4p == attn_prefill_wmma_i4" + where, op.down<float>(cnt), v4, Kind::invariant));
+                                c.rep.add(cmpExact("attn_prefill_wmma_i4p head-range launches == attn_prefill_wmma_i4" + where, oh.down<float>(cnt), v4,
+                                                   Kind::invariant));
+                                const int n_keys = p0 + n;
+                                for (const int seg : {64, 1024}) {
+                                    if (seg >= n_keys) continue;
+                                    Buf os4(o4.bytes()), osp(o4.bytes()), st4(static_cast<std::size_t>(n) * nh * 2 * 4), stp(st4.bytes());
+                                    for (Buf* b : {&os4, &osp}) b->fill(0x7f);
+                                    st4.zero();
+                                    stp.zero();
+                                    for (int r0 = 0; r0 < n_keys; r0 += seg) {
+                                        const int r1 = std::min(n_keys, r0 + seg);
+                                        hip::launch(f4s, {cdiv(n, 128), static_cast<unsigned>(nh), 1}, {256, 1, 1}, 0, c.s, dqp.p(), pool.args(), os4.p(), nh, nkv,
+                                                    kQStride, dpos.p(), n, kScale, 0, r0, r1, st4.p());
+                                        hip::launch(fps, {cdiv(n, 128), static_cast<unsigned>(nh), 1}, {256, 1, 1}, 0, c.s, dqp.p(), pool.args(), osp.p(), nh, nkv,
+                                                    kQStride, dpos.p(), n, kScale, 0, r0, r1, stp.p());
+                                    }
+                                    c.sync();
+                                    c.rep.add(cmpExact("attn_prefill_wmma_s_i4p key ranges of " + std::to_string(seg) + " == attn_prefill_wmma_s_i4" + where,
+                                                       osp.down<float>(cnt), os4.down<float>(cnt), Kind::invariant));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

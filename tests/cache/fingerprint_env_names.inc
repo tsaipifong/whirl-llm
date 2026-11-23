@@ -12,6 +12,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_ARGMAX_MB",  // src/config/env_snapshot.cpp (v0252-f1arg3: other kernels, same bits; hashed as MOE_FUSE)
     "WHIRL_ATTN_DQ4",  // src/common/numerics.cpp
     "WHIRL_ATTN_DQF",  // src/common/numerics.cpp
+    "WHIRL_ATTN_I4PF",  // src/common/numerics.cpp (v0252-8sattn3: other kernels, same bits as the int4 form; hashed as DQ4_ORDER)
     "WHIRL_ATTN_I4QK",  // src/common/numerics.cpp (v0252-8sfp: fast int4 Q.K^T prefill attention off when "0")
     "WHIRL_ATTN_KG",  // src/common/numerics.cpp
     "WHIRL_ATTN_KGVAR",  // src/common/numerics.cpp (feat026-attnkg97, v0252-c1port)
