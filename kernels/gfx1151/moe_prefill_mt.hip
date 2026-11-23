@@ -133,6 +133,49 @@ __device__ void moepgu_impl(const uint8_t *__restrict__ W1, const uint8_t *__res
     }
 }
 
+// v0252-8smoe2 (C, EPI 5 = gemm_moepdhs_*): the coalesced f16 store of one wave's accumulators acc[TM][FPW] (rows
+// m0 + wm * TM * 16 .. + TM * 16, token fragments moep::frag(wn, WN, f)) into Yh [pos][rows_e]. Staged through the wave's
+// private LDS slice stg (16 * dhsLd(TM) halves; the caller has passed a block barrier after the last read of that LDS):
+// every element is the (_Float16)acc gemm_moepdh stores, only the store pattern differs (16-byte writes of 8 rows of one
+// token instead of 2-byte writes 4 KB apart) - bitwise the gemm_moepdh output (kt moemx invariance). Wave-uniform
+// control flow only (j, live): the wave barriers below are reached by all 32 lanes.
+template <int TM, int FPW, int WN>
+__device__ __forceinline__ void moep_store_h16_staged(const float8 (&acc)[TM][FPW], _Float16 *__restrict__ stg, _Float16 *__restrict__ Yh,
+                                                      int rows_e, int m0, int wm, int wn, int live, int n_tok, int pos0, int lane) {
+    constexpr int SLD = TM * 16 + 8;
+    const bool vec = (rows_e & 7) == 0;
+    const int rbase = m0 + wm * TM * 16;
+#pragma unroll
+    for (int f = 0; f < FPW; ++f) {
+        const int j = moep::frag(wn, WN, f);
+        if (j >= live) continue;  // wave-uniform
+#pragma unroll
+        for (int i = 0; i < TM; ++i)
+#pragma unroll
+            for (int v = 0; v < 8; ++v) stg[moep::dhsWrite(lane, i, v, SLD)] = (_Float16)acc[i][f][v];
+        __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
+        __builtin_amdgcn_wave_barrier();
+        __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
+        for (int c = lane; c < moep::dhsChunks(TM); c += WARP) {
+            int tk, r8;
+            moep::dhsRead(c, TM, &tk, &r8);
+            const int t = j * 16 + tk, row0 = rbase + r8;
+            if (t >= n_tok || row0 >= rows_e) continue;
+            const _Float16 *src = stg + tk * SLD + r8;
+            _Float16 *dst = Yh + (size_t)(pos0 + t) * rows_e + row0;
+            if (vec && row0 + 8 <= rows_e) {
+                *(half8 *)dst = *(const half8 *)src;
+            } else {
+                for (int q = 0; q < 8 && row0 + q < rows_e; ++q) dst[q] = src[q];
+            }
+        }
+        // the slice is rewritten by the next fragment
+        __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
+        __builtin_amdgcn_wave_barrier();
+        __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
+    }
+}
+
 // ---------------------------------------------------------------- down (+ optional fused combine)
 // Block: 8 waves as WM (rows) x WN (token columns); wave (wm, wn) holds TM = BM / 16 / WM row fragments and token
 // fragments wn, wn + WN, ... of one expert's tile of up to BNMAX tokens. Y: f32 [pos][rows_e] exactly as gemm_moe32r.
@@ -154,7 +197,7 @@ __device__ void moepdn_impl(const uint8_t *__restrict__ Wall, uint64_t row_bytes
     constexpr int A_PER = BM * GPR / NTH, B_PER = BNMAX * GPR / NTH;
     static_assert(NW % WM == 0 && BM % (16 * WM) == 0 && TM >= 1 && NF % WN == 0 && FPW >= 1, "wave layout");
     static_assert(BM * GPR % NTH == 0 && BNMAX * GPR % NTH == 0 && BK % 16 == 0, "tile/threads");
-    static_assert(EPI >= 0 && EPI <= 4, "epilogue");
+    static_assert(EPI >= 0 && EPI <= 5, "epilogue");  // v0252-8smoe2: 5 = gemm_moepdhs (Y f16, coalesced through LDS)
     constexpr bool FUSE = EPI == 1 || EPI == 3, YH = EPI == 2 || EPI == 3;
     float *__restrict__ Y = (float *)Yv;
     _Float16 *__restrict__ Yh = (_Float16 *)Yv;
@@ -230,6 +273,14 @@ __device__ void moepdn_impl(const uint8_t *__restrict__ Wall, uint64_t row_bytes
         }
     }
 #undef MOEPDN_FETCH
+    if constexpr (EPI == 5) {
+        // v0252-8smoe2 (C): the A tile is free after every wave's last WMMA read of it (block barrier), then each wave
+        // stages its accumulators in its own slice of As
+        static_assert(NW * 16 * (TM * 16 + 8) <= BM * LD, "the staging slices fit in As");
+        __syncthreads();
+        moep_store_h16_staged<TM, FPW, WN>(acc, &As[0][0] + wid * 16 * (TM * 16 + 8), Yh, rows_e, m0, wm, wn, live, n_tok, tl.y, lane);
+        return;
+    }
 #pragma unroll
     for (int f = 0; f < FPW; ++f) {
         const int j = moep::frag(wn, WN, f);

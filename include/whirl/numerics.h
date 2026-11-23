@@ -141,6 +141,10 @@ struct EnvValues {
     // v0252-8smoe (PLAN V1-147): moep_guw (WHIRL_MOEP_GUW: a kernels::kMoepGu variant name = the routing-aware wide gate + up
     // tile; "0", "" or an unknown name = off; class B: every moep gate + up variant stores the same bits)
     Raw moep_guw;
+    // v0252-8smoe2 (PLAN V1-147): moep_dhs (WHIRL_MOEP_DHS: the coalesced f16 down epilogue, class B), moep_dna (WHIRL_MOEP_DNA:
+    // a kernels::kMoepDn name = the COMB 5 atomic down variant, class L as MOEP_COMB), moep_fq (WHIRL_MOEP_FQ: the
+    // fused-dequant moep twins, class B); bool ones: "0" / "" = off, any other value on
+    Raw moep_dhs, moep_dna, moep_fq;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -148,7 +152,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 43;  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
+    static constexpr std::size_t n_fields = 46;  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -257,6 +261,10 @@ struct Target {
     // v0252-8smoe (B, PLAN V1-147): device::Profile::moep_guw - the routing-aware wide gate + up variant (kMoepGu index + 1,
     // 0 = off) of a balance / fast plan with the moep GEMMs (gfx1151, MXFP4 routed experts)
     std::uint32_t moep_guw_profile = 0;
+    // v0252-8smoe2 (PLAN V1-147): device::Profile moep_dhs / moep_dna / moep_fq (gfx1151 moep plans; opt-in rows)
+    bool moep_dhs_profile = false;
+    std::uint32_t moep_dna_profile = 0;
+    bool moep_fq_profile = false;
     // v0252-8sdec (PLAN V1-142): device::Profile::gemvh_group_dense (the gfx1151 row): numerics flag gemvh_grp on dense models
     bool gemvh_grp_profile = false;
 };
@@ -427,7 +435,7 @@ struct ItemState {
     X(U, moe_skip_min, 1, "")                                    \
     X(B, attn_sx, false, "")                                     \
     X(B, attn_i4qk, false, "")                                   \
-    X(U, moep_guw, 0, "")
+    X(U, moep_guw, 0, "")                                            X(B, moep_dhs, false, "")                                        X(U, moep_dna, 0, "")                                            X(B, moep_fq, false, "")
 
 struct Flags {
 #define WHIRL_NF_B bool

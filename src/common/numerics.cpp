@@ -231,6 +231,9 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"ATTN_SX", &S::attn_sx},      // v0252-strixc2
         {"ATTN_I4QK", &S::attn_i4qk},  // v0252-8sfp
         {"MOEP_GUW", &S::moep_guw},    // v0252-8smoe
+        {"MOEP_DHS", &S::moep_dhs},    // v0252-8smoe2 (C)
+        {"MOEP_DNA", &S::moep_dna},    // v0252-8smoe2 (D)
+        {"MOEP_FQ", &S::moep_fq},      // v0252-8smoe2 (E)
     }};
     return t;
 }
@@ -409,6 +412,24 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
         F.moep_guw = 0;
         for (int i = 0; i < kernels::kMoepGuN; ++i)
             if (*e.moep_guw == kernels::kMoepGu[i].name) F.moep_guw = static_cast<std::uint32_t>(i) + 1;
+    }
+    // v0252-8smoe2 (PLAN V1-147), all opt-in (device::Profile rows off on both cards): the card's row on the moep plan
+    // (gfx1151, MXFP4 routed experts) - C moep_dhs and E moep_fq in balance / fast (bitwise twins: the precise arm is a
+    // later decision), D moep_dna in fast (COMB 5 is fast-only). The variables override the row in any mode, as
+    // WHIRL_MOEP_GUW: MOEP_DHS / MOEP_FQ "0" / "" = off, any other value on; MOEP_DNA a kMoepDn name ("0", "", unknown =
+    // off). ops::chooseMoe uses each only where its kernel exists and its path is taken.
+    if (t.gfx1151 && t.moe_mxfp4 && r.mode != Mode::precise) {
+        F.moep_dhs = t.moep_dhs_profile;
+        F.moep_fq = t.moep_fq_profile;
+    }
+    if (t.gfx1151 && t.moe_mxfp4 && r.mode == Mode::fast) F.moep_dna = t.moep_dna_profile;
+    auto onOff = [](const Raw& v) { return !v->empty() && *v != "0"; };
+    if (e.moep_dhs) F.moep_dhs = onOff(e.moep_dhs);
+    if (e.moep_fq) F.moep_fq = onOff(e.moep_fq);
+    if (e.moep_dna) {
+        F.moep_dna = 0;
+        for (int i = 0; i < kernels::kMoepDnN; ++i)
+            if (*e.moep_dna == kernels::kMoepDn[i].name) F.moep_dna = static_cast<std::uint32_t>(i) + 1;
     }
     // v0251-a11port (feat026-router): the fused MoE router by default for MoE models, every mode (bit-identical to
     // moe_logits_f32 + moe_topk: kt moemx, golden); 0.2.5.1 on the gfx1151 code object (Radeon 8060S), v0252-c5port also
