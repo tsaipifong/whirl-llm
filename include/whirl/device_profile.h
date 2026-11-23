@@ -70,9 +70,10 @@ struct Profile {
     // auto / 0 / N overrides it. 0 = today's split count. gfx1201: 32 WGPs x 2 attn_ws4r blocks (LDS 47.8 / 58.4 KB of
     // 128 KB per WGP) = 64 = one machine wave (libr4d decode_splits / TRT-LLM MMHA law, progress/v0252-l2split.PRIOR_ART.md)
     std::uint16_t attn_lsplit_blocks;
-    // v0252-8sq4 (PLAN V1-140 / V1-109; fast only, all opt-in until the main session's screen shows a gain beyond its
-    // error, ADR-0019; a default flip is one line here plus the pinned CHECKs in tests/device, tests/iso/device.profile and
-    // tests/ops testAttnDq4F8):
+    // v0252-8sq4 (PLAN V1-140 / V1-109; fast only, opt-in until the main session's screen shows a gain beyond its error,
+    // ADR-0019; a default flip is one line here plus the pinned CHECKs in tests/device, tests/iso/device.profile,
+    // tests/ops testAttnDq4F8 and tests/unit testDq4F8Flags' shipped pin). v0252-8sflip2: attn_dq4_row_order is the gfx1151
+    // default; dq4_min_keys and fast_kv_q8h_moe_ctx stay opt-in:
     //   attn_dq4_row_order (F8 order): q4 KV decode / verify runs attn_dq4o (gfx1151 object: attn_dq4 with the gfx1201 block
     //     order, verify row fastest, so the MTP verify rows share the q4 K / V tiles through L2; same partials). Numerics
     //     flag dq4_order (numerics::Target::dq4_order_profile); WHIRL_DQ4_ORDER = 0 off / any other value on. A family whose
@@ -280,7 +281,11 @@ inline constexpr Profile k_profile_gfx1151{
     // v0252-8sq4: opt-in until the screens progress/8sq4-order.json / 8sq4-minkeys.json / 8sq4-kvq8h.json show a gain beyond
     // the error (ADR-0019). On: attn_dq4_row_order = true, dq4_min_keys = the screened target, fast_kv_q8h_moe_ctx = 1 (or
     // the context the screen supports)
-    .attn_dq4_row_order = false,  // WHIRL_DQ4_ORDER=1 turns it on
+    // v0252-8sflip2: F8 order ON by default (fast plans with q4 KV run attn_dq4o; same partials as attn_dq4: kt attndq4
+    // exact 54/54, [kv q4 order] 27/27). Screens scratch/abscreen/8sq4-order and 8sq4-order-long (Ornith fast, same exe,
+    // default vs WHIRL_DQ4_ORDER=1): tg 131072 +10.49 % +- 9.08 (gain, 4 rounds), tg 32768 +3.89 % +- 3.34 (gain),
+    // tg 65536 +9.69 % +- 10.24 (open), tg 8192 -1.53 % +- 5.78 (open), prefill guards flat. WHIRL_DQ4_ORDER=0 = attn_dq4
+    .attn_dq4_row_order = true,
     .dq4_min_keys = 0,            // WHIRL_DQ4_MINKEYS=1024 turns it on
     .fast_kv_q8h_moe_ctx = 0,     // WHIRL_FAST_KVQ8H=1 turns it on (every load)
     .tune_fast = true,
