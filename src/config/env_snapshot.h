@@ -50,6 +50,8 @@ public:
     Value argmax_mb;
     // numerics::loadFlags (v0252-strixc2): WHIRL_ATTN_SX=0 turns the gfx1151 balance attn_sx prefill attention off
     Value attn_sx;
+    // numerics::loadFlags (v0252-8sfp): WHIRL_ATTN_I4QK=0 turns the gfx1151 fast int4 Q.K^T prefill attention off
+    Value attn_i4qk;
     // Model::load (v0252-kvlong2, O1): WHIRL_DQ_FULL=0 keeps the q8 / q8h / q4 prefill dequant copy FFN-sized (the plan before O1)
     Value dq_full;
     // Model::load (v0252-pp2k2, through gemmTailEnv below): the f16 GEMM token-tail split (ops::GemmFlags::gemm_tail)
@@ -59,7 +61,7 @@ public:
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 71;
+    static constexpr std::size_t n_names = 72;
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

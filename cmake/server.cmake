@@ -153,6 +153,10 @@ add_executable(whirl-kt-bench-tests
 # slots) emulated on the CPU against gemv1s / gemvw (bitwise) and a double dot; no HIP.
 add_executable(whirl-gemvk-order-tests ${CMAKE_SOURCE_DIR}/tests/kernels/unit/gemvk_order_tests.cpp)
 
+# v0252-8sfp (PLAN V1-144): the int4 Q.K^T codes, fragment layout and error model of the fast gfx1151 prefill attention
+# (kernels/shared/attn_i4qk.h, attn_prefill_wmma_i4) emulated on the CPU; no HIP.
+add_executable(whirl-i4qk-ref-tests ${CMAKE_SOURCE_DIR}/tests/kernels/unit/i4qk_ref_tests.cpp)
+
 # measure-tools P4: whirl-stage-bench's HIP-free part (options, stage table, KV tile plan, per-stage golden, validation
 # judge, JSONL rows, the restore / preload / hash driver) on the CPU. `--emit FILE` writes sample rows for db_record.py.
 add_executable(whirl-stage-bench-tests

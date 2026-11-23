@@ -228,6 +228,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"ATTN_LSPLIT", &S::attn_lsplit},  // v0252-l2split (PLAN V1-88)
         {"MOESKIP", &S::moeskip},  // v0252-f5
         {"ATTN_SX", &S::attn_sx},      // v0252-strixc2
+        {"ATTN_I4QK", &S::attn_i4qk},  // v0252-8sfp
     }};
     return t;
 }
@@ -480,6 +481,12 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     const bool sx_default = t.moe;
     const bool sx_on = e.attn_sx && *e.attn_sx == "1" ? true : sx_default;
     F.attn_sx = sx_can && sx_on && !(e.attn_sx && *e.attn_sx == "0");
+    // v0252-8sfp (PLAN V1-144): the FAST gfx1151 prefill attention with int4 Q.K^T (attn_prefill_wmma_i4 / _s_i4 on
+    // v_wmma_i32_16x16x16_iu4, 2x the f16 WMMA rate on this card; per-row int4 query / key scales, kernels/shared/attn_i4qk.h).
+    // Changes the output, so fast only (the mode standard: 4-bit-level quality); precise / balance never. The device row
+    // decides (device::Profile::attn_i4qk_fast); models with MXFP4 tensors only (the product models, like h16 here);
+    // ops::chooseAttnPrefill still needs both kernels and the KG-3 copy path. WHIRL_ATTN_I4QK=0 turns it off (A/B arm).
+    F.attn_i4qk = r.mode == Mode::fast && t.attn_i4qk_profile && t.has_mxfp4 && !(e.attn_i4qk && *e.attn_i4qk == "0");
 }
 
 // tune.cpp:939-982 on the item table (the per-item overrides, WHIRL_Q8DEC, relaxacc, noteSwitches) and the flags
@@ -630,6 +637,12 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     if (items)
         if (const Raw& v = e.attn_sx; v && *v != "0" && p.mode != Mode::balance)
             p.ignored.push_back(std::format("WHIRL_ATTN_SX={} ignored: the strix prefill attention is balance-only ({} never takes it)", *v,
+                                            modeName(p.mode)));
+    // v0252-8sfp: WHIRL_ATTN_I4QK other than "0" in precise / balance is noted once (the flag stays off there: the
+    // output would change)
+    if (items)
+        if (const Raw& v = e.attn_i4qk; v && *v != "0" && p.mode != Mode::fast)
+            p.ignored.push_back(std::format("WHIRL_ATTN_I4QK={} ignored: the int4 Q.K^T prefill attention is fast-only ({} never takes it)", *v,
                                             modeName(p.mode)));
     if (items) {
         if (const Raw& v = e.spec_sample; v && !v->empty())

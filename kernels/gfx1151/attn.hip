@@ -14,6 +14,7 @@
 // (kv_ld8 / kv_ld1), and K/V are quantized once, when stored (kv_st32).
 // ---------------------------------------------------------------------------
 #include "shared/attn_kv_page.h"  // also in the gfx1201 set (kernels/attn.hip)
+#include "shared/attn_i4qk.h"     // v0252-8sfp: int4 Q.K^T codes of the fast prefill attention (attn_prefill_wmma_i4)
 // gfx11 WMMA fragment: 16 consecutive values (one scale group half)
 template <int F> __device__ __forceinline__ half16 kv_ld16(const void *base, const _Float16 *sc, size_t e) {
     if constexpr (F == 2) {
@@ -728,11 +729,18 @@ __device__ __forceinline__ void attn_prefill_impl_q8kv(const float *q, const KvA
 // tiles in the same order with the same arithmetic as one launch over all keys - bit-identical
 // output (a block whose keys all lie before kb0 returns at once; the range that holds a block's
 // last key writes its output).
-template <int MODE, int Q8, bool SEG = false>
+// I4 (v0252-8sfp, FAST mode only, kernels/shared/attn_i4qk.h): Q.K^T on v_wmma_i32_16x16x16_iu4 (16 cycles, the f16 form
+// 32): each query row (per head) quantized to int4 once per block, each key row of a tile once when it is stored in LDS
+// (per-row absmax / 7 scales), score = s_q s_k int dot; mask / softmax / P.V as the f16 kernel. Not bitwise.
+typedef int fa_i2 __attribute__((ext_vector_type(2)));
+typedef int fa_i8 __attribute__((ext_vector_type(8)));
+#define FA_K4S 34  // int4 K row stride in LDS (32-bit words: 32 words of 8 dims + 2 pad, conflict-free 8-byte fragment reads)
+template <int MODE, int Q8, bool SEG = false, bool I4 = false>
 __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
                       int q_stride, const int *pos, int n_tok, float scale, int h0,
                       int kb0 = 0, int kb1 = 0, float *st_ml = nullptr) {
     static_assert(!SEG || Q8 == 0, "attn_prefill_wmma SEG: f16 K / V only");
+    static_assert(!I4 || (Q8 == 0 && MODE == 0), "attn_prefill_wmma I4: f16 K / V, no probe mode");
     if constexpr (Q8) {
         attn_prefill_impl_q8kv<MODE, Q8>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);
         return;
@@ -751,10 +759,40 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
 
     // Q^T fragments (B operand): column = query, k = dims 16s + 8*(lane/16) ..
 #include "shared/attn_fa_qfrag.h"  // half8 qf[FA_D / 16]: Q^T fragments of query my_qc (ADR-0005)
+    // I4: int4 Q^T fragments (B operand, 16 dims each: word 0 = dims 16 st .. +7 from the lane of the low half, word 1 =
+    // dims 16 st + 8 .. +15 from the high half) and the query scale s_q, from the f32 q (one absmax over the 256 dims)
+    fa_i2 qi4[I4 ? FA_D / 16 : 1];
+    float sq = 0.f;
+    if constexpr (I4) {
+        const float *qr = q + ((size_t)my_qc * n_head + h) * q_stride;
+        float amax = 0.f;
+#pragma unroll
+        for (int st = 0; st < FA_D / 16; ++st) {
+            const float4 a = *(const float4 *)(qr + 16 * st + 8 * (lane / 16));
+            const float4 b = *(const float4 *)(qr + 16 * st + 8 * (lane / 16) + 4);
+            amax = fmaxf(amax, fmaxf(fmaxf(fabsf(a.x), fabsf(a.y)), fmaxf(fabsf(a.z), fabsf(a.w))));
+            amax = fmaxf(amax, fmaxf(fmaxf(fabsf(b.x), fabsf(b.y)), fmaxf(fabsf(b.z), fabsf(b.w))));
+        }
+        amax = fmaxf(amax, __shfl_xor(amax, 16, WARP));
+        sq = i4qk_scale(amax);
+        const float iq = i4qk_inv(amax);
+#pragma unroll
+        for (int st = 0; st < FA_D / 16; ++st) {
+            const float4 a = *(const float4 *)(qr + 16 * st + 8 * (lane / 16));
+            const float4 b = *(const float4 *)(qr + 16 * st + 8 * (lane / 16) + 4);
+            const float x[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+            const int w = (int)i4qk_pack8(x, iq);
+            const int pw = __shfl_xor(w, 16, WARP);
+            qi4[st] = lane < 16 ? (fa_i2){w, pw} : (fa_i2){pw, w};
+        }
+    }
     float8 o[FA_D / 16];
 #pragma unroll
     for (int dt = 0; dt < FA_D / 16; ++dt) o[dt] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
     float m = -INFINITY, l = 0.f;
+    // I4: int4 K tile [FA_K][FA_K4S words] and its row scales, inside the f16 tile's LDS (4.6 KB of its 16.9)
+    uint32_t *const Ks4 = reinterpret_cast<uint32_t *>(&Ks[0][0]);
+    float *const sk4 = reinterpret_cast<float *>(Ks4 + FA_K * FA_K4S);
 
     const int last_q = min(q0 + FA_Q, n_tok) - 1;
     const int n_keys = pos0 + last_q + 1;
@@ -808,10 +846,29 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
         if (MODE != 1 || k0 == 0) {
             loadK(k0);
             loadV(k0);
+            if constexpr (I4) {
+                // the 32 lanes of a wave hold the 256 dims of one key (key wid + 8 e, dims 8 lane .. +7): wave absmax,
+                // then each lane packs its 8 dims into word `lane` of the key's int4 row
+#pragma unroll
+                for (int e = 0; e < 4; ++e) {
+                    float x[8], amax = 0.f;
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) {
+                        x[i] = (float)kr8[e][i];
+                        amax = fmaxf(amax, fabsf(x[i]));
+                    }
+#pragma unroll
+                    for (int sh = 16; sh >= 1; sh >>= 1) amax = fmaxf(amax, __shfl_xor(amax, sh, WARP));
+                    const int key = tid / 32 + 8 * e;
+                    Ks4[key * FA_K4S + (tid % 32)] = i4qk_pack8(x, i4qk_inv(amax));
+                    if ((tid % 32) == 0) sk4[key] = i4qk_scale(amax);
+                }
+            } else {
 #pragma unroll
             for (int e = 0; e < 4; ++e) {
                 const int i = tid + e * 256;
                 *(half8 *)&Ks[i / 32][(i % 32) * 8] = kr8[e];
+            }
             }
             // keys vkb*8 + r: tile vkb / 2, j = (vkb % 2) * 8 + r ->
             // position (r % 2) * 8 + (vkb % 2) * 4 + r / 2 within the tile
@@ -832,6 +889,24 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
         // gfx11: Q^T keeps only this half's 8 dims per st in registers; the
         // full 16-dim B fragment is rebuilt with one cross-half exchange.
         float8 sc[FA_K / 16];
+        if constexpr (I4) {
+            // int4 S^T: A = key rows kt*16 + lane%16 (8-byte fragment of dims 16 st ..), B = qi4; C layout as f32
+            fa_i8 acc[FA_K / 16];
+#pragma unroll
+            for (int kt = 0; kt < FA_K / 16; ++kt) acc[kt] = (fa_i8){0, 0, 0, 0, 0, 0, 0, 0};
+#pragma unroll
+            for (int st = 0; st < FA_D / 16; ++st) {
+#pragma unroll
+                for (int kt = 0; kt < FA_K / 16; ++kt) {
+                    const fa_i2 a = *(const fa_i2 *)&Ks4[(kt * 16 + lane % 16) * FA_K4S + 2 * st];
+                    acc[kt] = __builtin_amdgcn_wmma_i32_16x16x16_iu4_w32(true, a, true, qi4[st], acc[kt], false);
+                }
+            }
+#pragma unroll
+            for (int kt = 0; kt < FA_K / 16; ++kt)
+#pragma unroll
+                for (int v = 0; v < 8; ++v) sc[kt][v] = (float)acc[kt][v] * (sk4[kt * 16 + CROW(lane, v)] * sq);
+        } else {
 #pragma unroll
         for (int kt = 0; kt < FA_K / 16; ++kt) sc[kt] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
 #pragma unroll
@@ -842,6 +917,7 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
                 const half16 a = ld_frag16(&Ks[kt * 16 + lane % 16][16 * st]);
                 sc[kt] = WMMA16(a, qb, sc[kt]);
             }
+        }
         }
         // causal mask + online softmax (per lane = per query; partner lane ^16)
 #include "shared/attn_fa_softmax.h"  // mask + online softmax of the key tile (ADR-0005)
@@ -922,6 +998,18 @@ extern "C" __global__ void __launch_bounds__(256)
     attn_prefill_wmma_s(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos,
                         int n_tok, float scale, int h0, int kb0, int kb1, float *st_ml) {
     attn_prefill_impl<0, 0, true>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0, kb0, kb1, st_ml);
+}
+// v0252-8sfp (FAST mode only): the int4 Q.K^T forms of attn_prefill_wmma / attn_prefill_wmma_s (same arguments, grid,
+// block; not bitwise), on the f16 key copy of the q8h / q4 paths (ops::chooseAttnPrefill, numerics flag attn_i4qk)
+extern "C" __global__ void __launch_bounds__(256)
+    attn_prefill_wmma_i4(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos,
+                         int n_tok, float scale, int h0) {
+    attn_prefill_impl<0, 0, false, true>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);
+}
+extern "C" __global__ void __launch_bounds__(256)
+    attn_prefill_wmma_s_i4(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos,
+                           int n_tok, float scale, int h0, int kb0, int kb1, float *st_ml) {
+    attn_prefill_impl<0, 0, true, true>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0, kb0, kb1, st_ml);
 }
 
 // q8 / q8h / q4 KV prefill (KG-3, the gfx1151 port of Q8P / FC-1c): the K and V of keys
