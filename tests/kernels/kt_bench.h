@@ -188,7 +188,15 @@ struct CellInfo {
     std::int64_t launches_per_call = 1;
 };
 whirl::bench::Row cellRow(const CellInfo& ci, const CellStats& cs, const std::string& tool_ver);
-// the paired ratio row of an A/B (metric kern.<family>.<kernel>.ab_ratio, unit ratio)
+// v0252-8sattn2: 95 % interval of a paired ratio - geometric mean of the per-pair B / A ratios and the t interval on their
+// logs (df = n - 1; t from a table to df 30, the Cornish-Fisher expansion above). Ratios <= 0 / non-finite are dropped.
+struct RatioCi {
+    double gmean = 0, lo = 0, hi = 0;
+    int n = 0;
+};
+RatioCi ratioCi95(const std::vector<double>& ratios);
+// the paired ratio row of an A/B (metric kern.<family>.<kernel>.ab_ratio, unit ratio; extras ratio_gmean / ratio_ci95_lo /
+// ratio_ci95_hi from ratioCi95 of the per-pair ratios)
 whirl::bench::Row abRow(const CellInfo& ci, const AbStats& ab, const std::string& tool_ver, const std::string& code_hash_b);
 
 // ---------------------------------------------------------------- whirl-kernel-test --bench (bench_kernels.cpp)
@@ -210,7 +218,32 @@ struct BenchOpts {
     std::vector<std::string> fdq_v;
     std::string tool_ver, code_hash, code_hash_b, gpu_arch, gpu_pci;
 };
-extern const char* const kBenchFamilies[12];
+// ---------------------------------------------------------------- family attnpv (v0252-8sattn2, gfx1151 prefill attention)
+// In-object A/B of prefill attention kernels of the same code object, same arguments / grid / block (128 queries x 1 head
+// per block, 256 threads). Variant aliases (progress\v0252-8sattn2.HANDOFF.md):
+//   V0 attn_prefill_wmma (f16, shipping)        V1 attn_prefill_wmma_i4 (int4, Q regs, shipping fast)
+//   V2 attn_prefill_wmma_i8 (int8, Q LDS + PF1)  V3 attn_prefill_wmma_i8n (int8, Q LDS, no prefetch)
+//   V4 attn_pfx_i8r (int8, Q regs, no prefetch)  V5 attn_pfx_i4l (int4, Q LDS, no prefetch)
+//   V6 attn_pfx_i4lp (int4, Q LDS, deferred-consumer prefetch PF 2)  V6p1 attn_pfx_i4lp1 (int4, Q LDS, PF 1)
+//   V7 attn_pfx_i8p2 (int8, Q LDS, PF 2)       V1p attn_pfx_i4p (int4, Q regs, score loop pinned, no prefetch)
+// qbits 16 / 8 / 4 = the Q.K^T product; two variants with the same qbits give the same bits (same codes, exact integer
+// sums, same softmax / P.V), so the bench checks B bitwise == A for them and B against the CPU otherwise.
+struct AttnPvVariant {
+    const char* alias;
+    const char* kernel;
+    int qbits;
+    const char* what;
+};
+const std::vector<AttnPvVariant>& attnPvVariants();
+const AttnPvVariant* attnPvFind(const std::string& alias);  // nullptr = unknown
+bool attnPvBitwise(const AttnPvVariant& a, const AttnPvVariant& b);
+struct AttnPvPair {
+    std::string a, b;  // aliases: B is timed against A (paired ratio B / A)
+};
+// "B/A[,B/A...]" (spaces ignored); "" = the default list. Unknown alias, missing '/', B == A -> err set, empty result.
+std::vector<AttnPvPair> attnPvPairs(const std::string& spec, std::string& err);
+
+extern const char* const kBenchFamilies[13];
 bool benchFamilyKnown(const std::string& f);
 struct Ctx;
 void runBench(Ctx& c, const BenchOpts& o);

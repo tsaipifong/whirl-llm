@@ -24,6 +24,9 @@
 //         machine-fill grid (v0252-l2split; Swift q8 / f16, Ornith f16; L x rows x blocks; tolerance check, not bitwise)
 //   ggemv gemvq_nt<N>r2_mxfp4 vs gemvk_nt<N>v1..9_mxfp4 (gfx1151 verify GEMV, N = every gemvk width 2..8 of
 //         kt::ggemvBenchNts(), --bench-nt a subset; feat026-ggemv, v0251-a6bench)
+//   attnpv in-object A/B (gfx1151, v0252-8sattn2) of prefill attention variants (kt::attnPvVariants: f16 / int4 / int8 Q.K^T,
+//         Q codes in registers or LDS, K / V prefetch forms) on the engine's f16 key copy, Swift 24 / 4 and Ornith 16 / 2,
+//         n 2048 at L 32768 / 98304; B bitwise == A within one Q.K^T product, else B against the f64 CPU; WHIRL_KT_PV_*
 //   argmax in-object A/B (gfx1201): argmax_rows_to / argmax_rank_rows_to vs the multi-block twins *_mb, 248320 logits x
 //         1 / 2 / 3 / 4 / 8 verify rows, hot and cold input; B bitwise == A first and after the timing (v0252-f1arg)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
@@ -206,6 +209,9 @@ void runCellInObject(Env& e, Cell& k) {
     printCell(cb, ab.b, "B ");
     std::printf("         B/A %.4f (p10 %.4f p90 %.4f, %d pairs ABBA in one object, order AB %.4f BA %.4f, %s) B %s A\n", ab.ratio.st.median,
                 ab.ratio.st.p10, ab.ratio.st.p90, ab.pairs, ab.order_ab, ab.order_ba, ab.ratio.stop_reason.c_str(), k.b_rule.c_str());
+    if (const RatioCi ci = ratioCi95(ab.ratio.samples); ci.n > 1)  // v0252-8sattn2: estimate +- measured error (ADR-0019)
+        std::printf("         B/A geometric mean %.4f, 95%% interval [%.4f, %.4f] (B time %+.2f %% [%+.2f, %+.2f] vs A, %d pairs)\n", ci.gmean, ci.lo, ci.hi,
+                    100 * (ci.gmean - 1), 100 * (ci.lo - 1), 100 * (ci.hi - 1), ci.n);
     if (!ab.ratio.ok()) {
         Result r;
         r.name = "bench in-object A/B timing " + k.kernel_b + " " + k.ci.cell + ": " + ab.ratio.error;
@@ -1911,9 +1917,206 @@ void benchArgmax(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- attnpv (v0252-8sattn2, gfx1151 prefill attention variants)
+// In-object A/B of two prefill attention kernels of this code object (kt::attnPvVariants: V0 f16 shipping, V1 int4 shipping
+// fast, V2 int8 opt-in, V3..V7 bench-only variants), the shape the engine runs on the 8060S: the KG-3 f16 copy of all keys
+// (contiguous rows, identity page table, as ops::chooseAttnPrefill's from_copy launch), n = WHIRL_KT_PV_N (default 2048, the
+// server's prefill forward) queries at the end of L keys (pos0 = L - n; WHIRL_KT_PV_L, default 32768,98304; --quick 8192),
+// Swift 24 / 4 and Ornith 16 / 2 heads (WHIRL_KT_PV_MODELS), grid ceil(n / 128) x heads, 256 threads, head-range launches
+// as the engine (<= 4096 x 128k query-key pairs per launch). Pairs: WHIRL_KT_PV_PAIRS "B/A,..." (default kt::attnPvPairs).
+// Checks: A against the f64 CPU attention (queries 0 and n - 1, heads 0 and last; tolerance 1e-2 of the term sum for f16 /
+// int8, 3e-2 for int4: per-row int4 score codes), then B bitwise == A when both have the same Q.K^T product (the variants
+// move loads, never values), else B against the CPU with its own tolerance. Timing: Bench::runAB (ABBA pairs), row metric
+// kern.attnpv.<B kernel>.ab_ratio = median of the per-pair B / A time ratios.
+void benchAttnPv(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "attnpv";
+    std::string perr;
+    const char* ps = std::getenv("WHIRL_KT_PV_PAIRS");
+    const std::vector<AttnPvPair> pairs = attnPvPairs(ps ? ps : "", perr);
+    if (!perr.empty()) {
+        Result r;
+        r.name = "bench attnpv: WHIRL_KT_PV_PAIRS: " + perr;
+        r.pass = false;
+        c.rep.add(r);
+        return;
+    }
+    if (!c.fnOpt("attn_prefill_wmma_i4")) {
+        c.rep.skip("attnpv", "bench attnpv", "the gfx1151 prefill attention variants are not in this code object");
+        return;
+    }
+    const int n = std::getenv("WHIRL_KT_PV_N") ? std::atoi(std::getenv("WHIRL_KT_PV_N")) : 2048;
+    std::vector<int> lens = c.quick ? std::vector<int>{8192} : std::vector<int>{32768, 98304};
+    if (const char* s = std::getenv("WHIRL_KT_PV_L")) {
+        lens.clear();
+        for (const char* p = s; *p;) {
+            lens.push_back(std::atoi(p));
+            while (*p && *p != ',') ++p;
+            if (*p == ',') ++p;
+        }
+    }
+    struct Shape {
+        const char* name;
+        int heads, nkv;
+    };
+    std::vector<Shape> shapes = {{"swift", 24, 4}, {"ornith", 16, 2}};
+    if (const char* s = std::getenv("WHIRL_KT_PV_MODELS")) {
+        std::vector<Shape> keep;
+        for (const Shape& sh : shapes)
+            if (std::string(s).find(sh.name) != std::string::npos) keep.push_back(sh);
+        shapes = keep;
+    }
+    constexpr int hd = 256, qstride = 2 * hd;
+    constexpr float scale = 1.0f / 16.0f;
+    constexpr std::size_t kChunk = std::size_t{1} << 22;  // 4 Mi f16 N(0, 1) values, tiled over the K / V rows
+    std::vector<std::uint16_t> ck(kChunk), cv(kChunk);
+    {
+        const auto a = c.randn(kChunk), b = c.randn(kChunk);
+        for (std::size_t i = 0; i < kChunk; ++i) {
+            ck[i] = f2h(a[i]);
+            cv[i] = f2h(b[i]);
+        }
+    }
+    auto tolFor = [](int qbits) { return qbits == 4 ? 3e-2 : 1e-2; };
+    for (const Shape& sh : shapes)
+        for (const int L : lens) {
+            if (L < n || n <= 0) continue;
+            const int heads = sh.heads, nkv = sh.nkv, row = nkv * hd, pages = static_cast<int>(cdiv(L, wk::kKvPage));
+            const std::size_t rows_el = static_cast<std::size_t>(pages) * wk::kKvPage * row;
+            auto pk = std::make_shared<Buf>(rows_el * 2);
+            auto pv = std::make_shared<Buf>(rows_el * 2);
+            for (std::size_t off = 0; off < rows_el; off += kChunk) {
+                const std::size_t nn = std::min(kChunk, rows_el - off);
+                hip::upload(pk->p() + off * 2, ck.data(), nn * 2);
+                hip::upload(pv->p() + off * 2, cv.data(), nn * 2);
+            }
+            hip::sync();
+            std::vector<int> ptab(static_cast<std::size_t>(pages));
+            std::iota(ptab.begin(), ptab.end(), 0);  // the engine's copy: contiguous rows
+            auto dpt = std::make_shared<Buf>(ptab);
+            std::vector<float> q = c.randn(static_cast<std::size_t>(n) * heads * qstride);
+            for (std::size_t t = 0; t < static_cast<std::size_t>(n) * heads; ++t)
+                for (int d = 0; d < hd; ++d) q[t * qstride + hd + d] = 30.0f;  // output gate sigmoid(30) = 1.0f
+            auto dq = std::make_shared<Buf>(q);
+            auto dpos = std::make_shared<Buf>(std::vector<int>{L - n});
+            const std::size_t out_el = static_cast<std::size_t>(n) * heads * hd;
+            auto outa = std::make_shared<Buf>(out_el * 4);
+            auto outb = std::make_shared<Buf>(out_el * 4);
+            const long long budget = 4096ll * 131072ll;
+            int parts = static_cast<int>(std::min<long long>(heads, (static_cast<long long>(n) * L + budget - 1) / budget));
+            while (parts > 1 && heads % parts != 0) ++parts;
+            // one launch series of kernel f into o (the engine's head ranges)
+            auto launchAll = [&c, dpt, dpos, dq, pk, pv, heads, nkv, n, parts](hip::Function f, const std::shared_ptr<Buf>& o) {
+                wk::KvArgs a{};
+                a.k = pk->p();
+                a.v = pv->p();
+                a.ptab = dpt->p();
+                const int hp = heads / parts;
+                const int qs = qstride;
+                const float sc = scale;
+                for (int p = 0; p < parts; ++p) {
+                    const int h0 = p * hp;
+                    hip::launch(f, {static_cast<unsigned>(cdiv(n, 128)), static_cast<unsigned>(hp), 1}, {256, 1, 1}, 0, c.s, dq->p(), a, o->p(), heads, nkv, qs,
+                                dpos->p(), n, sc, h0);
+                }
+            };
+            auto runOut = [&c, launchAll, out_el](hip::Function f, const std::shared_ptr<Buf>& o) {
+                o->fill(0xff);
+                launchAll(f, o);
+                c.sync();
+                return o->down<float>(out_el);
+            };
+            // f64 reference of queries 0 and n - 1, heads 0 and heads - 1 (rows / tiles as the upload above)
+            std::vector<double> ro, rs;
+            for (const int t : {0, n - 1})
+                for (const int h : {0, heads - 1}) {
+                    const int kvh = h / (heads / nkv), np = L - n + t + 1;
+                    const float* qv = q.data() + (static_cast<std::size_t>(t) * heads + h) * qstride;
+                    auto el = [&](int p, int i) { return ((static_cast<std::size_t>(p) * nkv + kvh) * hd + i) % kChunk; };
+                    std::vector<double> s(static_cast<std::size_t>(np));
+                    double mx = -INFINITY;
+                    for (int p = 0; p < np; ++p) {
+                        double d = 0;
+                        for (int i = 0; i < hd; ++i) d += static_cast<double>(h2f(f2h(qv[i]))) * h2f(ck[el(p, i)]);
+                        s[static_cast<std::size_t>(p)] = d * scale;
+                        mx = std::max(mx, s[static_cast<std::size_t>(p)]);
+                    }
+                    double l = 0;
+                    for (auto& x : s) {
+                        x = std::exp(x - mx);
+                        l += x;
+                    }
+                    std::vector<double> o(hd, 0.0), ab(hd, 0.0);
+                    for (int p = 0; p < np; ++p)
+                        for (int d = 0; d < hd; ++d) {
+                            const double vv = h2f(cv[el(p, d)]);
+                            o[static_cast<std::size_t>(d)] += s[static_cast<std::size_t>(p)] * vv;
+                            ab[static_cast<std::size_t>(d)] += s[static_cast<std::size_t>(p)] * std::fabs(vv);
+                        }
+                    for (int d = 0; d < hd; ++d) {
+                        ro.push_back(o[static_cast<std::size_t>(d)] / l);
+                        rs.push_back(ab[static_cast<std::size_t>(d)] / l);
+                    }
+                }
+            auto verifyQ = [ro, rs, n, heads](const std::vector<float>& got, double tol) {
+                std::vector<float> g;
+                for (const int t : {0, n - 1})
+                    for (const int h : {0, heads - 1})
+                        for (int d = 0; d < hd; ++d) g.push_back(got[(static_cast<std::size_t>(t) * heads + h) * hd + d]);
+                return cmpTol("attn prefill vs f64 CPU (queries 0, n-1; heads 0, last)", g, ro, rs, tol, 1e-4);
+            };
+            const std::string shp = "heads" + std::to_string(heads) + "_kv" + std::to_string(nkv) + "_hd256_n" + std::to_string(n) + "_L" + std::to_string(L);
+            for (const AttnPvPair& pr : pairs) {
+                const AttnPvVariant& va = *attnPvFind(pr.a);
+                const AttnPvVariant& vb = *attnPvFind(pr.b);
+                const hip::Function fa = c.fnOpt(va.kernel), fb = c.fnOpt(vb.kernel);
+                const std::string cell = std::string(sh.name) + ".f16copy.n" + std::to_string(n) + ".L" + std::to_string(L) + "." + pr.b + "/" + pr.a;
+                if (!fa || !fb) {
+                    Result r;
+                    r.name = "bench attnpv " + cell + ": " + (!fa ? va.kernel : vb.kernel) + " not in this code object";
+                    r.pass = false;
+                    c.rep.add(r);
+                    continue;
+                }
+                const bool bits = attnPvBitwise(va, vb);
+                const double tb = tolFor(vb.qbits);
+                Cell k;
+                k.ci = e.info("attnpv", va.kernel, cell, shp);
+                k.ci.settings = e.settings(rows_el * 4, 1) + ";kv=f16copy;kv_values=randn;a=" + pr.a + ";b=" + pr.b;
+                const double keys_seen = static_cast<double>(n) * (L - n) + 0.5 * static_cast<double>(n) * (n + 1);
+                k.ci.flops = 4.0 * hd * heads * keys_seen;
+                k.ci.launches_per_call = parts;
+                k.kernel = va.kernel;
+                k.kernel_b = vb.kernel;
+                k.fa = fa;
+                k.call = [launchAll, outa](hip::Function f, std::uint64_t) { launchAll(f, outa); };
+                k.call_b = [launchAll, outb, fb](std::uint64_t) { launchAll(fb, outb); };
+                k.run = [runOut, outa](hip::Function f) { return runOut(f, outa); };
+                const double ta = tolFor(va.qbits);
+                k.verify = [verifyQ, ta](const std::vector<float>& got) { return verifyQ(got, ta); };
+                char rule[96];
+                std::snprintf(rule, sizeof rule, "f64-CPU-checked (tol %.0e of the term sum; not bitwise to)", tb);
+                k.b_rule = bits ? "bitwise ==" : rule;
+                k.bitwise_b = [runOut, verifyQ, outa, outb, fa, fb, bits, tb, out_el]() -> std::pair<std::size_t, std::size_t> {
+                    const std::vector<float> yb = runOut(fb, outb);
+                    if (!bits) {
+                        const Result r = verifyQ(yb, tb);
+                        return {r.n > 0 ? r.n : 1, r.pass ? 0 : (r.n > 0 ? r.n : 1)};
+                    }
+                    const std::vector<float> ya = runOut(fa, outa);
+                    std::size_t mm = 0;
+                    for (std::size_t i = 0; i < out_el; ++i) mm += std::memcmp(&ya[i], &yb[i], 4) != 0;
+                    return {out_el, mm};
+                };
+                std::printf("   attnpv %s: A %s = %s; B %s = %s\n", cell.c_str(), pr.a.c_str(), va.what, pr.b.c_str(), vb.what);
+                runCell(e, k);
+            }
+        }
+}
+
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax", "attnpv"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -1965,7 +2168,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
     };
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
                       {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"ws4r", benchWs4r}, {"silu", benchSilu}, {"lsplit", benchLsplit},
-                      {"argmax", benchArgmax}};
+                      {"argmax", benchArgmax}, {"attnpv", benchAttnPv}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

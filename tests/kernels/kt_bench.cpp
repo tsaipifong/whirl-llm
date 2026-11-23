@@ -620,11 +620,112 @@ whirl::bench::Row abRow(const CellInfo& ci, const AbStats& ab, const std::string
     r.extra.push_back({"block_b", wb::json_number(static_cast<std::int64_t>(ab.b.block))});
     r.extra.push_back({"code_hash_b", wb::json_string(code_hash_b)});
     r.extra.push_back({"pairs", wb::json_number(static_cast<std::int64_t>(ab.pairs))});
+    if (const RatioCi ci = ratioCi95(ab.ratio.samples); ci.n > 0) {
+        r.extra.push_back({"ratio_gmean", wb::json_number(ci.gmean)});
+        r.extra.push_back({"ratio_ci95_lo", wb::json_number(ci.lo)});
+        r.extra.push_back({"ratio_ci95_hi", wb::json_number(ci.hi)});
+    }
     r.extra.push_back({"order_ab", wb::json_number(ab.order_ab)});
     r.extra.push_back({"order_ba", wb::json_number(ab.order_ba)});
     if (ab.a.st.n > 0) r.extra.push_back({"a_median_us", wb::json_number(ab.a.st.median)});
     if (ab.b.st.n > 0) r.extra.push_back({"b_median_us", wb::json_number(ab.b.st.median)});
     return r;
+}
+
+RatioCi ratioCi95(const std::vector<double>& ratios) {
+    RatioCi r;
+    std::vector<double> lg;
+    for (const double x : ratios)
+        if (std::isfinite(x) && x > 0) lg.push_back(std::log(x));
+    r.n = static_cast<int>(lg.size());
+    if (r.n == 0) return r;
+    double m = 0;
+    for (const double x : lg) m += x;
+    m /= r.n;
+    r.gmean = r.lo = r.hi = std::exp(m);
+    if (r.n < 2) return r;
+    double ss = 0;
+    for (const double x : lg) ss += (x - m) * (x - m);
+    const int df = r.n - 1;
+    static const double kT[31] = {0,     12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
+                                  2.201, 2.179,  2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086, 2.080,
+                                  2.074, 2.069,  2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042};
+    double t = 0;
+    if (df <= 30) {
+        t = kT[df];
+    } else {
+        const double z = 1.959963985, d = df;
+        t = z + (z * z * z + z) / (4 * d) + (5 * std::pow(z, 5) + 16 * z * z * z + 3 * z) / (96 * d * d);
+    }
+    const double hw = t * std::sqrt(ss / df) / std::sqrt(static_cast<double>(r.n));
+    r.lo = std::exp(m - hw);
+    r.hi = std::exp(m + hw);
+    return r;
+}
+
+// ---------------------------------------------------------------- family attnpv (v0252-8sattn2)
+const std::vector<AttnPvVariant>& attnPvVariants() {
+    static const std::vector<AttnPvVariant> v = {
+        {"V0", "attn_prefill_wmma", 16, "f16 Q.K^T, Q in registers, no prefetch (shipping balance / precise)"},
+        {"V1", "attn_prefill_wmma_i4", 4, "int4 Q.K^T, Q codes in registers, no prefetch (shipping fast)"},
+        {"V2", "attn_prefill_wmma_i8", 8, "int8 Q.K^T, Q codes in LDS, PF 1 (opt-in WHIRL_ATTN_I8QK)"},
+        {"V3", "attn_prefill_wmma_i8n", 8, "int8 Q.K^T, Q codes in LDS, no prefetch"},
+        {"V4", "attn_pfx_i8r", 8, "int8 Q.K^T, Q codes in registers, no prefetch"},
+        {"V5", "attn_pfx_i4l", 4, "int4 Q.K^T, Q codes in LDS, no prefetch"},
+        {"V6", "attn_pfx_i4lp", 4, "int4 Q.K^T, Q codes in LDS, deferred-consumer K / V prefetch (PF 2)"},
+        {"V6p1", "attn_pfx_i4lp1", 4, "int4 Q.K^T, Q codes in LDS, K / V prefetch as V2 (PF 1)"},
+        {"V7", "attn_pfx_i8p2", 8, "int8 Q.K^T, Q codes in LDS, deferred-consumer K / V prefetch (PF 2)"},
+        {"V1p", "attn_pfx_i4p", 4, "int4 Q.K^T, Q codes in registers, score loop pinned (no spill), no prefetch"},
+    };
+    return v;
+}
+
+const AttnPvVariant* attnPvFind(const std::string& alias) {
+    for (const AttnPvVariant& v : attnPvVariants())
+        if (alias == v.alias) return &v;
+    return nullptr;
+}
+
+bool attnPvBitwise(const AttnPvVariant& a, const AttnPvVariant& b) { return a.qbits == b.qbits && a.qbits != 16; }
+
+std::vector<AttnPvPair> attnPvPairs(const std::string& spec, std::string& err) {
+    err.clear();
+    // the brief's pairs (each variant against V0, the candidate against the shipping fast kernel) without V4 (int8 with Q
+    // in registers: 256 VGPRs + 10 spilled, does not fit; selectable by name), then the one-change pairs: the score-loop pin
+    // (V1p/V1), Q in LDS (V5/V1p) and each prefetch form against its no-prefetch twin
+    const std::string s = spec.empty() ? "V1/V0,V2/V0,V3/V0,V5/V0,V6/V0,V6/V1,V1p/V1,V5/V1p,V2/V3,V7/V3,V6/V5,V6p1/V5" : spec;
+    std::vector<AttnPvPair> out;
+    std::string item;
+    auto flush = [&]() -> bool {
+        if (item.empty()) return true;
+        const std::size_t sl = item.find('/');
+        if (sl == std::string::npos) {
+            err = "attnpv pair '" + item + "' has no '/' (B/A)";
+            return false;
+        }
+        AttnPvPair p{item.substr(sl + 1), item.substr(0, sl)};
+        if (!attnPvFind(p.a) || !attnPvFind(p.b)) {
+            err = "attnpv pair '" + item + "': unknown variant alias";
+            return false;
+        }
+        if (p.a == p.b) {
+            err = "attnpv pair '" + item + "': B == A";
+            return false;
+        }
+        out.push_back(p);
+        item.clear();
+        return true;
+    };
+    for (const char ch : s) {
+        if (ch == ' ') continue;
+        if (ch == ',') {
+            if (!flush()) return {};
+            continue;
+        }
+        item += ch;
+    }
+    if (!flush()) return {};
+    return out;
 }
 
 }  // namespace kt

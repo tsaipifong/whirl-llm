@@ -755,14 +755,26 @@ __device__ __forceinline__ void fa_lds_barrier() {
 //   1: K and V of tile k0 + FA_K loaded right after the second (LDS-only) barrier of step k0, in flight during the step.
 // The f16 kernel cannot take PF 1: compiled here (ROCm 7.2) every arrangement spills (K+V whole step 45 VGPRs, K whole
 // step 21, K / V after the softmax 46 / 26), because its Q (64 VGPRs) and O (128) leave no room (HANDOFF, research note).
-template <int MODE, int Q8, bool SEG = false, bool I4 = false, bool I8 = false, int PF = 0>
+//   2 (v0252-8sattn2, bench variants only): as 1, but nothing consumes the prefetched registers before the next step's store
+//     - the loads are raw (key index clamped for the address only), the zero masking of keys >= n_keys is done at the
+//     store (block-uniform branch, last tile only), and the page-table delta of the next tile is read at the top of the
+//     step. The PF 1 code object waits for its loads right after issuing them (the select of the masking consumes them in
+//     the same step: progress\v0252-8sattn2.PRIOR_ART.md sec. 2), so PF 1 hides nothing; PF 2 is the strix structure.
+// QX (v0252-8sattn2, bench variants only; same values, same arithmetic): the other placement of the query codes - I8: in
+// registers (this lane's 8 bytes per 16-dim step, the partner half's 8 joined per step as the f16 kernel's join_halves),
+// I4: in LDS (128 x FA_K4S words = 17.4 KB, the B fragment read per step as the I8 form). Bitwise == the shipping form.
+// PIN (v0252-8sattn2, bench variant only; same values): the shipping int4 score loop with the one-A-fragment pin of the int8
+// form (attn_prefill_wmma_i4 hoists the step's fragment reads and spills 6 VGPRs).
+template <int MODE, int Q8, bool SEG = false, bool I4 = false, bool I8 = false, int PF = 0, bool QX = false, bool PIN = false>
 __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
                       int q_stride, const int *pos, int n_tok, float scale, int h0,
                       int kb0 = 0, int kb1 = 0, float *st_ml = nullptr) {
     static_assert(!SEG || Q8 == 0, "attn_prefill_wmma SEG: f16 K / V only");
     static_assert(!I4 || (Q8 == 0 && MODE == 0), "attn_prefill_wmma I4: f16 K / V, no probe mode");
     static_assert(!I8 || (Q8 == 0 && MODE == 0 && !I4), "attn_prefill_wmma I8: f16 K / V, no probe mode, not with I4");
-    static_assert(PF == 0 || I8, "attn_prefill_wmma PF: the int8 form only (the f16 kernel spills with it)");
+    static_assert(PF == 0 || I8 || (I4 && QX), "attn_prefill_wmma PF: the int8 form or the int4 form with Q in LDS only");
+    static_assert(!QX || ((I8 || I4) && !SEG), "attn_prefill_wmma QX: int8 / int4 forms, one key range");
+    static_assert(!PIN || (I4 && !QX && !SEG), "attn_prefill_wmma PIN: the int4 form with Q in registers, one key range");
     if constexpr (Q8) {
         attn_prefill_impl_q8kv<MODE, Q8>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);
         return;
@@ -783,9 +795,9 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
 #include "shared/attn_fa_qfrag.h"  // half8 qf[FA_D / 16]: Q^T fragments of query my_qc (ADR-0005)
     // I4: int4 Q^T fragments (B operand, 16 dims each: word 0 = dims 16 st .. +7 from the lane of the low half, word 1 =
     // dims 16 st + 8 .. +15 from the high half) and the query scale s_q, from the f32 q (one absmax over the 256 dims)
-    fa_i2 qi4[I4 ? FA_D / 16 : 1];
+    fa_i2 qi4[I4 && !QX ? FA_D / 16 : 1];
     float sq = 0.f;
-    if constexpr (I4) {
+    if constexpr (I4 && !QX) {
         const float *qr = q + ((size_t)my_qc * n_head + h) * q_stride;
         float amax = 0.f;
 #pragma unroll
@@ -863,18 +875,24 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
             vr[r] = key < n_keys ? x : z;
         }
     };
-    if constexpr (I8) {
+    if constexpr (I8 || (I4 && QX)) {
         // I8: the int8 Q codes of the block's 128 queries in LDS (row = query column 16 wid + lane % 16 of FA_K8S words; words
         // 4 st + 2 (lane / 16), +1 = dims 16 st + 8 (lane / 16) .. +7, written by this lane) and this lane's query scale s_q (sq).
         // The score loop reads the whole 16-byte B fragment of step st from the row (lanes l and l + 16 read the same bytes), so
         // no query register stays live: that is what makes room for the K / V prefetch registers (the f16 kernel holds its Q as
         // 64 VGPRs of half8 pieces). LDS: K tile 8.8 KB + V^T 20.5 KB + Q 34.8 KB = 64.1 KB per block, two blocks per WGP as before.
-        __shared__ uint32_t ks8_tile[FA_K * FA_K8S + FA_K];
-        __shared__ uint32_t qs8_tile[FA_Q * FA_K8S];
+        // QX (I8): the same codes in registers (qi8: this lane's two words per step), no Q LDS.
+        // QX (I4): the int4 codes in LDS (Qs4: row as Qs8 of FA_K4S words; word 2 st + lane / 16 = dims 16 st + 8 (lane / 16)
+        // .. +7), the K tile as the shipping int4 form (Ks4 / sk4 inside the f16 tile's LDS): 16.9 + 20.5 + 17.4 = 54.8 KB.
+        __shared__ uint32_t ks8_tile[I8 ? FA_K * FA_K8S + FA_K : 1];
+        __shared__ uint32_t qs8_tile[I8 && !QX ? FA_Q * FA_K8S : 1];
+        __shared__ uint32_t qs4_tile[I4 ? FA_Q * FA_K4S : 1];
         uint32_t *const Ks8 = ks8_tile;
         uint32_t *const Qs8 = qs8_tile;
+        uint32_t *const Qs4 = qs4_tile;
         float *const sk8 = reinterpret_cast<float *>(ks8_tile + FA_K * FA_K8S);
-        {
+        fa_i2 qi8[I8 && QX ? FA_D / 16 : 1];
+        if constexpr (I8) {
             const float *qr = q + ((size_t)my_qc * n_head + h) * q_stride;
             float amax = 0.f;
 #pragma unroll
@@ -892,10 +910,55 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
                 const float4 a = *(const float4 *)(qr + 16 * st + 8 * (lane / 16));
                 const float4 b = *(const float4 *)(qr + 16 * st + 8 * (lane / 16) + 4);
                 const float xa[4] = {a.x, a.y, a.z, a.w}, xb[4] = {b.x, b.y, b.z, b.w};
+                if constexpr (QX)
+                    qi8[st] = (fa_i2){(int)i8qk_pack4(xa, iq), (int)i8qk_pack4(xb, iq)};
+                else
                 *(fa_i2 *)&Qs8[(wid * 16 + lane % 16) * FA_K8S + 4 * st + 2 * (lane / 16)] =
                     (fa_i2){(int)i8qk_pack4(xa, iq), (int)i8qk_pack4(xb, iq)};
             }
+        } else {
+            // I4 + QX: the shipping int4 query codes (same absmax, same packing), stored to LDS instead of kept as qi4
+            const float *qr = q + ((size_t)my_qc * n_head + h) * q_stride;
+            float amax = 0.f;
+#pragma unroll
+            for (int st = 0; st < FA_D / 16; ++st) {
+                const float4 a = *(const float4 *)(qr + 16 * st + 8 * (lane / 16));
+                const float4 b = *(const float4 *)(qr + 16 * st + 8 * (lane / 16) + 4);
+                amax = fmaxf(amax, fmaxf(fmaxf(fabsf(a.x), fabsf(a.y)), fmaxf(fabsf(a.z), fabsf(a.w))));
+                amax = fmaxf(amax, fmaxf(fmaxf(fabsf(b.x), fabsf(b.y)), fmaxf(fabsf(b.z), fabsf(b.w))));
+            }
+            amax = fmaxf(amax, __shfl_xor(amax, 16, WARP));
+            sq = i4qk_scale(amax);
+            const float iq = i4qk_inv(amax);
+#pragma unroll
+            for (int st = 0; st < FA_D / 16; ++st) {
+                const float4 a = *(const float4 *)(qr + 16 * st + 8 * (lane / 16));
+                const float4 b = *(const float4 *)(qr + 16 * st + 8 * (lane / 16) + 4);
+                const float x[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+                Qs4[(wid * 16 + lane % 16) * FA_K4S + 2 * st + lane / 16] = i4qk_pack8(x, iq);
+            }
         }
+        // PF 2: raw loads of a tile (no masking: its keys >= n_keys are zeroed at the store) with the page delta read earlier
+        auto loadKr = [&](int k0, int dl) {
+#pragma unroll
+            for (int e = 0; e < 4; ++e) {
+                const int kc = min(k0 + tid / 32 + 8 * e, n_keys - 1);
+                kr8[e] = kv_ld8<kv_kf(Q8)>(kv.k, kv.ks, (size_t)(unsigned)(kc + dl) * rstep + kro);
+            }
+        };
+        auto loadVr = [&](int k0, int dl) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                const int kc = min(k0 + vkb * 8 + r, n_keys - 1);
+                vr[r] = kv_ld4<kv_vf(Q8)>(kv.v, kv.vs, (size_t)(unsigned)(kc + dl) * rstep + vro);
+            }
+        };
+        // PF 2: page deltas two tiles ahead (dl2 = the delta of tile k0 + FA_K at the top of step k0), so the dependent
+        // page-table read of a prefetch was issued a whole step before its addresses are formed (r2 compile: read one step
+        // ahead, the compiler formed the addresses at once and waited for the read at the top of every step)
+        int dl2 = 0;
+        if constexpr (PF == 2)
+            if (k_beg + FA_K < k_end) dl2 = kv_delta(kv, tb, k_beg + FA_K);
         for (int k0 = k_beg; k0 < k_end; k0 += FA_K) {
             if constexpr (PF != 0)
                 fa_lds_barrier();
@@ -903,9 +966,28 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
                 __syncthreads();
             // PF 1: the previous step's prefetch (below) holds tile k0's K and V; the stores wait for the registers
             // (vmcnt), not for the barrier
+            int dln = 0;
+            if constexpr (PF == 2) {
+                dln = dl2;
+                if (k0 + 2 * FA_K < k_end) dl2 = kv_delta(kv, tb, k0 + 2 * FA_K);
+                if (k0 == k_beg) {
+                    loadK(k0);
+                    loadV(k0);
+                } else if (k0 + FA_K > n_keys) {  // block-uniform: the last tile holds keys >= n_keys, zero them
+                    const half8 z8 = {0, 0, 0, 0, 0, 0, 0, 0};
+                    const fa_h4 z4 = {0, 0, 0, 0};
+#pragma unroll
+                    for (int e = 0; e < 4; ++e)
+                        if (k0 + tid / 32 + 8 * e >= n_keys) kr8[e] = z8;
+#pragma unroll
+                    for (int r = 0; r < 8; ++r)
+                        if (k0 + vkb * 8 + r >= n_keys) vr[r] = z4;
+                }
+            } else {
             if (PF == 0 || k0 == k_beg) {
                 loadK(k0);
                 loadV(k0);
+            }
             }
             // as I4: the 32 lanes of a wave hold the 256 dims of one key (key wid + 8 e, dims 8 lane .. +7): wave absmax,
             // then each lane packs its 8 dims into words 2 lane, 2 lane + 1 of the key's int8 row
@@ -920,9 +1002,14 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
 #pragma unroll
                 for (int sh = 16; sh >= 1; sh >>= 1) amax = fmaxf(amax, __shfl_xor(amax, sh, WARP));
                 const int key = tid / 32 + 8 * e;
+                if constexpr (I8) {
                 const float ik = i8qk_inv(amax);
                 *(fa_i2 *)&Ks8[key * FA_K8S + 2 * (tid % 32)] = (fa_i2){(int)i8qk_pack4(x, ik), (int)i8qk_pack4(x + 4, ik)};
                 if ((tid % 32) == 0) sk8[key] = i8qk_scale(amax);
+                } else {
+                    Ks4[key * FA_K4S + (tid % 32)] = i4qk_pack8(x, i4qk_inv(amax));
+                    if ((tid % 32) == 0) sk4[key] = i4qk_scale(amax);
+                }
             }
             // keys vkb*8 + r: tile vkb / 2, j = (vkb % 2) * 8 + r ->
             // position (r % 2) * 8 + (vkb % 2) * 4 + r / 2 within the tile (as the f16 kernel's V^T store)
@@ -943,21 +1030,35 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
                 __syncthreads();
             // PF 1: issue the next tile's K and V loads now; they land in kr8 / vr while this tile is scored (no use before
             // the next step's store). Same rows, same zero masking past n_keys as the load at the top of the step.
-            if constexpr (PF != 0) {
+            if constexpr (PF == 1) {
                 if (k0 + FA_K < k_end) {
                     loadK(k0 + FA_K);
                     loadV(k0 + FA_K);
                 }
             }
-            // int8 S^T: A = key rows kt*16 + lane%16 (16-byte fragment of dims 16 st ..), B = this lane's query row in Qs8
+            if constexpr (PF == 2) {
+                if (k0 + FA_K < k_end) {
+                    loadKr(k0 + FA_K, dln);
+                    loadVr(k0 + FA_K, dln);
+                }
+            }
             float8 sc[FA_K / 16];
+            if constexpr (I8) {
+            // int8 S^T: A = key rows kt*16 + lane%16 (16-byte fragment of dims 16 st ..), B = this lane's query row in Qs8
             {
                 fa_i8 acc[FA_K / 16];
 #pragma unroll
                 for (int kt = 0; kt < FA_K / 16; ++kt) acc[kt] = (fa_i8){0, 0, 0, 0, 0, 0, 0, 0};
 #pragma unroll
                 for (int st = 0; st < FA_D / 16; ++st) {
-                    const fa_i4v qb = *(const fa_i4v *)&Qs8[(wid * 16 + lane % 16) * FA_K8S + 4 * st];
+                    fa_i4v qb;
+                    if constexpr (QX) {
+                        // this lane's 8 bytes and the partner half's 8 (lane ^ 16), low half first (as join_halves)
+                        const int p0 = xhalf(qi8[st][0]), p1 = xhalf(qi8[st][1]);
+                        qb = lane < 16 ? (fa_i4v){qi8[st][0], qi8[st][1], p0, p1} : (fa_i4v){p0, p1, qi8[st][0], qi8[st][1]};
+                    } else {
+                        qb = *(const fa_i4v *)&Qs8[(wid * 16 + lane % 16) * FA_K8S + 4 * st];
+                    }
 #pragma unroll
                     for (int kt = 0; kt < FA_K / 16; ++kt) {
                         const fa_i4v a = *(const fa_i4v *)&Ks8[(kt * 16 + lane % 16) * FA_K8S + 4 * st];
@@ -969,6 +1070,28 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
                 for (int kt = 0; kt < FA_K / 16; ++kt)
 #pragma unroll
                     for (int v = 0; v < 8; ++v) sc[kt][v] = (float)acc[kt][v] * (sk8[kt * 16 + CROW(lane, v)] * sq);
+            }
+            } else {
+                // int4 S^T as the shipping form, B = this lane's query row in Qs4 (8-byte fragment of dims 16 st ..)
+                fa_i8 acc[FA_K / 16];
+#pragma unroll
+                for (int kt = 0; kt < FA_K / 16; ++kt) acc[kt] = (fa_i8){0, 0, 0, 0, 0, 0, 0, 0};
+#pragma unroll
+                for (int st = 0; st < FA_D / 16; ++st) {
+                    const fa_i2 qb = *(const fa_i2 *)&Qs4[(wid * 16 + lane % 16) * FA_K4S + 2 * st];
+#pragma unroll
+                    for (int kt = 0; kt < FA_K / 16; ++kt) {
+                        const fa_i2 a = *(const fa_i2 *)&Ks4[(kt * 16 + lane % 16) * FA_K4S + 2 * st];
+                        acc[kt] = __builtin_amdgcn_wmma_i32_16x16x16_iu4_w32(true, a, true, qb, acc[kt], false);
+                        // pin (as the int8 form): one A fragment in flight at a time. Without it the compiler hoists all 48
+                        // fragment reads of the step (96 VGPRs) and the variant spills (r1 compile: 7 / 74 spilled VGPRs)
+                        asm volatile("" : "+v"(acc[kt]));
+                    }
+                }
+#pragma unroll
+                for (int kt = 0; kt < FA_K / 16; ++kt)
+#pragma unroll
+                    for (int v = 0; v < 8; ++v) sc[kt][v] = (float)acc[kt][v] * (sk4[kt * 16 + CROW(lane, v)] * sq);
             }
             // causal mask + online softmax (per lane = per query; partner lane ^16), O rescale, as the f16 kernel
 #include "shared/attn_fa_softmax.h"  // mask + online softmax of the key tile (ADR-0005)
@@ -1054,6 +1177,7 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
                 for (int kt = 0; kt < FA_K / 16; ++kt) {
                     const fa_i2 a = *(const fa_i2 *)&Ks4[(kt * 16 + lane % 16) * FA_K4S + 2 * st];
                     acc[kt] = __builtin_amdgcn_wmma_i32_16x16x16_iu4_w32(true, a, true, qi4[st], acc[kt], false);
+                    if constexpr (PIN) asm volatile("" : "+v"(acc[kt]));
                 }
             }
 #pragma unroll
@@ -1185,6 +1309,26 @@ extern "C" __global__ void __launch_bounds__(256)
     attn_prefill_wmma_i8n(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos,
                           int n_tok, float scale, int h0) {
     attn_prefill_impl<0, 0, false, false, true, 0>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);
+}
+// v0252-8sattn2 (PLAN V1-148): bench-only variants (kt-bench family attnpv, tests/kernels/kt_bench.h; kt invariants in
+// tests/kernels/test_attn.cpp); never selected by the engine, same arguments / grid / block as attn_prefill_wmma.
+// Each moves the query codes or the K / V loads, never a value: bitwise == attn_prefill_wmma_i8 (i8*) / _i4 (i4*).
+#define FA_PFX_ENTRY(NAME, I4_, I8_, PF_, QX_)                                                                        \
+    extern "C" __global__ void __launch_bounds__(256)                                                               \
+        NAME(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos, int n_tok, \
+             float scale, int h0) {                                                                                 \
+        attn_prefill_impl<0, 0, false, I4_, I8_, PF_, QX_>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0); \
+    }
+FA_PFX_ENTRY(attn_pfx_i8r, false, true, 0, true)    // V4: int8, Q codes in registers, no prefetch
+FA_PFX_ENTRY(attn_pfx_i8p2, false, true, 2, false)  // V7: int8, Q codes in LDS, deferred-consumer prefetch
+FA_PFX_ENTRY(attn_pfx_i4l, true, false, 0, true)    // V5: int4, Q codes in LDS, no prefetch
+FA_PFX_ENTRY(attn_pfx_i4lp, true, false, 2, true)   // V6: int4, Q codes in LDS, deferred-consumer prefetch
+FA_PFX_ENTRY(attn_pfx_i4lp1, true, false, 1, true)  // V6p1: int4, Q codes in LDS, PF 1 (as attn_prefill_wmma_i8)
+// V1p: the shipping int4 kernel with its score loop pinned (one A fragment in flight)
+extern "C" __global__ void __launch_bounds__(256)
+    attn_pfx_i4p(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos, int n_tok,
+                 float scale, int h0) {
+    attn_prefill_impl<0, 0, false, true, false, 0, false, true>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);
 }
 
 // q8 / q8h / q4 KV prefill (KG-3, the gfx1151 port of Q8P / FC-1c): the K and V of keys
