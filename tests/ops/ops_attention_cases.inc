@@ -685,6 +685,65 @@ void testAttnPrefill() {
     CHECK(pl.steps.size() == 2 && pl.steps[1].head0 == 12 && pl.steps[0].grid.y == 12);
 }
 
+// v0252-8sfp (PLAN V1-144): the FAST gfx1151 prefill attention with int4 Q.K^T. With attn_i4qk_on and both kernels in the
+// table, the KG-3 copy path launches attn_pwf_i4 (one range) / attn_pws_i4 (key ranges) in place of attn_pwf / attn_pws with
+// the same steps, grids, blocks, head ranges and key ranges; flag off, or either kernel missing (the gfx1201 object): the
+// f16 kernels exactly as before. The f16-cache paths (attn_kg / attn_kx / attn_prefill_wmma) never take it.
+void testAttnI4qk() {
+    ops::AttnPrefillProblem p;
+    p.n = 512;  // the 8060S-like set of testAttnPrefill (Swift: 24 heads, 4 KV heads, head_dim 256)
+    p.head_dim = 256;
+    p.n_head = 24;
+    p.n_head_kv = 4;
+    p.scale = 1.0f / 16.0f;
+    p.kv_q8 = true;
+    p.dq_rows = 8192;
+    p.dq_ptab = true;
+    p.dq_st_ml = true;
+    ops::AttnPrefillFlags off, on;
+    on.attn_i4qk_on = true;
+    kn::KernelTable k = attnTable(true, true, true, false);
+    k.attn_pwf_i4 = tag("attn_pwf_i4");
+    k.attn_pws_i4 = tag("attn_pws_i4");
+    auto same = [](const ops::AttnPrefillPlan& a, const ops::AttnPrefillPlan& b, const char* fa, const char* fb) {
+        bool ok = a.steps.size() == b.steps.size();
+        for (std::size_t i = 0; ok && i < a.steps.size(); ++i) {
+            const ops::AttnStep &x = a.steps[i], &y = b.steps[i];
+            ok = x.op == y.op && x.grid.x == y.grid.x && x.grid.y == y.grid.y && x.grid.z == y.grid.z && x.block.x == y.block.x && x.head0 == y.head0 &&
+                 x.from_copy == y.from_copy && x.ranged == y.ranged && x.r0 == y.r0 && x.r1 == y.r1;
+            if (ok && x.op == ops::AttnStep::Op::attn) ok = nameOf(x.f) == fa && nameOf(y.f) == fb;
+        }
+        return ok;
+    };
+    // one dequantized range: kv_dq_rows_r + attn_pwf_i4 (same grid as attn_pwf)
+    CHECK(same(ops::chooseAttnPrefill(p, off, k), ops::chooseAttnPrefill(p, on, k), "attn_pwf", "attn_pwf_i4"));
+    // keys past the scratch: the attn_pws_i4 series, the same ranges
+    p.pos0 = 20000;
+    CHECK(same(ops::chooseAttnPrefill(p, off, k), ops::chooseAttnPrefill(p, on, k), "attn_pws", "attn_pws_i4"));
+    // a long prefill with head ranges (4096 queries at 32k, one range of 40960 rows)
+    p.pos0 = 32768;
+    p.n = 4096;
+    p.dq_rows = 40960;
+    CHECK(same(ops::chooseAttnPrefill(p, off, k), ops::chooseAttnPrefill(p, on, k), "attn_pwf", "attn_pwf_i4"));
+    // either kernel missing: the f16 kernels
+    for (int miss = 0; miss < 2; ++miss) {
+        kn::KernelTable km = k;
+        (miss == 0 ? km.attn_pwf_i4 : km.attn_pws_i4) = nullptr;
+        CHECK(same(ops::chooseAttnPrefill(p, off, km), ops::chooseAttnPrefill(p, on, km), "attn_pwf", "attn_pwf"));
+    }
+    // the f16 cache read in place (no copy scratch) and the attn_kg table: untouched by the flag
+    p.kv_q8 = false;
+    p.dq_ptab = false;
+    p.dq_rows = 0;
+    p.pos0 = 0;
+    p.n = 512;
+    for (const kn::KernelTable& kk : {k, attnTable(false, false, false, true)}) {
+        const auto a = ops::chooseAttnPrefill(p, off, kk), b = ops::chooseAttnPrefill(p, on, kk);
+        CHECK(a.steps.size() == b.steps.size());
+        for (std::size_t i = 0; i < a.steps.size() && i < b.steps.size(); ++i) CHECK(a.steps[i].f == b.steps[i].f && nameOf(b.steps[i].f).find("_i4") == std::string::npos);
+    }
+}
+
 // v0252-strixc2 (PLAN V1-09): the balance gfx1151 prefill attention attn_sx<NP> (strix-llama.cpp fattn-rdna35, not bitwise).
 // (1) attnSxFor: NP = the first of 8 / 4 / 2 dividing the GQA ratio (fattn-rdna35.cu:863-870), only when it also divides
 // the heads of the launch, head_dim 256, and the code object has that NP's kernel; exhaustive (never another NP's kernel).

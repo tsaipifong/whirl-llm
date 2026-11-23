@@ -239,6 +239,7 @@ int main() {
     testDq4Partition();  // v0252-n2 (feat027-dq4r9700 764af36)
     testAttnPrefill();
     testAttnSx();  // v0252-strixc2 (fails before the port: no attnSxFor / attn_sx_on)
+    testAttnI4qk();  // v0252-8sfp (fails to build before the change: no attn_i4qk_on / attn_pwf_i4)
     testAttnKgVariant();  // v0252-c1port (fails before the port: the stub has no variant, chooseAttnPrefill never asks)
     testOpsMoe();
     testOpTables();

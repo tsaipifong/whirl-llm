@@ -88,6 +88,7 @@ nu::Target target(const CardFake& c, std::string_view model, bool kv_explicit) {
     t.k_moe_skip = true;
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     t.attn_sx_profile = c.prof.attn_sx_balance;  // v0252-strixc2 (tune.cpp numericsTarget)
+    t.attn_i4qk_profile = c.prof.attn_i4qk_fast;  // v0252-8sfp (tune.cpp numericsTarget)
     return t;
 }
 
@@ -858,6 +859,7 @@ void testFastOnlyOverrides() {
         {"ATTN_LSPLIT", 'L'},
         {"MOESKIP", 'F'},     // v0252-f5: moeskip, fast-only (applyFastOnlyOverride; drops routed experts)
         {"ATTN_SX", 'L'},  // v0252-strixc2: attn_sx<NP> (strix fattn-rdna35), not bitwise: balance only (testAttnSxFlag)
+        {"ATTN_I4QK", 'F'},  // v0252-8sfp: int4 Q.K^T prefill attention, not bitwise: fast only (testAttnI4qkFlag)
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -1516,6 +1518,58 @@ static void testAttnSxFlag() {
     }
 }
 
+// v0252-8sfp (PLAN V1-144): the gfx1151 FAST prefill attention with int4 Q.K^T (attn_prefill_wmma_i4 / _s_i4, NOT bitwise).
+// The plan flag attn_i4qk is on exactly in fast mode on the 8060S card (device::Profile::attn_i4qk_fast -> Target::
+// attn_i4qk_profile), both models (MXFP4 tensors); never in precise or balance (their plans and bits stay exactly as they
+// are), never on the R9700 card (no kernel). WHIRL_ATTN_I4QK=0 turns it off and changes nothing else (bitsKey = the default
+// plan's with attn_i4qk false, same log line, no +overrides, never lossy); any other value keeps the plan's choice; a
+// non-"0" value in precise / balance adds exactly one Plan::ignored note. Every OTHER flag of every plan is the one it
+// was before the flag existed (the plan with attn_i4qk cleared == the WHIRL_ATTN_I4QK=0 plan). Fails before the port.
+static void testAttnI4qkFlag() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    std::size_t on_cells = 0;
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const bool want = std::string_view(mode) == "fast" && c.prof.attn_i4qk_fast;
+                const nu::Plan d = pl(t, mode, {});
+                NCHECK(d.flags.attn_i4qk == want, "attn_i4qk default {} {} {}: {} (want {})", c.name, model, mode, d.flags.attn_i4qk, want);
+                on_cells += d.flags.attn_i4qk;
+                // "0": off, nothing else moves
+                const nu::Plan z = pl(t, mode, {{"ATTN_I4QK", "0"}});
+                nu::Plan a = d;
+                a.flags.attn_i4qk = false;
+                NCHECK(!z.flags.attn_i4qk && a.bitsKey() == z.bitsKey() && nu::logLine(z) == nu::logLine(d) && z.overrides == d.overrides &&
+                           z.lossy_override == d.lossy_override && z.ignored.empty(),
+                       "attn_i4qk {} {} {}: WHIRL_ATTN_I4QK=0 turns only the attn_i4qk flag off", c.name, model, mode);
+                NCHECK((d.bitsKey() != z.bitsKey()) == want, "attn_i4qk {} {} {}: the arms default / =0 must differ exactly where it runs", c.name, model,
+                       mode);
+                for (const char* v : {"1", "x", ""}) {
+                    const nu::Plan o = pl(t, mode, {{"ATTN_I4QK", v}});
+                    NCHECK(o.flags.attn_i4qk == want && o.bitsKey() == d.bitsKey() && o.overrides == d.overrides && o.lossy_override == d.lossy_override,
+                           "attn_i4qk {} {} {}: WHIRL_ATTN_I4QK='{}' keeps the plan's choice", c.name, model, mode, v);
+                    std::size_t notes = 0;
+                    for (const std::string& n : o.ignored) notes += n.rfind(std::string("WHIRL_ATTN_I4QK=") + v + " ignored", 0) == 0;
+                    const std::size_t want_notes = std::string_view(mode) == "fast" ? 0 : 1;
+                    NCHECK(notes == want_notes && o.ignored.size() == want_notes, "attn_i4qk {} {} {}: WHIRL_ATTN_I4QK='{}': {} ignored notes (want {})",
+                           c.name, model, mode, v, notes, want_notes);
+                }
+            }
+    NCHECK(on_cells == 2, "attn_i4qk: on by default in exactly 2 cells (8060S fast, both models), got {}", on_cells);
+    // a model without MXFP4 tensors: off
+    for (const char* model : {"swift", "moe"}) {
+        nu::Target tq = target(card("8060s"), model, false);
+        tq.has_mxfp4 = false;
+        NCHECK(!pl(tq, "fast", {}).flags.attn_i4qk, "attn_i4qk {}: a model without MXFP4 tensors -> off", model);
+    }
+}
+
 // v0252-c3port (feat026-moedec, gfx1201 precise decode): WHIRL_MOE_FUSE / WHIRL_GEMVH_F32 were off by default on both
 // cards, both models and every mode; "1" turns only that flag on (bitsKey = the off plan's with the flag set, same log
 // line, no +overrides, never lossy); "0" = off. The kernels exist only in the gfx1201 code object (ops::chooseMoeFuse /
@@ -2030,6 +2084,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testWs4rFlag();  // v0252-ws4r97b (fails before phase 2: the stub parseWs4r accepts nothing)
     testLsplitFlag();  // v0252-l2split (fails to build before the change: no attn_lsplit / parseLsplit)
     testAttnSxFlag();  // v0252-strixc2 (fails before the port: loadFlags never sets attn_sx)
+    testAttnI4qkFlag();  // v0252-8sfp (fails before the port: loadFlags never sets attn_i4qk)
     testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port); v0252-c3bdef (the R9700 MoE default rows fail before c3bdef)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
