@@ -46,6 +46,9 @@
 //   dequant_f16_<T>(W, rb, f16* out, ncols, nrows); f32_to_f16(x, y, n)
 //   gemvhf_<T> / gemvhf2_<T>(W, rb, const float* X, float* Y, ncols, nrows, n_tok, accumulate)  (v0252-c3port, gfx1201
 //            only, no f16 entry): gemvh_<T> / gemvh2_<T> with X rounded to f16 in the kernel as f32_to_f16 does
+//   gemvhg_<T>(GvArgs g, const f16* X, ncols, n_tok, accumulate)  (v0252-8sdec, gfx1151 only, paired types: mxfp4):
+//            up to 3 matrices on the same X in one launch, tiles of 16 rows numbered matrix by matrix (g.b1 / g.b2 =
+//            first tile of matrix 1 / 2), n_tok <= 16; bitwise == gemvh_<T> per matrix
 //   qact_fp8 / qact_fp8t(const float* x, u8* q, float* sx, int ncols)
 //   gemm8_c<i>, gemm8h_c<i>, gemm8t_c<i>, gemm8th_c<i>(W, rb, const u8* wref,
 //            const u8* X8, const float* sx, float* Y, ncols, nrows, n_tok, acc)
@@ -686,6 +689,9 @@ struct MatmulKernels {
     // gemvh2_<T> on f32 x, each element rounded to f16 in the B load exactly as f32_to_f16 does (no conversion launch);
     // no f16 entry (f16 weights keep f32_to_f16 + gemvh). Chosen by ops::gemvhF32 (WHIRL_GEMVH_F32)
     PerType<F> gemvhf{}, gemvhf2{};
+    // v0252-8sdec (optional, gfx1151 code object only): gemvhg_<T>, the grouped gemvh_<T> (GvArgs, n <= 16), chosen by
+    // ops::chooseGemvhGroup (WHIRL_GEMVH_GRP)
+    PerType<F> gemvhg{};
     Nt gemvq_nt{}, gemvq_nt_g{};
     std::array<Nt, 2> gemvq_mr{}, gemvq_mr_g{};      // [R/2 - 1][nt - 2][type], R = 2, 4
     std::array<Nt, kNGemvw> gemvw{}, gemvw_g{};      // [v][nt - 2][type], v = 1..8

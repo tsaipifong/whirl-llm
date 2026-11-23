@@ -320,4 +320,31 @@ Function gemvhF32(const GemmPlan& p, GgmlType ty, bool enabled, const GemmFlags&
     return nullptr;
 }
 
+// v0252-8sdec (PLAN V1-142): rule and bits in matmul.h
+GemvhGroupPlan chooseGemvhGroup(const MatShape* ws, std::size_t n_mats, std::uint32_t n, bool enabled, const MatmulFlags& mf, const GemmFlags& f,
+                                const kernels::MatmulKernels& k) {
+    GemvhGroupPlan out;
+    if (!enabled || n_mats < 2 || n_mats > 3) return out;
+    const std::size_t t = ti(ws[0].ty);
+    const Function g = k.gemvhg[t];
+    if (g == nullptr) return out;
+    std::uint32_t base[3] = {0, 0, 0}, tiles = 0;
+    for (std::size_t i = 0; i < n_mats; ++i) {
+        const MatShape& w = ws[i];
+        if (w.ty != ws[0].ty || w.ncols != ws[0].ncols) return out;
+        if (chooseMatmulPath(w, n, mf, k) != MatmulPath::gemm_f16) return out;
+        const GemmPlan p = chooseGemmF16(w, n, 0, f, k);
+        if (p.kind != GemmKind::gemvh || p.f == nullptr || p.f != k.gemvh[t]) return out;
+        base[i] = tiles;
+        tiles += (w.nrows + 15) / 16;
+    }
+    out.f = g;
+    out.b1 = static_cast<std::int32_t>(base[1]);
+    if (n_mats == 3) out.b2 = static_cast<std::int32_t>(base[2]);
+    out.tiles = tiles;
+    out.grid = D(f.gemvh_cap != 0 ? kernels::gemvhGridCap(tiles * 16, f.gemvh_cap) : tiles);
+    out.block = D(32);
+    return out;
+}
+
 }  // namespace whirl::ops

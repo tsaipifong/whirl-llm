@@ -889,13 +889,14 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     // F1's one-pass check (KernelTable::argmax_rank_rows_to) is in the code object (the R9700 takes the arm only with it)
     // and (v0252-f2def2) the family enables it (device::Profile::relax_rank_check; Context::setRelaxRank reads the same)
     t.relax_moe_arm = whirl::numerics::relaxMoeDefaultName(t.gfx1151);
-    // v0252-b5 round 3 (PLAN V1-97): the dense fast arm of this GPU (gfx1201 k8a02; gfx1151 none)
+    // v0252-b5 round 3 (PLAN V1-97): the dense fast arm of this GPU (gfx1201 k8a02; gfx1151 k8a02 since v0252-8sdec)
     t.relax_dense_arm = whirl::numerics::relaxDenseDefaultName(t.gfx1151);
     t.k_relax_rank = prof.relax_rank_check && m.k.argmax_rank_rows_to != nullptr;
     // v0252-f5 (moeskip): the routing / grouping / combine entry points (both code objects) and the per-card fast default rule
     t.k_moe_skip = m.k.moe_topk_skip != nullptr && m.k.moe_skip_apply != nullptr && m.k.moe_route_skip != nullptr && m.k.moe_combine_skip != nullptr;
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     t.attn_sx_profile = prof.attn_sx_balance;  // v0252-strixc2: the gfx1151 balance prefill attention (numerics flag attn_sx)
+    t.gemvh_grp_profile = prof.gemvh_group_dense;  // v0252-8sdec: the gfx1151 precise grouped gemvh (numerics flag gemvh_grp)
     return t;
 }
 
