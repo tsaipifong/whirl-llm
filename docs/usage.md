@@ -631,6 +631,7 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 | `WHIRL_ATTN_KG=0` | prefill attention without the GQA-grouped kernel (bitwise-equal) |
 | `WHIRL_ATTN_DQF=0` | q8 / q8h (and q4) KV prefill attention on the quantized cache (`attn_kg_q8`; Radeon 8060S `attn_prefill_wmma_q8` / `_q4`) instead of an f16 copy of the sequence's keys + the f16 kernel (bitwise-equal) |
 | `WHIRL_ATTN_SEG=N` | Radeon 8060S: prefill attention in key ranges of N keys (multiple of 256) with the softmax state carried (`attn_prefill_wmma_s`), also for f16 KV (bitwise-equal; a test knob, no speed gain end to end) |
+| `WHIRL_ATTN_I4QK=0` | fast mode, Radeon 8060S (gfx1151): prefill attention with f16 Q.K^T (`attn_prefill_wmma`, the balance kernel) instead of the int4 Q.K^T form `attn_prefill_wmma_i4` (iu4 WMMA, per-row int4 query / key scales; since 0.2.5.2; changes the fast output) |
 | `WHIRL_GDN_SEQ=1` | sequential DeltaNet prefill instead of the chunked scan |
 | `WHIRL_GDN_V0=1` | per-row DeltaNet decode step kernel (same values) |
 | `WHIRL_NAIVE_ATTN=1` | reference attention path |

@@ -110,6 +110,10 @@ struct AttnPrefillFlags {
     // Taken for f16 rows walked in ONE key range: the f16 cache (in place of attn_kx / attn_prefill_wmma) and the KG-3
     // single-range copy of q8 / q8h keys (in place of attn_pwf); never on attn_kg / multi-range series / WHIRL_ATTN_SEG.
     bool attn_sx_on = false;
+    // v0252-8sfp (PLAN V1-144): the fast-mode gfx1151 int4 Q.K^T forms attn_pwf_i4 / attn_pws_i4 in place of attn_pwf /
+    // attn_pws on the KG-3 dequantized-copy path (numerics flag attn_i4qk = fast + device::Profile::attn_i4qk_fast;
+    // not bitwise; WHIRL_ATTN_I4QK=0 off). Needs both kernels; the f16 cache paths are unchanged.
+    bool attn_i4qk_on = false;
 };
 // v0252-strixc2: the attn_sx kernel for a GQA ratio grp (query heads per KV head) and hp heads per launch at head_dim,
 // with its NP (= strix NCOLS2: the first of 8 / 4 / 2 dividing grp, fattn-rdna35.cu:863-870) in *np; nullptr (and *np 0)
