@@ -1049,6 +1049,59 @@ void testAttn(Ctx& c) {
                         }
                     }
                 }
+                // v0252-8sattn2 (PLAN V1-148): the bench-only prefill attention variants of family attnpv (gfx1151; never selected
+                // by the engine). Each moves Q or the K / V loads, never a value: bitwise == its shipping form.
+                //   attn_pfx_i8r   int8, Q codes in registers, no prefetch      == attn_prefill_wmma_i8
+                //   attn_pfx_i8p2  int8, Q in LDS, deferred-consumer prefetch   == attn_prefill_wmma_i8
+                //   attn_pfx_i4l   int4, Q codes in LDS, no prefetch            == attn_prefill_wmma_i4
+                //   attn_pfx_i4lp  int4, Q in LDS, deferred-consumer prefetch   == attn_prefill_wmma_i4
+                //   attn_pfx_i4lp1 int4, Q in LDS, PF1 (the prefetch of _i8)    == attn_prefill_wmma_i4
+                //   attn_pfx_i4p   int4, Q in registers, score loop pinned      == attn_prefill_wmma_i4
+                // A code object that has attn_prefill_wmma_i8 but not the variants is the build before this item: FAIL, not skip.
+                {
+                    struct PvCase {
+                        const char *var, *ref;
+                    };
+                    const PvCase pv[] = {{"attn_pfx_i8r", "attn_prefill_wmma_i8"},   {"attn_pfx_i8p2", "attn_prefill_wmma_i8"},
+                                         {"attn_pfx_i4l", "attn_prefill_wmma_i4"},   {"attn_pfx_i4lp", "attn_prefill_wmma_i4"},
+                                         {"attn_pfx_i4lp1", "attn_prefill_wmma_i4"}, {"attn_pfx_i4p", "attn_prefill_wmma_i4"}};
+                    for (const PvCase& pc : pv) {
+                        auto fr = c.fnOpt(pc.ref), fv = c.fnOpt(pc.var);
+                        if (!fr) {
+                            c.rep.skip("attn", std::string(pc.var) + tag, std::string(pc.ref) + " not in this code object");
+                            continue;
+                        }
+                        if (!fv) {
+                            Result r;
+                            r.name = std::string(pc.var) + " present next to " + pc.ref + tag;
+                            r.pass = false;
+                            r.note = "the bench variant is missing from this code object";
+                            c.rep.add(r);
+                            continue;
+                        }
+                        for (const auto& [nh, nkv] : {std::pair{24, 4}, std::pair{16, 2}}) {
+                            const std::size_t cnt = static_cast<std::size_t>(n) * nh * kHd;
+                            for (const int p0 : {L - n, 0}) {
+                                Buf dpos(std::vector<int>{p0});
+                                const std::string where =
+                                    " (" + std::to_string(nh) + " / " + std::to_string(nkv) + " heads) at pos " + std::to_string(p0) + tag;
+                                Buf orf(static_cast<std::size_t>(n) * kHeads * kHd * 4), ov(orf.bytes()), oh(orf.bytes());
+                                for (Buf* b : {&orf, &ov, &oh}) b->fill(0x7f);
+                                auto launchPv = [&](hip::Function fn, Buf& o, int h0, int nh_launch) {
+                                    hip::launch(fn, {cdiv(n, 128), static_cast<unsigned>(nh_launch), 1}, {256, 1, 1}, 0, c.s, dqp.p(), pool.args(), o.p(), nh,
+                                                nkv, kQStride, dpos.p(), n, kScale, h0);
+                                };
+                                launchPv(fr, orf, 0, nh);
+                                launchPv(fv, ov, 0, nh);
+                                for (const int h0 : {0, nh / 2}) launchPv(fv, oh, h0, nh / 2);
+                                c.sync();
+                                const auto vr = orf.down<float>(cnt);
+                                c.rep.add(cmpExact(std::string(pc.var) + " == " + pc.ref + where, ov.down<float>(cnt), vr, Kind::invariant));
+                                c.rep.add(cmpExact(std::string(pc.var) + " head-range launches == " + pc.ref + where, oh.down<float>(cnt), vr, Kind::invariant));
+                            }
+                        }
+                    }
+                }
             }
         }
     }

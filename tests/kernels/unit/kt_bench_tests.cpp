@@ -548,6 +548,36 @@ static void test_ab_order_and_ratio() {
     check("A/B: order effect AB pairs == BA pairs for a drift-free kernel", ab.order_ab == ab.order_ba && ab.order_ab == 0.9);
 }
 
+// v0252-8sattn2: the 95 % interval of the paired ratio (geometric mean of the per-pair B / A ratios, t interval on their
+// logs) that the A/B rows carry, so a verdict reads "estimate +- measured error" from one row (ADR-0019)
+static void test_ratio_ci95() {
+    RatioCi r = ratioCi95({1.05, 1.05, 1.05, 1.05});
+    check("ratio ci95: constant ratios -> gmean = lo = hi", std::fabs(r.gmean - 1.05) < 1e-12 && std::fabs(r.lo - 1.05) < 1e-12 &&
+                                                                  std::fabs(r.hi - 1.05) < 1e-12 && r.n == 4,
+          num(r.gmean) + " " + num(r.lo) + " " + num(r.hi));
+    // logs of {0.9, 1.1}: mean 0 (gmean 0.99499), sd = (ln 1.1 - ln 0.9) / sqrt 2 = 0.14190; t(0.975, 1) = 12.706 ->
+    // half width 12.706 * 0.14190 / sqrt 2 = 1.2749 on the log scale
+    r = ratioCi95({0.9, 1.1});
+    const double gm = std::sqrt(0.9 * 1.1), hw = 12.706 * (std::log(1.1) - std::log(0.9)) / std::sqrt(2.0) / std::sqrt(2.0);
+    check("ratio ci95: two pairs use t(0.975, 1) = 12.706", std::fabs(r.gmean - gm) < 1e-9 && std::fabs(std::log(r.hi / r.gmean) - hw) < 1e-3 &&
+                                                               std::fabs(std::log(r.gmean / r.lo) - hw) < 1e-3,
+          num(r.gmean) + " " + num(r.lo) + " " + num(r.hi));
+    // 40 pairs alternating 0.98 / 1.02: t(0.975, 39) ~ 2.023, sd of logs ~ 0.02026 -> half width ~ 0.00648
+    std::vector<double> v;
+    for (int i = 0; i < 40; ++i) v.push_back(i % 2 ? 1.02 : 0.98);
+    r = ratioCi95(v);
+    double m = 0, ss = 0;
+    for (double x : v) m += std::log(x);
+    m /= 40;
+    for (double x : v) ss += (std::log(x) - m) * (std::log(x) - m);
+    const double hw40 = 2.023 * std::sqrt(ss / 39) / std::sqrt(40.0);
+    check("ratio ci95: 40 pairs, t(0.975, 39)", std::fabs(std::log(r.hi / r.gmean) - hw40) < 2e-4 && r.lo < 1.0 && r.hi > 1.0, num(r.lo) + " " + num(r.hi));
+    r = ratioCi95({});
+    check("ratio ci95: no pairs -> n 0", r.n == 0);
+    r = ratioCi95({1.0, -1.0, 1.0});
+    check("ratio ci95: non-positive ratio dropped", r.n == 2);
+}
+
 static void test_ab_order_bias() {
     // whichever runs first in a pair is 5 % faster (8060S order bias): the ratio median stays at the true 1.0 only because
     // both orders are equally represented; the order effect is visible
@@ -735,6 +765,49 @@ static void test_jsonl_file(const std::string& emit) {
     if (emit.empty()) fs::remove(p, ec);
 }
 
+// v0252-8sattn2: the variant table and pair list of bench family attnpv (prefill attention variants, gfx1151)
+static void test_attnpv_variants() {
+    const auto& vs = attnPvVariants();
+    std::map<std::string, std::string> kern;
+    for (const AttnPvVariant& v : vs) kern[v.alias] = v.kernel;
+    check("attnpv: V0 = attn_prefill_wmma (f16 shipping)", kern["V0"] == "attn_prefill_wmma");
+    check("attnpv: V1 = attn_prefill_wmma_i4 (int4 shipping fast)", kern["V1"] == "attn_prefill_wmma_i4");
+    check("attnpv: V2 = attn_prefill_wmma_i8 (int8 opt-in, Q in LDS + PF1)", kern["V2"] == "attn_prefill_wmma_i8");
+    check("attnpv: V3 = attn_prefill_wmma_i8n (int8, Q in LDS, no prefetch)", kern["V3"] == "attn_prefill_wmma_i8n");
+    check("attnpv: V4 = attn_pfx_i8r (int8, Q in registers, no prefetch)", kern["V4"] == "attn_pfx_i8r");
+    check("attnpv: V5 = attn_pfx_i4l (int4, Q in LDS, no prefetch)", kern["V5"] == "attn_pfx_i4l");
+    check("attnpv: V6 = attn_pfx_i4lp (int4, Q in LDS, deferred-consumer prefetch)", kern["V6"] == "attn_pfx_i4lp");
+    check("attnpv: V6p1 = attn_pfx_i4lp1 (int4, Q in LDS, PF1 as shipped in V2)", kern["V6p1"] == "attn_pfx_i4lp1");
+    check("attnpv: V7 = attn_pfx_i8p2 (int8, Q in LDS, deferred-consumer prefetch)", kern["V7"] == "attn_pfx_i8p2");
+    check("attnpv: V1p = attn_pfx_i4p (int4, Q in registers, score loop pinned, no prefetch)", kern["V1p"] == "attn_pfx_i4p");
+    check("attnpv: 10 variants", vs.size() == 10, std::to_string(vs.size()));
+    // bits: the same score codes and integer sums give the same output; f16 vs int never
+    auto bw = [&](const char* a, const char* b) {
+        const AttnPvVariant *va = attnPvFind(a), *vb = attnPvFind(b);
+        return va && vb && attnPvBitwise(*va, *vb);
+    };
+    check("attnpv: V6 vs V1 bitwise (same int4 codes, exact integer sums)", bw("V6", "V1") && bw("V5", "V1") && bw("V6p1", "V1") && bw("V1p", "V1"));
+    check("attnpv: V4 / V3 / V7 vs V2 bitwise (same int8 codes)", bw("V4", "V2") && bw("V3", "V2") && bw("V7", "V2"));
+    check("attnpv: int vs f16 not bitwise, int4 vs int8 not bitwise", !bw("V1", "V0") && !bw("V2", "V0") && !bw("V6", "V2"));
+    check("attnpv: unknown alias -> nullptr", attnPvFind("V9") == nullptr);
+    // the default pair list: the brief's pairs (each variant vs V0, V6 vs V1) without V4 (256 VGPRs + 10 spilled: does not
+    // fit, selectable by name only), then the one-change pairs (pin, Q in LDS, each prefetch form vs its no-prefetch twin)
+    std::string err;
+    const auto def = attnPvPairs("", err);
+    std::string got;
+    for (const AttnPvPair& p : def) got += p.b + "/" + p.a + ",";
+    check("attnpv: default pairs", err.empty() && got == "V1/V0,V2/V0,V3/V0,V5/V0,V6/V0,V6/V1,V1p/V1,V5/V1p,V2/V3,V7/V3,V6/V5,V6p1/V5,", got + " " + err);
+    const auto two = attnPvPairs("V2/V3, V6/V5", err);
+    check("attnpv: 'V2/V3, V6/V5' -> B V2 vs A V3, B V6 vs A V5",
+          err.empty() && two.size() == 2 && two[0].b == "V2" && two[0].a == "V3" && two[1].b == "V6" && two[1].a == "V5", err);
+    attnPvPairs("V9/V0", err);
+    check("attnpv: unknown alias rejected", !err.empty());
+    attnPvPairs("V2", err);
+    check("attnpv: pair without '/' rejected", !err.empty());
+    attnPvPairs("V2/V2", err);
+    check("attnpv: B == A rejected", !err.empty());
+}
+
 int main(int argc, char** argv) {
     std::string emit;
     for (int i = 1; i < argc; ++i)
@@ -760,11 +833,13 @@ int main(int argc, char** argv) {
         test_cache_state_anchor_switched_off();
         test_ab_order_and_ratio();
         test_ab_order_bias();
+        test_ratio_ci95();
         test_burst();
         test_sha256();
         test_roof();
         test_rows();
         test_jsonl_file(emit);
+        test_attnpv_variants();
     } catch (const std::exception& e) {
         check(std::string("exception: ") + e.what(), false);
     }
