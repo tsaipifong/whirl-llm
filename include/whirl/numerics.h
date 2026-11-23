@@ -138,6 +138,10 @@ struct EnvValues {
     // v0252-8sfp (PLAN V1-144): attn_i4qk (WHIRL_ATTN_I4QK: "0" turns the fast gfx1151 int4 Q.K^T prefill attention off;
     // any other value keeps the plan's choice; never on in precise / balance - Plan::ignored notes a non-"0" value there)
     Raw attn_i4qk;
+    // v0252-8sattn3 (PLAN V1-148): attn_i4pf (WHIRL_ATTN_I4PF: the int4 prefill attention with Q codes in LDS + K / V prefetch,
+    // bit-identical to the int4 form; "0" / "" off, any other value on, unset = the profile; only where attn_i4qk is on -
+    // Plan::ignored notes a non-"0" value in precise / balance)
+    Raw attn_i4pf;
     // v0252-8smoe (PLAN V1-147): moep_guw (WHIRL_MOEP_GUW: a kernels::kMoepGu variant name = the routing-aware wide gate + up
     // tile; "0", "" or an unknown name = off; class B: every moep gate + up variant stores the same bits)
     Raw moep_guw;
@@ -156,7 +160,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 48;  // v0252-8sq4: + dq4_order, dq4_min_keys (46 -> 48)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
+    static constexpr std::size_t n_fields = 49;  // v0252-8sattn3: + attn_i4pf (48 -> 49)  // v0252-8sq4: + dq4_order, dq4_min_keys (46 -> 48)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -259,6 +263,8 @@ struct Target {
     bool attn_sx_profile = false;
     // v0252-8sfp (PLAN V1-144): device::Profile::attn_i4qk_fast (the gfx1151 row): fast prefill attention int4 Q.K^T
     bool attn_i4qk_profile = false;
+    // v0252-8sattn3 (PLAN V1-148): device::Profile::attn_i4_qlds_pf (opt-in on both rows): the int4 Q-in-LDS + prefetch form
+    bool attn_i4pf_profile = false;
     // v0252-8smoe (A, PLAN V1-95): device::Profile::moep_comb_fast_skip - the MoE prefill combine of a fast plan that runs
     // moeskip (MXFP4 routed experts, no WHIRL_MOEP_COMB); 0 = the family's non-f16 combine (moepCombMoeSkip)
     std::uint32_t moep_comb_fast_skip_profile = 0;
@@ -442,6 +448,7 @@ struct ItemState {
     X(U, moe_skip_min, 1, "")                                    \
     X(B, attn_sx, false, "")                                     \
     X(B, attn_i4qk, false, "")                                   \
+    X(B, attn_i4pf, false, "")                                   \
     X(U, moep_guw, 0, "")                                            X(B, moep_dhs, false, "")                                        X(U, moep_dna, 0, "")                                            X(B, moep_fq, false, "")                                         X(B, dq4_order, false, "")                                       X(U, dq4_min_keys, 0, "")
 
 struct Flags {

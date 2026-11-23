@@ -230,6 +230,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOESKIP", &S::moeskip},  // v0252-f5
         {"ATTN_SX", &S::attn_sx},      // v0252-strixc2
         {"ATTN_I4QK", &S::attn_i4qk},  // v0252-8sfp
+        {"ATTN_I4PF", &S::attn_i4pf},  // v0252-8sattn3
         {"MOEP_GUW", &S::moep_guw},    // v0252-8smoe
         {"MOEP_DHS", &S::moep_dhs},    // v0252-8smoe2 (C)
         {"MOEP_DNA", &S::moep_dna},    // v0252-8smoe2 (D)
@@ -547,6 +548,11 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     // decides (device::Profile::attn_i4qk_fast); models with MXFP4 tensors only (the product models, like h16 here);
     // ops::chooseAttnPrefill still needs both kernels and the KG-3 copy path. WHIRL_ATTN_I4QK=0 turns it off (A/B arm).
     F.attn_i4qk = r.mode == Mode::fast && t.attn_i4qk_profile && t.has_mxfp4 && !(e.attn_i4qk && *e.attn_i4qk == "0");
+    // v0252-8sattn3 (PLAN V1-148): the second int4 form (attn_prefill_wmma_i4p / _s_i4p: int4 Q codes in LDS + K / V register
+    // prefetch; bit-identical to the int4 kernels), only where attn_i4qk is on (fast, gfx1151 row, MXFP4) - so precise /
+    // balance and the R9700 never take it. The card's row (device::Profile::attn_i4_qlds_pf, opt-in), then WHIRL_ATTN_I4PF
+    // ("0" / "" off, any other value on: the WHIRL_DQ4_ORDER rule). ops::chooseAttnPrefill still needs both i4p kernels.
+    if (F.attn_i4qk) F.attn_i4pf = e.attn_i4pf ? !e.attn_i4pf->empty() && *e.attn_i4pf != "0" : t.attn_i4pf_profile;
 }
 
 // tune.cpp:939-982 on the item table (the per-item overrides, WHIRL_Q8DEC, relaxacc, noteSwitches) and the flags
@@ -703,6 +709,11 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     if (items)
         if (const Raw& v = e.attn_i4qk; v && *v != "0" && p.mode != Mode::fast)
             p.ignored.push_back(std::format("WHIRL_ATTN_I4QK={} ignored: the int4 Q.K^T prefill attention is fast-only ({} never takes it)", *v,
+                                            modeName(p.mode)));
+    // v0252-8sattn3: WHIRL_ATTN_I4PF other than "0" in precise / balance is noted once (it rides on the fast-only int4 form)
+    if (items)
+        if (const Raw& v = e.attn_i4pf; v && *v != "0" && p.mode != Mode::fast)
+            p.ignored.push_back(std::format("WHIRL_ATTN_I4PF={} ignored: the int4 Q.K^T prefill attention is fast-only ({} never takes it)", *v,
                                             modeName(p.mode)));
     // v0252-8sq4: WHIRL_DQ4_ORDER / WHIRL_DQ4_MINKEYS other than "0" outside fast are noted once each (q4 KV and its attn_dq4
     // path exist only in fast; the flags stay off there)

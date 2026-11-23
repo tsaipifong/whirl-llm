@@ -126,6 +126,10 @@ struct AttnPrefillFlags {
     // attn_pws on the KG-3 dequantized-copy path (numerics flag attn_i4qk = fast + device::Profile::attn_i4qk_fast;
     // not bitwise; WHIRL_ATTN_I4QK=0 off). Needs both kernels; the f16 cache paths are unchanged.
     bool attn_i4qk_on = false;
+    // v0252-8sattn3 (PLAN V1-148): with attn_i4qk_on, the second int4 forms attn_pwf_i4p / attn_pws_i4p (int4 Q codes in
+    // LDS + K / V register prefetch; bit-identical to attn_pwf_i4 / attn_pws_i4) in their place, same steps and grids
+    // (numerics flag attn_i4pf; WHIRL_ATTN_I4PF). Needs both i4p kernels; alone (int4 off) it picks nothing.
+    bool attn_i4pf_on = false;
 };
 // v0252-strixc2: the attn_sx kernel for a GQA ratio grp (query heads per KV head) and hp heads per launch at head_dim,
 // with its NP (= strix NCOLS2: the first of 8 / 4 / 2 dividing grp, fattn-rdna35.cu:863-870) in *np; nullptr (and *np 0)
