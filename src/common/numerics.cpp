@@ -413,14 +413,19 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
         for (int i = 0; i < kernels::kMoepGuN; ++i)
             if (*e.moep_guw == kernels::kMoepGu[i].name) F.moep_guw = static_cast<std::uint32_t>(i) + 1;
     }
-    // v0252-8smoe2 (PLAN V1-147), all opt-in (device::Profile rows off on both cards): the card's row on the moep plan
-    // (gfx1151, MXFP4 routed experts) - C moep_dhs and E moep_fq in balance / fast (bitwise twins: the precise arm is a
-    // later decision), D moep_dna in fast (COMB 5 is fast-only). The variables override the row in any mode, as
-    // WHIRL_MOEP_GUW: MOEP_DHS / MOEP_FQ "0" / "" = off, any other value on; MOEP_DNA a kMoepDn name ("0", "", unknown =
-    // off). ops::chooseMoe uses each only where its kernel exists and its path is taken.
-    if (t.gfx1151 && t.moe_mxfp4 && r.mode != Mode::precise) {
-        F.moep_dhs = t.moep_dhs_profile;
+    // v0252-8smoe2 (PLAN V1-147): the card's row on the moep plan (gfx1151, MXFP4 routed experts). v0252-8sflip: C and E are
+    // the gfx1151 default (device::Profile rows on; gfx1201 off: no moep kernels there). E moep_fq (the fused-dequant twins,
+    // same bits as the kernels they replace) in EVERY mode - screens 8smoe2-e / -ec-bands (balance / fast KEEP, balance hash
+    // same) and 8smoe2-e-precise (precise pp 2048 +9.47 % +-1.49, 8192 +6.22 % +-1.59, 32768 +4.50 % +-1.35, output hash
+    // same 6 of 6). C moep_dhs where the f16 epilogue (gemm_moepdh, pl.ydh) can run: balance / fast (COMB 3 with the item
+    // h16; fast runs it only without moeskip); precise never stores f16 expert outputs, so its row is not applied there.
+    // D moep_dna in fast (COMB 5 is fast-only; row 0 = opt-in, screen OPEN). The variables override the row in any mode, as
+    // WHIRL_MOEP_GUW: MOEP_DHS / MOEP_FQ "0" / "" = off (the previous kernels: the reference arm of later screens), any
+    // other value on; MOEP_DNA a kMoepDn name ("0", "", unknown = off). ops::chooseMoe uses each only where its kernel
+    // exists and its path is taken.
+    if (t.gfx1151 && t.moe_mxfp4) {
         F.moep_fq = t.moep_fq_profile;
+        if (r.mode != Mode::precise) F.moep_dhs = t.moep_dhs_profile;
     }
     if (t.gfx1151 && t.moe_mxfp4 && r.mode == Mode::fast) F.moep_dna = t.moep_dna_profile;
     auto onOff = [](const Raw& v) { return !v->empty() && *v != "0"; };

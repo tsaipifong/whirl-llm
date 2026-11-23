@@ -139,12 +139,13 @@ struct Profile {
     // every mode; the default applies in balance / fast (numerics::Target::moep_guw_profile; precise keeps its path until
     // its own screen arm). WHIRL_MOEP_GUW = a variant name / 0 overrides it
     std::uint8_t moep_guw;
-    // v0252-8smoe2 (PLAN V1-147; all three opt-in, 0 / false on both rows until a screen shows a gain beyond its error):
+    // v0252-8smoe2 (PLAN V1-147; opt-in until a screen shows a gain beyond its error; v0252-8sflip: C and E on in the
+    // gfx1151 row, D still opt-in):
     //   moep_dhs (C): the coalesced f16 down epilogue gemm_moepdhs_* where the plan stores f16 expert outputs (balance /
     //     fast; same bits as gemm_moepdh); numerics::Target::moep_dhs_profile; WHIRL_MOEP_DHS=1 / 0 overrides it
     //   moep_dna (D): kernels::kMoepDn index + 1 of the atomic-scatter (COMB 5) down variant (fast; 4 = m128w8n128k64);
     //     numerics::Target::moep_dna_profile; WHIRL_MOEP_DNA = a variant name / 0 overrides it
-    //   moep_fq (E): the fused-dequant moep twins gemm_moepfq*_* (balance / fast; same bits as the base kernels);
+    //   moep_fq (E): the fused-dequant moep twins gemm_moepfq*_* (every mode; same bits as the base kernels);
     //     numerics::Target::moep_fq_profile; WHIRL_MOEP_FQ=1 / 0 overrides it
     bool moep_dhs;
     std::uint8_t moep_dna;
@@ -295,10 +296,15 @@ inline constexpr Profile k_profile_gfx1151{
     // error); WHIRL_MOEP_GUW=g64n128k64 (a kernels::kMoepGu name) turns it on (same bits)
     .moep_guw = 0,  // v0252-8sopen: opt-in (was 2 = g64n128k64)
     // v0252-8smoe2: opt-in until the screens progress/8smoe2-C.json / -D.json / -E.json show a gain beyond the error
-    // (ADR-0019); a default flip is this line plus the pinned CHECK in tests/iso/device.profile + tests/device
-    .moep_dhs = false,  // C: WHIRL_MOEP_DHS=1 turns it on
-    .moep_dna = 0,      // D: WHIRL_MOEP_DNA=m128w8n128k64 turns it on (index 3 + 1 = 4)
-    .moep_fq = false,   // E: WHIRL_MOEP_FQ=1 turns it on
+    // (ADR-0019); a default flip is this line plus the pinned CHECK in tests/iso/device.profile + tests/device.
+    // v0252-8sflip (PLAN V1-147): C and E are the default - Ornith prefill on this card, paired change +- 95 % (ADR-0019):
+    // E (8smoe2-e, -ec-bands, -e-precise; all KEEP, output hash same): balance pp 2048 +11.07 % +-1.61, 8192 +7.45 % +-1.98,
+    // 32768 +5.20 % +-1.56, 98304 +3.10 % +-2.34; fast pp 2048 +10.13 % +-1.60, 32768 +5.47 % +-1.36; precise pp 2048
+    // +9.47 % +-1.49, 8192 +6.22 % +-1.59, 32768 +4.50 % +-1.35 (equal output). E + C (8smoe2-ec-bands KEEP): balance pp 8192
+    // +11.62 % +-2.19, 32768 +8.68 % +-2.44, 98304 +5.09 % +-2.30. WHIRL_MOEP_FQ=0 / WHIRL_MOEP_DHS=0 = the previous kernels.
+    .moep_dhs = true,  // C (balance / fast f16 epilogue; precise never stores f16): WHIRL_MOEP_DHS=0 turns it off
+    .moep_dna = 0,     // D: opt-in (8smoe2-D OPEN); WHIRL_MOEP_DNA=m128w8n128k64 turns it on (index 3 + 1 = 4)
+    .moep_fq = true,   // E (every mode): WHIRL_MOEP_FQ=0 turns it off
     .vision_attn_threads = 256,
 };
 
