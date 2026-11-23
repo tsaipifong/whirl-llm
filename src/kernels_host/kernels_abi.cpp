@@ -434,6 +434,10 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         k.attn_pws_i4 = L.opt("attn_prefill_wmma_s_i4");
         if (k.attn_pws_i4 != nullptr) k.attn_pwf_i4 = L.opt("attn_prefill_wmma_i4");
         if (k.attn_pwf_i4 == nullptr) k.attn_pws_i4 = nullptr;
+        // v0252-8sattn: the balance-only int8 Q.K^T pair (both or neither)
+        k.attn_pws_i8 = L.opt("attn_prefill_wmma_s_i8");
+        if (k.attn_pws_i8 != nullptr) k.attn_pwf_i8 = L.opt("attn_prefill_wmma_i8");
+        if (k.attn_pwf_i8 == nullptr) k.attn_pws_i8 = nullptr;
         // v0252-strixc2: f16 entries for every KV format (the f16 cache, or the KG-3 f16 copy of q8 / q8h keys)
         k.attn_sx2 = L.opt("attn_sx2");
         k.attn_sx4 = L.opt("attn_sx4");

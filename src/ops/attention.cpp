@@ -325,7 +325,10 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
         // v0252-8sfp: fast takes the int4 Q.K^T forms on the same copy, same grids (not bitwise; attn_sx is balance-only,
         // so the two never meet)
         const bool i4 = f.attn_i4qk_on && k.attn_pwf_i4 != nullptr && k.attn_pws_i4 != nullptr;
-        const Function pwf = i4 ? k.attn_pwf_i4 : k.attn_pwf, pws = i4 ? k.attn_pws_i4 : k.attn_pws;
+        // v0252-8sattn: balance takes the int8 Q.K^T + register-prefetch forms on the same copy, same grids (not bitwise; the
+        // plan never sets attn_i4qk and attn_i8qk together - fast / balance - and i4 wins if both were set)
+        const bool i8 = !i4 && f.attn_i8qk_on && k.attn_pwf_i8 != nullptr && k.attn_pws_i8 != nullptr;
+        const Function pwf = i4 ? k.attn_pwf_i4 : i8 ? k.attn_pwf_i8 : k.attn_pwf, pws = i4 ? k.attn_pws_i4 : i8 ? k.attn_pws_i8 : k.attn_pws;
         for (u32 r0 = 0; r0 < rows; r0 += seg) {
             const u32 r1 = std::min(rows, r0 + seg), nr = r1 - r0;
             dqRange(r0, nr);

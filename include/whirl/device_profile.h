@@ -105,6 +105,11 @@ struct Profile {
     // 2x its f16 rate; the gfx1201 object has no such kernel); not bitwise, so the numerics plan takes it in fast only
     // (numerics::Target::attn_i4qk_profile); WHIRL_ATTN_I4QK=0 turns it off
     bool attn_i4qk_fast;
+    // v0252-8sattn (PLAN V1-148): balance-mode prefill attention with int8 Q.K^T + K / V register prefetch
+    // (attn_prefill_wmma_i8 / _s_i8: gfx1151 iu8 WMMA; the gfx1201 object has no such kernel); not bitwise, so the
+    // numerics plan takes it in balance only (numerics::Target::attn_i8qk_profile = the DEFAULT; both rows false: not on
+    // balance's allowed list until Sir Pifeng decides); WHIRL_ATTN_I8QK=1 turns it on where the kernel exists, =0 off
+    bool attn_i8qk_balance;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
     // v0252-n10: whirl-server writes the TAIL-CK checkpoint inside the solo prefill forward that contains the tail point
@@ -172,6 +177,7 @@ inline constexpr Profile k_profile_gfx1201{
     .argmax_mb_moe = true,  // gfx1201 MoE: on in fast (PLAN V1-117)
     .attn_sx_balance = false,  // v0252-strixc2: no attn_sx in the gfx1201 code object
     .attn_i4qk_fast = false,   // v0252-8sfp: no attn_prefill_wmma_i4 in the gfx1201 code object (fp8 there, iu4 not used)
+    .attn_i8qk_balance = false,  // v0252-8sattn: no attn_prefill_wmma_i8 in the gfx1201 code object (gfx1201 unchanged)
     // v0252-ch4k (PLAN V1-75): MoE solo prefills run 4096-row forwards in the 8060S fill form (whole chunks up to the
     // batch 4096; no extra memory, the prefill buffers are sized for the batch). Timed e2e A/B on the R9700 (Ornith
     // MXFP4, 4 ABBA rounds, 4096-row forwards vs 2048, scratch/v0252_ch4k/gpu/20261111-0310/summary.md): precise pp 8k
@@ -237,6 +243,10 @@ inline constexpr Profile k_profile_gfx1151{
     .attn_sx_balance = true,  // v0252-strixc2: balance prefill attention (acceptance: progress/v0252-strixc2.HANDOFF.md)
     // v0252-8sfp: on (fast only); screen progress/8sfp-screen.json decides it (8060S Swift fast pp 8k / 32k)
     .attn_i4qk_fast = true,
+    // v0252-8sattn: OFF. int8 Q.K^T attention is not on balance's allowed list (quantized attention is a fast item;
+    // adding it to balance is Sir Pifeng's quality-policy decision): opt-in only, WHIRL_ATTN_I8QK=1 (diagnostic spec
+    // progress/8sattn-i8diag.json)
+    .attn_i8qk_balance = false,
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = true,  // v0252-tailck8s (PLAN V1-138, ADR-0022 supplement 4; was false = the 0.2.5.1 forward end)

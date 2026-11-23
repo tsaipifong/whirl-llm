@@ -136,6 +136,10 @@ struct EnvValues {
     // v0252-8sfp (PLAN V1-144): attn_i4qk (WHIRL_ATTN_I4QK: "0" turns the fast gfx1151 int4 Q.K^T prefill attention off;
     // any other value keeps the plan's choice; never on in precise / balance - Plan::ignored notes a non-"0" value there)
     Raw attn_i4qk;
+    // v0252-8sattn (PLAN V1-148): attn_i8qk (WHIRL_ATTN_I8QK: "0" turns the balance gfx1151 int8 Q.K^T + register-prefetch
+    // prefill attention off; any other value keeps the plan's choice; never on in precise / fast - Plan::ignored notes a
+    // non-"0" value there)
+    Raw attn_i8qk;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -143,7 +147,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 41;
+    static constexpr std::size_t n_fields = 42;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -246,6 +250,8 @@ struct Target {
     bool attn_sx_profile = false;
     // v0252-8sfp (PLAN V1-144): device::Profile::attn_i4qk_fast (the gfx1151 row): fast prefill attention int4 Q.K^T
     bool attn_i4qk_profile = false;
+    // v0252-8sattn (PLAN V1-148): device::Profile::attn_i8qk_balance (the gfx1151 row): balance prefill attention int8 Q.K^T
+    bool attn_i8qk_profile = false;
 };
 
 // ---- v0252-f2: the fast MoE relaxacc arms (the G3a / G4a screen arms) and the shipped default per GPU.
@@ -408,7 +414,7 @@ struct ItemState {
     X(F, moe_skip_thr, 0.f, "")                                  \
     X(U, moe_skip_min, 1, "")                                    \
     X(B, attn_sx, false, "")                                     \
-    X(B, attn_i4qk, false, "")
+    X(B, attn_i4qk, false, "")                                       X(B, attn_i8qk, false, "")
 
 struct Flags {
 #define WHIRL_NF_B bool

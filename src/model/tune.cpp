@@ -897,6 +897,7 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     t.attn_sx_profile = prof.attn_sx_balance;  // v0252-strixc2: the gfx1151 balance prefill attention (numerics flag attn_sx)
     t.attn_i4qk_profile = prof.attn_i4qk_fast;  // v0252-8sfp: the gfx1151 fast int4 Q.K^T prefill attention (flag attn_i4qk)
+    t.attn_i8qk_profile = prof.attn_i8qk_balance;  // v0252-8sattn: the gfx1151 balance int8 Q.K^T prefill attention (flag attn_i8qk)
     return t;
 }
 

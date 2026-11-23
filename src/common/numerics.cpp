@@ -229,6 +229,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOESKIP", &S::moeskip},  // v0252-f5
         {"ATTN_SX", &S::attn_sx},      // v0252-strixc2
         {"ATTN_I4QK", &S::attn_i4qk},  // v0252-8sfp
+        {"ATTN_I8QK", &S::attn_i8qk},  // v0252-8sattn
     }};
     return t;
 }
@@ -487,6 +488,21 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     // decides (device::Profile::attn_i4qk_fast); models with MXFP4 tensors only (the product models, like h16 here);
     // ops::chooseAttnPrefill still needs both kernels and the KG-3 copy path. WHIRL_ATTN_I4QK=0 turns it off (A/B arm).
     F.attn_i4qk = r.mode == Mode::fast && t.attn_i4qk_profile && t.has_mxfp4 && !(e.attn_i4qk && *e.attn_i4qk == "0");
+    // v0252-8sattn (PLAN V1-148): the BALANCE gfx1151 prefill attention with int8 Q.K^T (attn_prefill_wmma_i8 / _s_i8 on
+    // v_wmma_i32_16x16x16_iu8, the f16 rate on this card) whose int8 query pieces free the 32 VGPRs that hold the next K / V
+    // tile while the current one is scored (register prefetch; the f16 kernel sits at the 256-VGPR wall). Per-row int8 query
+    // / key codes (kernels/shared/attn_i8qk.h): changes the output, so balance only, under its item kvq8 (int8 K on the q8h
+    // path it runs on; the query codes are the 8060S balance "prefill int8 activations"); precise / fast never (fast has
+    // its int4 form). NOT on balance's allowed list (quantized attention is a fast item; Sir Pifeng decides): the device
+    // row's default (device::Profile::attn_i8qk_balance) is false on both cards, so it runs only with WHIRL_ATTN_I8QK=1
+    // (the owner-decision diagnostic), and only where the gfx1151 kernel exists; models with MXFP4 tensors only;
+    // ops::chooseAttnPrefill still needs both kernels and the KG-3 copy path, and attn_sx keeps precedence where it is on
+    // (Ornith). WHIRL_ATTN_I8QK=0 = off.
+    {
+        const bool i8_can = r.mode == Mode::balance && t.gfx1151 && t.has_mxfp4 && r.has(Item::kvq8);
+        const bool i8_on = e.attn_i8qk ? *e.attn_i8qk == "1" || (t.attn_i8qk_profile && *e.attn_i8qk != "0") : t.attn_i8qk_profile;
+        F.attn_i8qk = i8_can && i8_on;
+    }
 }
 
 // tune.cpp:939-982 on the item table (the per-item overrides, WHIRL_Q8DEC, relaxacc, noteSwitches) and the flags
@@ -643,6 +659,12 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     if (items)
         if (const Raw& v = e.attn_i4qk; v && *v != "0" && p.mode != Mode::fast)
             p.ignored.push_back(std::format("WHIRL_ATTN_I4QK={} ignored: the int4 Q.K^T prefill attention is fast-only ({} never takes it)", *v,
+                                            modeName(p.mode)));
+    // v0252-8sattn: WHIRL_ATTN_I8QK other than "0" in precise / fast is noted once (the flag stays off there: precise is
+    // bit-identical, fast has the int4 form)
+    if (items)
+        if (const Raw& v = e.attn_i8qk; v && *v != "0" && p.mode != Mode::balance)
+            p.ignored.push_back(std::format("WHIRL_ATTN_I8QK={} ignored: the int8 Q.K^T prefill attention is balance-only ({} never takes it)", *v,
                                             modeName(p.mode)));
     if (items) {
         if (const Raw& v = e.spec_sample; v && !v->empty())
