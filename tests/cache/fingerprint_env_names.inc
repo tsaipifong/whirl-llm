@@ -93,6 +93,9 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_MOEP_DN",    // src/common/numerics.cpp
     "WHIRL_MOEP_COMB",  // src/common/numerics.cpp
     "WHIRL_MOEP_GUW",   // src/common/numerics.cpp (v0252-8smoe: routing-aware wide moep gate + up tile; same bits, hashed like MOEP_GU)
+    "WHIRL_MOEP_DHS",   // src/common/numerics.cpp (v0252-8smoe2 C: coalesced f16 down epilogue; same bits, hashed like MOEP_GU)
+    "WHIRL_MOEP_DNA",   // src/common/numerics.cpp (v0252-8smoe2 D: COMB 5 atomic down variant; hashed like MOEP_COMB)
+    "WHIRL_MOEP_FQ",    // src/common/numerics.cpp (v0252-8smoe2 E: fused-dequant moep twins; same bits, hashed like MOEP_GU)
     "WHIRL_MOE_RFUSE",  // src/common/numerics.cpp (feat026-router, v0251-a11port)
     "WHIRL_MOE_FUSE",   // src/common/numerics.cpp (feat026-moedec, v0252-c3port: other kernels, same bits; hashed as MOE_RFUSE)
     "WHIRL_MOESKIP",  // src/common/numerics.cpp (feat027 moeskip, v0252-f5: fast-only, drops routed MoE experts)

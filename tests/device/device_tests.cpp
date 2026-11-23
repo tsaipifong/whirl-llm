@@ -187,6 +187,10 @@ void testProfiles() {
     // v0252-8smoe (B, PLAN V1-147): the routing-aware wide moep gate + up tile is opt-in on both cards (v0252-8sopen: screen
     // 8smoe-screen OPEN, ADR-0019; WHIRL_MOEP_GUW=g64n128k64 turns it on)
     CHECK(a.moep_guw == 0 && b.moep_guw == 0);
+    // v0252-8smoe2 (PLAN V1-147): the three opt-in moep levers, off on both cards until their screens (progress/8smoe2-C / -D /
+    // -E.json) show a gain beyond the error (ADR-0019). A default flip = the device_profile.h row + THIS line (D: 4 =
+    // m128w8n128k64; C / E: true) - numerics_plan_tests testMoep2Flags follows the row by itself.
+    CHECK(!a.moep_dhs && !b.moep_dhs && a.moep_dna == 0 && b.moep_dna == 0 && !a.moep_fq && !b.moep_fq);
     // v0252-8sdec (PLAN V1-142): the precise grouped gemvh (gemvhg, gfx1151 object only) is opt-in on both cards
     // (v0252-8sopen: screens 8sdec-screen2 / -bands OPEN, ADR-0019; WHIRL_GEMVH_GRP=1 turns it on)
     CHECK(!a.gemvh_group_dense && !b.gemvh_group_dense);

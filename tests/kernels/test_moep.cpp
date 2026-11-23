@@ -12,6 +12,11 @@
 //   * gemm_moepdh_<v> == f16(gemm_moe32r) bits; moe_combine4h and the fused gemm_moepdhc_<v> equal each other
 //     bitwise and moe_combine within one f16 rounding of every expert output
 //   * gemm_moepda_<v> (atomic scatter) + moe_combine4 (K = 0) == moe_combine within f32 reassociation
+//   v0252-8smoe2 (opt-in twins, invariance against their base kernels):
+//   * C gemm_moepdhs_<v> (coalesced f16 store) == gemm_moepdh_<v> bits (= f16(gemm_moe32r))
+//   * E gemm_moepfqgu_<v> == gemm_moegu bits; gemm_moepfqdn_<v> == gemm_moe32r bits; gemm_moepfqdh_<v> / _moepfqdhs_<v> ==
+//     f16(gemm_moe32r) bits; gemm_moepfqda_<v> within the atomic bound of gemm_moepda (only where E and F are multiples
+//     of 256: whole MXFP4 super-blocks, the host rule ops::moepFqShapeOk)
 // Routings: skewed (a hot expert with 1/7 of the pairs: several BNMAX tiles, tiles of 1..BNMAX tokens, empty
 // 16-token fragments) at 200 and 1500 tokens, and a Zipf(1.0) routing at 2048 and 4096 tokens (no repeated expert per token).
 // SPDX-License-Identifier: Apache-2.0
@@ -151,6 +156,15 @@ void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& d
             c.sync();
             c.rep.add(cmpExact(std::string("gemm_moepgu_") + vg.name + "_mxfp4 == gemm_moegu_mxfp4" + tag, anew.down<std::uint16_t>(ar.size()), ar,
                                Kind::invariant));
+            // v0252-8smoe2 (E): the fused-dequant twin, same tile list and grid
+            if (c.k.moep_fq_gu[v] && E % 256 == 0 && F % 256 == 0) {
+                anew.fill(0xff);
+                hip::launch(c.k.moep_fq_gu[v], {static_cast<unsigned>(mt) * cdivp(F, static_cast<unsigned>(vg.gr)), 1, 1}, {256, 1, 1}, 0, c.s, dgate.p(),
+                            dup.p(), gate.row_bytes, F, xg.p(), anew.p(), E, tv.p(), nv.p());
+                c.sync();
+                c.rep.add(cmpExact(std::string("gemm_moepfqgu_") + vg.name + "_mxfp4 == gemm_moegu_mxfp4" + tag, anew.down<std::uint16_t>(ar.size()), ar,
+                                   Kind::invariant));
+            }
         }
         // combine4 (same bits as moe_combine)
         if (c.k.moe_combine4 && E % 4 == 0) {
@@ -184,6 +198,13 @@ void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& d
             hip::launch(c.k.moep_dn[v], {grid, 1, 1}, {256, 1, 1}, 0, c.s, ddown.p(), down.row_bytes, E, aref.p(), ynew.p(), F, tv.p(), nv.p());
             c.sync();
             c.rep.add(cmpExact("gemm_moepdn_" + vn + "_mxfp4 == gemm_moe32r_mxfp4" + tag, ynew.down<float>(yr.size()), yr, Kind::invariant));
+            const bool fq_shape = E % 256 == 0 && F % 256 == 0;  // v0252-8smoe2 (E): ops::moepFqShapeOk
+            if (c.k.moep_fq_dn[v] && fq_shape) {
+                ynew.fill(0xff);
+                hip::launch(c.k.moep_fq_dn[v], {grid, 1, 1}, {256, 1, 1}, 0, c.s, ddown.p(), down.row_bytes, E, aref.p(), ynew.p(), F, tv.p(), nv.p());
+                c.sync();
+                c.rep.add(cmpExact("gemm_moepfqdn_" + vn + "_mxfp4 == gemm_moe32r_mxfp4" + tag, ynew.down<float>(yr.size()), yr, Kind::invariant));
+            }
             Buf cnt(static_cast<std::size_t>(n) * nrb * 4);
             if (c.k.moep_dc[v]) {
                 // fused combine: Y and x bitwise, counters zero after, a second run equal
@@ -223,6 +244,21 @@ void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& d
                 std::vector<std::uint16_t> yr16(yr.size());
                 for (std::size_t i = 0; i < yr.size(); ++i) yr16[i] = f2h(yr[i]);
                 c.rep.add(cmpExact("gemm_moepdh_" + vn + "_mxfp4 == f16(gemm_moe32r)" + tag, yh.down<std::uint16_t>(yr16.size()), yr16, Kind::invariant));
+                // v0252-8smoe2: C (coalesced store) and the E twins of the f16-output kernels store the same f16 bits
+                {
+                    Buf y2(static_cast<std::size_t>(pairs) * E * 2);
+                    const std::pair<hip::Function, std::string> twins[] = {{c.k.moep_dhs[v], "gemm_moepdhs_"},
+                                                                           {fq_shape ? c.k.moep_fq_dh[v] : nullptr, "gemm_moepfqdh_"},
+                                                                           {fq_shape ? c.k.moep_fq_dhs[v] : nullptr, "gemm_moepfqdhs_"}};
+                    for (const auto& [fn, pre] : twins) {
+                        if (!fn) continue;
+                        y2.fill(0xff);
+                        hip::launch(fn, {grid, 1, 1}, {256, 1, 1}, 0, c.s, ddown.p(), down.row_bytes, E, aref.p(), y2.p(), F, tv.p(), nv.p());
+                        c.sync();
+                        c.rep.add(cmpExact(pre + vn + "_mxfp4 == gemm_moepdh_" + vn + " == f16(gemm_moe32r)" + tag, y2.down<std::uint16_t>(yr16.size()), yr16,
+                                           Kind::invariant));
+                    }
+                }
                 const auto xhv = xh.down<float>(xr.size());
                 // one f16 rounding of every expert output (2^-11 relative) + f32 noise
                 c.rep.add(cmpTol("moe_combine4h (f16 yd, balance candidate) vs moe_combine" + tag, xhv, xr_d, sc, std::ldexp(1.0, -10), 1e-6));
@@ -247,6 +283,16 @@ void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& d
                 // f32 reassociation of K + 2 terms: (K + 2) * 2^-24 of sum |terms|, kept at 1e-6
                 c.rep.add(cmpTol("gemm_moepda_" + vn + "_mxfp4 (atomic scatter, fast candidate) vs moe_combine" + tag, xa.down<float>(xr.size()), xr_d, sc,
                                  1e-6, 1e-7));
+                if (c.k.moep_fq_da[v] && fq_shape) {  // v0252-8smoe2 (E): the same bound
+                    xa.up(x0);
+                    hip::launch(c.k.moe_combine4, {cdivp(E, 1024), static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, xa.p(), dysh.p(), dsg.p(), yref.p(),
+                                inv.p(), dw.p(), E, 0);
+                    hip::launch(c.k.moep_fq_da[v], {grid, 1, 1}, {256, 1, 1}, 0, c.s, ddown.p(), down.row_bytes, E, aref.p(), F, tv.p(), nv.p(), perm.p(),
+                                dw.p(), xa.p(), K);
+                    c.sync();
+                    c.rep.add(cmpTol("gemm_moepfqda_" + vn + "_mxfp4 (atomic scatter, fast candidate) vs moe_combine" + tag, xa.down<float>(xr.size()), xr_d,
+                                     sc, 1e-6, 1e-7));
+                }
             }
         }
     }

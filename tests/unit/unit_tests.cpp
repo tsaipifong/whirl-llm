@@ -79,6 +79,8 @@ const OrderRow kOrder[] = {
     {"kernels.gemm", "testGemvhTuneDefault"},  // v0252-c2acc (gfx1201 precise gemvh default = m1_q1)
     {"kernels.moe", "testMoepSchedule"},  // v0251-a7port
     {"kernels.moe", "testMoeSkipRef"},  // v0252-f5 (moeskip host reference)
+    {"kernels.moe", "testMoepDhsMap"},  // v0252-8smoe2 (C: coalesced f16 epilogue maps)
+    {"kernels.moe", "testMoepFqMap"},   // v0252-8smoe2 (E: fused-dequant fetch map)
     {"kernels.sample", "testArgmaxKeys"},       // v0252-f1arg (feat026-argmax's key check)
     {"kernels.sample", "testArgmaxRankModel"},  // v0252-f1arg
     {"model.core", "testValueScope"},

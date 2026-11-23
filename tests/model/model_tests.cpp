@@ -2585,6 +2585,7 @@ void testEnvSnapshot() {
                                      "ATTN_SX",  // v0252-strixc2: numerics loadFlags, not in the exec dump (unit testAttnSxFlag)
                                      "ATTN_I4QK",  // v0252-8sfp: numerics loadFlags, not in the exec dump (unit testAttnI4qkFlag)
                                      "MOEP_GUW",  // v0252-8smoe: numerics loadFlags, not in the exec dump (unit testMoepGuwFlag)
+                                     "MOEP_DHS", "MOEP_DNA", "MOEP_FQ",  // v0252-8smoe2: numerics loadFlags (unit testMoep2Flags)
                                      "DQ_FULL",  // v0252-kvlong2: Model::load -> allocScratch dq_ctx (iso model.scratch dq_copy_covers_context)
                                      "GEMM_TAIL"};  // v0252-pp2k2: Model::load -> config::gemmTailEnv (iso env_snapshot, forward.dispatch gemm_tail_launches)
     for (const auto& e : names) {
@@ -3114,6 +3115,9 @@ nu::Target targetOf(const q::Model& m) {
     t.attn_i4qk_profile = whirl::device::profile(m.arch).attn_i4qk_fast;  // v0252-8sfp
     t.moep_comb_fast_skip_profile = whirl::device::profile(m.arch).moep_comb_fast_skip;  // v0252-8smoe (A)
     t.moep_guw_profile = whirl::device::profile(m.arch).moep_guw;  // v0252-8smoe (B)
+    t.moep_dhs_profile = whirl::device::profile(m.arch).moep_dhs;  // v0252-8smoe2 (C)
+    t.moep_dna_profile = whirl::device::profile(m.arch).moep_dna;  // v0252-8smoe2 (D)
+    t.moep_fq_profile = whirl::device::profile(m.arch).moep_fq;    // v0252-8smoe2 (E)
     t.gemvh_grp_profile = whirl::device::profile(m.arch).gemvh_group_dense;  // v0252-8sdec
     return t;
 }
