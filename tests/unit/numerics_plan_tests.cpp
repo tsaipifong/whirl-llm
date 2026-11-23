@@ -88,6 +88,7 @@ nu::Target target(const CardFake& c, std::string_view model, bool kv_explicit) {
     t.k_moe_skip = true;
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     t.attn_sx_profile = c.prof.attn_sx_balance;  // v0252-strixc2 (tune.cpp numericsTarget)
+    t.gemvh_grp_profile = c.prof.gemvh_group_dense;  // v0252-8sdec (tune.cpp numericsTarget)
     return t;
 }
 
@@ -623,6 +624,10 @@ void testLoadRules() {
                fl({{"GEMVH_F32", ""}}).flags.gemvh_f32 && !fl({{"GEMVH_F32", "0"}}).flags.gemvh_f32 &&
                !fl({{"GEMVH_F32", "1"}}, "precise").lossy_override,
            "GEMVH_F32: envFlag rule (gemvh_f32)");
+    // v0252-8sdec: WHIRL_GEMVH_GRP -> gemvh_grp, the envFlag rule, never lossy (default off on this R9700 target)
+    NCHECK(!fl({}).flags.gemvh_grp && fl({{"GEMVH_GRP", "1"}}).flags.gemvh_grp && fl({{"GEMVH_GRP", ""}}).flags.gemvh_grp &&
+               !fl({{"GEMVH_GRP", "0"}}).flags.gemvh_grp && !fl({{"GEMVH_GRP", "1"}}, "precise").lossy_override,
+           "GEMVH_GRP: envFlag rule (gemvh_grp)");
     NCHECK(!fl({{"G8T", "0"}}).flags.g8t && fl({}).flags.g8t, "G8T");
     // feat026-moep (was loader.cpp envGet; t = the R9700 card, where the default is off): variant names -> index + 1,
     // unknown / "" / "0" / unset -> 0 (off), MOEP_COMB strtoul
@@ -853,6 +858,7 @@ void testFastOnlyOverrides() {
         {"ATTN_KGVAR", 'B'},  // v0252-c1port: attn_kgv / attn_kgk, designed bit-identical to attn_kg (kt attn, golden)
         // v0252-c3port (feat026-moedec): fused precise MoE decode / gemvh on f32 input, bit-identical (kt moefuse, golden)
         {"MOE_FUSE", 'B'},   {"GEMVH_F32", 'B'},
+        {"GEMVH_GRP", 'B'},  // v0252-8sdec: grouped precise gemvh, bit-identical to gemvh per matrix (kt gemvhg, golden)
         {"ATTN_WS4R", 'B'},  // v0252-ws4r97b: gfx1201 attn_ws4r1 / 2[b], bit-identical to attn_wsplit1 / 2 (kt ws4r, golden)
         // v0252-l2split: another decode split partition (another f32 combine order): balance / fast only, precise ignores it
         {"ATTN_LSPLIT", 'L'},
@@ -1089,8 +1095,10 @@ void testRelaxDenseArmCard(const CardFake& c) {
         return nu::plan(r, t);
     };
     const bool g51 = c.prof.numerics_8060s;
-    const std::uint32_t wk = g51 ? 4u : 8u;
-    const float wa = g51 ? 0.1f : 0.02f;
+    // v0252-8sdec (PLAN V1-143): both cards ship k8a02 for dense fast (the 8060S joined; its screen progress/8sdec-screen.json)
+    const std::uint32_t wk = 8u;
+    const float wa = 0.02f;
+    (void)g51;
     const nu::Target t0 = target(c, "swift", false);  // no arm: the plan before round 3
     NCHECK(t0.relax_dense_arm.empty(), "RD-2 {}: the hand-built target has a dense arm", c.name);
     nu::Target t = t0;
@@ -1103,7 +1111,7 @@ void testRelaxDenseArmCard(const CardFake& c) {
                    p.overrides.empty() && p.ignored.empty(),
                "RD-2 {} Swift fast: k {} alpha {} (want {} / {})", c.name, p.flags.relax_k, p.flags.relax_alpha, wk, wa);
         NCHECK(nu::logLine(p).find(std::format("[k {}, alpha {:.2f}", wk, wa)) != std::string::npos, "RD-2 {}: plan line {}", c.name, nu::logLine(p));
-        NCHECK((p.bitsKey() != base.bitsKey()) == !g51, "RD-2 {}: the arm moves the R9700 plan only", c.name);
+        NCHECK(p.bitsKey() != base.bitsKey(), "RD-2 {}: the arm moves the fast plan (k / alpha)", c.name);
         NCHECK(planOf("fast", t, {}, false).flags == p.flags, "RD-2 {}: flags differ without load_overrides", c.name);
         // RD-3
         NCHECK(planOf("fast", t, {{"RELAX_K", "4"}, {"RELAX_ALPHA", "0.1"}}).flags == base.flags,
@@ -1138,7 +1146,8 @@ void testRelaxDenseArm() {
     NCHECK(nu::relaxDenseArm("") == nullptr && nu::relaxDenseArm("k4a10d2") == nullptr && nu::relaxArm("k8a02") == nullptr, "RD-1 the dense and MoE arm tables are separate");
     NCHECK(nu::relaxDenseDefaultName(false) == "k8a02" && nu::relaxDenseDefaultName(false) == nu::relax_dense_default_r9700, "RD-1 R9700 dense default '{}'",
            nu::relaxDenseDefaultName(false));
-    NCHECK(nu::relaxDenseDefaultName(true).empty() && nu::relax_dense_default_8060s.empty(), "RD-1 8060S dense default '{}' (want none: k 4 / alpha 0.1 stays)",
+    // v0252-8sdec (PLAN V1-143): the 8060S ships the R9700's kept arm k8a02 too (A arm = WHIRL_RELAX_K=4 WHIRL_RELAX_ALPHA=0.1)
+    NCHECK(nu::relaxDenseDefaultName(true) == "k8a02" && nu::relax_dense_default_8060s == "k8a02", "RD-1 8060S dense default '{}' (want k8a02)",
            nu::relaxDenseDefaultName(true));
     for (const CardFake& c : k_cards) testRelaxDenseArmCard(c);
     // the rule is the name: a target that names the arm takes it on any card (the loader decides per card)
@@ -1445,6 +1454,36 @@ static void testKgVarFlag() {
 // changes nothing else (bitsKey = the default plan's with attn_sx false, same log line, no +overrides, never lossy); "1"
 // changes nothing in balance; a non-"0" value in precise / fast leaves the flag off and adds exactly one Plan::ignored
 // note. A custom balance item list without h16 leaves it off. Fails before the port (loadFlags never sets attn_sx).
+// v0252-8sdec (PLAN V1-142): gemvh_grp (the precise grouped gemvh) defaults on for DENSE models on the card whose profile
+// row says so (gfx1151 gemvh_group_dense), every mode (bitwise: only precise rows can take the kernel); off on MoE models and
+// on the R9700; WHIRL_GEMVH_GRP=0 / =1 win both ways and never mark the plan lossy. The other flags do not move. Fails to
+// build before the change (no Target::gemvh_grp_profile / Flags::gemvh_grp).
+static void testGemvhGrpDefault() {
+    auto planOf = [](const char* mode, const nu::Target& t, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    for (const CardFake& c : k_cards)
+        for (const char* model : {"swift", "moe"})
+            for (const char* mode : {"precise", "balance", "fast"}) {
+                const nu::Target t = target(c, model, false);
+                const bool want = std::string_view(c.name) == "8060s" && std::string_view(model) == "swift";
+                const nu::Plan p = planOf(mode, t, {});
+                NCHECK(p.flags.gemvh_grp == want, "gemvh_grp {} {} {}: {} (want {})", c.name, model, mode, p.flags.gemvh_grp, want);
+                const nu::Plan off = planOf(mode, t, {{"GEMVH_GRP", "0"}}), on = planOf(mode, t, {{"GEMVH_GRP", "1"}});
+                NCHECK(!off.flags.gemvh_grp && on.flags.gemvh_grp && !off.lossy_override && !on.lossy_override, "gemvh_grp {} {} {}: env 0 / 1", c.name,
+                       model, mode);
+                nu::Flags a = p.flags, b = off.flags;
+                a.gemvh_grp = b.gemvh_grp = false;
+                NCHECK(a == b, "gemvh_grp {} {} {}: another flag moved", c.name, model, mode);
+                nu::Target t0 = t;
+                t0.gemvh_grp_profile = false;
+                NCHECK(!planOf(mode, t0, {}).flags.gemvh_grp, "gemvh_grp {} {} {}: on without the profile row", c.name, model, mode);
+            }
+}
+
 static void testAttnSxFlag() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -2038,6 +2077,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testFastOnlyRefusal();  // bug-fastonly: refusal notes, fast unchanged
     testRelaxMoeArms();  // v0252-f2 (fails before the port: no arm is known)
     testRelaxDenseArm();  // v0252-b5 round 3 (e) (fails to build before the change: no dense arm)
+    testGemvhGrpDefault();  // v0252-8sdec (fails to build before the change: no gemvh_grp)
     testMoeSkipPlan();  // v0252-f5 (fails before the port: moeskip not implemented, not opt-in, no WHIRL_MOESKIP, no flags)
     pass += g_p;
     fail += g_f;

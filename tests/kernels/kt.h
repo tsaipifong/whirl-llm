@@ -219,6 +219,7 @@ void testAttnDq4(Ctx& c);  // "attndq4": attn_dq4 at 256 splits / contexts up to
 // (kv_dq_rows_r_q4) attn_kgk / attn_kg <np> == one-range attn_kgs <np> (fast prefill, candidate A)
 void testAttnKgLong(Ctx& c);
 void testGemvh(Ctx& c);   // "gemvh": bitwise sweep of precise-decode gemvh/gemvh2
+void testGemvhg(Ctx& c);  // "gemvhg": grouped gemvhg == gemvh per matrix (v0252-8sdec, gfx1151)
 void benchGemvh(Ctx& c);  // "gemvhbench": timing only
 void testGemvhv(Ctx& c);  // "gemvhv": bitwise sweep of gfx1201 gemvh candidates from WHIRL_KT_GEMVH_HSACO (on request)
 void benchAttn(Ctx& c);  // "attnbench": timing only, run with --only attnbench

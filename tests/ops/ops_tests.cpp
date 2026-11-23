@@ -232,6 +232,7 @@ int main() {
     testOpsGemm();
     testOpsGemmFq();  // v0251-a3port
     testGemvhF32();   // v0252-c3port (fails before the port: gemvhF32 is a stub)
+    testGemvhGroup();  // v0252-8sdec (fails to build before the change: no chooseGemvhGroup)
     testOpsGemmTail();  // v0252-pp2k2 (fails to build before F1: no planGemmF16 / GemmFlags::gemm_tail)
     testAttnDecode();
     testAttnDecodeWs4r();  // v0252-ws4r97b (fails before phase 2: stub profile rows 0, chooseAttnDecode never swaps)

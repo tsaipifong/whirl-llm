@@ -2574,7 +2574,7 @@ void testEnvSnapshot() {
     // GPU load / at static initialisation) named here with the test that covers its value: flag() above for the
     // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
     const std::vector<std::string> covered = envtab::namesCovered();
-    const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "MOEP_GU", "MOEP_DN", "MOEP_COMB", "MOE_RFUSE", "MOE_FUSE", "GEMVH_F32", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
+    const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "MOEP_GU", "MOEP_DN", "MOEP_COMB", "MOE_RFUSE", "MOE_FUSE", "GEMVH_F32", "GEMVH_GRP", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
                                      "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS",  // these three: Model::load -> forwardEnv (testForwardEnv)
                                      "FDQ8S", "FDQ8S_MIN",  // v0251-a3port: Model::load -> fdqEnv (testFdqEnv)
                                      "ATTN_KGVAR",  // v0252-c1port: numerics loadFlags, not in the exec dump (unit testKgVarFlag)
@@ -3109,6 +3109,7 @@ nu::Target targetOf(const q::Model& m) {
     t.k_moe_skip = m.k.moe_topk_skip != nullptr && m.k.moe_skip_apply != nullptr && m.k.moe_route_skip != nullptr && m.k.moe_combine_skip != nullptr;
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     t.attn_sx_profile = whirl::device::profile(m.arch).attn_sx_balance;  // v0252-strixc2
+    t.gemvh_grp_profile = whirl::device::profile(m.arch).gemvh_group_dense;  // v0252-8sdec
     return t;
 }
 
@@ -3185,11 +3186,12 @@ void testRelaxDefaultTarget() {
         m->arch = a;
         const std::string cell = std::format("b5 dense relax {}", g51 ? "gfx1151" : "gfx1201");
         nu::Target t = q::numericsTarget(*m);
-        check(t.relax_dense_arm == (g51 ? std::string_view() : std::string_view("k8a02")), std::format("{}: numericsTarget dense arm '{}'", cell, t.relax_dense_arm));
+        // v0252-8sdec (PLAN V1-143): k8a02 on both cards
+        check(t.relax_dense_arm == std::string_view("k8a02"), std::format("{}: numericsTarget dense arm '{}'", cell, t.relax_dense_arm));
         check(n2a::targetOf(*m).relax_dense_arm == t.relax_dense_arm, cell + ": n2a::targetOf differs from numericsTarget");
         t.mtp = true;  // (the host-only Model has no MTP block; the GPU load of Swift does)
         const nu::Plan pf = nu::plan(nu::forModel(nu::parseMode("fast", "test"), false), t);
-        check(pf.flags.relax_on && pf.flags.relax_k == (g51 ? 4u : 8u) && pf.flags.relax_alpha == (g51 ? 0.1f : 0.02f) && pf.relax_drafts == 0u,
+        check(pf.flags.relax_on && pf.flags.relax_k == 8u && pf.flags.relax_alpha == 0.02f && pf.relax_drafts == 0u,
               std::format("{}: Swift fast k {} alpha {} drafts {}", cell, pf.flags.relax_k, pf.flags.relax_alpha, pf.relax_drafts));
         for (const char* mode : {"precise", "balance"}) {
             nu::Target t0 = t;
