@@ -61,12 +61,14 @@ public:
     // numerics::loadFlags (v0252-8smoe2, PLAN V1-147): WHIRL_MOEP_DHS (C, coalesced f16 down epilogue), WHIRL_MOEP_DNA (D, the
     // COMB 5 atomic down variant name), WHIRL_MOEP_FQ (E, fused-dequant moep twins); all opt-in
     Value moep_dhs, moep_dna, moep_fq;
+    // numerics::loadFlags (v0252-8sq4, F8): WHIRL_DQ4_ORDER, WHIRL_DQ4_MINKEYS; Model::load (fallback): WHIRL_FAST_KVQ8H
+    Value dq4_order, dq4_min_keys, fast_kvq8h;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 77;  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (74 -> 77)  // v0252-8smoe: + moep_guw (72 -> 73; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (73 -> 74)
+    static constexpr std::size_t n_names = 80;  // v0252-8sq4: + dq4_order, dq4_min_keys, fast_kvq8h (77 -> 80)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (74 -> 77)  // v0252-8smoe: + moep_guw (72 -> 73; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (73 -> 74)
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

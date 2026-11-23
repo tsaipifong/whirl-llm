@@ -734,6 +734,9 @@ struct AttnKernels {
     F attn_decode{}, kv_store{}, attn_split{}, attn_combine{}, attn_prep{}, attn_combine_q8{};
     F attn_wsplit1{}, attn_wsplit2{}, attn_prefill_wmma{}, attn_kx{};
     F attn_dq4{};  // q4 KV decode / verify (gfx1151 / gfx1201; null if not built): attn_wsplit1 arguments, 256 threads
+    // v0252-8sq4 (F8 order): gfx1151 attn_dq4 with the gfx1201 block order (verify row fastest: the rows of one (head, split)
+    // share K / V tiles in L2); same arguments, grid and partials as attn_dq4. Null on gfx1201 (its attn_dq4 has that order)
+    F attn_dq4o{};
     F attn_ws4{};  // gfx1151 4-wave pipelined attn_wsplit1 (same arguments / bits, one query per group): decode rows (WHIRL_ATTN_WS4=0: old path)
     F attn_ws4g[3]{};  // gfx1151 multi-row verify, CG 1..3 tiles (attn_ws4g{1,2,3}[_q8]; 256 threads, grid.x = n_kv x column groups)
     // v0252-ws4r97b (PLAN V1-87): gfx1201 4-wave pipelined attn_wsplit1 / attn_wsplit2 (same arguments / groups / grid /

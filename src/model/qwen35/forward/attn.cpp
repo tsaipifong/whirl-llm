@@ -114,6 +114,8 @@ void Context::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         // device::Profile::attn_lsplit_blocks
         static_assert(ops::kAttnLsplitAuto == numerics::kAttnLsplitAuto, "attn_lsplit auto: one value in numerics and ops");
         af.attn_lsplit = nf().attn_lsplit;
+        af.dq4_order = nf().dq4_order;        // v0252-8sq4 (F8 order: attn_dq4o; WHIRL_DQ4_ORDER)
+        af.dq4_min_keys = nf().dq4_min_keys;  // v0252-8sq4 (F8 split; WHIRL_DQ4_MINKEYS)
         const ops::AttnDecodePlan pl = ops::chooseAttnDecode(ap, af, k, k.caps, device::profile(arch));
         if (pl.kind == ops::AttnDecodeKind::split)
             hip::launch(pl.f, pl.grid, pl.block, 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv), I(hd), I(2 * hd), pos_buf,

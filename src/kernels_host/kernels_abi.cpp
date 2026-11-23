@@ -383,6 +383,7 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         k.attn_wsplit1 = L.opt("attn_wsplit1_q4");
         k.attn_wsplit2 = L.opt("attn_wsplit2_q4");
         k.attn_dq4 = L.opt("attn_dq4");
+        k.attn_dq4o = L.opt("attn_dq4o");  // v0252-8sq4 (gfx1151 object only)
     } else if (kv == KvFormat::q8 || kv == KvFormat::q8h) {
         k.attn_decode = L.req("attn_decode_q8");
         k.kv_store = L.req("kv_store_q8");

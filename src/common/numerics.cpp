@@ -234,6 +234,8 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOEP_DHS", &S::moep_dhs},    // v0252-8smoe2 (C)
         {"MOEP_DNA", &S::moep_dna},    // v0252-8smoe2 (D)
         {"MOEP_FQ", &S::moep_fq},      // v0252-8smoe2 (E)
+        {"DQ4_ORDER", &S::dq4_order},  // v0252-8sq4 (F8 order)
+        {"DQ4_MINKEYS", &S::dq4_min_keys},  // v0252-8sq4 (F8 split)
     }};
     return t;
 }
@@ -430,6 +432,16 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
         F.moep_dna = 0;
         for (int i = 0; i < kernels::kMoepDnN; ++i)
             if (*e.moep_dna == kernels::kMoepDn[i].name) F.moep_dna = static_cast<std::uint32_t>(i) + 1;
+    }
+    // v0252-8sq4 (PLAN V1-140 / V1-109, F8), fast only (q4 KV exists only there; precise / balance keep false / 0 and ignore
+    // the variables): the card's rows (device::Profile attn_dq4_row_order / dq4_min_keys, opt-in), then WHIRL_DQ4_ORDER ("0" /
+    // "" off, any other value on) and WHIRL_DQ4_MINKEYS (a whole decimal 1 .. 1048576 = the keys-per-split target; "0", ""
+    // or anything else = 0 = today's rule). ops::chooseAttnDecode uses them only on the attn_dq4 path.
+    if (r.mode == Mode::fast) {
+        F.dq4_order = t.dq4_order_profile;
+        F.dq4_min_keys = t.dq4_min_keys_profile;
+        if (e.dq4_order) F.dq4_order = onOff(e.dq4_order);
+        if (e.dq4_min_keys) F.dq4_min_keys = parseDq4MinKeys(*e.dq4_min_keys);
     }
     // v0251-a11port (feat026-router): the fused MoE router by default for MoE models, every mode (bit-identical to
     // moe_logits_f32 + moe_topk: kt moemx, golden); 0.2.5.1 on the gfx1151 code object (Radeon 8060S), v0252-c5port also
@@ -687,6 +699,16 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
         if (const Raw& v = e.attn_i4qk; v && *v != "0" && p.mode != Mode::fast)
             p.ignored.push_back(std::format("WHIRL_ATTN_I4QK={} ignored: the int4 Q.K^T prefill attention is fast-only ({} never takes it)", *v,
                                             modeName(p.mode)));
+    // v0252-8sq4: WHIRL_DQ4_ORDER / WHIRL_DQ4_MINKEYS other than "0" outside fast are noted once each (q4 KV and its attn_dq4
+    // path exist only in fast; the flags stay off there)
+    if (items) {
+        if (const Raw& v = e.dq4_order; v && *v != "0" && p.mode != Mode::fast)
+            p.ignored.push_back(std::format("WHIRL_DQ4_ORDER={} ignored: the q4 KV decode attention is fast-only ({} never takes it)", *v,
+                                            modeName(p.mode)));
+        if (const Raw& v = e.dq4_min_keys; v && *v != "0" && p.mode != Mode::fast)
+            p.ignored.push_back(std::format("WHIRL_DQ4_MINKEYS={} ignored: the q4 KV decode attention is fast-only ({} never takes it)", *v,
+                                            modeName(p.mode)));
+    }
     if (items) {
         if (const Raw& v = e.spec_sample; v && !v->empty())
             applyOverride(p, Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
@@ -782,6 +804,37 @@ std::optional<std::uint32_t> parseLsplit(std::string_view s) {
     }
     if (v <= 4096) return v;
     return std::nullopt;
+}
+
+// v0252-8sq4: WHIRL_DQ4_MINKEYS values (numerics.h)
+std::uint32_t parseDq4MinKeys(std::string_view s) {
+    if (s.empty() || s.size() > 7) return 0;
+    std::uint32_t v = 0;
+    for (const char ch : s) {
+        if (ch < '0' || ch > '9') return 0;
+        v = v * 10 + static_cast<std::uint32_t>(ch - '0');
+    }
+    return v <= 1048576u ? v : 0u;
+}
+
+// v0252-8sq4: the fallback's load-time decision (numerics.h)
+bool fastKvQ8hMoe(std::uint32_t row, const std::optional<std::string>& env, std::uint32_t ctx) {
+    std::uint32_t thr = row;
+    if (env) {
+        const std::string& s = *env;
+        bool num = !s.empty() && s.size() <= 9;
+        std::uint32_t v = 0;
+        for (const char ch : s) {
+            if (ch < '0' || ch > '9') {
+                num = false;
+                break;
+            }
+            v = v * 10 + static_cast<std::uint32_t>(ch - '0');
+        }
+        if (num) thr = v;
+    }
+    if (thr == 0) return false;
+    return ctx == 0 || ctx >= thr;
 }
 
 // v0252-f5: "T" or "T:M" - T a plain decimal in [0, 1] (digits with at most one '.', no sign, exponent, hex, inf or nan),
@@ -1100,9 +1153,10 @@ KvChoice chooseKvMode(const Request& r, bool moe, const KvCaps& caps) {
     // int8 with rotation where the code object has it, else plain int8 (every code object has q8)
     const KvFormat q8 = caps.q8h ? KvFormat::q8h : KvFormat::q8;
     if (r.has(Item::kvq4)) {
-        if (caps.fast_q8h && caps.q8h && !moe) {
+        if (caps.fast_q8h && caps.q8h && (!moe || caps.fast_q8h_moe)) {
             // RC6 (FAST-8S, 3-run means on the Radeon 8060S): q8h decodes +7/+19/+14% faster than q4 at
-            // 32k/64k/128k, prefill within noise, KL error 4-10x smaller
+            // 32k/64k/128k, prefill within noise, KL error 4-10x smaller. v0252-8sq4 (fallback): MoE models too where
+            // caps.fast_q8h_moe (opt-in; the q4 verify rows re-read the KV per row there, progress/v0252-8sq4.HANDOFF.md)
             c.kv = KvFormat::q8h;
             c.why = std::format("{}, {}: q8h (Radeon 8060S: faster decode than q4)", modeName(r.mode), model);
             return c;
@@ -1166,8 +1220,8 @@ std::optional<KvFormat> kvEstimateRequest(const std::optional<std::string>& kv_e
     return kv_env && *kv_env != "auto" ? kvFormatFromName(*kv_env) : std::nullopt;
 }
 
-KvFormat kvEstimate(KvEstSite site, const Request& r, bool moe, std::optional<KvFormat> req) {
-    const KvCaps caps = kvCapsEstimate(kvEstSiteIntegrated(site));
+KvFormat kvEstimate(KvEstSite site, const Request& r, bool moe, std::optional<KvFormat> req, bool fast_q8h_moe) {
+    const KvCaps caps = kvCapsEstimate(kvEstSiteIntegrated(site), fast_q8h_moe);
     return dump::kv(kvEstSiteName(site), r, moe, caps, req, chooseKv(r, moe, caps, req)).kv;
 }
 
