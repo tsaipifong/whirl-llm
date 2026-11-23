@@ -91,6 +91,9 @@ nu::Target target(const CardFake& c, std::string_view model, bool kv_explicit) {
     t.attn_i4qk_profile = c.prof.attn_i4qk_fast;  // v0252-8sfp (tune.cpp numericsTarget)
     t.moep_comb_fast_skip_profile = c.prof.moep_comb_fast_skip;  // v0252-8smoe (A, tune.cpp numericsTarget)
     t.moep_guw_profile = c.prof.moep_guw;  // v0252-8smoe (B, tune.cpp numericsTarget)
+    t.moep_dhs_profile = c.prof.moep_dhs;  // v0252-8smoe2 (C, tune.cpp numericsTarget)
+    t.moep_dna_profile = c.prof.moep_dna;  // v0252-8smoe2 (D)
+    t.moep_fq_profile = c.prof.moep_fq;    // v0252-8smoe2 (E)
     t.gemvh_grp_profile = c.prof.gemvh_group_dense;  // v0252-8sdec (tune.cpp numericsTarget)
     return t;
 }
@@ -858,6 +861,9 @@ void testFastOnlyOverrides() {
         // through the plan's refusal (v0251-a7pol B26-41, testMoepCombMode), so the variable's class stays 'L'.
         {"MOEP_GU", 'B'},  {"MOEP_DN", 'B'},   {"MOEP_COMB", 'L'},
         {"MOEP_GUW", 'B'},  // v0252-8smoe: the routing-aware wide moep gate + up variant, every variant the same bits (kt moemx)
+        // v0252-8smoe2: C coalesced f16 epilogue and E fused-dequant twins store the base kernels' bits (kt moemx); D picks the
+        // COMB 5 atomic down variant (the atomic class is fast-only through MOEP_COMB; its variable is 'L' like MOEP_COMB)
+        {"MOEP_DHS", 'B'}, {"MOEP_DNA", 'L'}, {"MOEP_FQ", 'B'},
         {"MOE_RFUSE", 'B'},  // v0251-a11port: fused router, bit-identical to moe_logits_f32 + moe_topk (kt moemx, golden)
         {"ATTN_KGVAR", 'B'},  // v0252-c1port: attn_kgv / attn_kgk, designed bit-identical to attn_kg (kt attn, golden)
         // v0252-c3port (feat026-moedec): fused precise MoE decode / gemvh on f32 input, bit-identical (kt moefuse, golden)
@@ -1649,6 +1655,76 @@ static void testMoepGuwFlag() {
     NCHECK(pl(tq, "balance", {}).flags.moep_guw == 0u, "moep_guw: non-MXFP4 routed experts off");
 }
 
+// v0252-8smoe2 (PLAN V1-147, levers C / D / E): device::Profile moep_dhs / moep_dna / moep_fq and WHIRL_MOEP_DHS / _DNA / _FQ.
+// The row (Target::*_profile) applies on the 8060S MoE MXFP4 plan: C and E in balance / fast, D in fast; 0 elsewhere. The
+// variables override it in any mode: DHS / FQ "0" / "" off, any other value on; DNA a kMoepDn name ("0" / "" / unknown off).
+// Tests follow the profile row: the shipped rows are read from k_cards, so a default flip is the row + the device pin only.
+// Each "=0" arm changes only its own flag; each switch changes bitsKey exactly where it changes its flag. Fails to build before
+// the change (no Flags::moep_dhs / moep_dna / moep_fq, EnvValues fields, Target::*_profile).
+static void testMoep2Flags() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    NCHECK(std::string(whirl::kernels::kMoepDn[3].name) == "m128w8n128k64", "kMoepDn[3] = m128w8n128k64");
+    std::size_t on_c = 0, on_d = 0, on_e = 0;
+    for (const bool forced : {false, true})  // the shipped rows, then rows with every lever on (the rule)
+        for (const char* mode : {"precise", "balance", "fast"})
+            for (const CardFake& c : k_cards)
+                for (const char* model : {"swift", "moe"}) {
+                    nu::Target t = target(c, model, false);
+                    if (forced) {
+                        t.moep_dhs_profile = t.moep_fq_profile = true;
+                        t.moep_dna_profile = 4u;
+                    }
+                    const bool moep = std::string_view(model) == "moe" && c.prof.numerics_8060s;
+                    const bool bf = moep && std::string_view(mode) != "precise", fa = moep && std::string_view(mode) == "fast";
+                    const bool want_c = bf && t.moep_dhs_profile, want_e = bf && t.moep_fq_profile;
+                    const std::uint32_t want_d = fa ? t.moep_dna_profile : 0u;
+                    const nu::Plan d = pl(t, mode, {});
+                    const std::string cell = std::format("{} {} {} {}", forced ? "forced" : "shipped", c.name, model, mode);
+                    NCHECK(d.flags.moep_dhs == want_c && d.flags.moep_dna == want_d && d.flags.moep_fq == want_e, "moep2 default {}: {} {} {}", cell,
+                           d.flags.moep_dhs, d.flags.moep_dna, d.flags.moep_fq);
+                    on_c += forced && want_c;
+                    on_d += forced && want_d != 0;
+                    on_e += forced && want_e;
+                    struct Sw {
+                        const char* name;
+                        const char* on;
+                        bool def_on;
+                    };
+                    for (const Sw& s : {Sw{"MOEP_DHS", "1", want_c}, Sw{"MOEP_DNA", "m128w8n128k64", want_d != 0}, Sw{"MOEP_FQ", "1", want_e}}) {
+                        const nu::Plan z = pl(t, mode, {{s.name, "0"}}), o = pl(t, mode, {{s.name, s.on}});
+                        nu::Flags fz = d.flags, fo = d.flags;
+                        if (std::string_view(s.name) == "MOEP_DHS") fz.moep_dhs = false, fo.moep_dhs = true;
+                        if (std::string_view(s.name) == "MOEP_DNA") fz.moep_dna = 0u, fo.moep_dna = 4u;
+                        if (std::string_view(s.name) == "MOEP_FQ") fz.moep_fq = false, fo.moep_fq = true;
+                        NCHECK(z.flags == fz && o.flags == fo && z.ignored == d.ignored && o.ignored == d.ignored && nu::logLine(z) == nu::logLine(d) &&
+                                   !o.lossy_override,
+                               "moep2 {} WHIRL_{}: =0 / ={} change only their own flag", cell, s.name, s.on);
+                        NCHECK((z.bitsKey() != d.bitsKey()) == s.def_on && (o.bitsKey() != d.bitsKey()) == !s.def_on,
+                               "moep2 {} WHIRL_{}: bitsKey differs exactly where the flag changes", cell, s.name);
+                        for (const char* off : {"", "0"}) {
+                            const nu::Plan x = pl(t, mode, {{s.name, off}});
+                            NCHECK(x.flags == fz, "moep2 {} WHIRL_{}='{}' = off", cell, s.name, off);
+                        }
+                    }
+                    for (const char* bogus : {"bogus", "m128w8", "1"})
+                        NCHECK(pl(t, mode, {{"MOEP_DNA", bogus}}).flags.moep_dna == 0u, "moep2 {} WHIRL_MOEP_DNA='{}' = off", cell, bogus);
+                    NCHECK(pl(t, mode, {{"MOEP_DNA", "m128w4n64k64"}}).flags.moep_dna == 2u, "moep2 {}: DNA by name", cell);
+                }
+    NCHECK(on_c == 2 && on_e == 2 && on_d == 1, "moep2 rule cells C {} D {} E {} (want 2 / 1 / 2: 8060S moe balance+fast / fast / balance+fast)", on_c,
+           on_d, on_e);
+    nu::Target tq = target(card("8060s"), "moe", false);
+    tq.moep_dhs_profile = tq.moep_fq_profile = true;
+    tq.moep_dna_profile = 4u;
+    tq.moe_mxfp4 = false;
+    const nu::Plan q = pl(tq, "fast", {});
+    NCHECK(!q.flags.moep_dhs && q.flags.moep_dna == 0u && !q.flags.moep_fq, "moep2: non-MXFP4 routed experts off");
+}
+
 static void testAttnI4qkFlag() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -2221,6 +2297,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testAttnSxFlag();  // v0252-strixc2 (fails before the port: loadFlags never sets attn_sx)
     testAttnI4qkFlag();  // v0252-8sfp (fails before the port: loadFlags never sets attn_i4qk)
     testMoepGuwFlag();  // v0252-8smoe (B; fails to build before the change: no Flags::moep_guw / EnvValues::moep_guw)
+    testMoep2Flags();  // v0252-8smoe2 (C / D / E; fails to build before the change: no Flags::moep_dhs / moep_dna / moep_fq)
     testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port); v0252-c3bdef (the R9700 MoE default rows fail before c3bdef)
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)

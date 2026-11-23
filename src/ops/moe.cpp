@@ -119,6 +119,19 @@ MoeFlags moepFloor(const MoeProblem& p, const MoeFlags& f, bool keep) {
 }
 }  // namespace
 
+Function moepFqTwin(Function fn, const kernels::MoeKernels& k) {
+    if (fn == nullptr) return fn;
+    for (int v = 0; v < kernels::kMoepGuN; ++v)
+        if (fn == k.moep_gu[v]) return k.moep_fq_gu[v] != nullptr ? k.moep_fq_gu[v] : fn;
+    for (int v = 0; v < kernels::kMoepDnN; ++v) {
+        const Function base[] = {k.moep_dn[v], k.moep_dh[v], k.moep_dhs[v], k.moep_da[v]};
+        const Function twin[] = {k.moep_fq_dn[v], k.moep_fq_dh[v], k.moep_fq_dhs[v], k.moep_fq_da[v]};
+        for (int i = 0; i < 4; ++i)
+            if (fn == base[i]) return twin[i] != nullptr ? twin[i] : fn;
+    }
+    return fn;
+}
+
 u32 moeTile(u32 n, u32 K, u32 R) { return n * K < 48 * R ? 32 : moe_bn; }
 
 int moepGuFor(u32 n, u32 K, u32 R, const MoeFlags& f, const kernels::MoeKernels& k) {
@@ -193,7 +206,10 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
         // v0252-8smoe: the routing-aware wide gate + up tile (moepGuFor; same bits for every variant)
         const int gv = moepGuFor(n, K, R, f, k);
         const kernels::MoepGuVariant& vg = kernels::kMoepGu[gv];
-        const kernels::MoepDnVariant& vd = kernels::kMoepDn[f.moep_dn];
+        // v0252-8smoe2 (D): the atomic scatter's down variant (moep_dna; its token tile must be the plan's: one tile list)
+        const bool dna_ok = f.moep_dna >= 0 && f.moep_dna < kernels::kMoepDnN && k.moep_da[f.moep_dna] != nullptr &&
+                            kernels::kMoepDn[f.moep_dna].bn == kernels::kMoepDn[f.moep_dn].bn;
+        int gridv = f.moep_dn;  // the variant whose BM sizes the down grid
         pl.kind = MoePrefillKind::moep;
         pl.bits = MoeBits::moe_f16_gemm;
         pl.gu_bn = static_cast<u32>(vg.bn);
@@ -203,7 +219,7 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
         // (moep_comb_ok) as well as prec_dec (WHIRL_Q8DEC=1 clears prec_dec in precise): 3 / 4 balance + fast, 5 fast only
         const bool lossy_ok = !f.prec_dec && f.moep_comb_ok != MoeFlags::MoepComb::bitwise;
         const bool atomic_ok = !f.prec_dec && f.moep_comb_ok == MoeFlags::MoepComb::atomic;
-        const bool cnt_ok = p.cnt_buf && static_cast<u32>(vd.bm) >= kernels::kMoepMinBm;
+        const bool cnt_ok = p.cnt_buf && static_cast<u32>(kernels::kMoepDn[f.moep_dn].bm) >= kernels::kMoepMinBm;
         pl.fgu = k.moep_gu[gv];
         pl.fdn = k.moep_dn[dv];
         if (f.moep_comb == 2 && k.moep_dc[dv] != nullptr && cnt_ok) {
@@ -213,13 +229,14 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
             // v0252-combfix: moepYdh3 (the caller's flags; here f == f_in) - lossy_ok, COMB 3, gemm_moepdh of this DN
             // variant, moe_combine4h, E % 4; the same predicate gives a forward below the row floor its f16 moe_yd
             pl.ydh = true;
-            pl.fdn = k.moep_dh[dv];
+            pl.fdn = f.moep_dhs && k.moep_dhs[dv] != nullptr ? k.moep_dhs[dv] : k.moep_dh[dv];  // v0252-8smoe2 (C): same bits
         } else if (lossy_ok && f.moep_comb == 4 && k.moep_dhc[dv] != nullptr && cnt_ok) {
             pl.ydh = pl.comb_fused = true;
             pl.fdn = k.moep_dhc[dv];
         } else if (atomic_ok && f.moep_comb == 5 && k.moep_da[dv] != nullptr && k.moe_combine4 != nullptr && E % 4 == 0) {
             pl.comb_atomic = true;
-            pl.fdn = k.moep_da[dv];
+            if (dna_ok) gridv = f.moep_dna;  // v0252-8smoe2 (D)
+            pl.fdn = k.moep_da[gridv];
         }
         if (pl.ydh || pl.comb_atomic) {
             pl.bits = MoeBits::moe_lossy_gemm;  // not the f16 GEMM class (balance item f16 intermediates / fast candidate)
@@ -227,8 +244,14 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
             pl.comb_grid = D((E + 1023) / 1024, n);
         }
         pl.gu_pgrid = D(pl.max_tiles64 * ((F + vg.gr - 1) / vg.gr));
+        const kernels::MoepDnVariant& vd = kernels::kMoepDn[gridv];
         pl.dn_pgrid = D(max_tiles * ((E + vd.bm - 1) / vd.bm));
         if (pl.comb_fused) pl.comb4 = false;
+        // v0252-8smoe2 (E): the fused-dequant twins (same arguments, grid and bits) where present and the shapes allow
+        if (f.moep_fq && moepFqShapeOk(p.gate_ncols, p.down_ncols)) {
+            pl.fgu = moepFqTwin(pl.fgu, k);
+            pl.fdn = moepFqTwin(pl.fdn, k);
+        }
     } else if (fp8) {
         pl.kind = MoePrefillKind::fp8;
         pl.bits = MoeBits::moe_fp8_gemm;
@@ -265,7 +288,8 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
             // expert outputs is the one a forward of >= moepWide rows gets, so a row's bits do not follow the forward size
             const kernels::MoepDnVariant& vd = kernels::kMoepDn[nh_dv];
             pl.ydh = true;
-            pl.fdn = k.moep_dh[nh_dv];
+            pl.fdn = f.moep_dhs && k.moep_dhs[nh_dv] != nullptr ? k.moep_dhs[nh_dv] : k.moep_dh[nh_dv];  // v0252-8smoe2 (C)
+            if (f.moep_fq && moepFqShapeOk(p.gate_ncols, p.down_ncols)) pl.fdn = moepFqTwin(pl.fdn, k);  // v0252-8smoe2 (E)
             pl.dn_pgrid = D(max_tiles * ((E + vd.bm - 1) / vd.bm));
             pl.bits = MoeBits::moe_lossy_gemm;
             pl.comb4 = true;

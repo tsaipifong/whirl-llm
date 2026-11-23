@@ -57,6 +57,16 @@ struct MoeFlags {
     // of moep_gu (llama.cpp mmq.cu:197-201 picks its MoE tile against the average tokens per expert on RDNA3 / 3.5 / 4).
     // Every moep gate + up variant stores the same bits (kt moemx), so the plan's bit class is unchanged.
     int moep_guw = -1;
+    // v0252-8smoe2 (PLAN V1-147; numerics::Flags moep_dhs / moep_dna / moep_fq, WHIRL_MOEP_DHS / _DNA / _FQ; all opt-in):
+    //   moep_dhs (C): a plan with f16 expert outputs (ydh: moep COMB 3, or the fused_gu kind below the row floor) stores them
+    //     with gemm_moepdhs_<v> (the coalesced f16 epilogue) instead of gemm_moepdh_<v> - same bits;
+    //   moep_dna (D): index into kMoepDn of the down variant of the atomic scatter (COMB 5) when it has the plan's token
+    //     tile (-1 = the plan's moep_dn) - fast only, as COMB 5 (f32 add order varies run to run either way);
+    //   moep_fq (E): the moep GEMMs on their fused-dequant twins gemm_moepfq*_<v> where the code object has the twin and
+    //     the shapes are whole MXFP4 super-blocks (gate ncols and down ncols % 256) - same bits as the base kernels.
+    bool moep_dhs = false;
+    int moep_dna = -1;
+    bool moep_fq = false;
     // v0251-a7pol (B26-41): the combine classes the numerics MODE allows (moepCombFor; qwen35::Context::moeBlock sets it
     // from the plan's mode). Not prec_dec: WHIRL_Q8DEC=1 clears prec_dec in precise. Default: bitwise only.
     enum class MoepComb : std::uint8_t {
@@ -110,6 +120,18 @@ inline void setMoep(MoeFlags& f, std::uint32_t plan_gu, std::uint32_t plan_dn, s
 }
 // v0252-8smoe: numerics::Flags::moep_guw (variant index + 1, 0 = off) -> MoeFlags::moep_guw (index, -1 = off)
 inline void setMoepGuw(MoeFlags& f, std::uint32_t plan_guw) { f.moep_guw = static_cast<int>(plan_guw) - 1; }
+// v0252-8smoe2: numerics::Flags moep_dhs / moep_dna (variant index + 1, 0 = off) / moep_fq -> MoeFlags (moep_dna -1 = off)
+inline void setMoep2(MoeFlags& f, bool plan_dhs, std::uint32_t plan_dna, bool plan_fq) {
+    f.moep_dhs = plan_dhs;
+    f.moep_dna = static_cast<int>(plan_dna) - 1;
+    f.moep_fq = plan_fq;
+}
+// v0252-8smoe2 (E): the fused-dequant twin of a moep / moepdh kernel the plan chose (the same variant's entry), or fn itself
+// when the twin is missing or fn is no moep kernel. Callers check the shape rule (moepFqShapeOk).
+Function moepFqTwin(Function fn, const kernels::MoeKernels& k);
+inline constexpr bool moepFqShapeOk(std::uint32_t gate_ncols, std::uint32_t down_ncols) {
+    return gate_ncols > 0 && down_ncols > 0 && gate_ncols % 256 == 0 && down_ncols % 256 == 0;
+}
 // v0252-8smoe: the gate + up variant a moep forward of n rows runs - the wide one when it is set, in the code object and the
 // experts average at least its token tile (n * K >= bn * R), else moep_gu. Callers have checked moep_gu (moepOk).
 int moepGuFor(std::uint32_t n, std::uint32_t K, std::uint32_t R, const MoeFlags& f, const kernels::MoeKernels& k);

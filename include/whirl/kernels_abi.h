@@ -231,6 +231,11 @@
 //            gfx1201 object, kernels/moe_combine_h.hip, after gemm8r_moeh / gemm8r_moe32h with W2 = null writing f16 yd)
 //   gemm_moepda_<v>_mxfp4(W, rb, rows_e, X, ncols, tiles, n_tiles, perm, w, x, K): x += w * y by f32
 //            atomics (no yd; order varies run to run); the shared expert added before by moe_combine4, K = 0
+//  v0252-8smoe2 (optional, gfx1151, opt-in; kernels/gfx1151/moe_prefill_fq.hip):
+//   gemm_moepdhs_<v>_mxfp4: gemm_moepdh arguments and grid, the same f16 Y bits stored 16 bytes per lane via LDS
+//   gemm_moepfqgu_<v> / gemm_moepfqdn_<v> / _moepfqdh_<v> / _moepfqdhs_<v> / _moepfqda_<v> (_mxfp4): the arguments,
+//            grid and bits of gemm_moepgu / dn / dh / dhs / da of variant v, on the fused-dequant main loop (raw MXFP4
+//            bytes carried across the WMMA loop, injected decode); require ncols % 256 == 0
 //  moeskip (optional, fast only; v0252-f5 from feat027-moeskip-r1, NEW entry points: no existing kernel changes; host
 //  reference whirl/moe_skip.h). A dropped (token, slot) pair has id -1 / weight 0; the kept slots are a prefix of the K
 //  sorted slots; the kept weights are renormalized:
@@ -785,6 +790,12 @@ struct MoeKernels {
     // balance / fast candidates (f16 expert outputs; atomic scatter)
     std::array<F, kMoepDnN> moep_dh{}, moep_dhc{}, moep_da{};
     F moe_combine4h{};
+    // v0252-8smoe2 (optional, gfx1151, opt-in): C = gemm_moepdhs_<v> (gemm_moepdh with the coalesced f16 store, same bits);
+    // E = the fused-dequant twins gemm_moepfq{gu,dn,dh,dhs,da}_<v> (the gemmfq main loop, same bits as the base kernel;
+    // null for the variants without one lane per MXFP4 sub-block)
+    std::array<F, kMoepDnN> moep_dhs{};
+    std::array<F, kMoepGuN> moep_fq_gu{};
+    std::array<F, kMoepDnN> moep_fq_dn{}, moep_fq_dh{}, moep_fq_dhs{}, moep_fq_da{};
     // v0252-f5 moeskip (optional, fast; kernels/moe_skip.hip, kernels/gfx1151/moe_skip.hip, kernels/shared/moe_skip.h)
     F moe_topk_skip{}, moe_skip_apply{}, moe_route_skip{}, moe_combine_skip{};  // both code objects
     F moe_gu_skip_mx{}, moe_down_skip_mx{};    // generic MXFP4 decode experts (moe_gu_skip_mxfp4 / moe_down_skip_mxfp4), both

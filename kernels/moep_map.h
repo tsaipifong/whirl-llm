@@ -28,4 +28,27 @@ MOEP_HD int frag(int wn, int WN, int i) { return wn + WN * i; }
 // counter slot of (token, row block) for the fused combine
 MOEP_HD int cntSlot(int tok, int rb, int nrb_) { return tok * nrb_ + rb; }
 
+// v0252-8smoe2 (C): the coalesced f16 epilogue (gemm_moepdhs_*, EPI 5). A wave stages the TM row fragments x one 16-token
+// fragment of its f32 WMMA accumulators as f16 in a private LDS slice [16 tokens][TM * 16 rows + 8 pad], then every lane
+// writes 8 consecutive rows (16 bytes) of one token. Slice row stride (halves; a multiple of 8: 16-byte aligned reads).
+MOEP_HD int dhsLd(int TM) { return TM * 16 + 8; }
+// slice offset of accumulator element v of row fragment i held by lane (WMMA f32 layout: token lane % 16, row CROW)
+MOEP_HD int dhsWrite(int lane, int i, int v, int ld) { return (lane % 16) * ld + i * 16 + 2 * v + lane / 16; }
+// 8-row chunks of one staged fragment (16 tokens x TM * 16 rows / 8)
+MOEP_HD int dhsChunks(int TM) { return 16 * TM * 2; }
+// chunk c -> (token in the fragment, first row in the wave's TM * 16 rows)
+MOEP_HD void dhsRead(int c, int TM, int* tok, int* row8) {
+    *tok = c / (2 * TM);
+    *row8 = (c % (2 * TM)) * 8;
+}
+
+// v0252-8smoe2 (E): the fused-dequant (gemmfq) A fetch of the moep twins gemm_moepfq*: per K chunk of BK values a row has
+// BK / 32 MXFP4 sub-blocks; lane slot s (threadIdx.x + e * 256) takes row s / (BK / 32) and its sub-block s % (BK / 32)
+// (adjacent lanes: one row's bytes). The four half8 of a sub-block go to LDS columns sb * 32 + j * 8, j = 0..3 (the
+// dec_group_h groups g .. g + 3 of that sub-block: low nibbles of bytes 0-7, of bytes 8-15, high of 0-7, high of 8-15).
+MOEP_HD int fqRow(int s, int BK) { return s / (BK / 32); }
+MOEP_HD int fqSb(int s, int BK) { return s % (BK / 32); }
+// MXFP4 sub-block index inside the 256-value super-block of chunk k0 (k0 % BK == 0, BK in {32, 64})
+MOEP_HD int fqIb(int k0, int sb) { return ((k0 & 255) >> 5) + sb; }
+
 }  // namespace moep

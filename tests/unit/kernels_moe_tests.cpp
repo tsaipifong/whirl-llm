@@ -200,6 +200,118 @@ void testMoepSchedule() {
 //     dropped pairs parked after n_kept with inv -1 (perm there = a valid dropped pair); no -1 = moe_route's grouping;
 //   * combine (k ascending, inv -1 skipped) == the direct sum over the kept experts, bitwise (NaN tail never read);
 //   * mutant control: the rule without the renormalization fails the sum check.
+// v0252-8smoe2 (C): the coalesced f16 epilogue of gemm_moepdhs_* (kernels/gfx1151/moe_prefill_mt.hip moep_store_h16_staged,
+// maps kernels/moep_map.h dhs*). CPU replay with the kernel's own maps, every kMoepDn variant, Ornith shapes and the three
+// routings: (1) the staging slice holds element (token lane % 16, row i * 16 + CROW(lane, v)) of every lane / accumulator
+// exactly once and fits in the A tile (all 8 waves); (2) the read chunks cover the slice exactly once, 8 rows each,
+// 16-byte aligned; (3) through the whole grid every routed (pos, row) of moe_yd is stored exactly once, by the lane whose
+// accumulator holds it (the value gemm_moepdh stores there), including rows_e % 8 != 0 (scalar tail). Fails to build before
+// the change (no moep::dhs*).
+void testMoepDhsMap() {
+    namespace kn = whirl::kernels;
+    for (const kn::MoepDnVariant& v : kn::kMoepDn) {
+        const int WM = v.wm, WN = 8 / WM, TM = v.bm / 16 / WM, SLD = moep::dhsLd(TM), LD = v.bk + 8;
+        const std::string tag = std::string(" ") + v.name;
+        check(SLD % 8 == 0 && 8 * 16 * SLD <= v.bm * LD, "dhs slice: 16-byte rows, 8 slices fit in As" + tag);
+        // (1) + (2): one wave's slice
+        std::vector<int> slot(static_cast<std::size_t>(16 * SLD), -1);
+        bool w_ok = true;
+        for (int lane = 0; lane < 32; ++lane)
+            for (int i = 0; i < TM; ++i)
+                for (int vv = 0; vv < 8; ++vv) {
+                    const int o = moep::dhsWrite(lane, i, vv, SLD);
+                    const int tok = lane % 16, row = i * 16 + crow(lane, vv);
+                    if (o < 0 || o >= 16 * SLD || slot[static_cast<std::size_t>(o)] != -1 || o != tok * SLD + row) w_ok = false;
+                    else slot[static_cast<std::size_t>(o)] = tok * 1024 + row;
+                }
+        check(w_ok, "dhs write map: every accumulator element once at (token, row)" + tag);
+        std::vector<int> seen(static_cast<std::size_t>(16 * TM * 16), 0);
+        bool r_ok = moep::dhsChunks(TM) == 16 * TM * 16 / 8;
+        for (int c = 0; c < moep::dhsChunks(TM); ++c) {
+            int tk = -1, r8 = -1;
+            moep::dhsRead(c, TM, &tk, &r8);
+            if (tk < 0 || tk >= 16 || r8 < 0 || r8 + 8 > TM * 16 || r8 % 8 != 0 || (tk * SLD + r8) % 8 != 0) r_ok = false;
+            else
+                for (int q = 0; q < 8; ++q) {
+                    ++seen[static_cast<std::size_t>(tk * TM * 16 + r8 + q)];
+                    if (slot[static_cast<std::size_t>(tk * SLD + r8 + q)] != tk * 1024 + r8 + q) r_ok = false;
+                }
+        }
+        r_ok = r_ok && std::all_of(seen.begin(), seen.end(), [](int x) { return x == 1; });
+        check(r_ok, "dhs read map: every staged element read once, as its own (token, row)" + tag);
+        // (3): the whole grid (rows_e 2048 = Ornith E, and 2040: the scalar tail)
+        for (const int rows_e : {2048, 2040})
+            for (const int kind : {0, 1, 2}) {
+                std::mt19937_64 rng(7u + static_cast<unsigned>(kind));
+                const int n = 2048, K = 8, R = 256, pairs = n * K;
+                const auto tl = tilesFor(routing(rng, n, K, R, kind), R, v.bn);
+                const int nrb = moep::nrb(rows_e, v.bm), grid = moep::maxTiles(pairs, v.bn, R) * nrb;
+                std::vector<unsigned char> cov(static_cast<std::size_t>(pairs) * rows_e, 0);
+                for (int bx = 0; bx < grid; ++bx) {
+                    const int ti = moep::blockTile(bx, nrb), rb = moep::blockRb(bx, nrb);
+                    if (ti >= static_cast<int>(tl.size())) continue;
+                    const Tile& t = tl[static_cast<std::size_t>(ti)];
+                    const int live = moep::liveFrags(t.cnt), m0 = rb * v.bm;
+                    for (int wid = 0; wid < 8; ++wid) {
+                        const int wm = wid % WM, wn = wid / WM;
+                        for (int f = 0; f < v.bn / 16 / WN; ++f) {
+                            const int j = moep::frag(wn, WN, f);
+                            if (j >= live) continue;
+                            for (int c = 0; c < moep::dhsChunks(TM); ++c) {  // lanes c, c + 32, ...: each chunk once
+                                int tk, r8;
+                                moep::dhsRead(c, TM, &tk, &r8);
+                                const int tt = j * 16 + tk, row0 = m0 + wm * TM * 16 + r8;
+                                if (tt >= t.cnt || row0 >= rows_e) continue;
+                                for (int q = 0; q < 8 && row0 + q < rows_e; ++q) ++cov[static_cast<std::size_t>(t.pos + tt) * rows_e + row0 + q];
+                            }
+                        }
+                    }
+                }
+                check(std::all_of(cov.begin(), cov.end(), [](unsigned char x) { return x == 1; }),
+                      "dhs grid: every routed (pos, row) stored exactly once, rows_e " + std::to_string(rows_e) + " routing " + std::to_string(kind) + tag);
+            }
+    }
+}
+
+// v0252-8smoe2 (E): the fused-dequant A fetch of the gemm_moepfq* twins (kernels/gfx1151/moe_prefill_fq.hip MoepFqFetch, maps
+// moep::fqRow / fqSb / fqIb). For each twin's (A rows, BK): the lane slots cover every (row, sub-block) of the chunk once, and
+// the LDS column of each decoded half8 (sb * 32 + j * 8) is the column dec_group_h<QT_MXFP4> fills with that group in the base
+// kernel (group g = (k0 + col) / 8 reads sub-block ((g & 31) * 8) >> 5 of the super-block, value offset (g * 8) & 31 =
+// j * 8; j order = low nibbles of bytes 0-7, of 8-15, high of 0-7, high of 8-15), for every chunk k0 of K = 512 / 2048.
+// With mx_inject's decode (testMxInject: bitwise == the LUT math) the A tile is the base kernel's tile, hence its bits.
+// Fails to build before the change (no moep::fq*).
+void testMoepFqMap() {
+    struct Shape {
+        const char* name;
+        int bma, bk;
+    };
+    for (const Shape s : {Shape{"gu g64n64k64 / g64n128k64", 128, 64}, Shape{"gu g128n128k32", 256, 32}, Shape{"dn m128 k64", 128, 64}})
+        for (const int ncols : {512, 2048}) {
+            const int SBR = s.bk / 32;
+            bool ok = s.bma * SBR % 256 == 0;
+            std::vector<int> cov(static_cast<std::size_t>(s.bma * s.bk), 0);
+            for (int sl = 0; sl < s.bma * SBR; ++sl) {
+                const int r = moep::fqRow(sl, s.bk), sb = moep::fqSb(sl, s.bk);
+                if (r < 0 || r >= s.bma || sb < 0 || sb >= SBR) {
+                    ok = false;
+                    continue;
+                }
+                for (int j = 0; j < 4; ++j)
+                    for (int q = 0; q < 8; ++q) ++cov[static_cast<std::size_t>(r * s.bk + sb * 32 + j * 8 + q)];
+                for (int k0 = 0; k0 < ncols; k0 += s.bk) {
+                    const int ib = moep::fqIb(k0, sb);
+                    for (int j = 0; j < 4; ++j) {
+                        const int col = sb * 32 + j * 8, g = (k0 + col) / 8;  // dec_group_h's group of this LDS column
+                        const int p = (g & 31) * 8;
+                        if ((g >> 5) != (k0 >> 8) || (p >> 5) != ib || (p & 31) != j * 8) ok = false;
+                    }
+                }
+            }
+            ok = ok && std::all_of(cov.begin(), cov.end(), [](int x) { return x == 1; });
+            check(ok, std::string("fq fetch map: every A element once, at dec_group_h's column, ") + s.name + " ncols " + std::to_string(ncols));
+        }
+}
+
 void testMoeSkipRef() {
     namespace ms = whirl::moeskip;
     std::uint32_t seed = 12345u;
@@ -372,6 +484,8 @@ const whirl::test::Suite& unitSuite_kernels_moe() {
                                       {
                                           {"testMoepSchedule", [] { testMoepSchedule(); }},
                                           {"testMoeSkipRef", [] { testMoeSkipRef(); }},  // v0252-f5
+                                          {"testMoepDhsMap", [] { testMoepDhsMap(); }},  // v0252-8smoe2 (C)
+                                          {"testMoepFqMap", [] { testMoepFqMap(); }},    // v0252-8smoe2 (E)
                                       },
                                       nullptr};
     return s;

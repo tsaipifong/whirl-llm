@@ -139,6 +139,16 @@ struct Profile {
     // every mode; the default applies in balance / fast (numerics::Target::moep_guw_profile; precise keeps its path until
     // its own screen arm). WHIRL_MOEP_GUW = a variant name / 0 overrides it
     std::uint8_t moep_guw;
+    // v0252-8smoe2 (PLAN V1-147; all three opt-in, 0 / false on both rows until a screen shows a gain beyond its error):
+    //   moep_dhs (C): the coalesced f16 down epilogue gemm_moepdhs_* where the plan stores f16 expert outputs (balance /
+    //     fast; same bits as gemm_moepdh); numerics::Target::moep_dhs_profile; WHIRL_MOEP_DHS=1 / 0 overrides it
+    //   moep_dna (D): kernels::kMoepDn index + 1 of the atomic-scatter (COMB 5) down variant (fast; 4 = m128w8n128k64);
+    //     numerics::Target::moep_dna_profile; WHIRL_MOEP_DNA = a variant name / 0 overrides it
+    //   moep_fq (E): the fused-dequant moep twins gemm_moepfq*_* (balance / fast; same bits as the base kernels);
+    //     numerics::Target::moep_fq_profile; WHIRL_MOEP_FQ=1 / 0 overrides it
+    bool moep_dhs;
+    std::uint8_t moep_dna;
+    bool moep_fq;
     // ---- vision
     unsigned vision_attn_threads;  // kernels/vision/vision.hip vis_attn2 block size of this code object
 };
@@ -210,6 +220,9 @@ inline constexpr Profile k_profile_gfx1201{
     .gemm_tail = true,
     .moep_comb_fast_skip = 0,  // v0252-8smoe: the gfx1201 fast moeskip plan keeps the f32 moe_yd combine 0 (no moep kernels)
     .moep_guw = 0,             // v0252-8smoe: no moep kernels in the gfx1201 object
+    .moep_dhs = false,         // v0252-8smoe2: no moep kernels in the gfx1201 object
+    .moep_dna = 0,
+    .moep_fq = false,
     .vision_attn_threads = 128,
 };
 
@@ -281,6 +294,11 @@ inline constexpr Profile k_profile_gfx1151{
     // (balance pp 8192 +0.45 % +-1.05, pp 32768 +0.45 % +-1.08; ADR-0019: not a default until a cell gains beyond its
     // error); WHIRL_MOEP_GUW=g64n128k64 (a kernels::kMoepGu name) turns it on (same bits)
     .moep_guw = 0,  // v0252-8sopen: opt-in (was 2 = g64n128k64)
+    // v0252-8smoe2: opt-in until the screens progress/8smoe2-C.json / -D.json / -E.json show a gain beyond the error
+    // (ADR-0019); a default flip is this line plus the pinned CHECK in tests/iso/device.profile + tests/device
+    .moep_dhs = false,  // C: WHIRL_MOEP_DHS=1 turns it on
+    .moep_dna = 0,      // D: WHIRL_MOEP_DNA=m128w8n128k64 turns it on (index 3 + 1 = 4)
+    .moep_fq = false,   // E: WHIRL_MOEP_FQ=1 turns it on
     .vision_attn_threads = 256,
 };
 

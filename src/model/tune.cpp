@@ -899,6 +899,9 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     t.attn_i4qk_profile = prof.attn_i4qk_fast;  // v0252-8sfp: the gfx1151 fast int4 Q.K^T prefill attention (flag attn_i4qk)
     t.moep_comb_fast_skip_profile = prof.moep_comb_fast_skip;  // v0252-8smoe (A): the fast moeskip MoE prefill combine
     t.moep_guw_profile = prof.moep_guw;  // v0252-8smoe (B): the routing-aware wide moep gate + up tile (flag moep_guw)
+    t.moep_dhs_profile = prof.moep_dhs;  // v0252-8smoe2 (C): coalesced f16 down epilogue (flag moep_dhs)
+    t.moep_dna_profile = prof.moep_dna;  // v0252-8smoe2 (D): COMB 5 atomic down variant (flag moep_dna)
+    t.moep_fq_profile = prof.moep_fq;    // v0252-8smoe2 (E): fused-dequant moep twins (flag moep_fq)
     t.gemvh_grp_profile = prof.gemvh_group_dense;  // v0252-8sdec: the gfx1151 precise grouped gemvh (numerics flag gemvh_grp)
     return t;
 }
@@ -991,6 +994,8 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         std::fprintf(stderr, "whirl: WHIRL_MOEP_DN=%s: unknown variant (off)\n", env.moep_dn->c_str());
     if (env.moep_guw && f.moep_guw == 0 && !env.moep_guw->empty() && *env.moep_guw != "0")  // v0252-8smoe
         std::fprintf(stderr, "whirl: WHIRL_MOEP_GUW=%s: unknown variant (off)\n", env.moep_guw->c_str());
+    if (env.moep_dna && f.moep_dna == 0 && !env.moep_dna->empty() && *env.moep_dna != "0")  // v0252-8smoe2 (D)
+        std::fprintf(stderr, "whirl: WHIRL_MOEP_DNA=%s: unknown variant (off)\n", env.moep_dna->c_str());
     log += "  " + nu::logLine(p) + "\n";
     // bug-fastonly: WHIRL_RELAX / WHIRL_KV=q4 refused by precise / balance (fast-only items; the plan is untouched)
     for (const std::string& ign : p.ignored) log += "  " + ign + "\n";

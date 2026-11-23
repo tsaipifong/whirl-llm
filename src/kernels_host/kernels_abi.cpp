@@ -508,7 +508,14 @@ void loadMoe(MoeKernels& k, const Loader& L) {
         k.moep_dh[v] = L.opt(std::string("gemm_moepdh_") + kMoepDn[v].name + "_mxfp4");
         k.moep_dhc[v] = L.opt(std::string("gemm_moepdhc_") + kMoepDn[v].name + "_mxfp4");
         k.moep_da[v] = L.opt(std::string("gemm_moepda_") + kMoepDn[v].name + "_mxfp4");
+        // v0252-8smoe2 (C / E; opt-in twins, same bits)
+        k.moep_dhs[v] = L.opt(std::string("gemm_moepdhs_") + kMoepDn[v].name + "_mxfp4");
+        k.moep_fq_dn[v] = L.opt(std::string("gemm_moepfqdn_") + kMoepDn[v].name + "_mxfp4");
+        k.moep_fq_dh[v] = L.opt(std::string("gemm_moepfqdh_") + kMoepDn[v].name + "_mxfp4");
+        k.moep_fq_dhs[v] = L.opt(std::string("gemm_moepfqdhs_") + kMoepDn[v].name + "_mxfp4");
+        k.moep_fq_da[v] = L.opt(std::string("gemm_moepfqda_") + kMoepDn[v].name + "_mxfp4");
     }
+    for (int v = 0; v < kMoepGuN; ++v) k.moep_fq_gu[v] = L.opt(std::string("gemm_moepfqgu_") + kMoepGu[v].name + "_mxfp4");  // v0252-8smoe2 (E)
     k.moe_combine4 = L.opt("moe_combine4");
     k.moe_combine4h = L.opt("moe_combine4h");
     // v0252-f5 moeskip (fast; all optional): routing / grouping / combine twins (both code objects), the generic MXFP4 decode

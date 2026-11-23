@@ -844,6 +844,166 @@ void testOpsMoeGuw(ops::MoeProblem p, const kn::KernelTable& k97, const kn::Kern
     CHECK(same(ops::chooseMoe(q, fw, k97, k97.silu_mul_x8h), ops::chooseMoe(q, f0, k97, k97.silu_mul_x8h)));
 }
 
+// v0252-8smoe2 (PLAN V1-147, levers C / D / E; all opt-in): MoeFlags moep_dhs / moep_dna / moep_fq (ops::setMoep2).
+//   C moep_dhs: where the plan stores f16 expert outputs (ydh: moep COMB 3, and the fused_gu kind below the row floor with
+//     COMB 3) fdn is gemm_moepdhs_<the same variant>; nothing else moves; without the twin in the table: unchanged.
+//   D moep_dna: where the plan runs the atomic scatter (comb_atomic: COMB 5, fast) fdn is gemm_moepda_<dna> when dna has
+//     the plan's token tile (else the plan's variant); the down grid follows dna's BM; nothing else moves.
+//   E moep_fq: on the moep / narrow-f16 plans fgu / fdn become their gemm_moepfq* twins (same variant, same epilogue) where
+//     the table has them and gate / down ncols are multiples of 256; nothing else moves (grids, tile lists, bits class).
+//   Off (the default) = the plan before the change, field for field; the R9700 table (no moep kernels) is unchanged.
+// Fails to build before the change (no MoeFlags::moep_dhs / moep_dna / moep_fq, setMoep2, kernel table twins).
+void testOpsMoep2(ops::MoeProblem p, const kn::KernelTable& k97, const kn::KernelTable& k8) {
+    const auto kmp = std::make_unique<kn::KernelTable>(k8);  // heap (v0252-f5fix)
+    kn::KernelTable& km = *kmp;
+    for (int v = 0; v < kn::kMoepGuN; ++v) km.moep_gu[v] = tag(std::string("gemm_moepgu_") + kn::kMoepGu[v].name + "_mxfp4");
+    for (int v = 0; v < kn::kMoepDnN; ++v) {
+        const std::string vn = kn::kMoepDn[v].name;
+        km.moep_dn[v] = tag("gemm_moepdn_" + vn + "_mxfp4");
+        km.moep_dh[v] = tag("gemm_moepdh_" + vn + "_mxfp4");
+        km.moep_da[v] = tag("gemm_moepda_" + vn + "_mxfp4");
+        km.moep_dhs[v] = tag("gemm_moepdhs_" + vn + "_mxfp4");
+        // the code object's fused-dequant twins: the variants with one lane per MXFP4 sub-block (BM * BK / 32 % 256 == 0)
+        if (kn::kMoepDn[v].bm * kn::kMoepDn[v].bk / 32 % 256 == 0) {
+            km.moep_fq_dn[v] = tag("gemm_moepfqdn_" + vn + "_mxfp4");
+            km.moep_fq_dh[v] = tag("gemm_moepfqdh_" + vn + "_mxfp4");
+            km.moep_fq_dhs[v] = tag("gemm_moepfqdhs_" + vn + "_mxfp4");
+            km.moep_fq_da[v] = tag("gemm_moepfqda_" + vn + "_mxfp4");
+        }
+    }
+    for (int v = 0; v < kn::kMoepGuN; ++v)
+        if (2 * kn::kMoepGu[v].gr * kn::kMoepGu[v].bk / 32 % 256 == 0) km.moep_fq_gu[v] = tag(std::string("gemm_moepfqgu_") + kn::kMoepGu[v].name + "_mxfp4");
+    CHECK(km.moep_fq_gu[0] != nullptr && km.moep_fq_gu[1] != nullptr && km.moep_fq_gu[2] == nullptr && km.moep_fq_dn[2] != nullptr &&
+          km.moep_fq_dn[3] != nullptr && km.moep_fq_dn[4] == nullptr);  // = kernels/gfx1151/moe_prefill_fq.hip's entry list
+    km.moe_combine4 = tag("moe_combine4");
+    km.moe_combine4h = tag("moe_combine4h");
+    ops::MoeFlags f0;  // the 8060S default moep plan (g64n64k64 + m128w4n128k64 + moe_combine4)
+    ops::setMoep(f0, 1, 3, 1);
+    CHECK(!f0.moep_dhs && f0.moep_dna == -1 && !f0.moep_fq);
+    ops::setMoep2(f0, false, 0, false);
+    CHECK(!f0.moep_dhs && f0.moep_dna == -1 && !f0.moep_fq);
+    {
+        ops::MoeFlags x = f0;
+        ops::setMoep2(x, true, 4, true);
+        CHECK(x.moep_dhs && x.moep_dna == 3 && x.moep_fq && std::string(kn::kMoepDn[3].name) == "m128w8n128k64");
+    }
+    auto same = [](const ops::MoePlan& a, const ops::MoePlan& b) {
+        return a.kind == b.kind && a.bits == b.bits && a.bn == b.bn && a.max_tiles == b.max_tiles && a.max_tiles64 == b.max_tiles64 && a.fgu == b.fgu &&
+               a.fdn == b.fdn && a.gu_bn == b.gu_bn && a.comb4 == b.comb4 && a.comb_fused == b.comb_fused && a.ydh == b.ydh &&
+               a.comb_atomic == b.comb_atomic && a.comb_grid.x == b.comb_grid.x && a.comb_grid.y == b.comb_grid.y && a.gu_pgrid.x == b.gu_pgrid.x &&
+               a.dn_pgrid.x == b.dn_pgrid.x && a.skip == b.skip;
+    };
+    // every field but fdn / fgu / dn_pgrid
+    auto rest = [](const ops::MoePlan& a, const ops::MoePlan& b) {
+        return a.kind == b.kind && a.bits == b.bits && a.bn == b.bn && a.max_tiles == b.max_tiles && a.max_tiles64 == b.max_tiles64 &&
+               a.gu_bn == b.gu_bn && a.comb4 == b.comb4 && a.comb_fused == b.comb_fused && a.ydh == b.ydh && a.comb_atomic == b.comb_atomic &&
+               a.comb_grid.x == b.comb_grid.x && a.comb_grid.y == b.comb_grid.y && a.gu_pgrid.x == b.gu_pgrid.x && a.skip == b.skip;
+    };
+    auto swapPrefix = [](const std::string& n, const std::string& from, const std::string& to) {
+        return n.rfind(from, 0) == 0 ? to + n.substr(from.size()) : n;
+    };
+    // the fused-dequant twin name the table holds for a base kernel name ("" = none)
+    auto fqName = [&](const std::string& n) -> std::string {
+        for (const char* b : {"gu_", "dn_", "dhs_", "dh_", "da_"}) {
+            const std::string from = std::string("gemm_moep") + b, to = std::string("gemm_moepfq") + b;
+            if (n.rfind(from, 0) == 0) {
+                const std::string t = swapPrefix(n, from, to);
+                for (int v = 0; v < kn::kMoepGuN; ++v)
+                    if (km.moep_fq_gu[v] != nullptr && nameOf(km.moep_fq_gu[v]) == t) return t;
+                for (int v = 0; v < kn::kMoepDnN; ++v)
+                    for (const auto* a : {&km.moep_fq_dn, &km.moep_fq_dh, &km.moep_fq_dhs, &km.moep_fq_da})
+                        if ((*a)[v] != nullptr && nameOf((*a)[v]) == t) return t;
+                return "";
+            }
+        }
+        return "";
+    };
+    std::size_t n_dhs = 0, n_dna = 0, n_fq = 0;
+    for (const unsigned mode : {0u, 1u, 2u}) {  // precise / balance / fast class (prec_dec, moep_comb_ok)
+        for (const unsigned comb : {1u, 3u, 5u}) {
+            for (const float skip : {0.f, 1.f}) {
+                for (const unsigned n : {33u, 1023u, 1024u, 2058u, 4096u, 8192u}) {
+                    ops::MoeFlags a = f0;
+                    a.prec_dec = mode == 0;
+                    a.moep_comb_ok = ops::moepCombFor(mode == 0, mode == 2);
+                    a.moep_comb = comb;
+                    a.moe_skip_thr = mode == 2 ? skip : 0.f;
+                    a.moe_skip_min = 6;
+                    ops::MoeProblem q = p;
+                    q.n = n;
+                    q.cnt_buf = true;
+                    const std::string cell = "moep2 mode " + std::to_string(mode) + " comb " + std::to_string(comb) + " skip " +
+                                             std::to_string(static_cast<int>(skip)) + " n " + std::to_string(n);
+                    const ops::MoePlan pa = ops::chooseMoe(q, a, km, km.silu_mul_x8h);
+                    // C
+                    ops::MoeFlags c = a;
+                    c.moep_dhs = true;
+                    const ops::MoePlan pc = ops::chooseMoe(q, c, km, km.silu_mul_x8h);
+                    const std::string an = nameOf(pa.fdn);
+                    if (pa.ydh && an.rfind("gemm_moepdh_", 0) == 0) {
+                        ++n_dhs;
+                        CHECK_DETAIL(nameOf(pc.fdn) == swapPrefix(an, "gemm_moepdh_", "gemm_moepdhs_") && pc.fgu == pa.fgu && pc.dn_pgrid.x == pa.dn_pgrid.x &&
+                                         rest(pa, pc),
+                                     cell + ": C takes gemm_moepdhs of the same variant, nothing else moves");
+                    } else {
+                        CHECK_DETAIL(same(pa, pc), cell + ": C changes nothing off the f16 expert-output plans");
+                    }
+                    // D (m128w8n128k64: the plan's token tile 128; m128w4n64k64: another tile -> ignored)
+                    ops::MoeFlags d = a, d64 = a;
+                    d.moep_dna = 3;
+                    d64.moep_dna = 1;
+                    const ops::MoePlan pd = ops::chooseMoe(q, d, km, km.silu_mul_x8h);
+                    CHECK_DETAIL(same(ops::chooseMoe(q, d64, km, km.silu_mul_x8h), pa), cell + ": D with another token tile is ignored");
+                    if (pa.comb_atomic) {
+                        ++n_dna;
+                        CHECK_DETAIL(nameOf(pd.fdn) == "gemm_moepda_m128w8n128k64_mxfp4" && pd.dn_pgrid.x == pa.dn_pgrid.x && pd.fgu == pa.fgu && rest(pa, pd),
+                                     cell + ": D takes gemm_moepda_m128w8n128k64 (same BM: same grid), nothing else moves");
+                    } else {
+                        CHECK_DETAIL(same(pa, pd), cell + ": D changes nothing off the atomic scatter");
+                    }
+                    // E
+                    ops::MoeFlags e = a;
+                    e.moep_fq = true;
+                    const ops::MoePlan pe = ops::chooseMoe(q, e, km, km.silu_mul_x8h);
+                    const std::string wg = fqName(nameOf(pa.fgu)), wd = fqName(an);
+                    const bool on = pa.kind == ops::MoePrefillKind::moep || (pa.kind == ops::MoePrefillKind::fused_gu && pa.ydh);
+                    if (on && (!wg.empty() || !wd.empty())) ++n_fq;
+                    CHECK_DETAIL(nameOf(pe.fgu) == (on && pa.kind == ops::MoePrefillKind::moep && !wg.empty() ? wg : nameOf(pa.fgu)) &&
+                                     nameOf(pe.fdn) == (on && !wd.empty() ? wd : an) && pe.dn_pgrid.x == pa.dn_pgrid.x && rest(pa, pe),
+                                 cell + ": E takes the fused-dequant twins of the same kernels, nothing else moves");
+                    // all three together: C then E on the same variant
+                    ops::MoeFlags all = a;
+                    all.moep_dhs = all.moep_fq = true;
+                    all.moep_dna = 3;
+                    const ops::MoePlan px = ops::chooseMoe(q, all, km, km.silu_mul_x8h);
+                    CHECK_DETAIL(nameOf(px.fdn) == (fqName(nameOf(pc.ydh ? pc.fdn : pd.fdn)).empty() || !on ? nameOf(pc.ydh ? pc.fdn : pd.fdn)
+                                                                                                         : fqName(nameOf(pc.ydh ? pc.fdn : pd.fdn))) &&
+                                     rest(pa, px),
+                                 cell + ": C + D + E compose");
+                    // the R9700 table (no moep kernels): unchanged
+                    CHECK_DETAIL(same(ops::chooseMoe(q, all, k97, k97.silu_mul_x8h), ops::chooseMoe(q, a, k97, k97.silu_mul_x8h)), cell + ": R9700 unchanged");
+                }
+            }
+        }
+    }
+    CHECK(n_dhs > 0 && n_dna > 0 && n_fq > 0);  // each lever is exercised
+    // E: shapes outside whole MXFP4 super-blocks keep the base kernels; a missing twin keeps the base kernel
+    {
+        ops::MoeProblem q = p;
+        q.n = 8192;
+        ops::MoeFlags a = f0, e = f0;
+        e.moep_fq = true;
+        q.gate_ncols = 2048 + 32;
+        CHECK(same(ops::chooseMoe(q, e, km, km.silu_mul_x8h), ops::chooseMoe(q, a, km, km.silu_mul_x8h)));
+        q.gate_ncols = 2048;
+        const auto kxp = std::make_unique<kn::KernelTable>(km);
+        kxp->moep_fq_gu[0] = nullptr;
+        const ops::MoePlan px = ops::chooseMoe(q, e, *kxp, kxp->silu_mul_x8h);
+        CHECK(nameOf(px.fgu) == "gemm_moepgu_g64n64k64_mxfp4" && nameOf(px.fdn) == "gemm_moepfqdn_m128w4n128k64_mxfp4");
+        CHECK(ops::moepFqTwin(nullptr, km) == nullptr && ops::moepFqTwin(km.moe_combine4, km) == km.moe_combine4);
+    }
+}
+
 void testOpsMoe() {
     ops::MoeProblem p;  // Ornith-like: E 2048, 8 of 256 experts, F 512, all MXFP4 with row exponents
     p.E = 2048;
@@ -1114,6 +1274,7 @@ void testOpsMoe() {
     testOpsMoeSkip(p);  // v0252-f5
     testOpsMoeCombRows(p);  // v0252-combfix (fails before the fix: the row floor drops COMB 3 below 1024 rows)
     testOpsMoeGuw(p, k97, k8);  // v0252-8smoe (fails to build before the change: no MoeFlags::moep_guw)
+    testOpsMoep2(p, k97, k8);  // v0252-8smoe2 (fails to build before the change: no MoeFlags::moep_dhs / moep_dna / moep_fq)
 }
 
 }  // namespace
