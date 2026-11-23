@@ -181,6 +181,7 @@ void testProfiles() {
     CHECK(!a.argmax_mb_dense && a.argmax_mb_moe && !b.argmax_mb_dense && !b.argmax_mb_moe);
     CHECK(!a.attn_sx_balance && b.attn_sx_balance);  // v0252-strixc2: the balance attn_sx prefill attention on the 8060S only
     CHECK(!a.attn_i4qk_fast && b.attn_i4qk_fast);  // v0252-8sfp: the fast int4 Q.K^T prefill attention on the 8060S only
+    CHECK(!a.attn_i8qk_balance && !b.attn_i8qk_balance);  // v0252-8sattn: int8 Q.K^T attention is opt-in only (not a balance item)
     CHECK(a.gemm_tail && !b.gemm_tail);  // v0252-pp2k2 (F1): the GEMM token-tail split on the R9700 only (8060S unchanged)
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");

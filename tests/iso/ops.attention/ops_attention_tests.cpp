@@ -16,6 +16,7 @@ int main(int argc, char** argv) {
                      {"attn_kgvar", testAttnKgVariant},  // v0252-c1port
                      {"attn_sx", testAttnSx},  // v0252-strixc2
                      {"attn_i4qk", testAttnI4qk},  // v0252-8sfp
+                     {"attn_i8qk", testAttnI8qk},  // v0252-8sattn
                      {"attn_prep", testAttnPrepRules}},
                     argc, argv);
 }

@@ -964,6 +964,91 @@ void testAttn(Ctx& c) {
                         }
                     }
                 }
+                // v0252-8sattn (PLAN V1-148): attn_prefill_wmma_i8 (gfx1151 only, the BALANCE prefill attention: int8 Q.K^T on
+                // iu8 WMMA + K / V register prefetch, NOT bitwise). Tolerance vs attn_prefill_wmma (the precise kernel) rel_rms
+                // <= 2e-2 and vs the f64 CPU reference rel_rms <= 2e-2 (int8 per-row codes: tests/kernels/unit/i8qk_ref_tests.cpp
+                // error model; a fragment-layout or scale bug gives O(1) errors), every output finite. Invariants (bitwise): a
+                // repeated launch == the first; two head-range launches == one; attn_prefill_wmma_i8n (the same int8 arithmetic
+                // WITHOUT the register prefetch: PF 0) == attn_prefill_wmma_i8 (the prefetch moves loads, never values);
+                // attn_prefill_wmma_s_i8 over key ranges of 64 / 1024 keys (softmax state carried in st_ml / the output) ==
+                // attn_prefill_wmma_i8 (as attn_prefill_wmma_s == attn_prefill_wmma). Shapes (24, 4) Swift with the CPU reference
+                // at pos L - n and 0, and (16, 2) Ornith; n = 200 / 130: the last 128-query tile is partial.
+                {
+                    auto f8 = c.fnOpt("attn_prefill_wmma_i8"), f8n = c.fnOpt("attn_prefill_wmma_i8n"), f8s = c.fnOpt("attn_prefill_wmma_s_i8");
+                    if (!f8 || !f8n || !f8s) {
+                        c.rep.skip("attn", "attn_prefill_wmma_i8 / _i8n / _s_i8" + tag, "kernel not in this code object");
+                    } else {
+                        struct I8Case {
+                            int nh, nkv;
+                        };
+                        for (const I8Case& ic : {I8Case{24, 4}, I8Case{16, 2}}) {
+                            const std::string shp = " (" + std::to_string(ic.nh) + " / " + std::to_string(ic.nkv) + " heads)";
+                            const bool cpu = ic.nh == kHeads && ic.nkv == kKv;
+                            const std::size_t cnt = static_cast<std::size_t>(n) * ic.nh * kHd;
+                            for (const int p0 : {L - n, 0}) {
+                                Buf dpos(std::vector<int>{p0});
+                                const std::string where = shp + " at pos " + std::to_string(p0) + tag;
+                                auto launch8 = [&](auto fn, Buf& o, int h0, int nh_launch) {
+                                    hip::launch(fn, {cdiv(n, 128), static_cast<unsigned>(nh_launch), 1}, {256, 1, 1}, 0, c.s, dqp.p(), pool.args(), o.p(), ic.nh,
+                                                ic.nkv, kQStride, dpos.p(), n, kScale, h0);
+                                };
+                                Buf ow(static_cast<std::size_t>(n) * kHeads * kHd * 4), o8(ow.bytes()), o8b(ow.bytes()), o8h(ow.bytes()), o8n(ow.bytes());
+                                for (Buf* b : {&ow, &o8, &o8b, &o8h, &o8n}) b->zero();
+                                launch8(c.fn("attn_prefill_wmma"), ow, 0, ic.nh);
+                                launch8(f8, o8, 0, ic.nh);
+                                launch8(f8, o8b, 0, ic.nh);
+                                for (const int h0 : {0, ic.nh / 2}) launch8(f8, o8h, h0, ic.nh / 2);
+                                launch8(f8n, o8n, 0, ic.nh);
+                                c.sync();
+                                const auto vw = ow.down<float>(cnt), v8 = o8.down<float>(cnt);
+                                bool fin = true;
+                                const double rp = relRms(v8, vw, cnt, fin);
+                                double mp = 0;
+                                for (std::size_t i = 0; i < cnt; ++i) mp = std::max(mp, std::fabs(static_cast<double>(v8[i]) - vw[i]));
+                                c.rep.add(sxResult("attn_prefill_wmma_i8 vs attn_prefill_wmma (balance, not bitwise)" + where, cnt, rp, 2e-2, mp, 0, fin));
+                                c.rep.add(cmpExact("attn_prefill_wmma_i8 repeated launch == first" + where, o8b.down<float>(cnt), v8, Kind::invariant));
+                                c.rep.add(cmpExact("attn_prefill_wmma_i8 head-range launches == one" + where, o8h.down<float>(cnt), v8, Kind::invariant));
+                                c.rep.add(cmpExact("attn_prefill_wmma_i8n (no prefetch) == attn_prefill_wmma_i8" + where, o8n.down<float>(cnt), v8, Kind::invariant));
+                                // key ranges (multiples of the 32-key step) with the softmax state carried
+                                const int n_keys = p0 + n;
+                                for (const int seg : {64, 1024}) {
+                                    if (seg >= n_keys) continue;
+                                    Buf os(ow.bytes()), st(static_cast<std::size_t>(n) * ic.nh * 2 * 4);
+                                    os.fill(0x7f);
+                                    st.zero();
+                                    for (int r0 = 0; r0 < n_keys; r0 += seg) {
+                                        const int r1 = std::min(n_keys, r0 + seg);
+                                        hip::launch(f8s, {cdiv(n, 128), static_cast<unsigned>(ic.nh), 1}, {256, 1, 1}, 0, c.s, dqp.p(), pool.args(), os.p(), ic.nh,
+                                                    ic.nkv, kQStride, dpos.p(), n, kScale, 0, r0, r1, st.p());
+                                    }
+                                    c.sync();
+                                    c.rep.add(cmpExact("attn_prefill_wmma_s_i8 key ranges of " + std::to_string(seg) + " == attn_prefill_wmma_i8" + where,
+                                                       os.down<float>(cnt), v8, Kind::invariant));
+                                }
+                                if (cpu) {
+                                    std::vector<int> qpp2(static_cast<std::size_t>(n));
+                                    for (int t = 0; t < n; ++t) qpp2[static_cast<std::size_t>(t)] = p0 + t;
+                                    std::vector<double> ro2, rs2;
+                                    attnRef(h, pool, qp, qpp2, rows, ro2, rs2);
+                                    const std::vector<float> got = pickRows(v8, rows);
+                                    double se = 0, sr = 0, ma = 0;
+                                    bool f2 = true;
+                                    for (std::size_t i = 0; i < ro2.size(); ++i) {
+                                        f2 = f2 && std::isfinite(got[i]);
+                                        const double d = static_cast<double>(got[i]) - ro2[i];
+                                        se += d * d;
+                                        sr += ro2[i] * ro2[i];
+                                        ma = std::max(ma, std::fabs(d));
+                                    }
+                                    const double rc = sr > 0 ? std::sqrt(se / sr) : 0.0;
+                                    c.rep.add(sxResult("attn_prefill_wmma_i8 vs f64 CPU reference (" + std::to_string(rows.size()) + " of " + std::to_string(n) +
+                                                           " queries)" + where,
+                                                       ro2.size(), rc, 2e-2, ma, 0, f2));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
