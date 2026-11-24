@@ -57,9 +57,9 @@ void testProfiles() {
     // gfx1201 stays off (its attn_dq4 already has the order; no attn_dq4o in its object)
     CHECK(!a.attn_dq4_row_order && b.attn_dq4_row_order && a.dq4_min_keys == 0 && b.dq4_min_keys == 0);
     CHECK(a.fast_kv_q8h_moe_ctx == 0 && b.fast_kv_q8h_moe_ctx == 0);
-    // v0252-8sdec (PLAN V1-142): the precise grouped gemvh (gemvhg, gfx1151 object only) is opt-in on both cards
-    // (v0252-8sopen: screens 8sdec-screen2 / -bands OPEN, ADR-0019; WHIRL_GEMVH_GRP=1 turns it on)
-    CHECK(!a.gemvh_group_dense && !b.gemvh_group_dense);
+    // v0252-8sdec (PLAN V1-142): the precise grouped gemvh (gemvhg, gfx1151 object only). v0252-8sgrp: the 8060S default
+    // (screen 8sdec-grp2: precise tg 8192 +2.36 % +- 2.00, bits SAME); gfx1201 stays off (no gemvhg in its object)
+    CHECK(!a.gemvh_group_dense && b.gemvh_group_dense);
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
     // v0252-ch4k2 (PLAN V1-75): gfx1201 MoE 4096-row forwards in the fill form, as gfx1151 (v0252-ch4k timed A/B)
