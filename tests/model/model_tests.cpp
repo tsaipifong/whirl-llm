@@ -2588,6 +2588,7 @@ void testEnvSnapshot() {
                                      "MOEP_GUW",  // v0252-8smoe: numerics loadFlags, not in the exec dump (unit testMoepGuwFlag)
                                      "MOEP_DHS", "MOEP_DNA", "MOEP_FQ",  // v0252-8smoe2: numerics loadFlags (unit testMoep2Flags)
                                      "DQ4_ORDER", "DQ4_MINKEYS",  // v0252-8sq4: numerics loadFlags (unit testDq4F8Flags)
+                                     "DQ4_SPLITS",  // v0252-8sq5: numerics loadFlags, not in the exec dump (unit testDq4SplitsFlag)
                                      "FAST_KVQ8H",  // v0252-8sq4: Model::load -> numerics::fastKvQ8hMoe (contract testFastKvQ8hMoe)
                                      "DQ_FULL",  // v0252-kvlong2: Model::load -> allocScratch dq_ctx (iso model.scratch dq_copy_covers_context)
                                      "GEMM_TAIL"};  // v0252-pp2k2: Model::load -> config::gemmTailEnv (iso env_snapshot, forward.dispatch gemm_tail_launches)

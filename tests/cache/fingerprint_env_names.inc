@@ -34,6 +34,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_DQ4_DYN",  // src/common/numerics.cpp
     "WHIRL_DQ4_MINKEYS",  // src/common/numerics.cpp (v0252-8sq4 F8 split: another q4 decode partition in fast; hashed like FD_SPLITS)
     "WHIRL_DQ4_ORDER",  // src/common/numerics.cpp (v0252-8sq4 F8 order: attn_dq4o, same partials; hashed like DQ4_DYN)
+    "WHIRL_DQ4_SPLITS",  // src/common/numerics.cpp (v0252-8sq5: the q4 decode split count, another partition in fast; hashed like DQ4_MINKEYS)
     "WHIRL_DQ_FULL",  // src/model/loader.cpp (v0252-kvlong2: =0 the FFN-sized prefill dequant copy; q8h may take other kernels)
     "WHIRL_DRAFT_HEAD",  // src/cli/cmd_bench.cpp
     "WHIRL_DRAFT_MODEL",  // src/cli/build_model.cpp

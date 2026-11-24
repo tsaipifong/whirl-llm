@@ -147,7 +147,10 @@ add_executable(whirl-bench-out-tests ${CMAKE_SOURCE_DIR}/tests/bench/bench_out_t
 # calibration, rotation, anchor / cooldown, ABBA, burst rule, sha256 and JSONL rows are unit-tested on the CPU.
 add_executable(whirl-kt-bench-tests
   ${CMAKE_SOURCE_DIR}/tests/kernels/unit/kt_bench_tests.cpp
-  ${CMAKE_SOURCE_DIR}/tests/kernels/kt_bench.cpp)
+  ${CMAKE_SOURCE_DIR}/tests/kernels/kt_bench.cpp
+  ${CMAKE_SOURCE_DIR}/tests/kernels/kt_dq4s.cpp)
+# v0252-8sq5: the dq4s bench table pairs every split count against ops::dq4Splits (the production rule; whirl_ops has no HIP)
+target_link_libraries(whirl-kt-bench-tests PRIVATE whirl_ops)
 
 # feat026-ggemv: the float-order contract of the gfx1151 gemvk kernels (wave / group walk, header extraction, token
 # slots) emulated on the CPU against gemv1s / gemvw (bitwise) and a double dot; no HIP.

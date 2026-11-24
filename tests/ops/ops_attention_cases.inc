@@ -1636,4 +1636,166 @@ void testAttnDq4F8() {
     std::printf("  testAttnDq4F8: %lld block maps, %lld min-keys rows (%lld with fewer splits than today)\n", maps, rows, fewer);
 }
 
+// v0252-8sq5 (PLAN V1-109, fast only: q4 KV): the q4 decode / verify split count from the device profile's measured table
+// (ops::dq4TableSplits, flag dq4_splits: 0 = today's rule ops::dq4Splits, kDq4SplitsAuto = the profile table, 1..256 = that
+// count). Expected values are the kernel bench's picks (scratch/v0252_8sq5/gpu/20261124-1609/table.txt), written out here,
+// not read from the row.
+void testAttnDq4Table() {
+    const auto& p97 = whirl::device::k_profile_gfx1201;
+    const auto& p8s = whirl::device::k_profile_gfx1151;
+    CHECK(!p97.dq4_split_table.on && p8s.dq4_split_table.on);
+    {
+        const ops::AttnDecodeFlags d;
+        CHECK(d.dq4_splits == 0u);  // ops default: today's rule (a caller without the plan's flags keeps today's grid)
+    }
+    const std::int32_t win_def = dq4WinArg(16384, 65536);
+    // rows of one sequence ending at keys - 1 (verify rows), or the draft row (win_def)
+    auto rowsAt = [](std::int32_t keys, std::int32_t n) {
+        std::vector<std::int32_t> v;
+        for (std::int32_t r = keys - n; r < keys; ++r) v.push_back(r);
+        return v;
+    };
+    const std::vector<std::int32_t> zeros(8, 0);
+    auto tab = [&](const std::vector<std::int32_t>& pos, std::int32_t win, std::uint32_t flag, const whirl::device::Profile& pr) {
+        return ops::dq4TableSplits(std::span<const std::int32_t>(pos), std::span<const std::int32_t>(zeros.data(), pos.size()), win, 256, flag,
+                                   pr.dq4_split_table);
+    };
+    auto today = [](const std::vector<std::int32_t>& pos, std::int32_t win) { return ops::dq4Splits(std::span<const std::int32_t>(pos), win, 256); };
+    const std::uint32_t A = ops::kDq4SplitsAuto;
+    struct Cell {
+        std::int32_t keys, rows;  // rows 0 = the MTP draft row (window on)
+        std::uint32_t s;
+    };
+    // every measured (row set, keys) cell -> the bench's pick (ties resolved as in progress/v0252-8sq5.HANDOFF.md round 2)
+    const Cell measured[] = {
+        {8192, 1, 8},   {16384, 1, 16}, {32768, 1, 16}, {49152, 1, 16}, {65536, 1, 16}, {98304, 1, 16}, {131072, 1, 16},
+        {8192, 2, 8},   {16384, 2, 8},  {32768, 2, 8},  {49152, 2, 8},  {65536, 2, 8},  {98304, 2, 64}, {131072, 2, 64},
+        {8192, 3, 8},   {16384, 3, 8},  {32768, 3, 8},  {49152, 3, 8},  {65536, 3, 32}, {98304, 3, 32}, {131072, 3, 32},
+        {65536, 0, 16}, {98304, 0, 16}, {131072, 0, 16},
+        // between and past the breakpoints: the nearest lower-or-equal breakpoint
+        {8193, 1, 8},   {16383, 1, 8},  {40000, 1, 16}, {262144, 1, 16}, {65535, 2, 8},  {98303, 2, 8},  {120000, 2, 64},
+        {262144, 2, 64}, {65535, 3, 8}, {200000, 3, 32}, {70000, 0, 16}, {262144, 0, 16},
+    };
+    long long cells = 0;
+    ops::AttnDecodeProblem p;
+    p.head_dim = 256;
+    p.n_head = 16;
+    p.n_head_kv = 2;
+    p.max_ctx = 262144;
+    p.kv_q4 = true;
+    p.rows_known = true;
+    ops::AttnDecodeFlags f;
+    f.fd_splits = 256;
+    static const kn::KernelTable s8 = attnTable(true, true, true, false), s97 = attnTable(false, false, true, true);
+    auto k8 = std::make_unique<kn::KernelTable>(s8);
+    k8->attn_dq4o = tag("attn_dq4o");
+    const kn::KernelTable* k97 = &s97;
+    for (const Cell& c : measured) {
+        const std::int32_t n = c.rows == 0 ? 1 : c.rows, win = c.rows == 0 ? win_def : 0;
+        const std::vector<std::int32_t> pos = rowsAt(c.keys, n);
+        const std::uint32_t got = tab(pos, win, A, p8s);
+        CHECK(got == c.s);
+        if (got != c.s) std::printf("    dq4 table keys %d rows %d: %u, want %u\n", c.keys, c.rows, got, c.s);
+        // the plan launches it (gfx1151 kernel set, attn_dq4o): grid.y = the table's count
+        ops::AttnDecodeProblem q = p;
+        q.n = static_cast<std::uint32_t>(n);
+        q.row_pos = std::span<const std::int32_t>(pos);
+        q.row_base = std::span<const std::int32_t>(zeros.data(), pos.size());
+        q.win = win;
+        ops::AttnDecodeFlags fa = f;
+        fa.dq4_splits = A;
+        fa.dq4_order = true;
+        const ops::AttnDecodePlan pl = ops::chooseAttnDecode(q, fa, *k8, k8->caps, p8s);
+        CHECK(pl.kind == ops::AttnDecodeKind::dq4 && nameOf(pl.f) == "attn_dq4o" && pl.n_split == c.s && pl.grid.y == c.s && pl.grid.z == q.n);
+        // gfx1201: the row is off -> today's rule for the same inputs
+        CHECK(tab(pos, win, A, p97) == 0u);
+        CHECK(ops::chooseAttnDecode(q, fa, *k97, k97->caps, p97).n_split == today(pos, win));
+        // switch 0 = today's rule on the 8060S too
+        ops::AttnDecodeFlags f0 = fa;
+        f0.dq4_splits = 0;
+        CHECK(tab(pos, win, 0, p8s) == 0u && ops::chooseAttnDecode(q, f0, *k8, k8->caps, p8s).n_split == today(pos, win));
+        // WHIRL_DQ4_MINKEYS set: it wins over the table
+        ops::AttnDecodeFlags fm = fa;
+        fm.dq4_min_keys = 1024;
+        CHECK(ops::chooseAttnDecode(q, fm, *k8, k8->caps, p8s).n_split ==
+              ops::dq4MinKeysSplits(std::span<const std::int32_t>(pos), win, 256, 1024));
+        cells += 1;
+    }
+    // forced counts: a valid count is taken as is, an invalid one falls back to today's rule
+    {
+        const std::vector<std::int32_t> r2 = rowsAt(32768, 2), d1 = rowsAt(131072, 1);
+        CHECK(tab(r2, 0, 32, p8s) == 32u && tab(r2, 0, 32, p97) == 32u);  // forced works on any card (the A/B arm)
+        CHECK(tab(r2, 0, 1, p8s) == 1u);                                   // one split: valid (no window)
+        CHECK(tab(d1, win_def, 4, p8s) == 0u);                             // < 8 with the window: the window branch needs >= 8
+        CHECK(tab(r2, 0, 257, p8s) == 0u);                                 // past the grid
+        CHECK(ops::dq4TableSplits(std::span<const std::int32_t>(r2), std::span<const std::int32_t>(zeros.data(), 2), 0, 64, 128, p8s.dq4_split_table) == 0u);
+        CHECK(ops::dq4GridOk(std::span<const std::int32_t>(r2), 0, 32, 256) && !ops::dq4GridOk(std::span<const std::int32_t>(r2), 0, 300, 256) &&
+              !ops::dq4GridOk(std::span<const std::int32_t>(r2), 0, 128, 64) && !ops::dq4GridOk(std::span<const std::int32_t>(d1), win_def, 4, 256));
+    }
+    // row sets the bench did not time keep today's rule: 4+ rows, rows of different sequences (batched decode), rows that are
+    // not consecutive, a window with more than one row, keys below the first breakpoint, unknown rows
+    {
+        const std::vector<std::int32_t> r4 = rowsAt(32768, 4), r2 = rowsAt(32768, 2), r1 = rowsAt(4096, 1);
+        CHECK(tab(r4, 0, A, p8s) == 0u);
+        const std::int32_t bases[2] = {0, 1};
+        CHECK(ops::dq4TableSplits(std::span<const std::int32_t>(r2), std::span<const std::int32_t>(bases, 2), 0, 256, A, p8s.dq4_split_table) == 0u);
+        const std::int32_t gap[2] = {32760, 32767};
+        CHECK(ops::dq4TableSplits(std::span<const std::int32_t>(gap, 2), std::span<const std::int32_t>(zeros.data(), 2), 0, 256, A, p8s.dq4_split_table) == 0u);
+        CHECK(tab(rowsAt(131072, 2), win_def, A, p8s) == 0u);
+        CHECK(tab(r1, 0, A, p8s) == 0u);
+        // the draft row below the window threshold launches like a plain row: the rows-1 table
+        CHECK(tab(rowsAt(32768, 1), win_def, A, p8s) == 16u);
+        ops::AttnDecodeProblem q = p;
+        q.n = 2;
+        q.rows_known = false;
+        ops::AttnDecodeFlags fa = f;
+        fa.dq4_splits = A;
+        CHECK(ops::chooseAttnDecode(q, fa, *k8, k8->caps, p8s).n_split == 256);  // unknown rows: today's fixed grid
+        // f16 KV (balance / precise): the flag never touches the ws4 grid
+        q = p;
+        q.n = 2;
+        q.kv_q4 = false;
+        q.row_pos = std::span<const std::int32_t>(r2);
+        q.row_base = std::span<const std::int32_t>(zeros.data(), 2);
+        static const kn::KernelTable s8f = attnTable(true, true, false, false);
+        ops::AttnDecodeFlags f64 = fa;
+        f64.fd_splits = 64;
+        CHECK(ops::chooseAttnDecode(q, f64, s8f, s8f.caps, p8s).n_split == 64);
+    }
+    // --- no invalid grid: rows 1..4 x keys 1..262144 x window off / default, auto and forced 8 / 16 / 64: whatever count the
+    // plan takes, every key of every row is in exactly one launched split (the kernel model kRange) and none past the grid
+    long long swept = 0, bad = 0, from_table = 0;
+    for (const std::int32_t win : {0, win_def})
+        for (std::int32_t nr = 1; nr <= 4; ++nr)
+            for (std::int32_t keys = nr; keys <= 262144; keys += (keys < 1024 ? 1 : 61)) {
+                const std::vector<std::int32_t> pos = rowsAt(keys, nr);
+                for (const std::uint32_t flag : {A, 8u, 16u, 64u}) {
+                    const std::uint32_t t = tab(pos, win, flag, p8s);
+                    const std::uint32_t s = t != 0 ? t : today(pos, win);
+                    from_table += t != 0;
+                    swept += 1;
+                    bool ok = s >= 1 && s <= 256 && !(win != 0 && s < 8);
+                    for (const std::int32_t pp : pos) {
+                        const std::int32_t n_pos = pp + 1;
+                        std::int32_t covered = 0, prev_end = -1;
+                        for (std::uint32_t i = 0; ok && i < 256; ++i) {
+                            const KRange r = kRange(n_pos, static_cast<std::int32_t>(i), static_cast<std::int32_t>(s), win);
+                            if (r.b0 >= n_pos || r.b1 <= r.b0) continue;
+                            if (i >= s || r.b0 < prev_end) ok = false;
+                            covered += r.b1 - r.b0;
+                            prev_end = r.b1;
+                        }
+                        std::int32_t want = n_pos;
+                        const std::int32_t w = (win & 0xffff) * 64, min_pos = (win >> 16) * 1024;
+                        const std::int32_t w0 = std::max<std::int32_t>(256, (n_pos - w) & ~63);
+                        if (win != 0 && s > 1 && n_pos >= min_pos && w0 > 256) want = 256 + (n_pos - w0);
+                        if (covered != want) ok = false;
+                    }
+                    bad += !ok;
+                }
+            }
+    CHECK(swept > 0 && bad == 0 && from_table > 0);
+    std::printf("  testAttnDq4Table: %lld measured cells, %lld swept (%lld from the table or forced), %lld bad\n", cells, swept, from_table, bad);
+}
+
 }  // namespace
