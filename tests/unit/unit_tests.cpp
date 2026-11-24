@@ -81,6 +81,8 @@ const OrderRow kOrder[] = {
     {"kernels.moe", "testMoeSkipRef"},  // v0252-f5 (moeskip host reference)
     {"kernels.moe", "testMoepDhsMap"},  // v0252-8smoe2 (C: coalesced f16 epilogue maps)
     {"kernels.moe", "testMoepFqMap"},   // v0252-8smoe2 (E: fused-dequant fetch map)
+    {"kernels.moe", "testMoepFixSum"},  // v0252-8sdet (COMB 6: order-independent fixed-point combine)
+    {"kernels.moe", "testMoepFixReuse"},  // v0252-8sdet round 4 (the region left zero: reuse without a clear)
     {"kernels.sample", "testArgmaxKeys"},       // v0252-f1arg (feat026-argmax's key check)
     {"kernels.sample", "testArgmaxRankModel"},  // v0252-f1arg
     {"model.core", "testValueScope"},

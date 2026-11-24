@@ -26,6 +26,9 @@
 //         kt::ggemvBenchNts(), --bench-nt a subset; feat026-ggemv, v0251-a6bench)
 //   argmax in-object A/B (gfx1201): argmax_rows_to / argmax_rank_rows_to vs the multi-block twins *_mb, 248320 logits x
 //         1 / 2 / 3 / 4 / 8 verify rows, hot and cold input; B bitwise == A first and after the timing (v0252-f1arg)
+//   moepc in-object A/B (gfx1151, v0252-8sdet): COMB 6 (moe_fix_zero + gemm_moep[fq]di_<v>) vs COMB 5 (moe_combine4 K 0 +
+//         gemm_moepda_<v>) and vs COMB 1 (gemm_moepdn_<v> + moe_combine4), Ornith layer 0 down experts, n 2048 / 4096;
+//         B within the fixed-point bound of A and B run 2 bitwise == run 1 first, then ABBA pairs
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
 // without a model the cells use synthetic MXFP4 blocks of the same shapes (cell names start with "synthetic.").
 
@@ -39,6 +42,7 @@
 #include <memory>
 #include <numeric>
 
+#include "../../kernels/moep_map.h"  // v0252-8sdet: moep::fxLimit / kFxShift (family moepc)
 #include "argmax_key.h"  // AM_WS_BYTES (family argmax, v0252-f1arg)
 #include "cpu_ref.h"
 #include "kt_bench.h"
@@ -1911,9 +1915,173 @@ void benchArgmax(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- moepc (v0252-8sdet, PLAN V1-140, gfx1151 fast)
+// In-object A/B of the MoE prefill down projection + combine on the Ornith down experts
+// (--moemx; layer 0), Zipf(1.0) routing, n = 2048 / 4096 tokens (the 8060S MoE forward sizes), the default down variant
+// (kMoepDefault.dn) and m128w8n128k64 (lever D); every side is the WHOLE replaced sequence:
+//   COMB 5 = moe_combine4 (K = 0: x += sg * ysh) + gemm_moepda_<v> (f32 atomic scatter into x)
+//   COMB 1 = gemm_moepdn_<v> (moe_yd f32) + moe_combine4 (K = 8)
+//   COMB 6 = moe_fix_zero (sums + counters) + gemm_moepdi_<v> (i32 fixed-point sums, last arriver converts + adds ysh into x)
+// Cells: B = COMB 6 against A = COMB 5 and against A = COMB 1. Check before timing (b_rule): B within K * 2^-15 + 2^-14 |A|
+// of A on the full x from the same x0 (A and B are different numeric forms: fast may change output), AND B run twice from
+// x0 bitwise identical (order independence). Then ABBA pairs in one object (Bench::runAB) -> ab_ratio B / A.
+namespace {
+std::vector<int> moepcZipf(std::mt19937_64& rng, int n, int K, int R) {
+    std::vector<int> rank(static_cast<std::size_t>(R));
+    std::iota(rank.begin(), rank.end(), 0);
+    std::shuffle(rank.begin(), rank.end(), rng);
+    std::vector<double> cdf(static_cast<std::size_t>(R));
+    double acc = 0;
+    for (int e = 0; e < R; ++e) cdf[static_cast<std::size_t>(e)] = acc += 1.0 / (rank[static_cast<std::size_t>(e)] + 1.0);
+    std::uniform_real_distribution<double> u(0.0, acc);
+    std::vector<int> ids(static_cast<std::size_t>(n) * K);
+    for (int t = 0; t < n; ++t)
+        for (int got = 0; got < K;) {
+            const int e = std::min(static_cast<int>(std::lower_bound(cdf.begin(), cdf.end(), u(rng)) - cdf.begin()), R - 1);
+            bool dup = false;
+            for (int j = 0; j < got; ++j) dup = dup || ids[static_cast<std::size_t>(t) * K + j] == e;
+            if (!dup) ids[static_cast<std::size_t>(t) * K + got++] = e;
+        }
+    return ids;
+}
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax"};
+void benchMoepc(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "moepc";
+    const int dv0 = wk::kMoepDefault.dn;
+    if (!c.k.moe_fix_zero || !c.k.moep_di[dv0] || !c.k.moep_da[dv0] || !c.k.moep_dn[dv0] || !c.k.moe_combine4 || !c.k.moe_route) {
+        c.rep.skip("moepc", "bench gemm_moepdi", "kernel not in this code object");
+        return;
+    }
+    const whirl::gguf::File* f = c.open(c.models.moemx);
+    const int layer = 0;  // Ornith layer 0 down experts (the kt moemx layer)
+    const std::string tn = "blk." + std::to_string(layer) + ".ffn_down_exps.weight";
+    if (!f || !f->tensor(tn) || f->tensor(tn)->type != whirl::gguf::GgmlType::mxfp4) {
+        c.rep.skip("moepc", "bench gemm_moepdi", "needs --moemx (Ornith MXFP4) with " + tn);
+        return;
+    }
+    const HostMat down = loadMat(*f, tn);
+    const int R = static_cast<int>(f->getUintOr("qwen35moe.expert_count", 256));
+    const int K = static_cast<int>(f->getUintOr("qwen35moe.expert_used_count", 8));
+    const int F = down.ncols, E = down.nrows / R;
+    auto ddown = std::make_shared<Buf>(down.data);
+    const std::uint64_t drb = down.row_bytes;
+    const float lim = moep::fxLimit(K);
+    for (const int n : {2048, 4096}) {
+        const int pairs = n * K;
+        const std::vector<int> ids = moepcZipf(c.rng, n, K, R);
+        std::vector<float> wv = c.randu(static_cast<std::size_t>(pairs), 0.f, 0.3f), sgv = c.randu(static_cast<std::size_t>(n), 0.f, 1.f);
+        const std::vector<float> x0 = c.randn(static_cast<std::size_t>(n) * E), ysh = c.randn(static_cast<std::size_t>(n) * E);
+        std::vector<std::uint16_t> act(static_cast<std::size_t>(pairs) * F);
+        {
+            const std::vector<float> a = c.randn(act.size(), 0.5f);
+            for (std::size_t i = 0; i < act.size(); ++i) act[i] = f2h(a[i]);
+        }
+        auto dids = std::make_shared<Buf>(ids), dw = std::make_shared<Buf>(wv), dsg = std::make_shared<Buf>(sgv), dysh = std::make_shared<Buf>(ysh),
+             dact = std::make_shared<Buf>(act);
+        auto xa = std::make_shared<Buf>(static_cast<std::size_t>(n) * E * 4), xb = std::make_shared<Buf>(static_cast<std::size_t>(n) * E * 4);
+        auto perm = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * 4), inv = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * 4);
+        auto yd = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * E * 4);
+        const std::string rt = "zipf";
+        for (const int dv : {dv0, 3}) {  // 3 = m128w8n128k64 (lever D, same token tile)
+            if (dv >= wk::kMoepDnN || !c.k.moep_di[dv] || !c.k.moep_da[dv] || !c.k.moep_dn[dv] || wk::kMoepDn[dv].bn != wk::kMoepDn[dv0].bn) continue;
+            const wk::MoepDnVariant& vd = wk::kMoepDn[dv];
+            const int bn = vd.bn, mt = (pairs + bn - 1) / bn + R, nrb = (E + vd.bm - 1) / vd.bm;
+            const unsigned grid = static_cast<unsigned>(mt) * static_cast<unsigned>(nrb);
+            auto tiles = std::make_shared<Buf>(static_cast<std::size_t>(mt) * 16), ntl = std::make_shared<Buf>(16);
+            hip::launch(c.k.moe_route, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dids->p(), pairs, R, bn, perm->p(), inv->p(), tiles->p(), ntl->p());
+            c.sync();
+            const std::size_t words = static_cast<std::size_t>(n) * E + static_cast<std::size_t>(n) * nrb, words4 = (words + 3) / 4;
+            auto fx = std::make_shared<Buf>(words4 * 16);
+            const DevPtr cnt = fx->p() + static_cast<std::uint64_t>(n) * E * 4;
+            const unsigned zgrid = static_cast<unsigned>(std::min<std::size_t>((words4 + 255) / 256, 1024));
+            const int w4 = static_cast<int>(words4);
+            // v0252-8sdet round 3: fqs = the fused-dequant twins (the shipping fast plan: WHIRL_MOEP_FQ on): gemm_moepfqda_ /
+            // gemm_moepfqdn_ / gemm_moepfqdi_ (cells "...fq.comb6_vs_*"); else the base kernels
+            for (const bool fqs : {true, false}) {
+            const hip::Function fda = fqs ? c.k.moep_fq_da[dv] : c.k.moep_da[dv], fdn = fqs ? c.k.moep_fq_dn[dv] : c.k.moep_dn[dv],
+                                fdi = fqs ? c.k.moep_fq_di[dv] : c.k.moep_di[dv], fc4 = c.k.moe_combine4, fz = c.k.moe_fix_zero;
+            if (!fda || !fdn || !fdi || (fqs && (E % 256 != 0 || F % 256 != 0))) continue;  // fq: ops::moepFqShapeOk
+            const std::string pre = fqs ? "gemm_moepfq" : "gemm_moep", vtag = fqs ? ".fq" : "";
+            const unsigned c4x = static_cast<unsigned>((E + 1023) / 1024);
+            const std::string vn = vd.name;
+            auto seqB = [&c, ddown, dact, fx, xb, tiles, ntl, perm, inv, dw, dsg, dysh, fz, fdi, zgrid, w4, grid, drb, E, F, K, lim, cnt](std::uint64_t) {
+                hip::launch(fz, {zgrid, 1, 1}, {256, 1, 1}, 0, c.s, fx->p(), w4);
+                hip::launch(fdi, {grid, 1, 1}, {256, 1, 1}, 0, c.s, ddown->p(), drb, E, dact->p(), fx->p(), F, tiles->p(), ntl->p(), perm->p(), inv->p(),
+                            dw->p(), dsg->p(), dysh->p(), xb->p(), cnt, K, lim);
+            };
+            struct ASide {
+                const char* comb;
+                hip::Function main;
+            };
+            for (const ASide& as : {ASide{"comb5", fda}, ASide{"comb1", fdn}}) {
+                const bool c5 = std::string(as.comb) == "comb5";
+                const std::string kname = c5 ? "moe_combine4_k0+" + pre + "da_" + vn : pre + "dn_" + vn + "+moe_combine4";
+                Cell k;
+                k.ci = e.info("moepc", kname, "ornith.l" + std::to_string(layer) + ".n" + std::to_string(n) + "." + rt + "." + vn + vtag + ".comb6_vs_" + as.comb,
+                              "E" + std::to_string(E) + "_F" + std::to_string(F) + "_R" + std::to_string(R) + "_K" + std::to_string(K));
+                k.ci.settings = e.settings(static_cast<std::uint64_t>(down.data.size()), 1) + ";routing=" + rt + ";layer=" + std::to_string(layer) +
+                                ";dn=" + vn + ";fq=" + (fqs ? "1" : "0") + ";a=" + as.comb + ";b=comb6";
+                k.ci.bytes = static_cast<double>(down.data.size()) + 12.0 * n * E;
+                k.kernel = kname;
+                k.fa = as.main;
+                k.call = [&c, c5, ddown, dact, xa, yd, tiles, ntl, perm, inv, dw, dsg, dysh, fc4, grid, c4x, drb, E, F, K, n](hip::Function fn, std::uint64_t) {
+                    if (c5) {
+                        hip::launch(fc4, {c4x, static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, xa->p(), dysh->p(), dsg->p(), yd->p(), inv->p(), dw->p(), E, 0);
+                        hip::launch(fn, {grid, 1, 1}, {256, 1, 1}, 0, c.s, ddown->p(), drb, E, dact->p(), F, tiles->p(), ntl->p(), perm->p(), dw->p(), xa->p(), K);
+                    } else {
+                        hip::launch(fn, {grid, 1, 1}, {256, 1, 1}, 0, c.s, ddown->p(), drb, E, dact->p(), yd->p(), F, tiles->p(), ntl->p());
+                        hip::launch(fc4, {c4x, static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, xa->p(), dysh->p(), dsg->p(), yd->p(), inv->p(), dw->p(), E, K);
+                    }
+                };
+                k.run = [&c, &k, xa, &x0](hip::Function fn) {
+                    xa->up(x0);
+                    k.call(fn, 0);
+                    c.sync();
+                    return xa->down<float>(x0.size());
+                };
+                k.verify = [](const std::vector<float>& got) {
+                    Result r;
+                    r.kind = Kind::invariant;
+                    r.n = got.size();
+                    r.mismatches = static_cast<std::size_t>(std::count_if(got.begin(), got.end(), [](float v) { return !std::isfinite(v); }));
+                    r.pass = r.mismatches == 0;
+                    r.name = "A x finite (kt moemx checks A's values)";
+                    return r;
+                };
+                k.kernel_b = "moe_fix_zero+" + pre + "di_" + vn;
+                k.b_rule = "within K * 2^-15 + 2^-14 |A| of (and B run 2 bitwise == run 1)";
+                k.call_b = seqB;
+                k.bitwise_b = [&c, &k, xa, xb, &x0, K]() -> std::pair<std::size_t, std::size_t> {
+                    xa->up(x0);
+                    k.call(k.fa, 0);
+                    xb->up(x0);
+                    k.call_b(0);
+                    c.sync();
+                    const auto a = xa->down<float>(x0.size()), b1 = xb->down<float>(x0.size());
+                    xb->up(x0);
+                    k.call_b(0);
+                    c.sync();
+                    const auto b2 = xb->down<float>(x0.size());
+                    std::size_t bad = 0;
+                    const double abs_tol = K * std::ldexp(1.0, -(moep::kFxShift + 1));
+                    for (std::size_t i = 0; i < a.size(); ++i) {
+                        bad += !(std::fabs(static_cast<double>(b1[i]) - a[i]) <= abs_tol + std::ldexp(std::fabs(static_cast<double>(a[i])), -14));
+                        bad += std::memcmp(&b1[i], &b2[i], 4) != 0;
+                    }
+                    return {2 * a.size(), bad};
+                };
+                runCell(e, k);
+            }
+            }  // fqs
+        }
+    }
+}
+
+}  // namespace
+
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax", "moepc"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -1965,7 +2133,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
     };
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
                       {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"ws4r", benchWs4r}, {"silu", benchSilu}, {"lsplit", benchLsplit},
-                      {"argmax", benchArgmax}};
+                      {"argmax", benchArgmax}, {"moepc", benchMoepc}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

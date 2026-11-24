@@ -1004,6 +1004,175 @@ void testOpsMoep2(ops::MoeProblem p, const kn::KernelTable& k97, const kn::Kerne
     }
 }
 
+// v0252-8sdet (PLAN V1-140): COMB 6 = the order-independent fixed-point combine (fast only, opt-in WHIRL_MOEP_COMB=6):
+// fdn = gemm_moepdi_<the plan's down variant> (i32 atomic adds of w * y into moe_yd's first n * E words, the last arriver
+// of each (token, row block) adds fxValue(sum) + sg * ysh into x), moe_fix_zero clears the sums + counters first; no
+// moe_combine4 launch (comb4 false). Plan values: the counters at byte n * E * 4 of moe_yd, the zeroed words / 4, the
+// clamp fxLimit(K) (K = 8: 268435440 = the largest float with 8 * lim <= INT32_MAX). Never in precise (also with
+// WHIRL_Q8DEC=1) or balance, never below the moep row floor, never without moep_di / moe_fix_zero in the table or with
+// K < 2 (moe_yd must hold n * E + n * nrb words), never with moeskip min-keep 0 (a token with no kept slot would never
+// be finalized); with moeskip (min >= 1) it keeps the skip path; D (moep_dna) picks the gemm_moepdi twin of that variant;
+// COMB 5 and every other COMB unchanged by the new table entries; the R9700 table never takes it.
+// Fails to build before the change (no MoePlan::comb_fix / fix_*, KernelTable moep_di / moe_fix_zero).
+void testOpsMoepFix(ops::MoeProblem p, const kn::KernelTable& k97, const kn::KernelTable& k8) {
+    const auto kmp = std::make_unique<kn::KernelTable>(k8);
+    kn::KernelTable& km = *kmp;
+    for (int v = 0; v < kn::kMoepGuN; ++v) km.moep_gu[v] = tag(std::string("gemm_moepgu_") + kn::kMoepGu[v].name + "_mxfp4");
+    for (int v = 0; v < kn::kMoepDnN; ++v) {
+        const std::string vn = kn::kMoepDn[v].name;
+        km.moep_dn[v] = tag("gemm_moepdn_" + vn + "_mxfp4");
+        km.moep_dh[v] = tag("gemm_moepdh_" + vn + "_mxfp4");
+        km.moep_da[v] = tag("gemm_moepda_" + vn + "_mxfp4");
+    }
+    km.moe_combine4 = tag("moe_combine4");
+    km.moe_combine4h = tag("moe_combine4h");
+    const auto knp = std::make_unique<kn::KernelTable>(km);  // the table before the change (no COMB 6 kernels)
+    for (int v = 0; v < kn::kMoepDnN; ++v) km.moep_di[v] = tag(std::string("gemm_moepdi_") + kn::kMoepDn[v].name + "_mxfp4");
+    km.moe_fix_zero = tag("moe_fix_zero");
+    ops::MoeFlags f0;
+    ops::setMoep(f0, 1, 3, 1);
+    ops::MoeProblem q = p;
+    q.n = 4096;
+    ops::MoeFlags ff = f0;
+    ff.moep_comb_ok = ops::moepCombFor(false, true);
+    ff.moep_comb = 5;
+    const ops::MoePlan p5 = ops::chooseMoe(q, ff, km, km.silu_mul_x8h);
+    CHECK(p5.comb_atomic && !p5.comb_fix && nameOf(p5.fdn) == "gemm_moepda_m128w4n128k64_mxfp4");
+    ff.moep_comb = 6;
+    const ops::MoePlan pl = ops::chooseMoe(q, ff, km, km.silu_mul_x8h);
+    CHECK_DETAIL(pl.kind == ops::MoePrefillKind::moep && pl.comb_fix && !pl.comb_atomic && !pl.comb_fused && !pl.ydh && !pl.comb4 &&
+                     pl.bits == ops::MoeBits::moe_lossy_gemm && nameOf(pl.fdn) == "gemm_moepdi_m128w4n128k64_mxfp4",
+                 "COMB 6 fast: gemm_moepdi, no combine launch, lossy class");
+    CHECK(pl.fgu == p5.fgu && pl.dn_pgrid.x == p5.dn_pgrid.x && pl.bn == p5.bn && pl.max_tiles == p5.max_tiles && pl.gu_pgrid.x == p5.gu_pgrid.x);
+    const std::uint64_t words = 4096ull * 2048 + 4096ull * (2048 / 128);
+    CHECK_DETAIL(pl.fix_cnt_off == 4096ull * 2048 * 4 && pl.fix_words4 == words / 4 && pl.fix_lim == 268435440.f &&
+                     static_cast<double>(pl.fix_lim) * 8 <= 2147483647.0 && pl.fix_zero_grid.x == std::min<std::uint64_t>((words / 4 + 255) / 256, 1024),
+                 "COMB 6 plan values: counter offset " + std::to_string(pl.fix_cnt_off) + " words4 " + std::to_string(pl.fix_words4) + " lim " +
+                     std::to_string(pl.fix_lim) + " zero grid " + std::to_string(pl.fix_zero_grid.x));
+    // the other combines do not move with the new table entries
+    for (const unsigned cm : {0u, 1u, 2u, 3u, 4u, 5u}) {
+        ops::MoeFlags a = ff;
+        a.moep_comb = cm;
+        q.cnt_buf = cm == 2 || cm == 4;
+        const ops::MoePlan x = ops::chooseMoe(q, a, km, km.silu_mul_x8h), y = ops::chooseMoe(q, a, *knp, knp->silu_mul_x8h);
+        CHECK_DETAIL(!x.comb_fix && x.fdn == y.fdn && x.fgu == y.fgu && x.comb4 == y.comb4 && x.comb_atomic == y.comb_atomic && x.ydh == y.ydh &&
+                         x.comb_fused == y.comb_fused && x.bits == y.bits && x.skip == y.skip && x.comb_grid.x == y.comb_grid.x,
+                     "COMB " + std::to_string(cm) + " unchanged by the COMB 6 table entries");
+    }
+    q.cnt_buf = false;
+    // not fast: the plain moep down + moe_combine (the bitwise fallback, as COMB 5 there)
+    for (const int mode : {0, 1, 2}) {  // precise, balance, precise with prec_dec cleared (WHIRL_Q8DEC=1)
+        ops::MoeFlags a = f0;
+        a.prec_dec = mode == 0;
+        a.moep_comb_ok = ops::moepCombFor(mode != 1, false);
+        a.moep_comb = 6;
+        const ops::MoePlan x = ops::chooseMoe(q, a, km, km.silu_mul_x8h);
+        CHECK_DETAIL(x.kind == ops::MoePrefillKind::moep && !x.comb_fix && !x.comb_atomic && x.bits == ops::MoeBits::moe_f16_gemm &&
+                         nameOf(x.fdn) == "gemm_moepdn_m128w4n128k64_mxfp4",
+                     "COMB 6 refused outside fast, mode " + std::to_string(mode));
+    }
+    // kernels missing: not taken (the plain moep down)
+    {
+        const ops::MoePlan x = ops::chooseMoe(q, ff, *knp, knp->silu_mul_x8h);
+        CHECK(!x.comb_fix && !x.comb_atomic && nameOf(x.fdn) == "gemm_moepdn_m128w4n128k64_mxfp4");
+        const auto kz = std::make_unique<kn::KernelTable>(km);
+        kz->moe_fix_zero = nullptr;
+        CHECK(!ops::chooseMoe(q, ff, *kz, kz->silu_mul_x8h).comb_fix);
+    }
+    // below the moep row floor: no moep, no COMB 6
+    {
+        ops::MoeProblem s = q;
+        s.n = 128;
+        const ops::MoePlan x = ops::chooseMoe(s, ff, km, km.silu_mul_x8h);
+        CHECK(x.kind == ops::MoePrefillKind::fused_gu && !x.comb_fix && !x.comb4 && !x.ydh);
+    }
+    // K < 2: moe_yd cannot hold the sums + counters
+    {
+        ops::MoeProblem s = q;
+        s.K = 1;
+        CHECK(!ops::chooseMoe(s, ff, km, km.silu_mul_x8h).comb_fix);
+    }
+    // moeskip: kept with min-keep >= 1 (the skip path stays), refused with min-keep 0
+    {
+        ops::MoeFlags a = ff;
+        a.moe_skip_thr = 1.f;
+        a.moe_skip_min = 6;
+        const ops::MoePlan x = ops::chooseMoe(q, a, km, km.silu_mul_x8h);
+        CHECK_DETAIL(x.comb_fix && x.skip && nameOf(x.fdn) == "gemm_moepdi_m128w4n128k64_mxfp4", "COMB 6 with moeskip keeps the skip path");
+        a.moe_skip_min = 0;
+        CHECK(!ops::chooseMoe(q, a, km, km.silu_mul_x8h).comb_fix);
+    }
+    // D: the down variant of the atomic forms (same token tile) -> its gemm_moepdi twin
+    {
+        ops::MoeFlags a = ff;
+        a.moep_dna = 3;
+        const ops::MoePlan x = ops::chooseMoe(q, a, km, km.silu_mul_x8h);
+        CHECK(x.comb_fix && nameOf(x.fdn) == "gemm_moepdi_m128w8n128k64_mxfp4" && x.dn_pgrid.x == pl.dn_pgrid.x);
+    }
+    // the R9700 table: never
+    CHECK(!ops::chooseMoe(q, ff, k97, k97.silu_mul_x8h).comb_fix);
+    // v0252-8sdet round 3: the fused-dequant twin (the shipping fast plan has moep_fq on): COMB 6 takes gemm_moepfqdi_<v> as
+    // COMB 5 takes gemm_moepfqda_<v>; a variant without the twin keeps gemm_moepdi_<v>; and for EVERY COMB x fq x moeskip the
+    // down handle exists and the step that launches it matches its argument list: downInCombine() exactly for the fused
+    // (moep_dc / moep_dhc), atomic (moep_da / moep_fq_da) and fixed-point (moep_di / moep_fq_di) kernels, the plain-list
+    // kernels (moep_dn / dh / dhs and their fq twins) otherwise
+    {
+        const auto kf = std::make_unique<kn::KernelTable>(km);
+        for (int v = 0; v < kn::kMoepDnN; ++v)
+            if (kn::kMoepDn[v].bm * kn::kMoepDn[v].bk / 32 % 256 == 0) {
+                const std::string vn = kn::kMoepDn[v].name;
+                kf->moep_fq_dn[v] = tag("gemm_moepfqdn_" + vn + "_mxfp4");
+                kf->moep_fq_dh[v] = tag("gemm_moepfqdh_" + vn + "_mxfp4");
+                kf->moep_fq_da[v] = tag("gemm_moepfqda_" + vn + "_mxfp4");
+                kf->moep_fq_di[v] = tag("gemm_moepfqdi_" + vn + "_mxfp4");
+            }
+        for (int v = 0; v < kn::kMoepDnN; ++v) {
+            kf->moep_dc[v] = tag(std::string("gemm_moepdc_") + kn::kMoepDn[v].name + "_mxfp4");
+            kf->moep_dhc[v] = tag(std::string("gemm_moepdhc_") + kn::kMoepDn[v].name + "_mxfp4");
+        }
+        ops::MoeFlags a = ff;
+        a.moep_fq = true;
+        const ops::MoePlan x6 = ops::chooseMoe(q, a, *kf, kf->silu_mul_x8h);
+        CHECK_DETAIL(x6.comb_fix && x6.downInCombine() && nameOf(x6.fdn) == "gemm_moepfqdi_m128w4n128k64_mxfp4", "COMB 6 + fq: gemm_moepfqdi, " + nameOf(x6.fdn));
+        a.moep_comb = 5;
+        CHECK(nameOf(ops::chooseMoe(q, a, *kf, kf->silu_mul_x8h).fdn) == "gemm_moepfqda_m128w4n128k64_mxfp4");
+        a.moep_comb = 6;
+        kf->moep_fq_di[2] = nullptr;  // no twin of this variant: the base kernel, never a null launch
+        CHECK(nameOf(ops::chooseMoe(q, a, *kf, kf->silu_mul_x8h).fdn) == "gemm_moepdi_m128w4n128k64_mxfp4");
+        kf->moep_fq_di[2] = tag("gemm_moepfqdi_m128w4n128k64_mxfp4");
+        auto inFam = [&](Fn f, std::initializer_list<const std::array<Fn, kn::kMoepDnN>*> fams) {
+            for (const auto* a2 : fams)
+                for (const Fn g : *a2)
+                    if (g != nullptr && g == f) return true;
+            return false;
+        };
+        int cells = 0;
+        for (const unsigned cm : {0u, 1u, 2u, 3u, 4u, 5u, 6u})
+            for (const bool fq : {false, true})
+                for (const float sk : {0.f, 1.f})
+                    for (const unsigned n : {1024u, 4096u, 8192u}) {
+                        ops::MoeFlags b = ff;
+                        b.moep_comb = cm;
+                        b.moep_fq = fq;
+                        b.moe_skip_thr = sk;
+                        b.moe_skip_min = 6;
+                        ops::MoeProblem qq = q;
+                        qq.n = n;
+                        qq.cnt_buf = true;
+                        const ops::MoePlan pp = ops::chooseMoe(qq, b, *kf, kf->silu_mul_x8h);
+                        if (pp.kind != ops::MoePrefillKind::moep) continue;
+                        ++cells;
+                        const bool comb_list = inFam(pp.fdn, {&kf->moep_dc, &kf->moep_dhc, &kf->moep_da, &kf->moep_fq_da, &kf->moep_di, &kf->moep_fq_di});
+                        const bool plain_list = inFam(pp.fdn, {&kf->moep_dn, &kf->moep_dh, &kf->moep_dhs, &kf->moep_fq_dn, &kf->moep_fq_dh, &kf->moep_fq_dhs});
+                        CHECK_DETAIL(pp.fdn != nullptr && pp.downInCombine() == comb_list && pp.downInCombine() != plain_list,
+                                     "COMB " + std::to_string(cm) + " fq " + std::to_string(fq) + " skip " + std::to_string(static_cast<int>(sk)) + " n " +
+                                         std::to_string(n) + ": down " + nameOf(pp.fdn) + " launched by the " +
+                                         (pp.downInCombine() ? "combine" : "grouped-GEMM") + " step");
+                    }
+        CHECK(cells >= 7 * 2 * 2);
+    }
+}
+
 void testOpsMoe() {
     ops::MoeProblem p;  // Ornith-like: E 2048, 8 of 256 experts, F 512, all MXFP4 with row exponents
     p.E = 2048;
@@ -1275,6 +1444,7 @@ void testOpsMoe() {
     testOpsMoeCombRows(p);  // v0252-combfix (fails before the fix: the row floor drops COMB 3 below 1024 rows)
     testOpsMoeGuw(p, k97, k8);  // v0252-8smoe (fails to build before the change: no MoeFlags::moep_guw)
     testOpsMoep2(p, k97, k8);  // v0252-8smoe2 (fails to build before the change: no MoeFlags::moep_dhs / moep_dna / moep_fq)
+    testOpsMoepFix(p, k97, k8);  // v0252-8sdet (fails to build before the change: no MoePlan::comb_fix, KernelTable moep_di)
 }
 
 }  // namespace

@@ -23,6 +23,8 @@
 
 #include "cpu_ref.h"
 
+#include "../../kernels/moep_map.h"  // v0252-8sdet: moep::fxLimit / fxScale / kFxShift (the kernel's own constants)
+
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -185,6 +187,8 @@ void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& d
                                    yr[static_cast<std::size_t>(hinv[static_cast<std::size_t>(t) * K + k]) * E + e]);
                 sc[static_cast<std::size_t>(t) * E + e] = s + std::fabs(static_cast<double>(x0[static_cast<std::size_t>(t) * E + e]));
             }
+        std::vector<float> xfix0;  // v0252-8sdet: the first down variant's COMB 6 x (cross-variant order independence)
+        std::string xfix0_name;
         for (int v = 0; v < wk::kMoepDnN; ++v) {
             if (!c.k.moep_dn[v]) continue;
             const wk::MoepDnVariant& vd = wk::kMoepDn[v];
@@ -294,6 +298,119 @@ void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& d
                                      sc, 1e-6, 1e-7));
                 }
             }
+            // v0252-8sdet (COMB 6, fast): moe_fix_zero, then gemm_moepdi (i32 fixed-point sums, the last arriver adds
+            // fxValue(sum) + sg * ysh into x). (a) vs moe_combine within K * 2^-(kFxShift+1) absolute (one rounding per
+            // addend on the 2^-14 grid) + 1e-6 of sum |terms| (f32 conversion / adds); (b) the sums and counters are left
+            // zero; (c) ORDER INDEPENDENCE: a second launch equals the first bitwise, and every down variant (other token
+            // tiles, row blocks and wave layouts = other tile lists, block counts and arrival orders) equals the first
+            // variant's x bitwise (the addends are the same: every variant's WMMA chain is gemm_moe32r's, rows above).
+            if (c.k.moep_di[v] && c.k.moe_fix_zero) {
+                const float lim = moep::fxLimit(K);
+                const std::size_t words = static_cast<std::size_t>(n) * E + static_cast<std::size_t>(n) * nrb, words4 = (words + 3) / 4;
+                Buf fx(words4 * 16);
+                std::vector<float> xs[2];
+                for (int run = 0; run < 2; ++run) {
+                    Buf xf(static_cast<std::size_t>(n) * E * 4);
+                    xf.up(x0);
+                    fx.fill(0xa5);  // garbage: moe_fix_zero must clear it
+                    hip::launch(c.k.moe_fix_zero, {static_cast<unsigned>(std::min<std::size_t>((words4 + 255) / 256, 1024)), 1, 1}, {256, 1, 1}, 0, c.s, fx.p(),
+                                static_cast<int>(words4));
+                    hip::launch(c.k.moep_di[v], {grid, 1, 1}, {256, 1, 1}, 0, c.s, ddown.p(), down.row_bytes, E, aref.p(), fx.p(), F, tv.p(), nv.p(), perm.p(),
+                                inv.p(), dw.p(), dsg.p(), dysh.p(), xf.p(), fx.p() + static_cast<std::uint64_t>(n) * E * 4, K, lim);
+                    c.sync();
+                    xs[run] = xf.down<float>(xr.size());
+                    if (run == 0) {
+                        c.rep.add(cmpTol("gemm_moepdi_" + vn + "_mxfp4 (fixed-point combine, fast) vs moe_combine" + tag, xs[0], xr_d, sc, 1e-6,
+                                         K * std::ldexp(1.0, -(moep::kFxShift + 1))));
+                        const auto hz = fx.down<int>(words);
+                        Result r;
+                        r.name = "gemm_moepdi_" + vn + "_mxfp4 sums + counters left zero" + tag;
+                        r.n = hz.size();
+                        r.mismatches = static_cast<std::size_t>(std::count_if(hz.begin(), hz.end(), [](int q) { return q != 0; }));
+                        r.pass = r.mismatches == 0;
+                        c.rep.add(r);
+                    }
+                }
+                c.rep.add(cmpExact("gemm_moepdi_" + vn + "_mxfp4 run 2 == run 1 (order independence)" + tag, xs[1], xs[0], Kind::invariant));
+                // v0252-8sdet round 4: the engine clears the region only when it may be dirty (not per layer): two consecutive
+                // down launches on ONE buffer with no moe_fix_zero between them; the second gives x bitwise == a launch on a
+                // freshly cleared buffer (xs[0]), and the region is zero after it
+                {
+                    fx.fill(0x33);
+                    hip::launch(c.k.moe_fix_zero, {static_cast<unsigned>(std::min<std::size_t>((words4 + 255) / 256, 1024)), 1, 1}, {256, 1, 1}, 0, c.s,
+                                fx.p(), static_cast<int>(words4));
+                    std::vector<float> xr2;
+                    for (int run = 0; run < 2; ++run) {
+                        Buf xf(static_cast<std::size_t>(n) * E * 4);
+                        xf.up(x0);
+                        hip::launch(c.k.moep_di[v], {grid, 1, 1}, {256, 1, 1}, 0, c.s, ddown.p(), down.row_bytes, E, aref.p(), fx.p(), F, tv.p(), nv.p(),
+                                    perm.p(), inv.p(), dw.p(), dsg.p(), dysh.p(), xf.p(), fx.p() + static_cast<std::uint64_t>(n) * E * 4, K, lim);
+                        c.sync();
+                        if (run == 1) xr2 = xf.down<float>(xr.size());
+                    }
+                    c.rep.add(cmpExact("gemm_moepdi_" + vn + "_mxfp4 second launch without a clear == with a clear" + tag, xr2, xs[0], Kind::invariant));
+                    const auto hz = fx.down<int>(words);
+                    Result r;
+                    r.name = "gemm_moepdi_" + vn + "_mxfp4 sums + counters zero after two launches without a clear" + tag;
+                    r.n = hz.size();
+                    r.mismatches = static_cast<std::size_t>(std::count_if(hz.begin(), hz.end(), [](int q) { return q != 0; }));
+                    r.pass = r.mismatches == 0;
+                    c.rep.add(r);
+                }
+                // v0252-8sdet round 3: the fused-dequant twin (the shipping fast plan has moep_fq on). Its WMMA chains are
+                // gemm_moepdn's (row "gemm_moepfqdn_<v> == gemm_moe32r" above), so its addends, sums and x are BITWISE
+                // gemm_moepdi_<v>'s: one exact row against xs[0], sums + counters left zero, run 2 == run 1
+                if (c.k.moep_fq_di[v] && fq_shape) {
+                    std::vector<float> xq[2];
+                    for (int run = 0; run < 2; ++run) {
+                        Buf xf(static_cast<std::size_t>(n) * E * 4);
+                        xf.up(x0);
+                        fx.fill(0x5a);
+                        hip::launch(c.k.moe_fix_zero, {static_cast<unsigned>(std::min<std::size_t>((words4 + 255) / 256, 1024)), 1, 1}, {256, 1, 1}, 0, c.s,
+                                    fx.p(), static_cast<int>(words4));
+                        hip::launch(c.k.moep_fq_di[v], {grid, 1, 1}, {256, 1, 1}, 0, c.s, ddown.p(), down.row_bytes, E, aref.p(), fx.p(), F, tv.p(), nv.p(),
+                                    perm.p(), inv.p(), dw.p(), dsg.p(), dysh.p(), xf.p(), fx.p() + static_cast<std::uint64_t>(n) * E * 4, K, lim);
+                        c.sync();
+                        xq[run] = xf.down<float>(xr.size());
+                        if (run == 0) {
+                            const auto hz = fx.down<int>(words);
+                            Result r;
+                            r.name = "gemm_moepfqdi_" + vn + "_mxfp4 sums + counters left zero" + tag;
+                            r.n = hz.size();
+                            r.mismatches = static_cast<std::size_t>(std::count_if(hz.begin(), hz.end(), [](int q) { return q != 0; }));
+                            r.pass = r.mismatches == 0;
+                            c.rep.add(r);
+                        }
+                    }
+                    c.rep.add(cmpExact("gemm_moepfqdi_" + vn + "_mxfp4 == gemm_moepdi_" + vn + " (fused-dequant twin, same bits)" + tag, xq[0], xs[0],
+                                       Kind::invariant));
+                    c.rep.add(cmpExact("gemm_moepfqdi_" + vn + "_mxfp4 run 2 == run 1 (order independence)" + tag, xq[1], xq[0], Kind::invariant));
+                }
+                if (xfix0.empty()) {
+                    xfix0 = xs[0];
+                    xfix0_name = vn;
+                } else {
+                    c.rep.add(cmpExact("gemm_moepdi_" + vn + "_mxfp4 == gemm_moepdi_" + xfix0_name + " (other tiles / grid: order independence)" + tag, xs[0],
+                                       xfix0, Kind::invariant));
+                }
+            }
+        }
+        // v0252-8sdet: the clamp of the fixed-point combine is never reached on this data (largest |w * y| against the
+        // per-addend limit fxLimit(K) * 2^-kFxShift; K 8: 16383.999)
+        if (c.k.moe_fix_zero) {
+            double mx = 0.0;
+            for (int t = 0; t < n; ++t)
+                for (int k = 0; k < K; ++k)
+                    for (int e = 0; e < E; ++e)
+                        mx = std::max(mx, std::fabs(static_cast<double>(wv[static_cast<std::size_t>(t) * K + k]) *
+                                                    yr[static_cast<std::size_t>(hinv[static_cast<std::size_t>(t) * K + k]) * E + e]));
+            const double cap = static_cast<double>(moep::fxLimit(K)) / moep::fxScale();
+            Result r;
+            r.name = "moep fixed-point combine: max |w * y| " + std::to_string(mx) + " < clamp " + std::to_string(cap) + tag;
+            r.n = 1;
+            r.mismatches = mx < cap ? 0 : 1;
+            r.pass = mx < cap;
+            c.rep.add(r);
         }
     }
 }

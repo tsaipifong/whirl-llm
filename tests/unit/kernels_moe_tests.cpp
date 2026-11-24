@@ -476,6 +476,277 @@ void testMoeSkipRef() {
     }
 }
 
+// v0252-8sdet (PLAN V1-140, COMB 6): the order-independent fixed-point MoE combine of gemm_moepdi_* (kernels/moep_map.h
+// fx*; kernels/gfx1151/moe_prefill_mt.hip EPI 6). CPU replay with the kernel's own helpers:
+//   (1) fxLimit(K): integral, K * lim <= INT32_MAX (no overflow of the final i32 sum for any input), tight (the next
+//       float up breaks it), for K 1..32;
+//   (2) fxQuant: round to nearest even on the 2^-kFxShift grid (|q * 2^-S - a| <= 2^-(S+1) inside the range), symmetric
+//       clamp to +-lim (+-inf too), NaN -> 0;
+//   (3) the whole down grid (bn 128 tiles of the KEPT pairs, moeskip-style dropped slots with inv -1, Ornith K 8, 3
+//       routings): i32 adds mod 2^32, last-arriver counters with the kept-slot count (fxKept), finalize x += fxValue(sum)
+//       + sg * ysh by the last block; under 4 random block orders AND a different position order inside each expert,
+//       x is bitwise identical; every (token, row block) finalized once, after all its kept addends; counters and sums end
+//       at 0; |fxValue(sum) - sum of the addends| <= kept * 2^-(S+1) + |value| * 2^-24 (clamp-free addends);
+//   (4) mutant control: the same addends summed in f32 in those orders (COMB 5's arithmetic) differ somewhere.
+// Fails to build before the change (no moep::fx*).
+void testMoepFixSum() {
+    constexpr double kI32 = 2147483647.0;
+    const float qstep = 1.f / moep::fxScale();
+    check(moep::fxScale() == static_cast<float>(1 << moep::kFxShift) && qstep * moep::fxScale() == 1.f, "fx: scale 2^kFxShift");
+    // (1)
+    bool lim_ok = true;
+    for (int K = 1; K <= 32; ++K) {
+        const float lim = moep::fxLimit(K);
+        if (!(lim > 0.f) || lim != std::floor(lim) || static_cast<double>(lim) * K > kI32 ||
+            static_cast<double>(std::nextafter(lim, 1e30f)) * K <= kI32)
+            lim_ok = false;
+    }
+    check(lim_ok, "fx limit: integral, K * lim <= INT32_MAX and tight, K 1..32");
+    // (2)
+    const float lim8 = moep::fxLimit(8);
+    bool q_ok = moep::fxQuant(0.f, lim8) == 0 && moep::fxQuant(-0.f, lim8) == 0;
+    q_ok = q_ok && moep::fxQuant(0.5f * qstep, lim8) == 0 && moep::fxQuant(1.5f * qstep, lim8) == 2 && moep::fxQuant(2.5f * qstep, lim8) == 2 &&
+           moep::fxQuant(-0.5f * qstep, lim8) == 0 && moep::fxQuant(-1.5f * qstep, lim8) == -2 && moep::fxQuant(-2.5f * qstep, lim8) == -2 &&
+           moep::fxQuant(0.75f * qstep, lim8) == 1 && moep::fxQuant(-0.75f * qstep, lim8) == -1;  // nearest, ties to even
+    q_ok = q_ok && moep::fxQuant(1e30f, lim8) == static_cast<int>(lim8) && moep::fxQuant(-1e30f, lim8) == -static_cast<int>(lim8) &&
+           moep::fxQuant(INFINITY, lim8) == static_cast<int>(lim8) && moep::fxQuant(-INFINITY, lim8) == -static_cast<int>(lim8) &&
+           moep::fxQuant(NAN, lim8) == 0;
+    {
+        std::mt19937_64 rng(11);
+        std::uniform_real_distribution<double> ex(-20.0, 13.9);  // |a| up to ~1.5e4 < lim8 / 2^14 = 16384
+        for (int i = 0; i < 200000 && q_ok; ++i) {
+            const float a = static_cast<float>((rng() & 1 ? 1.0 : -1.0) * std::exp2(ex(rng)));
+            const int q = moep::fxQuant(a, lim8);
+            if (std::fabs(static_cast<double>(q) * qstep - a) > 0.5 * qstep) q_ok = false;
+        }
+    }
+    check(q_ok, "fx quant: nearest-even on the 2^-14 grid, error <= half a step, clamp +-lim (inf too), NaN -> 0");
+    // (3) + (4)
+    const int n = 300, K = 8, R = 64, rows_e = 256, BM = 128, bn = 128, nrb = moep::nrb(rows_e, BM);
+    bool det = true, once = true, ends0 = true, err_ok = true, f32_differs = false, kept_ok = true;
+    for (const int kind : {0, 1, 2}) {
+        std::mt19937_64 rng(23u + static_cast<unsigned>(kind));
+        const std::vector<int> ids = routing(rng, n, K, R, kind);
+        // moeskip-style drops (fast): slot k >= 1 dropped with probability 1/4; slot 0 always kept (min keep 1)
+        std::vector<int> keep(ids.size(), 1);
+        for (std::size_t p = 0; p < ids.size(); ++p)
+            if (p % K != 0 && rng() % 4 == 0) keep[p] = 0;
+        // addends a(pair, row) = w * y: log-uniform magnitudes 2^-20 .. 2^12, random sign
+        std::uniform_real_distribution<double> ex(-20.0, 12.0);
+        std::vector<float> add(ids.size() * rows_e);
+        for (float& a : add) a = static_cast<float>((rng() & 1 ? 1.0 : -1.0) * std::exp2(ex(rng)));
+        std::vector<float> x0(static_cast<std::size_t>(n) * rows_e), ysh(x0.size()), sg(static_cast<std::size_t>(n));
+        for (float& v : x0) v = static_cast<float>(std::ldexp(static_cast<double>(rng() % 2000000) - 1e6, -12));
+        for (float& v : ysh) v = static_cast<float>(std::ldexp(static_cast<double>(rng() % 2000000) - 1e6, -16));
+        for (float& v : sg) v = static_cast<float>((rng() % 1000) / 1000.0);
+        std::vector<float> first, first32;
+        for (int order = 0; order < 4; ++order) {
+            // positions: kept pairs grouped by expert, any order inside an expert (order 0 stable, then shuffled); inv -1 for dropped
+            std::vector<int> perm, inv(ids.size(), -1);
+            std::vector<Tile> tl;
+            for (int e = 0; e < R; ++e) {
+                std::vector<int> ps;
+                for (std::size_t p = 0; p < ids.size(); ++p)
+                    if (ids[p] == e && keep[p]) ps.push_back(static_cast<int>(p));
+                if (order > 0) std::shuffle(ps.begin(), ps.end(), rng);
+                for (std::size_t s = 0; s < ps.size(); s += bn)
+                    tl.push_back({e, static_cast<int>(perm.size() + s), static_cast<int>(std::min<std::size_t>(bn, ps.size() - s))});
+                for (const int p : ps) {
+                    inv[static_cast<std::size_t>(p)] = static_cast<int>(perm.size());
+                    perm.push_back(p);
+                }
+            }
+            for (int t = 0; t < n; ++t) {
+                int c = 0;
+                for (int k = 0; k < K; ++k) c += keep[static_cast<std::size_t>(t) * K + k];
+                if (moep::fxKept(inv.data(), t, K) != c) kept_ok = false;
+            }
+            std::vector<int> blocks(tl.size() * nrb);
+            std::iota(blocks.begin(), blocks.end(), 0);
+            if (order > 0) std::shuffle(blocks.begin(), blocks.end(), rng);
+            std::vector<std::uint32_t> acc(static_cast<std::size_t>(n) * rows_e, 0u);
+            std::vector<int> cnt(static_cast<std::size_t>(n) * nrb, 0), fin(cnt.size(), 0), arrived(cnt.size(), 0);
+            std::vector<float> x = x0, x32 = x0;
+            for (const int bx : blocks) {
+                const int ti = moep::blockTile(bx, nrb), rb = moep::blockRb(bx, nrb);
+                const Tile& t = tl[static_cast<std::size_t>(ti)];
+                const int m0 = rb * BM;
+                for (int tt = 0; tt < t.cnt; ++tt) {
+                    const int p = perm[static_cast<std::size_t>(t.pos + tt)], tok = p / K;
+                    for (int r = m0; r < m0 + BM && r < rows_e; ++r) {
+                        const float a = add[static_cast<std::size_t>(p) * rows_e + r];
+                        acc[static_cast<std::size_t>(tok) * rows_e + r] += static_cast<std::uint32_t>(moep::fxQuant(a, moep::fxLimit(K)));
+                        x32[static_cast<std::size_t>(tok) * rows_e + r] += a;  // COMB 5's arithmetic (mutant control)
+                    }
+                }
+                for (int tt = 0; tt < t.cnt; ++tt) {
+                    const int tok = perm[static_cast<std::size_t>(t.pos + tt)] / K;
+                    const std::size_t c = static_cast<std::size_t>(moep::cntSlot(tok, rb, nrb));
+                    ++arrived[c];
+                    if (cnt[c]++ == moep::fxKept(inv.data(), tok, K) - 1) {
+                        cnt[c] = 0;
+                        ++fin[c];
+                        if (arrived[c] != moep::fxKept(inv.data(), tok, K)) once = false;
+                        for (int r = m0; r < m0 + BM && r < rows_e; ++r) {
+                            const std::size_t o = static_cast<std::size_t>(tok) * rows_e + r;
+                            const int s = static_cast<int>(acc[o]);
+                            acc[o] = 0u;
+                            const float v = moep::fxValue(s);
+                            double ref = 0.0;
+                            int kept = 0;
+                            for (int k = 0; k < K; ++k)
+                                if (keep[static_cast<std::size_t>(tok) * K + k]) {
+                                    ref += add[(static_cast<std::size_t>(tok) * K + k) * rows_e + r];
+                                    ++kept;
+                                }
+                            if (std::fabs(static_cast<double>(v) - ref) > kept * 0.5 * qstep + std::fabs(ref) * std::ldexp(1.0, -23)) err_ok = false;
+                            x[o] += v + sg[static_cast<std::size_t>(tok)] * ysh[o];
+                        }
+                    }
+                }
+            }
+            for (std::size_t c = 0; c < cnt.size(); ++c)
+                if (fin[c] != 1 || cnt[c] != 0) once = false;
+            for (const std::uint32_t a : acc)
+                if (a != 0u) ends0 = false;
+            if (order == 0) {
+                first = x;
+                first32 = x32;
+            } else {
+                if (std::memcmp(first.data(), x.data(), x.size() * sizeof(float)) != 0) det = false;
+                if (std::memcmp(first32.data(), x32.data(), x32.size() * sizeof(float)) != 0) f32_differs = true;
+            }
+        }
+    }
+    check(kept_ok, "fx kept: fxKept(inv) = the kept slots of each token");
+    check(once, "fx grid: every (token, row block) finalized exactly once, after all its kept addends; counters end at 0");
+    check(ends0, "fx grid: the i32 sums are left zeroed");
+    check(err_ok, "fx grid: |fxValue(sum) - sum of the addends| <= kept * 2^-15 + |sum| * 2^-23");
+    check(det, "fx grid: x bitwise identical under 4 block orders and position orders (order independence)");
+    check(f32_differs, "fx grid mutant control: f32 sums of the same addends in those orders differ (the check can see order dependence)");
+}
+
+// v0252-8sdet round 4: the buffer contract behind clearing moe_yd's fixed-point region only when it may be dirty. One MoE
+// layer = the whole down grid with the product layout (i32 sums [n][rows_e] at word 0, counters [n][nrb] right after, the
+// kernel's own moep::fx* helpers, last arriver swaps the sum to 0 and resets the counter), blocks in a random order,
+// moeskip-style dropped slots (inv -1). Checked: (1) after every layer every word of the region is 0 again; (2) layer 2 on
+// the SAME buffer without a clear gives x bitwise equal to layer 2 on a freshly cleared buffer, for a second layer with
+// fewer rows (the counters move into former sum words) and with the same rows; (3) an "aborted forward" (2 of 3 layers
+// run, the rest never launched) followed by a new forward without a clear == with a clear; (4) mutant control: a buffer
+// left dirty (one stale counter) gives different x - the check can see a missing clear.
+namespace {
+struct FxIn {
+    int n;
+    std::vector<int> ids, keep;
+    std::vector<float> add, x0;
+};
+FxIn fxInput(std::mt19937_64& rng, int n, int K, int R, int rows_e) {
+    FxIn in;
+    in.n = n;
+    in.ids = routing(rng, n, K, R, 1);
+    in.keep.assign(in.ids.size(), 1);
+    for (std::size_t p = 0; p < in.ids.size(); ++p)
+        if (p % K != 0 && rng() % 4 == 0) in.keep[p] = 0;
+    std::uniform_real_distribution<double> ex(-16.0, 8.0);
+    in.add.resize(in.ids.size() * rows_e);
+    for (float& a : in.add) a = static_cast<float>((rng() & 1 ? 1.0 : -1.0) * std::exp2(ex(rng)));
+    in.x0.resize(static_cast<std::size_t>(n) * rows_e);
+    for (float& v : in.x0) v = static_cast<float>(std::ldexp(static_cast<double>(rng() % 2000000) - 1e6, -12));
+    return in;
+}
+// one layer on buf (word layout as ffn.cpp: sums then counters); returns x
+std::vector<float> fxLayer(std::vector<std::uint32_t>& buf, const FxIn& in, int K, int R, int rows_e, int BM, std::mt19937_64& rng) {
+    const int n = in.n, nrb = moep::nrb(rows_e, BM), bn = 128;
+    std::vector<int> perm, inv(in.ids.size(), -1);
+    std::vector<Tile> tl;
+    for (int e = 0; e < R; ++e) {
+        std::vector<int> ps;
+        for (std::size_t p = 0; p < in.ids.size(); ++p)
+            if (in.ids[p] == e && in.keep[p]) ps.push_back(static_cast<int>(p));
+        for (std::size_t s = 0; s < ps.size(); s += bn)
+            tl.push_back({e, static_cast<int>(perm.size() + s), static_cast<int>(std::min<std::size_t>(bn, ps.size() - s))});
+        for (const int p : ps) {
+            inv[static_cast<std::size_t>(p)] = static_cast<int>(perm.size());
+            perm.push_back(p);
+        }
+    }
+    std::vector<int> blocks(tl.size() * nrb);
+    std::iota(blocks.begin(), blocks.end(), 0);
+    std::shuffle(blocks.begin(), blocks.end(), rng);
+    std::uint32_t* sum = buf.data();
+    std::uint32_t* cnt = buf.data() + static_cast<std::size_t>(n) * rows_e;
+    std::vector<float> x = in.x0;
+    const float lim = moep::fxLimit(K);
+    for (const int bx : blocks) {
+        const int ti = moep::blockTile(bx, nrb), rb = moep::blockRb(bx, nrb), m0 = rb * BM;
+        const Tile& t = tl[static_cast<std::size_t>(ti)];
+        for (int tt = 0; tt < t.cnt; ++tt) {
+            const int p = perm[static_cast<std::size_t>(t.pos + tt)], tok = p / K;
+            for (int r = m0; r < m0 + BM && r < rows_e; ++r)
+                sum[static_cast<std::size_t>(tok) * rows_e + r] += static_cast<std::uint32_t>(moep::fxQuant(in.add[static_cast<std::size_t>(p) * rows_e + r], lim));
+        }
+        for (int tt = 0; tt < t.cnt; ++tt) {
+            const int tok = perm[static_cast<std::size_t>(t.pos + tt)] / K;
+            std::uint32_t& c = cnt[moep::cntSlot(tok, rb, nrb)];
+            if (static_cast<int>(c++) == moep::fxKept(inv.data(), tok, K) - 1) {
+                c = 0u;
+                for (int r = m0; r < m0 + BM && r < rows_e; ++r) {
+                    const std::size_t o = static_cast<std::size_t>(tok) * rows_e + r;
+                    const int s = static_cast<int>(sum[o]);
+                    sum[o] = 0u;
+                    x[o] += moep::fxValue(s);
+                }
+            }
+        }
+    }
+    return x;
+}
+}  // namespace
+
+void testMoepFixReuse() {
+    const int K = 8, R = 64, rows_e = 256, BM = 128, nrb = moep::nrb(rows_e, BM);
+    const int nmax = 300;
+    const std::size_t words = static_cast<std::size_t>(nmax) * rows_e + static_cast<std::size_t>(nmax) * nrb;
+    std::mt19937_64 rng(97);
+    const FxIn a = fxInput(rng, nmax, K, R, rows_e), b = fxInput(rng, 200, K, R, rows_e), b2 = fxInput(rng, nmax, K, R, rows_e);
+    auto allZero = [](const std::vector<std::uint32_t>& v) { return std::all_of(v.begin(), v.end(), [](std::uint32_t w) { return w == 0u; }); };
+    bool zero_after = true, reuse_ok = true, abort_ok = true;
+    for (const FxIn* second : {&b, &b2}) {
+        std::vector<std::uint32_t> dirty_free(words, 0u);  // one clear at the start, none between the layers
+        fxLayer(dirty_free, a, K, R, rows_e, BM, rng);
+        zero_after = zero_after && allZero(dirty_free);
+        const std::vector<float> x_reused = fxLayer(dirty_free, *second, K, R, rows_e, BM, rng);
+        zero_after = zero_after && allZero(dirty_free);
+        std::vector<std::uint32_t> fresh(words, 0u);
+        const std::vector<float> x_fresh = fxLayer(fresh, *second, K, R, rows_e, BM, rng);
+        reuse_ok = reuse_ok && std::memcmp(x_reused.data(), x_fresh.data(), x_fresh.size() * sizeof(float)) == 0;
+    }
+    {
+        // an aborted forward: layers 1 and 2 of 3 ran (every launched kernel runs to its end), layer 3 never launched
+        std::vector<std::uint32_t> buf(words, 0u);
+        fxLayer(buf, a, K, R, rows_e, BM, rng);
+        fxLayer(buf, b2, K, R, rows_e, BM, rng);
+        const std::vector<float> x_next = fxLayer(buf, b, K, R, rows_e, BM, rng);
+        std::vector<std::uint32_t> fresh(words, 0u);
+        const std::vector<float> x_clear = fxLayer(fresh, b, K, R, rows_e, BM, rng);
+        abort_ok = std::memcmp(x_next.data(), x_clear.data(), x_clear.size() * sizeof(float)) == 0 && allZero(buf);
+    }
+    bool mutant_differs = false;
+    {
+        std::vector<std::uint32_t> stale(words, 0u);
+        stale[static_cast<std::size_t>(b.n) * rows_e] = 1u;  // one stale counter: the finalize of that (token, row block) moves
+        stale[5] = 77u;                                      // and one stale sum
+        const std::vector<float> xs = fxLayer(stale, b, K, R, rows_e, BM, rng);
+        std::vector<std::uint32_t> fresh(words, 0u);
+        const std::vector<float> xf = fxLayer(fresh, b, K, R, rows_e, BM, rng);
+        mutant_differs = std::memcmp(xs.data(), xf.data(), xf.size() * sizeof(float)) != 0;
+    }
+    check(zero_after, "fx reuse: the whole region is zero after every layer (sums swapped to 0, counters reset)");
+    check(reuse_ok, "fx reuse: layer 2 on the same buffer without a clear == on a cleared buffer, bitwise (fewer rows and same rows)");
+    check(abort_ok, "fx reuse: a forward after an aborted one (2 of 3 layers ran) without a clear == with a clear, bitwise");
+    check(mutant_differs, "fx reuse mutant control: a dirty buffer (stale counter + sum) changes x");
+}
+
 }  // namespace
 
 // tests/unit/unit_tests.cpp ORDER lists all modules
@@ -486,6 +757,8 @@ const whirl::test::Suite& unitSuite_kernels_moe() {
                                           {"testMoeSkipRef", [] { testMoeSkipRef(); }},  // v0252-f5
                                           {"testMoepDhsMap", [] { testMoepDhsMap(); }},  // v0252-8smoe2 (C)
                                           {"testMoepFqMap", [] { testMoepFqMap(); }},    // v0252-8smoe2 (E)
+                                          {"testMoepFixSum", [] { testMoepFixSum(); }},  // v0252-8sdet (COMB 6)
+                                          {"testMoepFixReuse", [] { testMoepFixReuse(); }},  // v0252-8sdet round 4
                                       },
                                       nullptr};
     return s;
