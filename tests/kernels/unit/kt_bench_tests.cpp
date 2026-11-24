@@ -7,6 +7,10 @@
 
 #include "../kt_bench.h"
 #include "../kt_dq4s.h"  // v0252-8sq5: the dq4s split-count bench table
+#include "../kt_ws4s.h"  // v0252-8sws: the ws4s split-count bench table
+#include "../../../kernels/gfx1151/attn_ws4_index.h"  // ws4::block_range / block_range_ns (host-includable)
+#include "whirl/device_profile.h"
+#include "whirl/kernels_abi.h"
 #include "whirl/ops/attention.h"  // ops::dq4Splits (the production split rule the dq4s table pairs against)
 
 #include <algorithm>
@@ -24,6 +28,7 @@
 #include <vector>
 
 using namespace kt;
+namespace ops = whirl::ops;
 
 static int g_fail = 0, g_pass = 0;
 
@@ -925,6 +930,294 @@ static void test_dq4s_geo_ci() {
           line);
 }
 
+// ---------------------------------------------------------------- ws4s (v0252-8sws): attn_ws4 / attn_ws4g split count S vs 64
+// today's launch for the same rows: ops::chooseAttnDecode on a gfx1151-like kernel table (ws4 path), f16 or q8h KV
+static ops::AttnDecodePlan opsWs4Plan(int heads, int nkv, const std::vector<int>& pos, int win, bool q8, const whirl::kernels::AttnKernels& k) {
+    static std::vector<std::int32_t> p, b;
+    p.assign(pos.begin(), pos.end());
+    b.assign(pos.size(), 0);
+    ops::AttnDecodeProblem pr;
+    pr.n = static_cast<std::uint32_t>(pos.size());
+    pr.head_dim = 256;
+    pr.n_head = static_cast<std::uint32_t>(heads);
+    pr.n_head_kv = static_cast<std::uint32_t>(nkv);
+    pr.max_ctx = ws4s::kMaxCtx;
+    pr.kv_q8 = q8;
+    pr.rows_known = true;
+    pr.row_pos = std::span<const std::int32_t>(p);
+    pr.row_base = std::span<const std::int32_t>(b);
+    pr.win = win;
+    whirl::kernels::Caps caps;
+    caps.attn_group1 = true;  // the gfx1151 object's marker
+    return ops::chooseAttnDecode(pr, ops::AttnDecodeFlags{}, k, caps, whirl::device::k_profile_gfx1151);
+}
+
+static char g_ws4_tags[8];
+static whirl::kernels::AttnKernels ws4Table() {
+    whirl::kernels::AttnKernels k;
+    k.attn_ws4 = &g_ws4_tags[0];
+    for (int i = 0; i < 3; ++i) k.attn_ws4g[i] = &g_ws4_tags[1 + i];
+    k.attn_wsplit1 = &g_ws4_tags[4];
+    k.attn_combine = &g_ws4_tags[5];
+    return k;
+}
+
+static bool ws4sSourceHas(const std::string& entry);
+
+static void test_ws4s_plan_is_ops() {
+    // the bench's shipping side (plan(.., 64)) is exactly the launch ops makes today: kernel, CG, grid, block, groups
+    const whirl::kernels::AttnKernels k = ws4Table();
+    std::size_t n = 0, bad = 0;
+    std::string first;
+    for (const ws4s::Shape& sh : ws4s::kShapes)
+        for (const bool q8 : {true, false})
+            for (int L = 1; L <= 140000; L += (L < 4096 ? 61 : L < 70000 ? 1999 : 4093))
+                for (const int R : {1, 2, 3, 4, 5, 8})
+                    for (const int win : {0, ws4s::kDraftWin}) {
+                        if (R > L) continue;
+                        std::vector<int> pos;
+                        for (int r = L - R; r < L; ++r) pos.push_back(r);
+                        const ops::AttnDecodePlan o = opsWs4Plan(sh.heads, sh.nkv, pos, win, q8, k);
+                        const ws4s::Plan m = ws4s::plan(sh.heads, sh.nkv, pos, win, 64);
+                        bool ok = o.kind == (m.multi ? ops::AttnDecodeKind::ws4g : ops::AttnDecodeKind::ws4) &&
+                                  o.f == (m.multi ? k.attn_ws4g[m.cg - 1] : k.attn_ws4) && o.grid.x == m.gx && o.grid.y == m.gy && o.grid.z == m.gz &&
+                                  o.block.x == m.block && o.n_split == m.gy && m.groups.size() == m.gz;
+                        for (std::size_t g = 0; ok && g < m.groups.size(); ++g)
+                            ok = o.groups.first[g] == m.groups[g][0] && o.groups.count[g] == m.groups[g][1];
+                        ++n;
+                        if (!ok) {
+                            ++bad;
+                            if (first.empty())
+                                first = std::string(sh.model) + " L " + std::to_string(L) + " R " + std::to_string(R) + " win " + std::to_string(win) + ": ops grid " +
+                                        std::to_string(o.grid.x) + "x" + std::to_string(o.grid.y) + "x" + std::to_string(o.grid.z) + " mirror " + std::to_string(m.gx) +
+                                        "x" + std::to_string(m.gy) + "x" + std::to_string(m.gz);
+                        }
+                    }
+    check("ws4s: plan(.., 64) == ops::chooseAttnDecode on the gfx1151 ws4 path (" + std::to_string(n) + " cases)", n > 2000 && bad == 0, first);
+    // the operating points: Ornith rows 2 -> attn_ws4g1 (16 columns), rows 3 -> attn_ws4g2; Swift rows 2 -> g1, rows 3 -> g2
+    const ws4s::Plan o2 = ws4s::plan(16, 2, {32766, 32767}, 0, 64), o3 = ws4s::plan(16, 2, {32765, 32766, 32767}, 0, 64);
+    const ws4s::Plan s3 = ws4s::plan(24, 4, {32765, 32766, 32767}, 0, 64), s1 = ws4s::plan(24, 4, {32767}, 0, 64);
+    check("ws4s: ornith rows 2 attn_ws4g1 grid 2x64x1 / 256 threads", o2.multi && o2.cg == 1 && o2.gx == 2 && o2.gy == 64 && o2.gz == 1 && o2.block == 256);
+    check("ws4s: ornith rows 3 attn_ws4g2, swift rows 3 attn_ws4g2", o3.multi && o3.cg == 2 && s3.multi && s3.cg == 2 && s3.gx == 4);
+    check("ws4s: swift rows 1 attn_ws4 grid 4x64x1 / 128 threads", !s1.multi && s1.gx == 4 && s1.gy == 64 && s1.gz == 1 && s1.block == 128);
+    const ws4s::Plan b16 = ws4s::plan(16, 2, {32766, 32767}, 0, 16);
+    check("ws4s: plan(.., 16) grid.y 16, same kernel kind", b16.multi && b16.cg == 1 && b16.gy == 16 && b16.gx == 2);
+    check("ws4s: kernel names", ws4s::kernelName(true, s1, 64) == "attn_ws4_q8" && ws4s::kernelName(false, s1, 16) == "attn_ws4_ns16" &&
+                                    ws4s::kernelName(true, o3, 128) == "attn_ws4g2_q8_ns128" && ws4s::kernelName(false, o2, 64) == "attn_ws4g1");
+    // v0252-8sws round 2: q8 at 8 / 16 = the PRODUCT entries (kernels::ws4SplitName), the rest stay bench-only _ns<S>
+    check("ws4s: q8 S 8 / 16 -> the product entries", ws4s::kernelName(true, s1, 8) == "attn_ws4_q8_sp8" && ws4s::kernelName(true, o2, 16) == "attn_ws4g1_q8_sp16" &&
+                                                          ws4s::kernelName(true, o3, 8) == "attn_ws4g2_q8_sp8" && ws4s::kernelName(false, o3, 8) == "attn_ws4g2_ns8" &&
+                                                          ws4s::kernelName(true, s1, 32) == "attn_ws4_q8_ns32");
+    std::string miss;
+    for (const std::uint32_t sp : whirl::kernels::kWs4SplitCounts)
+        for (int cg = 0; cg <= 3; ++cg)
+            if (!ws4sSourceHas(whirl::kernels::ws4SplitName(cg, sp))) miss += whirl::kernels::ws4SplitName(cg, sp) + " ";
+    check("ws4s: the 8 product entries attn_ws4[g1..3]_q8_sp8 / _sp16 are in kernels/gfx1151/attn_ws4.hip", miss.empty(), miss);
+}
+
+// the bench-only kernels' own range copy (ws4::block_range_ns<S>, attn_ws4_index.h) == the shipping rule at split constant S
+template <int S>
+static std::size_t ws4RangeNsMismatches() {
+    std::size_t bad = 0;
+    for (int n = 1; n <= 270000; n += (n < 5000 ? 13 : 997))
+        for (const int win : {0, ws4s::kDraftWin, (4096 / 64) | ((8192 / 1024) << 16)})
+            for (int s = 0; s < S; ++s) {
+                const ws4::Range a = ws4::block_range_ns<S>(n, s, win), b = ws4::block_range(n, s, S, win);
+                bad += a.b0 != b.b0 || a.b1 != b.b1;
+            }
+    return bad;
+}
+
+static void test_ws4s_grid_ok() {
+    const std::size_t rb = ws4RangeNsMismatches<8>() + ws4RangeNsMismatches<16>() + ws4RangeNsMismatches<32>() + ws4RangeNsMismatches<64>() +
+                           ws4RangeNsMismatches<128>();
+    check("ws4s: ws4::block_range_ns<S> == ws4::block_range(.., S, ..) for S 8..128, windows off / draft / small", rb == 0, num(static_cast<double>(rb)));
+    const std::vector<int> r2 = {131070, 131071};
+    bool all = true;
+    for (const int s : {8, 16, 32, 64, 128}) all = all && ws4s::gridOk(16, 2, r2, 0, s) && ws4s::gridOk(24, 4, {131071}, ws4s::kDraftWin, s);
+    check("ws4s: gridOk 8 / 16 / 32 / 64 / 128 at 128k (rows 2, draft row)", all);
+    check("ws4s: gridOk rejects counts without a kernel entry (4, 12, 256)", !ws4s::gridOk(16, 2, r2, 0, 4) && !ws4s::gridOk(16, 2, r2, 0, 12) &&
+                                                                               !ws4s::gridOk(16, 2, r2, 0, 256) && ws4s::nsBuilt(64) && !ws4s::nsBuilt(12));
+    std::vector<int> r6, r33;
+    for (int r = 0; r < 6; ++r) r6.push_back(100000 + r);
+    for (int r = 0; r < 33; ++r) r33.push_back(100000 + r);
+    check("ws4s: gridOk takes CG 3 (ornith 6 rows = 48 columns) for 16 and 64", ws4s::gridOk(16, 2, r6, 0, 16) && ws4s::gridOk(16, 2, r6, 0, 64));
+    // round 2: CG 3 cells only where an entry exists (the q8 product entries _sp8 / _sp16; no bench-only CG 3)
+    {
+        std::string e3;
+        const auto c6 = ws4s::cells(ws4s::optsFromEnv(fakeEnv({{"WHIRL_KT_WS4S_MODELS", "ornith"}, {"WHIRL_KT_WS4S_L", "65536"}, {"WHIRL_KT_WS4S_ROWS", "6"},
+                                                               {"WHIRL_KT_WS4S_S", "8,16,32"}}),
+                                                       &e3));
+        std::set<std::string> got;
+        for (const auto& x : c6) got.insert(x.name + "=" + x.kernel_b);
+        const std::set<std::string> want = {"ornith.q8hkv.L65536.rows6.s8_vs_s64=attn_ws4g3_q8_sp8", "ornith.q8hkv.L65536.rows6.s16_vs_s64=attn_ws4g3_q8_sp16"};
+        std::string g;
+        for (const auto& n : got) g += n + " ";
+        check("ws4s: CG 3 rows -> only the q8 product entries (no f16 / S 32 cell)", e3.empty() && got == want, g);
+    }
+    check("ws4s: gridOk rejects 33 rows and empty rows", !ws4s::gridOk(16, 2, r33, 0, 64) && !ws4s::gridOk(16, 2, {}, 0, 64));
+    check("ws4s: samePartition at 4096 keys (64 / 128: 64 keys a split) and not at 8192", ws4s::samePartition({4095}, 0, 64, 128) &&
+                                                                                         !ws4s::samePartition({8191}, 0, 64, 128) &&
+                                                                                         !ws4s::samePartition({131071}, 0, 64, 16));
+}
+
+static bool ws4sSourceHas(const std::string& entry) {
+#ifdef WHIRL_KT_SRC_DIR
+    static std::string src;
+    if (src.empty()) {
+        std::ifstream in(std::string(WHIRL_KT_SRC_DIR) + "/kernels/gfx1151/attn_ws4.hip", std::ios::binary);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        src = ss.str();
+    }
+    return src.find("(" + entry + ",") != std::string::npos;
+#else
+    (void)entry;
+    return false;
+#endif
+}
+
+static void test_ws4s_default_table() {
+    std::string err;
+    const ws4s::Opts o = ws4s::optsFromEnv(fakeEnv({}), &err);
+    check("ws4s: default opts parse", err.empty(), err);
+    check("ws4s: default models ornith, swift; kv q8h, f16", o.models == std::vector<std::string>{"ornith", "swift"} && o.kvs == std::vector<std::string>{"q8h", "f16"});
+    check("ws4s: default keys 8192 .. 131072", o.keys == std::vector<int>{8192, 16384, 32768, 49152, 65536, 98304, 131072});
+    check("ws4s: default splits 8 16 32 128", o.splits == std::vector<int>{8, 16, 32, 128});
+    std::vector<std::string> tags;
+    for (const auto& rs : o.rowsets) tags.push_back(rs.tag);
+    check("ws4s: default row sets 1 2 3 d1", tags == std::vector<std::string>{"1", "2", "3", "d1"});
+    const std::vector<ws4s::Cell> cs = ws4s::cells(o);
+    const whirl::kernels::AttnKernels k = ws4Table();
+    std::set<std::string> names, kernels_b;
+    std::size_t bad_ship = 0, bad_grid = 0, bad_pos = 0, bad_name = 0, bad_kern = 0, bad_shape = 0, bad_draft = 0, bad_aa = 0;
+    for (const ws4s::Cell& c : cs) {
+        names.insert(c.name);
+        const bool q8 = c.kv == "q8h";
+        const ops::AttnDecodePlan op = opsWs4Plan(c.heads, c.nkv, c.pos, c.win, q8, k);
+        bad_ship += !(c.s_ship == 64 && op.grid.x == c.pa.gx && op.grid.y == c.pa.gy && op.grid.z == c.pa.gz && op.block.x == c.pa.block &&
+                      op.f == (c.pa.multi ? k.attn_ws4g[c.pa.cg - 1] : k.attn_ws4));
+        bad_grid += !ws4s::gridOk(c.heads, c.nkv, c.pos, c.win, c.s) || !ws4s::gridOk(c.heads, c.nkv, c.pos, c.win, 64) || c.pb.gy != static_cast<unsigned>(c.s) ||
+                    c.pa.gy != 64u || c.pb.multi != c.pa.multi || c.pb.cg != c.pa.cg;
+        bool pos_ok = static_cast<int>(c.pos.size()) == c.rows;
+        for (int r = 0; r < c.rows && pos_ok; ++r) pos_ok = c.pos[static_cast<std::size_t>(r)] == c.keys - c.rows + r;
+        bad_pos += !pos_ok;
+        bad_name += c.name != c.model + "." + c.kv + "kv.L" + std::to_string(c.keys) + ".rows" + c.rows_tag + ".s" + std::to_string(c.s) + "_vs_s64";
+        const std::string base = c.pa.multi ? "attn_ws4g" + std::to_string(c.pa.cg) : std::string("attn_ws4");
+        const bool prod = q8 && (c.s == 8 || c.s == 16);
+        bad_kern += c.kernel_a != base + (q8 ? "_q8" : "") ||
+                    c.kernel_b != (prod ? whirl::kernels::ws4SplitName(c.pa.multi ? c.pa.cg : 0, static_cast<std::uint32_t>(c.s)) : c.kernel_a + "_ns" + std::to_string(c.s));
+        kernels_b.insert(c.kernel_b);
+        bad_shape += !((c.model == "ornith" && c.heads == 16 && c.nkv == 2) || (c.model == "swift" && c.heads == 24 && c.nkv == 4));
+        bad_draft += c.rows_tag == "d1" ? !(c.win == ws4s::kDraftWin && c.rows == 1 && c.keys >= ws4s::kDraftMinKeys) : c.win != 0;
+        bad_aa += c.s == 64 || c.same_partition;
+    }
+    // 2 models x 2 KV kinds x (7 keys x rows 1 / 2 / 3 + 3 draft-row keys) x 4 S
+    check("ws4s: default table 384 cells", cs.size() == 384, num(static_cast<double>(cs.size())));
+    check("ws4s: cell names unique", names.size() == cs.size());
+    check("ws4s: A of every cell == today's ops launch (64 splits)", bad_ship == 0, num(static_cast<double>(bad_ship)));
+    check("ws4s: only valid grids; B = the same kernel kind / CG at grid.y S", bad_grid == 0, num(static_cast<double>(bad_grid)));
+    check("ws4s: rows at L - R .. L - 1", bad_pos == 0);
+    check("ws4s: cell name <model>.<kv>kv.L<L>.rows<tag>.s<S>_vs_s64", bad_name == 0);
+    check("ws4s: kernel A = the shipping entry, B = the product _sp<S> entry (q8, S 8 / 16) or <A>_ns<S>", bad_kern == 0, num(static_cast<double>(bad_kern)));
+    check("ws4s: shapes Ornith 16/2, Swift 24/4", bad_shape == 0);
+    check("ws4s: d1 = one row, the default draft window, keys >= 65536; others no window", bad_draft == 0);
+    check("ws4s: default no A/A cells", bad_aa == 0);
+    std::string missing;
+    for (const std::string& kb : kernels_b)
+        if (!ws4sSourceHas(kb)) missing += kb + " ";
+    check("ws4s: every B kernel is a bench entry in kernels/gfx1151/attn_ws4.hip (" + std::to_string(kernels_b.size()) + ")", kernels_b.size() == 24 && missing.empty(),
+          missing);
+    auto find = [&](const std::string& n) { return std::any_of(cs.begin(), cs.end(), [&](const ws4s::Cell& c) { return c.name == n; }); };
+    check("ws4s: pins", find("ornith.q8hkv.L32768.rows2.s16_vs_s64") && find("swift.f16kv.L131072.rowsd1.s128_vs_s64") && find("swift.q8hkv.L8192.rows3.s8_vs_s64") &&
+                            !find("ornith.q8hkv.L32768.rowsd1.s16_vs_s64") && !find("ornith.q8hkv.L32768.rows1.s64_vs_s64"));
+    bool ordered = true;
+    for (std::size_t i = 1; i < cs.size(); ++i) {
+        const auto& a = cs[i - 1];
+        const auto& b = cs[i];
+        if (a.model == b.model && a.kv == b.kv && a.keys == b.keys && a.rows_tag == b.rows_tag) ordered = ordered && a.s < b.s;
+        if (a.model == b.model && a.kv == b.kv && a.keys > b.keys) ordered = false;
+    }
+    check("ws4s: run order model / kv / keys / rows / S", ordered);
+}
+
+static void test_ws4s_env_filters() {
+    std::string err;
+    ws4s::Opts o = ws4s::optsFromEnv(fakeEnv({{"WHIRL_KT_WS4S_MODELS", "ornith"}, {"WHIRL_KT_WS4S_KV", "q8h"}, {"WHIRL_KT_WS4S_L", "32768,131072"},
+                                              {"WHIRL_KT_WS4S_ROWS", "2 d1"}, {"WHIRL_KT_WS4S_S", "16"}}),
+                                     &err);
+    check("ws4s env: filters parse", err.empty(), err);
+    std::set<std::string> got;
+    for (const auto& c : ws4s::cells(o)) got.insert(c.name);
+    const std::set<std::string> want = {"ornith.q8hkv.L32768.rows2.s16_vs_s64", "ornith.q8hkv.L131072.rows2.s16_vs_s64", "ornith.q8hkv.L131072.rowsd1.s16_vs_s64"};
+    std::string g;
+    for (const auto& n : got) g += n + " ";
+    check("ws4s env: exactly the filtered cells", got == want, g);
+    o = ws4s::optsFromEnv(fakeEnv({{"WHIRL_KT_WS4S_MODELS", "swift"}, {"WHIRL_KT_WS4S_KV", "f16"}, {"WHIRL_KT_WS4S_L", "65536"}, {"WHIRL_KT_WS4S_ROWS", "1"},
+                                   {"WHIRL_KT_WS4S_AA", "1"}}),
+                          &err);
+    const auto ca = ws4s::cells(o);
+    const bool has_aa = std::any_of(ca.begin(), ca.end(), [](const ws4s::Cell& c) {
+        return c.s == 64 && c.same_partition && c.kernel_b == c.kernel_a + "_ns64" && c.name == "swift.f16kv.L65536.rows1.s64_vs_s64";
+    });
+    check("ws4s env: AA=1 adds the S == 64 control cell (B = the bench instantiation <A>_ns64)", err.empty() && o.aa && has_aa && ca.size() == 5);
+    std::string miss;
+    for (const char* n : {"attn_ws4_ns64", "attn_ws4_q8_ns64", "attn_ws4g1_ns64", "attn_ws4g2_ns64", "attn_ws4g1_q8_ns64", "attn_ws4g2_q8_ns64"})
+        if (!ws4sSourceHas(n)) miss += std::string(n) + " ";
+    check("ws4s: the six A/A control entries <A>_ns64 are in kernels/gfx1151/attn_ws4.hip", miss.empty(), miss);
+    for (const auto& kv : std::vector<std::pair<std::string, std::string>>{{"WHIRL_KT_WS4S_MODELS", "llama"},
+                                                                         {"WHIRL_KT_WS4S_KV", "q4"},
+                                                                         {"WHIRL_KT_WS4S_L", "abc"},
+                                                                         {"WHIRL_KT_WS4S_L", "0"},
+                                                                         {"WHIRL_KT_WS4S_ROWS", "x"},
+                                                                         {"WHIRL_KT_WS4S_ROWS", "33"},
+                                                                         {"WHIRL_KT_WS4S_S", "12"},
+                                                                         {"WHIRL_KT_WS4S_S", "256"}}) {
+        std::string e2;
+        (void)ws4s::optsFromEnv(fakeEnv({{kv.first, kv.second}}), &e2);
+        check("ws4s env: " + kv.first + "=" + kv.second + " is an error", !e2.empty());
+    }
+}
+
+// v0252-8sws round 2: WHIRL_KT_WS4S_TABLE=1 - B = the count the product rule launches (ops::ws4SplitCount, gfx1151 profile, flag
+// auto, a table with every product entry), one cell per (model, keys, rows), name suffix ".table"; A stays today's 64
+static void test_ws4s_table_cells() {
+    std::string err;
+    const ws4s::Opts o = ws4s::optsFromEnv(fakeEnv({{"WHIRL_KT_WS4S_TABLE", "1"}}), &err);
+    check("ws4s table: opts parse", err.empty() && o.table, err);
+    const auto cs = ws4s::cells(o);
+    std::size_t bad = 0, n_or = 0, n_sw = 0;
+    for (const auto& c : cs) {
+        const bool orn = c.model == "ornith";
+        n_or += orn;
+        n_sw += !orn;
+        const std::uint32_t want = orn ? 16u : 8u;
+        bad += c.kv != "q8h" || c.s != static_cast<int>(want) || c.s_ship != 64 || c.name.size() < 6 || c.name.substr(c.name.size() - 6) != ".table" ||
+               c.kernel_b != whirl::kernels::ws4SplitName(c.pa.multi ? c.pa.cg : 0, want);
+    }
+    // 7 keys x rows 1 / 2 / 3 + 3 draft-row keys = 24 per model, q8h only (f16 keeps 64: no cell); round 3: a cell over its measured
+    // limit is 64 = no cell (skipped, not an A/A): Swift rows 3 at 131072 -> 23
+    const bool no_sw3 = std::none_of(cs.begin(), cs.end(), [](const ws4s::Cell& c) { return c.name.rfind("swift.q8hkv.L131072.rows3.", 0) == 0; });
+    check("ws4s table: 24 Ornith / 23 Swift cells (Swift rows 3 @131072 over its limit), q8h only, B = the rule's count with its product entry",
+          n_or == 24 && n_sw == 23 && no_sw3 && bad == 0,
+          num(static_cast<double>(cs.size())) + " cells, " + num(static_cast<double>(bad)) + " bad");
+    {  // rows 4..9 and 196608 / 262144 through the env filters: the limits of the gfx1151 profile
+        std::string e9;
+        const auto c9 = ws4s::cells(ws4s::optsFromEnv(fakeEnv({{"WHIRL_KT_WS4S_TABLE", "1"}, {"WHIRL_KT_WS4S_ROWS", "4,9"}, {"WHIRL_KT_WS4S_L", "16384,32768,262144"}}), &e9));
+        std::set<std::string> got;
+        for (const auto& c : c9) got.insert(c.name);
+        const std::set<std::string> want = {"ornith.q8hkv.L16384.rows4.s16_vs_s64.table", "ornith.q8hkv.L32768.rows4.s16_vs_s64.table",
+                                            "ornith.q8hkv.L262144.rows4.s16_vs_s64.table", "ornith.q8hkv.L16384.rows9.s16_vs_s64.table",
+                                            "swift.q8hkv.L16384.rows4.s8_vs_s64.table",    "swift.q8hkv.L32768.rows4.s8_vs_s64.table",
+                                            "swift.q8hkv.L16384.rows9.s8_vs_s64.table"};
+        std::string g;
+        for (const auto& x : got) g += x + " ";
+        check("ws4s table: rows 4 / 9 at 16384 / 32768 / 262144 follow the limits", e9.empty() && got == want, g);
+    }
+    check("ws4s table: ornith 32768 rows2 -> s16 vs s64",
+          std::any_of(cs.begin(), cs.end(), [](const ws4s::Cell& c) { return c.name == "ornith.q8hkv.L32768.rows2.s16_vs_s64.table"; }));
+}
+
 int main(int argc, char** argv) {
     std::string emit;
     for (int i = 1; i < argc; ++i)
@@ -961,6 +1254,11 @@ int main(int argc, char** argv) {
         test_dq4s_env_filters();
         test_dq4s_geo_ci();
         test_dq4s_table_cells();
+        test_ws4s_plan_is_ops();
+        test_ws4s_grid_ok();
+        test_ws4s_default_table();
+        test_ws4s_env_filters();
+        test_ws4s_table_cells();
     } catch (const std::exception& e) {
         check(std::string("exception: ") + e.what(), false);
     }

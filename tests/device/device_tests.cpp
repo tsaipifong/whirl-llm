@@ -270,6 +270,20 @@ void testProfiles() {
     // blocks (one machine wave); the 8060S 0 (its attn_ws4 path keeps the constant 64 splits)
     CHECK(a.attn_lsplit_blocks == 64);
     CHECK(b.attn_lsplit_blocks == 0);
+    // v0252-8sws (PLAN V1-88 on gfx1151): the gfx1151 attn_ws4 / attn_ws4g (q8 / q8h KV) split count by machine fill, the
+    // same rule (ops::lsplitCount, flag attn_lsplit): 32 blocks = the measured best count x KV heads (Ornith 16 x 2, Swift
+    // 8 x 4; kernel bench ws4s 2026-11-24 19:10); 0 on the R9700 (no attn_ws4 there)
+    CHECK(a.attn_ws4_split_blocks == 0);
+    CHECK(b.attn_ws4_split_blocks == 32);
+    // v0252-8sws round 3: the measured limits (largest key count where S beat 64; [0] S 8 = Swift shape, [1] S 16 = Ornith;
+    // index 0 = MTP draft row, 1..9 = rows); gfx1201 off
+    {
+        const std::uint32_t l8[10] = {262144, 262144, 262144, 98304, 98304, 196608, 49152, 65536, 65536, 16384};
+        const std::uint32_t l16[10] = {262144, 262144, 262144, 262144, 262144, 262144, 262144, 16384, 16384, 16384};
+        bool same = b.ws4_split_limits.on && !a.ws4_split_limits.on;
+        for (int i = 0; i < 10; ++i) same = same && b.ws4_split_limits.max_keys[0][i] == l8[i] && b.ws4_split_limits.max_keys[1][i] == l16[i];
+        CHECK(same);
+    }
     // constexpr: the field reads fold like the arch comparisons they replaced
     static_assert(d::profile(Arch::gfx1151).prefill_exec_moe == 4096 && !d::profile(Arch::gfx1201).tune_fast);
     // REVIEW-ARCH3 P3-3: a value with no row throws instead of getting the gfx1201 row (a new enumerator without a

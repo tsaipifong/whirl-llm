@@ -605,12 +605,167 @@ Partials runG(Ctx& c, hip::Function fn, int cg, const Pool& p, const Buf& dq, co
 
 }  // namespace
 
+static void ws4SplitPass(Ctx& c);
+
 void testAttnWs4g(Ctx& c) {
     c.rep.family = "ws4g";
     ws4gPass(c);
+    ws4SplitPass(c);
     kH = 16, kNkv = 2, g_grp8 = true;
     ws4gPass(c);
+    ws4SplitPass(c);
     kH = 24, kNkv = 4, g_grp8 = false;
+}
+
+// v0252-8sws round 2 (PLAN V1-88 on gfx1151): the product entries attn_ws4_q8_sp<S> / attn_ws4g<cg>_q8_sp<S> (S 8 / 16, the
+// balance / fast q8h split constants; kernels::ws4SplitName). Per S, q8 KV, both head shapes:
+//  (a) attn_ws4_q8_sp<S> at grid S: partials bitwise == attn_wsplit1_q8 at grid S (its split rule is gridDim.y: the same key
+//      ranges) for contexts 1 .. 256k incl. empty splits (ctx 1, 2), chunk / page / split boundaries, random ones, and the MTP
+//      draft window;
+//  (b) the combined output (attn_combine over S) within the attn family tolerance of today's attn_ws4_q8 at 64 (another
+//      key partition = another f32 combine order: never bitwise, |B - A| <= 1e-2 rms(A) + 1e-4);
+//  (c) attn_ws4g<cg>_q8_sp<S> grouped (1..9 rows, CG 1..3, windows) == attn_ws4_q8_sp<S> single-row, bitwise (the host
+//      groups rows by the S ranges, ops::chooseAttnDecode).
+static void ws4SplitPass(Ctx& c) {
+    const auto fold = c.fnOpt("attn_wsplit1_q8"), f64 = c.fnOpt("attn_ws4_q8");
+    if (!fold || !f64 || !c.k.attn_combine) {
+        c.rep.skip("ws4g", "attn_ws4_q8_sp", "attn_wsplit1_q8 / attn_ws4_q8 / attn_combine not in this code object");
+        return;
+    }
+    const int maxpos = (c.quick || g_grp8) ? 70000 : 262144;
+    const int pages = (maxpos + wk::kKvPage - 1) / wk::kKvPage;
+    std::vector<int> ctxs = {1, 2, 31, 32, 33, 63, 64, 65, 255, 256, 257, 511, 1023, 1025, 4095, 4096, 4097, 8191, 8192, 8193, 32767, 32768, 32769, 65613};
+    if (!c.quick && !g_grp8)
+        for (int x : {98304, 131071, 131072, 131073, 196613, 262143, 262144}) ctxs.push_back(x);
+    for (int i = 0; i < 8; ++i) ctxs.push_back(1 + static_cast<int>(c.rng() % static_cast<std::uint64_t>(maxpos)));
+    const std::vector<float> q = c.randn(static_cast<std::size_t>(32) * kH * kQStr);
+    Buf dq(q);
+    Pool p(c, F::q8, pages);
+    const std::string tag = std::string(" [kv q8]") + grpTag();
+    for (const std::uint32_t S32 : wk::kWs4SplitCounts) {
+        const int S = static_cast<int>(S32);
+        hip::Function fs[4];
+        bool all = true;
+        for (int cg = 0; cg <= 3; ++cg) {
+            fs[cg] = c.fnOpt(wk::ws4SplitName(cg, S32));
+            all = all && fs[cg];
+        }
+        if (!all) {
+            c.rep.skip("ws4g", wk::ws4SplitName(0, S32), "product split entries not in this code object");
+            continue;
+        }
+        const std::string nm = wk::ws4SplitName(0, S32);
+        // (a) single row == attn_wsplit1_q8 at grid S (batches of 8 rows, alternating the two page tables)
+        for (std::size_t i = 0; i < ctxs.size(); i += 8) {
+            std::vector<int> pos, tbs;
+            std::string lst;
+            for (std::size_t j = i; j < std::min(ctxs.size(), i + 8); ++j) {
+                pos.push_back(ctxs[j] - 1);
+                tbs.push_back((j % 2) ? pages : 0);
+                lst += (lst.empty() ? "" : ",") + std::to_string(ctxs[j]);
+            }
+            compare(c, nm + " == attn_wsplit1_q8 at grid " + std::to_string(S) + " (ctx " + lst + ")" + tag, run(c, fs[0], p, dq, pos, tbs, S, 0), S,
+                    run(c, fold, p, dq, pos, tbs, S, 0), S, static_cast<int>(pos.size()));
+        }
+        {
+            const std::vector<int> pos = {2047, 4099, 9000, 65612}, tbs = {0, pages, 0, pages};
+            for (int win : {(1024 / 64) | (2 << 16), (512 / 64) | (0 << 16), (16384 / 64) | (2 << 16)})
+                compare(c, nm + " == attn_wsplit1_q8 at grid " + std::to_string(S) + " (draft window arg " + std::to_string(win) + ")" + tag,
+                        run(c, fs[0], p, dq, pos, tbs, S, win), S, run(c, fold, p, dq, pos, tbs, S, win), S, 4);
+        }
+        // (b) combined output vs today's 64 (tolerance, not bits)
+        {
+            std::size_t bad = 0, cnt = 0;
+            auto combined = [&](hip::Function fn, int ns, const std::vector<int>& pos, const std::vector<int>& tbs, int win) {
+                const int n = static_cast<int>(pos.size());
+                Buf dpos(pos), dkvb(tbs);
+                Buf ml(static_cast<std::size_t>(n) * ns * kH * 2 * 4), acc(static_cast<std::size_t>(n) * ns * kH * kD * 4), out(static_cast<std::size_t>(n) * kH * kD * 4);
+                out.fill(0x7f);
+                wk::AwGroups g{};
+                for (int r = 0; r < n; ++r) {
+                    g.first[r] = r;
+                    g.count[r] = 1;
+                }
+                hip::launch(fn, {static_cast<unsigned>(kNkv), static_cast<unsigned>(ns), static_cast<unsigned>(n)}, {128, 1, 1}, 0, c.s, dq.p(), p.args(dkvb.p(), win),
+                            ml.p(), acc.p(), kH, kNkv, kQStr, dpos.p(), kSc, DevPtr{0}, g);
+                const int hd = kD;
+                hip::launch(c.k.attn_combine, {static_cast<unsigned>(kH), static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, ml.p(), acc.p(), dq.p(), out.p(), kH, hd,
+                            kQStr, ns);
+                c.sync();
+                return out.down<float>(static_cast<std::size_t>(n) * kH * kD);
+            };
+            for (std::size_t i = 0; i < ctxs.size(); i += 8) {
+                std::vector<int> pos, tbs;
+                for (std::size_t j = i; j < std::min(ctxs.size(), i + 8); ++j) {
+                    pos.push_back(ctxs[j] - 1);
+                    tbs.push_back((j % 2) ? pages : 0);
+                }
+                for (const int win : {0, (16384 / 64) | (2 << 16)}) {
+                    const auto a = combined(f64, kNs, pos, tbs, win), b = combined(fs[0], S, pos, tbs, win);
+                    for (std::size_t r = 0; r < pos.size(); ++r) {  // per row: the bound of that row's output
+                        const std::size_t o = r * kH * kD, nr = static_cast<std::size_t>(kH) * kD;
+                        double ss = 0;
+                        for (std::size_t k = 0; k < nr; ++k) ss += static_cast<double>(a[o + k]) * a[o + k];
+                        const double bound = 1e-2 * std::sqrt(ss / static_cast<double>(nr)) + 1e-4;
+                        for (std::size_t k = 0; k < nr; ++k) bad += !(std::fabs(static_cast<double>(b[o + k]) - a[o + k]) <= bound);  // NaN = bad
+                        cnt += nr;
+                    }
+                }
+            }
+            Result res;
+            res.name = nm + " combined over " + std::to_string(S) + " splits within 1e-2 rms + 1e-4 of attn_ws4_q8 at 64 (all contexts, window off / on)" + tag;
+            res.n = cnt;
+            res.mismatches = bad;
+            res.pass = bad == 0 && cnt > 0;
+            c.rep.add(res);
+        }
+        // (c) grouped == single-row at S (host grouping by the S ranges)
+        {
+            auto grpS = [&](const std::vector<int>& pos, int win) {
+                std::vector<std::pair<int, int>> g;
+                auto key = [&](int pp) {
+                    const int n = pp + 1;
+                    const ws4::Range r0 = ws4::block_range(n, 0, S, win);
+                    return std::array<int, 3>{r0.b1 == ws4::kSink ? r0.b0 - 1 : 0, ws4::block_range(n, 1, S, win).b0, ws4::block_range(n, 2, S, win).b0};
+                };
+                for (int r = 0; r < static_cast<int>(pos.size()); ++r) {
+                    if (!g.empty() && key(pos[static_cast<std::size_t>(r)]) == key(pos[static_cast<std::size_t>(g.back().first)])) g.back().second += 1;
+                    else g.push_back({r, 1});
+                }
+                return g;
+            };
+            std::size_t bad = 0, cnt = 0, cases = 0;
+            std::string first_bad;
+            for (const int L : {3, 65, 1025, 4097, 8193, 32769, 65613})
+                for (int R = 1; R <= 9; ++R)
+                    for (const int win : {0, (1024 / 64) | (2 << 16)}) {
+                        if (R > L) continue;
+                        std::vector<int> pos;
+                        for (int r = L - R; r < L; ++r) pos.push_back(r);
+                        const auto grps = grpS(pos, win);
+                        int maxc = 1;
+                        for (const auto& gg : grps) maxc = std::max(maxc, gg.second);
+                        const std::vector<int> tbs(pos.size(), 0);
+                        if (maxc == 1) continue;  // one-row groups: attn_ws4_q8_sp, covered by (a)
+                        const int cg = ws4gCg(maxc);
+                        const auto r1 = cmpParts(runG(c, fs[cg], cg, p, dq, pos, tbs, grps, S, win), S, run(c, fs[0], p, dq, pos, tbs, S, win), S,
+                                                 static_cast<int>(pos.size()));
+                        bad += r1.first;
+                        cnt += r1.second;
+                        cases += 1;
+                        if ((r1.first || r1.second == 0) && first_bad.empty())
+                            first_bad = "ctx " + std::to_string(L) + " rows " + std::to_string(R) + " cg " + std::to_string(cg) + " win " + std::to_string(win);
+                    }
+            Result res;
+            res.name = wk::ws4SplitName(1, S32) + " / g2 / g3 grouped (2..9 rows) == " + nm + " single-row, " + std::to_string(cases) + " cases" + tag +
+                       (first_bad.empty() ? "" : "; first bad: " + first_bad);
+            res.kind = Kind::invariant;
+            res.n = cnt;
+            res.mismatches = bad;
+            res.pass = bad == 0 && cnt > 0;
+            c.rep.add(res);
+        }
+    }
 }
 
 static void ws4gPass(Ctx& c) {
