@@ -21,6 +21,22 @@
 
 namespace whirl::device {
 
+// v0252-8sq5 (PLAN V1-109): one step of the q4 decode / verify split-count table: from `keys` keys (the longest row) on,
+// `splits` splits, until the next step. splits 0 = an unused slot (the tail of a class)
+struct Dq4SplitStep {
+    std::uint32_t keys;
+    std::uint16_t splits;
+};
+inline constexpr std::size_t kDq4SplitClasses = 4, kDq4SplitSteps = 8;
+// the table per row class: [0] one row (plain decode), [1] two verify rows of one sequence at consecutive positions (1 MTP
+// draft per cycle), [2] three such rows (2 drafts), [3] the MTP draft row with its attention window active. Steps ascending in
+// keys; below the first step and for any other row set (4+ rows, rows of several sequences, a window with several rows) the
+// table gives nothing and ops keeps today's rule (ops::dq4TableSplits)
+struct Dq4SplitTable {
+    bool on;
+    std::array<std::array<Dq4SplitStep, kDq4SplitSteps>, kDq4SplitClasses> steps;
+};
+
 struct Profile {
     hip::Arch arch;
     // ---- memory
@@ -89,6 +105,11 @@ struct Profile {
     bool attn_dq4_row_order;
     std::uint16_t dq4_min_keys;
     std::uint32_t fast_kv_q8h_moe_ctx;
+    // v0252-8sq5 (PLAN V1-109; fast only: q4 KV): the attn_dq4 / attn_dq4o split count per row class and key count, measured
+    // by the kernel bench whirl-kernel-test --bench dq4s (in-object ABBA pairs against today's ops::dq4Splits count). Read by
+    // ops::dq4TableSplits when the numerics flag dq4_splits is auto (the fast default); WHIRL_DQ4_SPLITS=0 = today's rule,
+    // =N = N splits. WHIRL_DQ4_MINKEYS (when set) still wins. on = false: today's rule
+    Dq4SplitTable dq4_split_table;
     // ---- tuning (src/model/tune.cpp)
     bool tune_fast;                 // each kernel timed once per shape, slow candidates rejected early
     // tune cache file name suffix (table revision). A change to what the tuner times on this family (candidates, slots,
@@ -207,6 +228,7 @@ inline constexpr Profile k_profile_gfx1201{
     .attn_dq4_row_order = false,  // v0252-8sq4: no attn_dq4o in the gfx1201 object (attn_dq4 has the order)
     .dq4_min_keys = 0,            // v0252-8sq4 F8 split: opt-in (R9700 fast tg 96k inversion: its own screen later)
     .fast_kv_q8h_moe_ctx = 0,     // v0252-8sq4 fallback: opt-in (KvCaps::fast_q8h is false here, so inert today)
+    .dq4_split_table = {},        // v0252-8sq5: off (not measured on the R9700): today's rule ops::dq4Splits
     .tune_fast = false,
     .tune_cache_suffix = "",
     .tune_time_hint = "2 minutes (a few seconds for MXFP4 models)",
@@ -297,6 +319,24 @@ inline constexpr Profile k_profile_gfx1151{
     .attn_dq4_row_order = true,
     .dq4_min_keys = 0,            // WHIRL_DQ4_MINKEYS=1024 turns it on
     .fast_kv_q8h_moe_ctx = 0,     // WHIRL_FAST_KVQ8H=1 turns it on (every load)
+    // v0252-8sq5: kernel bench dq4s on this card (2026-11-24 16:09, scratch/v0252_8sq5/gpu/20261124-1609/table.txt; Ornith 16 / 2
+    // heads, attn_dq4o + attn_combine, 87 cells, 0 FAIL, B/A = time(S) / time(today's count), 95 % intervals ~+-0.15 %). Every
+    // measured breakpoint is written out; between them the lower one holds. The pick per cell is the fastest S; ties (two S
+    // within 1 %) go to the S that is also best at the neighbouring length: rows 2 @ 65536 8 (0.811) over 32 (0.818: 8 is also
+    // best at 49152), rows 2 @ 98304 64 (0.859) over 32 (0.865: 64 is also best at 131072). Today's count is 32 / 64 / 128 at
+    // 8192 / 16384 / >= 32768; the picks are 10-37 % faster there (e.g. rows 2 @ 32768: 270.9 -> 173.7 us). WHIRL_DQ4_SPLITS=0 =
+    // today's rule
+    .dq4_split_table = {.on = true,
+                        .steps = {{
+                            // one row: 8 (0.789) at 8192; 16 from 16384 (0.679 0.609 0.694 0.729 0.802 0.805)
+                            {{{8192, 8}, {16384, 16}, {32768, 16}, {49152, 16}, {65536, 16}, {98304, 16}, {131072, 16}, {0, 0}}},
+                            // two verify rows: 8 to 65536 (0.704 0.655 0.643 0.725 0.811), 64 from 98304 (0.859 0.897)
+                            {{{8192, 8}, {16384, 8}, {32768, 8}, {49152, 8}, {65536, 8}, {98304, 64}, {131072, 64}, {0, 0}}},
+                            // three verify rows: 8 to 49152 (0.720 0.688 0.643 0.711), 32 from 65536 (0.759 0.831 0.857)
+                            {{{8192, 8}, {16384, 8}, {32768, 8}, {49152, 8}, {65536, 32}, {98304, 32}, {131072, 32}, {0, 0}}},
+                            // the MTP draft row, window active (65536 ..): 16 (0.633 0.632 0.629)
+                            {{{65536, 16}, {98304, 16}, {131072, 16}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}}},
+                        }}},
     .tune_fast = true,
     .tune_cache_suffix = "-gfx1151r3",  // r3: gemmfq in the dequant family (v0251-a3key; tests/model testTuneCacheKey)
     .tune_time_hint = "8 minutes on the Radeon 8060S (less for MXFP4 models)",

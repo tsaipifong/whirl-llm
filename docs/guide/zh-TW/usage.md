@@ -386,6 +386,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_GEMVH_GRP=1\|0` | Radeon 8060S、precise 模式、dense MXFP4 模型（Swift）：解碼／驗證把共用同一個輸入的矩陣合成一次分組啟動（`gemvhg_mxfp4`），不再每個矩陣各啟動一次 `gemvh_mxfp4`。Radeon 8060S 自 0.2.5.2 起預設開（只限 precise；MoE 模型與 R9700 仍每個矩陣啟動一次）；`0`＝每個矩陣啟動一次（前一版的路徑）；兩種輸出相同 |
 | `WHIRL_ATTN_I4PF=1\|0` | Radeon 8060S（fast）：預填注意力的 int4 Q.K^T 改用第二種寫法（`attn_prefill_wmma_i4p`／`_s_i4p`：int4 查詢碼放 LDS，算這一段時先讀下一段 K／V）。Radeon 8060S 自 0.2.5.2 起預設開；`0`＝前一版的 kernel（`attn_prefill_wmma_i4`）；兩種輸出相同；`WHIRL_ATTN_I4QK=0` 或非 fast 模式時沒有作用 |
 | `WHIRL_DQ4_MINKEYS=N\|0` | q4 KV（fast）：q4 解碼注意力的 split 數依最長的列與每個 split N 個 key 決定（例如 1024；16k–64k 要合併的部分結果較少）。選用，預設 0＝出貨規則；fast 輸出可能改變 |
+| `WHIRL_DQ4_SPLITS=auto\|0\|N` | q4 KV（fast）：q4 解碼／驗證注意力的 split 數。預設 `auto`＝該卡實測的表（Radeon 8060S 自 0.2.5.2 起：依列數與上下文 8–64 個 split，kernel 量測比前一版規則少 10–37 % 注意力時間；R9700：前一版規則）；`0`＝前一版規則；`N`（1–256）＝在 grid 合法處用 N 個 split。有設 `WHIRL_DQ4_MINKEYS` 時以它為準；fast 輸出可能改變 |
 | `WHIRL_FAST_KVQ8H=N\|0` | Radeon 8060S、fast 模式、MoE 模型（Ornith）：每請求上下文至少 N 個 token 時改用 balance 的 q8h KV（1＝一律）。載入時決定；KV 記憶體約為 q4 的 1.9 倍。選用，預設 0 |
 | `WHIRL_FAKE_DEDICATED_GB=N` | 測試用：假裝 Radeon 8060S 只有 N GiB 專用 GPU 記憶體（例如 `0.5`），不必改 BIOS 就能看到拒絕訊息或縮小後的 KV 快取。預設關閉 |
 | `WHIRL_EMBD_HOST=0` | token embedding 表放在 VRAM（預設放 pinned 主記憶體；server 會把它的大小併入 pinned 宣告，讓 Shared Usage 監控扣除） |

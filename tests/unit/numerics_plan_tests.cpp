@@ -881,6 +881,7 @@ void testFastOnlyOverrides() {
         // v0252-8sq4 (F8): q4 KV decode attention switches, fast only (q4 KV exists only there; testDq4F8Flags). ORDER keeps the
         // partials (attn_dq4o), MINKEYS changes the partition (another combine order)
         {"DQ4_ORDER", 'F'}, {"DQ4_MINKEYS", 'F'},
+        {"DQ4_SPLITS", 'F'},  // v0252-8sq5: the q4 decode split count (profile table / today's rule / forced), fast only (testDq4SplitsFlag)
         // v0252-8sattn3: the int4 prefill attention with Q codes in LDS + K / V prefetch, bit-identical to the int4 kernel but
         // only reachable where the fast-only attn_i4qk is on (testAttnI4pfFlag)
         {"ATTN_I4PF", 'F'},
@@ -1870,6 +1871,66 @@ static void testDq4F8Flags() {
     NCHECK(pinned == 2, "dq4 F8 shipped pin: {} 8060S fast cells (want 2: swift, moe)", pinned);
 }
 
+// v0252-8sq5 (PLAN V1-109): flag dq4_splits, the q4 decode / verify split count (ops::dq4TableSplits). Fast only (q4 KV exists
+// only there): fast = kDq4SplitsAuto (the device profile's measured table; a row that is off = today's rule), precise /
+// balance = 0 (today's rule, never read: no q4 path) whatever WHIRL_DQ4_SPLITS says - one Plan::ignored note, the plan and
+// bitsKey unchanged. WHIRL_DQ4_SPLITS in fast: "auto" = the table, "0" / "" = today's rule (ops::dq4Splits: the A arm of the
+// screen), 1..256 = that count (ops falls back to today's rule where the grid is not valid), anything else = auto + a note.
+static void testDq4SplitsFlag() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    const std::uint32_t A = nu::kDq4SplitsAuto;
+    static_assert(nu::kDq4SplitsAuto == 65535u, "kDq4SplitsAuto");
+    NCHECK(nu::parseDq4Splits("auto") == A && nu::parseDq4Splits("0") == 0u && nu::parseDq4Splits("") == 0u && nu::parseDq4Splits("1") == 1u &&
+               nu::parseDq4Splits("8") == 8u && nu::parseDq4Splits("256") == 256u,
+           "parseDq4Splits values");
+    for (const char* bad : {"257", "x", "-1", "8x", " 8", "AUTO", "65535", "1024"})
+        NCHECK(!nu::parseDq4Splits(bad).has_value(), "parseDq4Splits('{}') refused", bad);
+    std::size_t cells = 0;
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const bool fast = std::string_view(mode) == "fast";
+                const std::string cell = std::format("{} {} {}", c.name, model, mode);
+                const nu::Plan d = pl(t, mode, {});
+                NCHECK(d.flags.dq4_splits == (fast ? A : 0u), "dq4_splits default {}: {}", cell, d.flags.dq4_splits);
+                for (const char* v : {"0", "", "auto", "1", "16", "256", "257", "x"}) {
+                    const nu::Plan p = pl(t, mode, {{"DQ4_SPLITS", v}});
+                    nu::Flags want = d.flags;
+                    const std::optional<std::uint32_t> pv = nu::parseDq4Splits(v);
+                    if (fast && pv) want.dq4_splits = *pv;
+                    NCHECK(p.flags == want, "dq4_splits {} WHIRL_DQ4_SPLITS='{}': only its own flag, fast only ({})", cell, v, p.flags.dq4_splits);
+                    NCHECK((p.bitsKey() != d.bitsKey()) == !(p.flags == d.flags), "dq4_splits {} '{}': bitsKey differs exactly where the flag changes", cell, v);
+                    // a note: outside fast for any value but "0" / ""; in fast for a value that does not parse
+                    const bool noted = fast ? !pv.has_value() : (std::string_view(v) != "0" && std::string_view(v) != "");
+                    NCHECK(!p.lossy_override, "dq4_splits {} '{}': no lossy override", cell, v);
+                    if (!noted) NCHECK(nu::logLine(p) == nu::logLine(d), "dq4_splits {} '{}': log line unchanged", cell, v);
+                    std::size_t notes = 0;
+                    for (const std::string& n : p.ignored) notes += n.rfind(std::string("WHIRL_DQ4_SPLITS=") + v + " ignored", 0) == 0;
+                    NCHECK(notes == (noted ? 1u : 0u) && p.ignored.size() == d.ignored.size() + (noted ? 1u : 0u), "dq4_splits {} '{}': {} notes", cell, v, notes);
+                    // precise / balance: plan and bitsKey never move
+                    if (!fast) NCHECK(p.flags == d.flags && p.bitsKey() == d.bitsKey(), "dq4_splits {} '{}': precise / balance moved", cell, v);
+                }
+                cells += 1;
+            }
+    NCHECK(cells == 12, "dq4_splits cells {}", cells);
+    // the default 8060S Ornith fast plan: bitsKey carries dq4_splits=65535 (auto: the profile table); WHIRL_DQ4_SPLITS=0 (today's
+    // rule, the screen's A arm) has another key
+    for (const CardFake& c : k_cards) {
+        if (std::string_view(c.name) != "8060s") continue;
+        const nu::Target t = target(c, "moe", false);
+        const nu::Plan d = pl(t, "fast", {}), z = pl(t, "fast", {{"DQ4_SPLITS", "0"}});
+        NCHECK(d.bitsKey().find("dq4_splits=65535;") != std::string::npos && z.bitsKey().find("dq4_splits=0;") != std::string::npos &&
+                   d.bitsKey() != z.bitsKey(),
+               "8060s Ornith fast: default key auto, WHIRL_DQ4_SPLITS=0 key 0");
+    }
+}
+
 static void testAttnI4qkFlag() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -2530,6 +2591,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testAttnI4pfFlag();  // v0252-8sattn3 (port: fails without the flag; round 3: fails while the gfx1151 row is off)
     testMoepGuwFlag();  // v0252-8smoe (B; fails to build before the change: no Flags::moep_guw / EnvValues::moep_guw)
     testDq4F8Flags();  // v0252-8sq4 (fails to build before the change: no Flags::dq4_order / dq4_min_keys, parseDq4MinKeys)
+    testDq4SplitsFlag();  // v0252-8sq5 (fails to build before the change: no Flags::dq4_splits, kDq4SplitsAuto, parseDq4Splits)
     testMoep2Flags();  // v0252-8smoe2 (C / D / E; fails to build before the change: no Flags::moep_dhs / moep_dna / moep_fq)
     testMoedecDefault();  // v0252-c3port (the "=1 on" rows fail before the port); v0252-c3bdef (the R9700 MoE default rows fail before c3bdef)
     testN2bR1();  // arch025-n2b-r1

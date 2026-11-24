@@ -29,6 +29,9 @@
 //   moepc in-object A/B (gfx1151, v0252-8sdet): COMB 6 (moe_fix_zero + gemm_moep[fq]di_<v>) vs COMB 5 (moe_combine4 K 0 +
 //         gemm_moepda_<v>) and vs COMB 1 (gemm_moepdn_<v> + moe_combine4), Ornith layer 0 down experts, n 2048 / 4096;
 //         B within the fixed-point bound of A and B run 2 bitwise == run 1 first, then ABBA pairs
+//   dq4s  in-object A/B of the q4-KV decode / verify attention split count (v0252-8sq5, gfx1151 fast): attn_dq4o +
+//         attn_combine at split S vs at S_ship = ops::dq4Splits (today's grid); Ornith 16 / 2, Swift 24 / 4, keys 8k..128k,
+//         rows 1 / 2 / 3 / MTP draft row; tolerance check, then ABBA pairs and a geometric mean with a 95 % interval
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
 // without a model the cells use synthetic MXFP4 blocks of the same shapes (cell names start with "synthetic.").
 
@@ -46,7 +49,10 @@
 #include "argmax_key.h"  // AM_WS_BYTES (family argmax, v0252-f1arg)
 #include "cpu_ref.h"
 #include "kt_bench.h"
+#include "kt_dq4s.h"  // v0252-8sq5: family dq4s cell table, geometric-mean judge line
 #include "kt_ggemv_widths.h"
+
+#include <random>
 
 namespace kt {
 
@@ -177,6 +183,10 @@ struct Cell {
     std::function<std::pair<std::size_t, std::size_t>()> bitwise_b;
     // v0252-l2split: what bitwise_b's "mismatch" means, for the report lines (family lsplit: a tolerance, not bits)
     std::string b_rule = "bitwise ==";
+    // v0252-8sq5 (family dq4s): also the judge line "B/A geometric mean g, 95% interval [lo, hi] ..." of the paired ratios
+    // (kt_dq4s.h geoCi) and its JSONL keys ratio_gmean / ratio_ci95_lo / ratio_ci95_hi on the ab_ratio row
+    bool geo = false;
+    std::vector<std::pair<std::string, std::string>> ab_extra;  // more JSONL keys on the ab_ratio row (value: JSON text)
 };
 
 // family fdq: A = k.fa through k.call, B = k.call_b of the same object; rows A / B (variant=A / B) and the paired ratio
@@ -210,6 +220,11 @@ void runCellInObject(Env& e, Cell& k) {
     printCell(cb, ab.b, "B ");
     std::printf("         B/A %.4f (p10 %.4f p90 %.4f, %d pairs ABBA in one object, order AB %.4f BA %.4f, %s) B %s A\n", ab.ratio.st.median,
                 ab.ratio.st.p10, ab.ratio.st.p90, ab.pairs, ab.order_ab, ab.order_ba, ab.ratio.stop_reason.c_str(), k.b_rule.c_str());
+    dq4s::GeoCi gci;
+    if (k.geo) {
+        gci = dq4s::geoCi(ab.ratio.samples);
+        std::printf("         %s %s\n", k.ci.cell.c_str(), dq4s::geoLine(gci).c_str());
+    }
     if (!ab.ratio.ok()) {
         Result r;
         r.name = "bench in-object A/B timing " + k.kernel_b + " " + k.ci.cell + ": " + ab.ratio.error;
@@ -238,6 +253,18 @@ void runCellInObject(Env& e, Cell& k) {
     rr.extra.push_back({"b_bitwise", "true"});
     rr.extra.push_back({"a_kernel", wb::json_string(k.kernel)});
     rr.extra.push_back({"in_object", "true"});
+    if (k.geo) {
+        char g[64];
+        auto num = [&g](double v) {
+            std::snprintf(g, sizeof(g), "%.6g", v);
+            return std::string(g);
+        };
+        rr.extra.push_back({"ratio_gmean", num(gci.g)});
+        rr.extra.push_back({"ratio_ci95_lo", num(gci.lo)});
+        rr.extra.push_back({"ratio_ci95_hi", num(gci.hi)});
+        rr.extra.push_back({"ratio_n", std::to_string(gci.n)});
+    }
+    for (const auto& x : k.ab_extra) rr.extra.push_back(x);
     e.write(rr);
 }
 
@@ -2079,9 +2106,172 @@ void benchMoepc(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- dq4s (v0252-8sq5, PLAN V1-109, gfx1151 fast)
+// In-object A/B of the q4-KV decode / verify attention SPLIT COUNT: the shipped kernel (attn_dq4o on gfx1151 - the profile
+// row attn_dq4_row_order; attn_dq4 where the object has no attn_dq4o) + attn_combine, A = the grid the fast plan launches
+// today, S_ship = ops::dq4Splits(row_pos, win, 256) (the same host function and arguments as ops::chooseAttnDecode with
+// dq4_dyn on), B = grid.y S. The cell table (models, keys, row sets, S, names, which grids the kernel takes) is
+// kt_dq4s.h (CPU-tested in whirl-kt-bench-tests). Launch = the engine's (src/model/qwen35/forward/attn.cpp:124-138):
+// grid {n_kv, S, rows}, 256 threads, every row its own group, then attn_combine {heads, rows} over S partials.
+// Data: a q4 KV pool of random 4-bit codes (random bytes, two codes each) and f16 scales of random sign and magnitude
+// 0.12..0.25 per 32 values (the kt attndq4 distribution), Q randn; page tables rotated over disjoint pool regions past the
+// last-level cache (kt rotation), rows at positions L - R .. L - 1. Check before timing (another split = another f32
+// combine order, never bitwise): every combined value |B - A| <= 1e-2 rms(A) + 1e-4 (the attn family's tolerance, as lsplit)
+// - a failing cell writes no timing row and is a FAIL. Then ABBA pairs in one object (Bench::runAB), the B/A median line and
+// the judge line "B/A geometric mean g, 95% interval [lo, hi]" (B < 1: S faster than S_ship).
+// Env: WHIRL_KT_DQ4S_MODELS / _L / _ROWS / _S / _AA (kt_dq4s.h); WHIRL_KT_DQ4S_MUT=1: the check's B run combines only the
+// first half of its splits (a planted wrong combine): every cell must FAIL its tolerance row (the check is not vacuous).
+void benchDq4s(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "dq4s";
+    hip::Function fk = c.fnOpt("attn_dq4o");
+    std::string kn = "attn_dq4o";
+    if (!fk) {
+        fk = c.fnOpt("attn_dq4");
+        kn = "attn_dq4";
+    }
+    if (!fk || !c.k.attn_combine || !c.k.caps.kv_q4) {
+        c.rep.skip("dq4s", "bench attn_dq4o split count", "kernel not in this code object (or no q4 KV)");
+        return;
+    }
+    std::string err;
+    const dq4s::Opts opts = dq4s::optsFromEnv([](const char* n) { return std::getenv(n); }, &err);
+    if (!err.empty()) {
+        Result r;
+        r.name = "bench dq4s: bad environment: " + err;
+        r.pass = false;
+        c.rep.add(r);
+        return;
+    }
+    const std::vector<dq4s::Cell> cells = dq4s::cells(opts);
+    const bool mut = std::getenv("WHIRL_KT_DQ4S_MUT") != nullptr;
+    std::printf("   dq4s: %zu cells, kernel %s%s\n", cells.size(), kn.c_str(), mut ? ", planted wrong combine (WHIRL_KT_DQ4S_MUT)" : "");
+    constexpr int hd = dq4s::kHd;
+    for (const dq4s::Shape& sh : dq4s::kShapes) {
+        std::vector<const dq4s::Cell*> mine;
+        for (const dq4s::Cell& x : cells)
+            if (x.model == sh.model) mine.push_back(&x);
+        if (mine.empty()) continue;
+        const int heads = sh.heads, nkv = sh.nkv, row = nkv * hd, qstride = 2 * hd;
+        // q4 bytes per KV row position (K or V): row / 2 codes + row / 32 f16 scales
+        auto regionBytes = [row](int L) {
+            return static_cast<std::uint64_t>(cdiv(L, wk::kKvPage)) * wk::kKvPage * (static_cast<std::uint64_t>(row) / 2 + static_cast<std::uint64_t>(row) / 32 * 2) * 2;
+        };
+        std::uint64_t max_pages = 0;
+        for (const dq4s::Cell* x : mine) {
+            const std::uint64_t pg = static_cast<std::uint64_t>(cdiv(x->keys, wk::kKvPage));
+            max_pages = std::max<std::uint64_t>(max_pages, pg * static_cast<std::uint64_t>(rotationCopies(regionBytes(x->keys), e.target, e.o.rot_cap)));
+        }
+        const std::size_t pool_el = static_cast<std::size_t>(max_pages) * wk::kKvPage * row;
+        Buf pk(pool_el / 2), pv(pool_el / 2), psk(pool_el / 32 * 2), psv(pool_el / 32 * 2);
+        {
+            constexpr std::size_t kChunk = std::size_t{1} << 22;  // elements per uploaded chunk (repeated over the pool)
+            std::vector<std::uint8_t> ck(kChunk / 2), cv(kChunk / 2);
+            for (auto* v : {&ck, &cv})
+                for (auto& b : *v) b = static_cast<std::uint8_t>(c.rng());
+            std::vector<std::uint16_t> sk(kChunk / 32), sv(kChunk / 32);
+            std::uniform_real_distribution<float> sc(0.12f, 0.25f);
+            for (auto* v : {&sk, &sv})
+                for (auto& y : *v) y = f2h((c.rng() & 1 ? 1.f : -1.f) * sc(c.rng));
+            for (std::size_t off = 0; off < pool_el; off += kChunk) {
+                const std::size_t nn = std::min(kChunk, pool_el - off);
+                hip::upload(pk.p() + off / 2, ck.data(), nn / 2);
+                hip::upload(pv.p() + off / 2, cv.data(), nn / 2);
+                hip::upload(psk.p() + off / 32 * 2, sk.data(), nn / 32 * 2);
+                hip::upload(psv.p() + off / 32 * 2, sv.data(), nn / 32 * 2);
+            }
+            hip::sync();
+        }
+        const std::vector<float> q = c.randn(static_cast<std::size_t>(dq4s::kMaxRows) * heads * qstride);
+        auto dq = std::make_shared<Buf>(q);
+        int cur_L = -1, pages = 0, RC = 1;
+        std::shared_ptr<Buf> dpt;
+        for (const dq4s::Cell* x : mine) {
+            if (x->keys != cur_L) {  // one rotated page-table set per key count
+                cur_L = x->keys;
+                pages = static_cast<int>(cdiv(cur_L, wk::kKvPage));
+                RC = rotationCopies(regionBytes(cur_L), e.target, e.o.rot_cap);
+                std::vector<int> ptab(static_cast<std::size_t>(RC) * pages);
+                for (int r = 0; r < RC; ++r) {
+                    std::vector<int> perm(static_cast<std::size_t>(pages));
+                    std::iota(perm.begin(), perm.end(), r * pages);
+                    std::shuffle(perm.begin(), perm.end(), c.rng);
+                    std::copy(perm.begin(), perm.end(), ptab.begin() + static_cast<std::ptrdiff_t>(r) * pages);
+                }
+                dpt = std::make_shared<Buf>(ptab);
+            }
+            const int R = x->rows, s_a = x->s_ship, s_b = x->s, win = x->win;
+            const int ns_max = std::max(s_a, s_b);
+            auto dpos = std::make_shared<Buf>(x->pos);
+            auto ml = std::make_shared<Buf>(static_cast<std::size_t>(R) * ns_max * heads * 2 * 4);
+            auto acc = std::make_shared<Buf>(static_cast<std::size_t>(R) * ns_max * heads * hd * 4);
+            auto out = std::make_shared<Buf>(static_cast<std::size_t>(R) * heads * hd * 4);
+            const hip::Function fc = c.k.attn_combine;
+            const DevPtr kp = pk.p(), vp = pv.p(), skp = psk.p(), svp = psv.p(), qp = dq->p();
+            // one decode / verify attention call: the kernel over `ns` splits, then the combine over `nsc` (= ns; the planted
+            // mutant passes ns / 2)
+            auto launch = [&c, dpt, dpos, ml, acc, out, kp, vp, skp, svp, qp, fc, pages, RC, R, heads, nkv, qstride, win](hip::Function f, int ns,
+                                                                                                                       std::uint64_t r, int nsc) {
+                wk::KvArgs a{};
+                a.k = kp;
+                a.v = vp;
+                a.ks = skp;
+                a.vs = svp;
+                a.ptab = dpt->p() + (r % static_cast<std::uint64_t>(RC)) * static_cast<std::uint64_t>(pages) * 4;
+                a.win = win;
+                wk::AwGroups g{};
+                for (int i = 0; i < R; ++i) {
+                    g.first[i] = i;
+                    g.count[i] = 1;
+                }
+                hip::launch(f, {static_cast<unsigned>(nkv), static_cast<unsigned>(ns), static_cast<unsigned>(R)}, {256, 1, 1}, 0, c.s, qp, a, ml->p(),
+                            acc->p(), heads, nkv, qstride, dpos->p(), at::scale, DevPtr{0}, g);
+                const int hdim = hd;
+                hip::launch(fc, {static_cast<unsigned>(heads), static_cast<unsigned>(R), 1}, {256, 1, 1}, 0, c.s, ml->p(), acc->p(), qp, out->p(), heads,
+                            hdim, qstride, nsc);
+            };
+            Cell k;
+            k.ci = e.info("dq4s", kn, x->name,
+                          "heads" + std::to_string(heads) + "_kv" + std::to_string(nkv) + "_hd256_L" + std::to_string(x->keys) + "_rows" + x->rows_tag + "_splits" +
+                              std::to_string(s_a) + "to" + std::to_string(s_b));
+            k.ci.settings = e.settings(regionBytes(x->keys) * static_cast<std::uint64_t>(RC), RC) +
+                            ";kv=q4;kv_values=random_codes_f16_scales_0.12-0.25;split_a=" + std::to_string(s_a) + ";split_b=" + std::to_string(s_b) +
+                            ";rows=" + x->rows_tag + ";win=" + std::to_string(win) + ";same_partition=" + (x->same_partition ? "1" : "0");
+            k.ci.bytes = static_cast<double>(regionBytes(x->keys)) * x->keys / (static_cast<double>(cdiv(x->keys, wk::kKvPage)) * wk::kKvPage);
+            k.ci.launches_per_call = 2;
+            k.kernel = kn + "_s" + std::to_string(s_a);  // kernel + attn_combine over S_ship splits
+            k.fa = fk;
+            k.kernel_b = kn + "_s" + std::to_string(s_b);  // kernel + attn_combine over S splits
+            k.b_rule = "within 1e-2 rms + 1e-4 of";
+            k.geo = true;
+            k.ab_extra = {{"split_a", std::to_string(s_a)},     {"split_b", std::to_string(s_b)}, {"keys", std::to_string(x->keys)},
+                          {"rows", wb::json_string(x->rows_tag)}, {"model", wb::json_string(x->model)}, {"same_partition", x->same_partition ? "true" : "false"}};
+            k.call = [launch, s_a](hip::Function f, std::uint64_t r) { launch(f, s_a, r, s_a); };
+            k.call_b = [launch, fk, s_b](std::uint64_t r) { launch(fk, s_b, r, s_b); };
+            k.bitwise_b = [&c, launch, fk, out, s_a, s_b, R, heads, mut]() {
+                const std::size_t n = static_cast<std::size_t>(R) * heads * hd;
+                auto once = [&](int ns, int nsc) {
+                    out->fill(0x7f);
+                    launch(fk, ns, 0, nsc);
+                    c.sync();
+                    return out->down<float>(n);
+                };
+                const auto a = once(s_a, s_a), b = once(s_b, mut ? std::max(1, s_b / 2) : s_b);
+                double ss = 0;
+                for (const float v : a) ss += static_cast<double>(v) * v;
+                const double bound = 1e-2 * std::sqrt(ss / static_cast<double>(n)) + 1e-4;
+                std::size_t bad = 0;
+                for (std::size_t i = 0; i < n; ++i) bad += !(std::fabs(static_cast<double>(b[i]) - a[i]) <= bound);  // NaN counts as bad
+                return std::make_pair(n, bad);
+            };
+            runCellInObject(e, k);
+        }
+    }
+}
+
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax", "moepc"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax", "moepc", "dq4s"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -2133,7 +2323,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
     };
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
                       {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"ws4r", benchWs4r}, {"silu", benchSilu}, {"lsplit", benchLsplit},
-                      {"argmax", benchArgmax}, {"moepc", benchMoepc}};
+                      {"argmax", benchArgmax}, {"moepc", benchMoepc}, {"dq4s", benchDq4s}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

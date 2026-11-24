@@ -6,8 +6,14 @@
 // `db_record.py jsonl FILE --dry-run`). Exit 0 = all pass.
 
 #include "../kt_bench.h"
+#include "../kt_dq4s.h"  // v0252-8sq5: the dq4s split-count bench table
+#include "whirl/ops/attention.h"  // ops::dq4Splits (the production split rule the dq4s table pairs against)
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <set>
+#include <span>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -735,6 +741,190 @@ static void test_jsonl_file(const std::string& emit) {
     if (emit.empty()) fs::remove(p, ec);
 }
 
+// ---------------------------------------------------------------- dq4s (v0252-8sq5): attn_dq4o split count S vs S_ship
+static int opsSplits(const std::vector<int>& pos, int win) {
+    std::vector<std::int32_t> p(pos.begin(), pos.end());
+    return static_cast<int>(whirl::ops::dq4Splits(std::span<const std::int32_t>(p.data(), p.size()), win, 256));
+}
+
+static std::function<const char*(const char*)> fakeEnv(std::map<std::string, std::string> m) {
+    auto mm = std::make_shared<std::map<std::string, std::string>>(std::move(m));
+    return [mm](const char* n) -> const char* {
+        const auto it = mm->find(n);
+        return it == mm->end() ? nullptr : it->second.c_str();
+    };
+}
+
+static void test_dq4s_mirror_is_ops_rule() {
+    // the table's partition mirror reproduces ops::dq4Splits (so its same-partition / grid checks are the kernel's)
+    std::size_t n = 0, bad = 0;
+    std::string first;
+    for (int L = 1; L <= 270000; L += (L < 4096 ? 37 : L < 70000 ? 997 : 4099))
+        for (const int R : {1, 2, 3, 5, 9})
+            for (const int win : {0, dq4s::kDraftWin}) {
+                if (R > L) continue;
+                std::vector<int> pos;
+                for (int r = L - R; r < L; ++r) pos.push_back(r);
+                const int a = dq4s::splitsMirror(pos, win, 256), b = opsSplits(pos, win);
+                ++n;
+                if (a != b) {
+                    ++bad;
+                    if (first.empty()) first = "L " + std::to_string(L) + " R " + std::to_string(R) + " win " + std::to_string(win) + ": " + std::to_string(a) + " vs " + std::to_string(b);
+                }
+            }
+    check("dq4s: splitsMirror == ops::dq4Splits (" + std::to_string(n) + " cases)", n > 1000 && bad == 0, first);
+    // the mirror's per / part at known points (src/ops/attention.cpp dq4Per: max(256, ceil(n / (min(ns,128) 64)) 64))
+    check("dq4s: per(32768, 128) == 256", dq4s::per(32768, 128) == 256, num(dq4s::per(32768, 128)));
+    check("dq4s: per(131072, 256) == per(131072, 128) == 1024", dq4s::per(131072, 256) == 1024 && dq4s::per(131072, 128) == 1024);
+    check("dq4s: per(32768, 16) == 2048", dq4s::per(32768, 16) == 2048);
+    const auto p = dq4s::part(131072, 0, 32);
+    check("dq4s: part(131072, 0, 32) == {0, 4096, 32}", p[0] == 0 && p[1] == 4096 && p[2] == 32);
+    const auto w = dq4s::part(131072, dq4s::kDraftWin, 32);
+    check("dq4s: part with the draft window takes the window branch at 128k", w[0] == 1 && w[2] <= 32);
+}
+
+static void test_dq4s_grid_ok() {
+    const std::vector<int> r2 = {131070, 131071};
+    check("dq4s: gridOk 8..128 at 128k, 2 rows", dq4s::gridOk(r2, 0, 8) && dq4s::gridOk(r2, 0, 128));
+    check("dq4s: gridOk rejects 0 and > 256", !dq4s::gridOk(r2, 0, 0) && !dq4s::gridOk(r2, 0, 257));
+    check("dq4s: gridOk rejects < 8 with the window on", !dq4s::gridOk({131071}, dq4s::kDraftWin, 4) && dq4s::gridOk({131071}, dq4s::kDraftWin, 8));
+    std::vector<int> r33;
+    for (int r = 0; r < 33; ++r) r33.push_back(100000 + r);
+    check("dq4s: gridOk rejects 33 rows", !dq4s::gridOk(r33, 0, 64));
+    check("dq4s: samePartition(8192: 32 / 64 / 128) and not 16", dq4s::samePartition({8191}, 0, 32, 64) && dq4s::samePartition({8191}, 0, 32, 128) &&
+                                                                     !dq4s::samePartition({8191}, 0, 32, 16));
+}
+
+static void test_dq4s_default_table() {
+    std::string err;
+    const dq4s::Opts o = dq4s::optsFromEnv(fakeEnv({}), &err);
+    check("dq4s: default opts parse", err.empty(), err);
+    check("dq4s: default models ornith, swift", o.models == std::vector<std::string>{"ornith", "swift"});
+    check("dq4s: default keys 8192 .. 131072", o.keys == std::vector<int>{8192, 16384, 32768, 49152, 65536, 98304, 131072});
+    check("dq4s: default splits 8 .. 128", o.splits == std::vector<int>{8, 16, 32, 64, 128});
+    std::vector<std::string> tags;
+    for (const auto& rs : o.rowsets) tags.push_back(rs.tag);
+    check("dq4s: default row sets 1 2 3 d1", tags == std::vector<std::string>{"1", "2", "3", "d1"});
+    check("dq4s: default no A/A cells", !o.aa);
+    const std::vector<dq4s::Cell> cs = dq4s::cells(o);
+    std::set<std::string> names;
+    std::size_t bad_ship = 0, bad_grid = 0, bad_pos = 0, bad_name = 0, bad_aa = 0, bad_shape = 0, bad_draft = 0;
+    for (const dq4s::Cell& c : cs) {
+        names.insert(c.name);
+        bad_ship += c.s_ship != opsSplits(c.pos, c.win);
+        bad_grid += !dq4s::gridOk(c.pos, c.win, c.s) || !dq4s::gridOk(c.pos, c.win, c.s_ship);
+        bool pos_ok = static_cast<int>(c.pos.size()) == c.rows;
+        for (int r = 0; r < c.rows && pos_ok; ++r) pos_ok = c.pos[static_cast<std::size_t>(r)] == c.keys - c.rows + r;
+        bad_pos += !pos_ok;
+        const std::string want = c.model + ".q4kv.L" + std::to_string(c.keys) + ".rows" + c.rows_tag + ".s" + std::to_string(c.s) + "_vs_s" + std::to_string(c.s_ship);
+        bad_name += c.name != want;
+        bad_aa += c.s == c.s_ship || c.same_partition || dq4s::samePartition(c.pos, c.win, c.s, c.s_ship);
+        bad_shape += !((c.model == "ornith" && c.heads == 16 && c.nkv == 2) || (c.model == "swift" && c.heads == 24 && c.nkv == 4));
+        bad_draft += c.rows_tag == "d1" ? !(c.win == dq4s::kDraftWin && c.rows == 1 && c.keys >= dq4s::kDraftMinKeys) : c.win != 0;
+    }
+    check("dq4s: default table has cells", cs.size() > 50, num(static_cast<double>(cs.size())));
+    check("dq4s: cell names unique", names.size() == cs.size());
+    check("dq4s: S_ship of every cell == ops::dq4Splits(rows, win, 256)", bad_ship == 0, num(static_cast<double>(bad_ship)));
+    check("dq4s: no cell with a grid the kernel rejects", bad_grid == 0);
+    check("dq4s: rows at L - R .. L - 1", bad_pos == 0);
+    check("dq4s: cell name <model>.q4kv.L<L>.rows<tag>.s<S>_vs_s<S_ship>", bad_name == 0);
+    check("dq4s: default cells all differ from S_ship's partition (no A/A)", bad_aa == 0);
+    check("dq4s: shapes Ornith 16/2, Swift 24/4", bad_shape == 0);
+    check("dq4s: d1 = one row, the default draft window, keys >= 65536; others no window", bad_draft == 0);
+    // pins: today's grid at the operating points (ops rule) and the cells made there
+    auto find = [&](const std::string& n) { return std::any_of(cs.begin(), cs.end(), [&](const dq4s::Cell& c) { return c.name == n; }); };
+    check("dq4s: ornith 32768 rows1 S_ship 128, S 8..64 timed", find("ornith.q4kv.L32768.rows1.s8_vs_s128") && find("ornith.q4kv.L32768.rows1.s64_vs_s128") &&
+                                                                    !find("ornith.q4kv.L32768.rows1.s128_vs_s128"));
+    check("dq4s: ornith 8192 rows1 S_ship 32: S 8 / 16 only (64 / 128 same partition)", find("ornith.q4kv.L8192.rows1.s8_vs_s32") &&
+                                                                                          find("ornith.q4kv.L8192.rows1.s16_vs_s32") &&
+                                                                                          !find("ornith.q4kv.L8192.rows1.s64_vs_s32"));
+    check("dq4s: ornith 131072 rows2 and the draft row", find("ornith.q4kv.L131072.rows2.s32_vs_s128") && find("ornith.q4kv.L131072.rowsd1.s32_vs_s128"));
+    check("dq4s: no draft row below 65536", !find("ornith.q4kv.L32768.rowsd1.s8_vs_s128"));
+    // run order: model, keys, row set, S ascending
+    bool ordered = true;
+    for (std::size_t i = 1; i < cs.size(); ++i) {
+        const auto& a = cs[i - 1];
+        const auto& b = cs[i];
+        if (a.model == b.model && a.keys == b.keys && a.rows_tag == b.rows_tag) ordered = ordered && a.s < b.s;
+        if (a.model == b.model && a.keys > b.keys) ordered = false;
+    }
+    check("dq4s: run order model / keys / rows / S", ordered);
+}
+
+static void test_dq4s_env_filters() {
+    std::string err;
+    dq4s::Opts o = dq4s::optsFromEnv(fakeEnv({{"WHIRL_KT_DQ4S_MODELS", "ornith"}, {"WHIRL_KT_DQ4S_L", "32768,131072"}, {"WHIRL_KT_DQ4S_ROWS", "2 d1"},
+                                              {"WHIRL_KT_DQ4S_S", "16,64"}}),
+                                     &err);
+    check("dq4s env: filters parse", err.empty(), err);
+    const auto cs = dq4s::cells(o);
+    std::set<std::string> got;
+    for (const auto& c : cs) got.insert(c.name);
+    const std::set<std::string> want = {"ornith.q4kv.L32768.rows2.s16_vs_s128", "ornith.q4kv.L32768.rows2.s64_vs_s128", "ornith.q4kv.L131072.rows2.s16_vs_s128",
+                                        "ornith.q4kv.L131072.rows2.s64_vs_s128", "ornith.q4kv.L131072.rowsd1.s16_vs_s128", "ornith.q4kv.L131072.rowsd1.s64_vs_s128"};
+    std::string g;
+    for (const auto& n : got) g += n + " ";
+    check("dq4s env: exactly the filtered cells", got == want, g);
+    o = dq4s::optsFromEnv(fakeEnv({{"WHIRL_KT_DQ4S_MODELS", "swift"}, {"WHIRL_KT_DQ4S_L", "65536"}, {"WHIRL_KT_DQ4S_ROWS", "1"}, {"WHIRL_KT_DQ4S_AA", "1"}}), &err);
+    const auto ca = dq4s::cells(o);
+    const bool has_aa = std::any_of(ca.begin(), ca.end(), [](const dq4s::Cell& c) { return c.s == c.s_ship && c.same_partition; });
+    const bool only_swift = std::all_of(ca.begin(), ca.end(), [](const dq4s::Cell& c) { return c.model == "swift" && c.heads == 24 && c.nkv == 4; });
+    check("dq4s env: AA=1 adds the S == S_ship control cell", err.empty() && o.aa && has_aa && only_swift);
+    for (const auto& kv : std::vector<std::pair<std::string, std::string>>{{"WHIRL_KT_DQ4S_MODELS", "llama"},
+                                                                         {"WHIRL_KT_DQ4S_L", "abc"},
+                                                                         {"WHIRL_KT_DQ4S_L", "0"},
+                                                                         {"WHIRL_KT_DQ4S_ROWS", "x"},
+                                                                         {"WHIRL_KT_DQ4S_ROWS", "33"},
+                                                                         {"WHIRL_KT_DQ4S_S", "-8"},
+                                                                         {"WHIRL_KT_DQ4S_S", "512"}}) {
+        std::string e2;
+        (void)dq4s::optsFromEnv(fakeEnv({{kv.first, kv.second}}), &e2);
+        check("dq4s env: " + kv.first + "=" + kv.second + " is an error", !e2.empty());
+    }
+}
+
+// v0252-8sq5 round 2: the reference stays today's rule (ops::dq4Splits) when the 8060S default becomes the profile table;
+// WHIRL_KT_DQ4S_TABLE=1 times the table's count (ops::dq4TableSplits on the gfx1151 row) against it, one cell per (keys, rows)
+static void test_dq4s_table_cells() {
+    std::string err;
+    const dq4s::Opts o = dq4s::optsFromEnv(fakeEnv({{"WHIRL_KT_DQ4S_TABLE", "1"}, {"WHIRL_KT_DQ4S_MODELS", "ornith"}}), &err);
+    check("dq4s table: opts parse", err.empty() && o.table, err);
+    const auto cs = dq4s::cells(o);
+    const auto& tab = whirl::device::k_profile_gfx1151.dq4_split_table;
+    std::size_t bad = 0, n = 0;
+    std::set<std::string> keyrows;
+    for (const auto& c : cs) {
+        std::vector<std::int32_t> p(c.pos.begin(), c.pos.end()), z(p.size(), 0);
+        const int t = static_cast<int>(whirl::ops::dq4TableSplits(std::span<const std::int32_t>(p), std::span<const std::int32_t>(z), c.win, 256,
+                                                                   whirl::ops::kDq4SplitsAuto, tab));
+        bad += c.s != t || c.s_ship != opsSplits(c.pos, c.win) || c.name.size() < 6 || c.name.substr(c.name.size() - 6) != ".table";
+        keyrows.insert(std::to_string(c.keys) + "/" + c.rows_tag);
+        ++n;
+    }
+    // 7 keys x rows 1 / 2 / 3 + 3 draft-row keys = 24 (Ornith), every one with a table count other than today's partition
+    check("dq4s table: one cell per (keys, rows), s = the gfx1151 table, S_ship = ops::dq4Splits", n == 24 && keyrows.size() == 24 && bad == 0,
+          num(static_cast<double>(n)) + " cells, " + num(static_cast<double>(bad)) + " bad");
+    check("dq4s table: ornith 32768 rows2 -> s8 vs s128", std::any_of(cs.begin(), cs.end(), [](const dq4s::Cell& c) { return c.name == "ornith.q4kv.L32768.rows2.s8_vs_s128.table"; }));
+    check("dq4s: gridOk is ops::dq4GridOk (+ rows bound)", dq4s::gridOk({32767}, 0, 16) == whirl::ops::dq4GridOk(std::span<const std::int32_t>(std::vector<std::int32_t>{32767}), 0, 16, 256));
+}
+
+static void test_dq4s_geo_ci() {
+    check("dq4s: t975(1) 12.706, (10) 2.228, (30) 2.042, large -> 1.96", std::fabs(dq4s::t975(1) - 12.706) < 1e-3 && std::fabs(dq4s::t975(10) - 2.228) < 1e-3 &&
+                                                                       std::fabs(dq4s::t975(30) - 2.042) < 1e-3 && std::fabs(dq4s::t975(100000) - 1.96) < 1e-3);
+    const dq4s::GeoCi c = dq4s::geoCi({0.9, 0.9, 0.9, 0.9});
+    check("dq4s: geoCi of constant 0.9", std::fabs(c.g - 0.9) < 1e-12 && std::fabs(c.lo - 0.9) < 1e-12 && std::fabs(c.hi - 0.9) < 1e-12 && c.n == 4);
+    const dq4s::GeoCi d = dq4s::geoCi({0.9, 1.1});
+    const double m = 0.5 * (std::log(0.9) + std::log(1.1)), sd = std::fabs(std::log(1.1) - std::log(0.9)) / std::sqrt(2.0), h = 12.706 * sd / std::sqrt(2.0);
+    check("dq4s: geoCi of {0.9, 1.1}", std::fabs(d.g - std::exp(m)) < 1e-9 && std::fabs(d.lo - std::exp(m - h)) < 1e-3 && std::fabs(d.hi - std::exp(m + h)) < 1e-2,
+          num(d.lo) + " " + num(d.hi));
+    const dq4s::GeoCi one = dq4s::geoCi({1.2});
+    check("dq4s: geoCi of one ratio: lo = hi = g", one.n == 1 && one.lo == one.g && one.hi == one.g && std::fabs(one.g - 1.2) < 1e-12);
+    const std::string line = dq4s::geoLine(dq4s::geoCi({0.95, 0.96, 0.94, 0.95}));
+    check("dq4s: judge line", line.find("B/A geometric mean 0.95") != std::string::npos && line.find("95% interval [") != std::string::npos &&
+                                  line.find("B time -5.0") != std::string::npos && line.find("4 pairs") != std::string::npos,
+          line);
+}
+
 int main(int argc, char** argv) {
     std::string emit;
     for (int i = 1; i < argc; ++i)
@@ -765,6 +955,12 @@ int main(int argc, char** argv) {
         test_roof();
         test_rows();
         test_jsonl_file(emit);
+        test_dq4s_mirror_is_ops_rule();
+        test_dq4s_grid_ok();
+        test_dq4s_default_table();
+        test_dq4s_env_filters();
+        test_dq4s_geo_ci();
+        test_dq4s_table_cells();
     } catch (const std::exception& e) {
         check(std::string("exception: ") + e.what(), false);
     }

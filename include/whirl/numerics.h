@@ -153,6 +153,9 @@ struct EnvValues {
     // block order, class B: same partials) and dq4_min_keys (WHIRL_DQ4_MINKEYS: the attn_dq4 split count from a keys-per-split
     // target, class F: another partition and combine order). Applied in fast only; "0" / "" = off
     Raw dq4_order, dq4_min_keys;
+    // v0252-8sq5 (PLAN V1-109; fast only): dq4_splits (WHIRL_DQ4_SPLITS: the q4 decode / verify split count; "auto" = the
+    // device profile's measured table, "0" / "" = today's rule, 1..256 = that count; class F: another partition)
+    Raw dq4_splits;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -160,7 +163,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 49;  // v0252-8sattn3: + attn_i4pf (48 -> 49)  // v0252-8sq4: + dq4_order, dq4_min_keys (46 -> 48)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
+    static constexpr std::size_t n_fields = 50;  // v0252-8sq5: + dq4_splits (49 -> 50)  // v0252-8sattn3: + attn_i4pf (48 -> 49)  // v0252-8sq4: + dq4_order, dq4_min_keys (46 -> 48)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -449,7 +452,8 @@ struct ItemState {
     X(B, attn_sx, false, "")                                     \
     X(B, attn_i4qk, false, "")                                   \
     X(B, attn_i4pf, false, "")                                   \
-    X(U, moep_guw, 0, "")                                            X(B, moep_dhs, false, "")                                        X(U, moep_dna, 0, "")                                            X(B, moep_fq, false, "")                                         X(B, dq4_order, false, "")                                       X(U, dq4_min_keys, 0, "")
+    X(U, moep_guw, 0, "")                                            X(B, moep_dhs, false, "")                                        X(U, moep_dna, 0, "")                                            X(B, moep_fq, false, "")                                         X(B, dq4_order, false, "")                                       X(U, dq4_min_keys, 0, "")                                    \
+    X(U, dq4_splits, 0, "")
 
 struct Flags {
 #define WHIRL_NF_B bool
@@ -534,6 +538,13 @@ std::optional<std::uint32_t> parseLsplit(std::string_view s);
 // v0252-8sq4 (F8 split): WHIRL_DQ4_MINKEYS -> a whole decimal 1 .. 1048576 = that keys-per-split target; "0", "" and
 // anything else ("x", "1k", "-1", "1048577") = 0 (today's attn_dq4 split rule)
 std::uint32_t parseDq4MinKeys(std::string_view s);
+// v0252-8sq5 (PLAN V1-109): flag dq4_splits "auto" (= ops::kDq4SplitsAuto): the device profile's dq4_split_table decides
+// (a row that is off: today's rule). The fast default; precise / balance 0 (no q4 KV path there)
+inline constexpr std::uint32_t kDq4SplitsAuto = 65535;
+// v0252-8sq5: WHIRL_DQ4_SPLITS -> "auto" = kDq4SplitsAuto, "0" or "" = 0 (today's rule ops::dq4Splits), a whole decimal
+// 1..256 = that split count; anything else ("x", "257", "-1", " 8", "AUTO") = std::nullopt (fast keeps auto, Plan::ignored
+// notes it)
+std::optional<std::uint32_t> parseDq4Splits(std::string_view s);
 // v0252-8sq4 (fallback): does fast mode on a MoE model take q8h KV at this load (KvCaps::fast_q8h_moe)? row =
 // device::Profile::fast_kv_q8h_moe_ctx (0 off, N = from N tokens of per-request context), env = WHIRL_FAST_KVQ8H (unset = the
 // row; a whole decimal: 0 off, N the same meaning; anything else = the row), ctx = the load's per-request context (0 =

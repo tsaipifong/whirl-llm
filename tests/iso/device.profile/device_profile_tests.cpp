@@ -57,6 +57,25 @@ void testProfiles() {
     // gfx1201 stays off (its attn_dq4 already has the order; no attn_dq4o in its object)
     CHECK(!a.attn_dq4_row_order && b.attn_dq4_row_order && a.dq4_min_keys == 0 && b.dq4_min_keys == 0);
     CHECK(a.fast_kv_q8h_moe_ctx == 0 && b.fast_kv_q8h_moe_ctx == 0);
+    // v0252-8sq5 (PLAN V1-109): the q4 KV decode / verify split-count table (fast only, ops::dq4TableSplits), measured by the
+    // kernel bench dq4s on the 8060S (scratch/v0252_8sq5/gpu/20261124-1609/table.txt, Ornith, 87 cells, intervals ~+-0.15 %):
+    // on in the gfx1151 row, off in the gfx1201 row (not measured there). A changed step changes THIS pin.
+    {
+        auto text = [](const d::Profile& p) {
+            std::string s = p.dq4_split_table.on ? "on" : "off";
+            for (std::size_t c = 0; c < p.dq4_split_table.steps.size(); ++c) {
+                s += " |";
+                for (const d::Dq4SplitStep& st : p.dq4_split_table.steps[c])
+                    if (st.splits != 0) s += " " + std::to_string(st.keys) + ":" + std::to_string(st.splits);
+            }
+            return s;
+        };
+        CHECK(text(a) == "off | | | |");
+        CHECK(text(b) == "on | 8192:8 16384:16 32768:16 49152:16 65536:16 98304:16 131072:16"
+                         " | 8192:8 16384:8 32768:8 49152:8 65536:8 98304:64 131072:64"
+                         " | 8192:8 16384:8 32768:8 49152:8 65536:32 98304:32 131072:32"
+                         " | 65536:16 98304:16 131072:16");
+    }
     // v0252-8sdec (PLAN V1-142): the precise grouped gemvh (gemvhg, gfx1151 object only). v0252-8sgrp: the 8060S default
     // (screen 8sdec-grp2: precise tg 8192 +2.36 % +- 2.00, bits SAME); gfx1201 stays off (no gemvhg in its object)
     CHECK(!a.gemvh_group_dense && b.gemvh_group_dense);

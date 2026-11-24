@@ -64,7 +64,13 @@ struct AttnDecodeFlags {
     //   dq4_min_keys: > 0 = the attn_dq4 split count from the longest host-known row (dq4MinKeysSplits), else today's rule
     bool dq4_order = false;
     std::uint32_t dq4_min_keys = 0;
+    // v0252-8sq5 (PLAN V1-109; fast only): numerics flag dq4_splits (WHIRL_DQ4_SPLITS; numerics plan: fast kDq4SplitsAuto,
+    // precise / balance 0). 0 = today's rule (dq4Splits), kDq4SplitsAuto = the device profile's dq4_split_table, 1..256 = that
+    // count (dq4TableSplits); dq4_min_keys, when > 0, wins. Ops default 0: a caller without the plan's flags keeps today's grid
+    std::uint32_t dq4_splits = 0;
 };
+// v0252-8sq5: AttnDecodeFlags::dq4_splits "auto" (= numerics::kDq4SplitsAuto)
+inline constexpr std::uint32_t kDq4SplitsAuto = 65535;
 enum class AttnDecodeKind : std::uint8_t { ws4, ws4g, wsplit, dq4, split };
 struct AttnDecodePlan {
     AttnDecodeKind kind = AttnDecodeKind::split;
@@ -98,6 +104,18 @@ std::uint32_t dq4Splits(std::span<const std::int32_t> row_pos, std::int32_t win,
 // MTP draft window branch on; 128 = the kernel's DQ_MAXS: dq_per never uses more). min_keys 0 or no rows: full.
 // Each row's partition is the kernel's dq_per(n_pos, grid): another split / combine order than today's (fast only).
 std::uint32_t dq4MinKeysSplits(std::span<const std::int32_t> row_pos, std::int32_t win, std::uint32_t full, std::uint32_t min_keys);
+// v0252-8sq5: a grid of s splits the kernel takes for these rows: 1 <= s <= min(full, 256) (full = the partial buffers' split
+// count), s >= 8 when a draft window is on (the window branch needs a second split; 8 = dq4Splits' floor), every row's keyed
+// splits (the kernel's dq_per partition) inside the grid. The bench whirl-kernel-test --bench dq4s uses the same check.
+bool dq4GridOk(std::span<const std::int32_t> row_pos, std::int32_t win, std::uint32_t s, std::uint32_t full);
+// v0252-8sq5 (PLAN V1-109): the split count for flag (AttnDecodeFlags::dq4_splits) and the profile table, or 0 = not decided
+// here (the caller keeps today's rule). flag 0: 0. flag 1..256: that count where dq4GridOk, else 0. flag kDq4SplitsAuto with
+// t.on: the row class - 1 row (window off or not yet active: n_max < the window threshold), 2 / 3 rows of one sequence at
+// consecutive positions (verify), 1 row with the window active (the MTP draft row) - then the step at or below n_max = the
+// longest row's key count; any other row set (4+ rows, several sequences, gaps, a window with several rows) or n_max below the
+// first step: 0. A table count that fails dq4GridOk: 0.
+std::uint32_t dq4TableSplits(std::span<const std::int32_t> row_pos, std::span<const std::int32_t> row_base, std::int32_t win, std::uint32_t full,
+                             std::uint32_t flag, const device::Dq4SplitTable& t);
 
 // ---- prefill (n > small_max rows), one sequence region (or one segment of a segmented prefill)
 struct AttnPrefillProblem {

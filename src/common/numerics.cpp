@@ -237,6 +237,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOEP_FQ", &S::moep_fq},      // v0252-8smoe2 (E)
         {"DQ4_ORDER", &S::dq4_order},  // v0252-8sq4 (F8 order)
         {"DQ4_MINKEYS", &S::dq4_min_keys},  // v0252-8sq4 (F8 split)
+        {"DQ4_SPLITS", &S::dq4_splits},  // v0252-8sq5 (measured split table)
     }};
     return t;
 }
@@ -448,6 +449,11 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
         F.dq4_min_keys = t.dq4_min_keys_profile;
         if (e.dq4_order) F.dq4_order = onOff(e.dq4_order);
         if (e.dq4_min_keys) F.dq4_min_keys = parseDq4MinKeys(*e.dq4_min_keys);
+        // v0252-8sq5 (PLAN V1-109): the q4 decode split count from the profile's measured table (auto); WHIRL_DQ4_SPLITS =
+        // auto / 0 (today's rule ops::dq4Splits: the screen's A arm) / 1..256; an invalid value keeps auto (noted below)
+        F.dq4_splits = kDq4SplitsAuto;
+        if (e.dq4_splits)
+            if (const std::optional<std::uint32_t> v = parseDq4Splits(*e.dq4_splits)) F.dq4_splits = *v;
     }
     // v0251-a11port (feat026-router): the fused MoE router by default for MoE models, every mode (bit-identical to
     // moe_logits_f32 + moe_topk: kt moemx, golden); 0.2.5.1 on the gfx1151 code object (Radeon 8060S), v0252-c5port also
@@ -731,6 +737,12 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
         if (const Raw& v = e.dq4_min_keys; v && *v != "0" && p.mode != Mode::fast)
             p.ignored.push_back(std::format("WHIRL_DQ4_MINKEYS={} ignored: the q4 KV decode attention is fast-only ({} never takes it)", *v,
                                             modeName(p.mode)));
+        // v0252-8sq5: WHIRL_DQ4_SPLITS: outside fast any value but "0" / "" is noted (the flag stays 0); in fast an invalid one
+        if (const Raw& v = e.dq4_splits; v && p.mode != Mode::fast && *v != "0" && !v->empty())
+            p.ignored.push_back(std::format("WHIRL_DQ4_SPLITS={} ignored: the q4 KV decode attention is fast-only ({} never takes it)", *v,
+                                            modeName(p.mode)));
+        else if (v && p.mode == Mode::fast && !parseDq4Splits(*v))
+            p.ignored.push_back(std::format("WHIRL_DQ4_SPLITS={} ignored: not auto, 0 or 1..256 (auto stays)", *v));
     }
     if (items) {
         if (const Raw& v = e.spec_sample; v && !v->empty())
@@ -826,6 +838,20 @@ std::optional<std::uint32_t> parseLsplit(std::string_view s) {
         v = v * 10 + static_cast<std::uint32_t>(ch - '0');
     }
     if (v <= 4096) return v;
+    return std::nullopt;
+}
+
+// v0252-8sq5: WHIRL_DQ4_SPLITS values (numerics.h)
+std::optional<std::uint32_t> parseDq4Splits(std::string_view s) {
+    if (s == "auto") return kDq4SplitsAuto;
+    if (s.empty()) return 0u;
+    if (s.size() > 3) return std::nullopt;
+    std::uint32_t v = 0;
+    for (const char ch : s) {
+        if (ch < '0' || ch > '9') return std::nullopt;
+        v = v * 10 + static_cast<std::uint32_t>(ch - '0');
+    }
+    if (v <= 256) return v;
     return std::nullopt;
 }
 
