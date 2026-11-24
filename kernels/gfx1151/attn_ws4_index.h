@@ -53,6 +53,32 @@ WS4_HD constexpr Range block_range(int n_pos, int split, int ns, int win) {
     return Range{b0, b1};
 }
 
+// v0252-8sws: block_range with the split count as a template constant, for the BENCH-ONLY kernel entries (attn_ws4.hip
+// <name>_ns<S>) only. Their own copy on purpose: when every device call of block_range passes ns = kNs the compiler folds 64
+// into it, and one call with another ns changed the shipping attn_ws4 / attn_ws4_q8 code (measured: code-object comparison).
+// Same arithmetic as per / block_range; kt_bench_tests pins block_range_ns<S>(n, s, w) == block_range(n, s, S, w).
+template <int NS>
+WS4_HD constexpr Range block_range_ns(int n_pos, int split, int win) {
+    int p = (n_pos + NS * 64 - 1) / (NS * 64) * 64;
+    int b0 = split * p, b1 = b0 + p < n_pos ? b0 + p : n_pos;
+    if (win != 0 && NS > 1) {
+        const int w = (win & 0xffff) * 64, min_pos = (win >> 16) * 1024;
+        const int wl = (n_pos - w) & ~63;
+        const int w0 = wl > kSink ? wl : kSink;
+        if (n_pos >= min_pos && w0 > kSink) {
+            if (split == 0) {
+                b0 = 0;
+                b1 = kSink;
+            } else {
+                p = (n_pos - w0 + (NS - 1) * 64 - 1) / ((NS - 1) * 64) * 64;
+                b0 = w0 + (split - 1) * p;
+                b1 = b0 + p < n_pos ? b0 + p : n_pos;
+            }
+        }
+    }
+    return Range{b0, b1};
+}
+
 // accumulator element v of lane -> row in the 16x16 tile (CROW)
 WS4_HD constexpr int crow(int lane, int v) { return 2 * v + lane / 16; }
 

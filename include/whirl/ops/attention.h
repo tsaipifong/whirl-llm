@@ -96,6 +96,19 @@ Function attnWs4rFor(std::uint32_t flag, std::uint8_t row, bool wide, const kern
 // of the rows or their positions, so a row's key partition (awPer(n_pos, split), kernels/attn_ws4r.hip:181) is the same in
 // any batch, verify group or plain decode. >= 2 keeps the MTP draft-window branch (it needs a second split).
 std::uint32_t lsplitCount(std::uint32_t n_split, std::uint32_t n_head_kv, std::uint32_t flag, std::uint16_t row);
+// v0252-8sws (PLAN V1-88 on gfx1151): the split constant of the gfx1151 attn_ws4 / attn_ws4g launch: lsplitCount(64, n_head_kv,
+// flag, row) (row = device::Profile::attn_ws4_split_blocks) when the KV is q8 / q8h and the table has that constant for the
+// single-row kernel and every CG (k.attn_ws4_sp / attn_ws4g_sp at kernels::kWs4SplitCounts), else 64 (today's kernels and
+// bits: flag 0 = precise, f16 KV, a head count whose count has no entry, a code object without the entries). A function of the
+// model, the KV format, the flag and the table only, never of the rows: a row's key ranges stay a function of its position.
+std::uint32_t ws4SplitCount(std::uint32_t n_head_kv, bool kv_q8, std::uint32_t flag, std::uint16_t row, const kernels::AttnKernels& k);
+// v0252-8sws round 3: the measured limits (device::Profile::ws4_split_limits) applied to the step: s (a ws4SplitCount result
+// other than 64) when the step's row class has a limit >= its key count, else 64. Row class: 0 = one row with a draft window
+// argument (the MTP draft row), else the row count n when 1 <= n <= 9 and the rows are one sequence at consecutive positions
+// (row_base equal, row_pos[r] = row_pos[0] + r); anything else -> 64. Key count: the largest row_pos + 1 when the host knows
+// the rows (rows_known and row_pos holds n entries), else max_ctx for one row (an upper bound), else (several unknown rows) 64.
+// Deterministic: a function of the step's rows only (same input -> same row counts -> same split).
+std::uint32_t ws4SplitForStep(const AttnDecodeProblem& p, std::uint32_t s, const device::Ws4SplitLimits& lim);
 // split rule helpers (kept in step with the kernels)
 std::int32_t awPer(std::int32_t n_pos, std::uint32_t n_split);
 std::uint32_t dq4Splits(std::span<const std::int32_t> row_pos, std::int32_t win, std::uint32_t full);

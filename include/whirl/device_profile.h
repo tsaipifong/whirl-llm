@@ -36,6 +36,15 @@ struct Dq4SplitTable {
     bool on;
     std::array<std::array<Dq4SplitStep, kDq4SplitSteps>, kDq4SplitClasses> steps;
 };
+// v0252-8sws round 3 (PLAN V1-88 on gfx1151): the measured limits of the attn_ws4 / attn_ws4g split constants besides 64:
+// max_keys[i][c] = the largest key count (the step's largest n_pos) at which split constant kernels::kWs4SplitCounts[i]
+// (0: 8, 1: 16) is launched for row class c (0 = the MTP draft row: one row with the draft window argument, 1..9 = a step of
+// that many rows of one sequence at consecutive positions); 0 = not measured. Above the limit, for other classes (10+ rows,
+// several sequences, gapped rows, rows the host does not know) and when !on: 64 (today's kernels and bits). ops::ws4SplitForStep.
+struct Ws4SplitLimits {
+    bool on;
+    std::uint32_t max_keys[2][10];
+};
 
 struct Profile {
     hip::Arch arch;
@@ -86,6 +95,21 @@ struct Profile {
     // auto / 0 / N overrides it. 0 = today's split count. gfx1201: 32 WGPs x 2 attn_ws4r blocks (LDS 47.8 / 58.4 KB of
     // 128 KB per WGP) = 64 = one machine wave (libr4d decode_splits / TRT-LLM MMHA law, progress/v0252-l2split.PRIOR_ART.md)
     std::uint16_t attn_lsplit_blocks;
+    // v0252-8sws (PLAN V1-88 on gfx1151): the same machine-fill rule for the gfx1151 attn_ws4 / attn_ws4g decode / verify
+    // attention with q8 / q8h KV: split count = ops::lsplitCount(64, n_head_kv, flag attn_lsplit, this field), launched only
+    // where the code object has that split constant (kernels::kWs4SplitCounts: attn_ws4_q8_sp<S>, attn_ws4g<cg>_q8_sp<S>),
+    // else today's 64 (ops::ws4SplitCount). A separate field, not attn_lsplit_blocks: on gfx1151 that one also drives the
+    // attn_wsplit fallback (WHIRL_ATTN_WS4=0), which was not measured and keeps 64. Balance / fast only (flag attn_lsplit:
+    // precise 0); f16 KV keeps 64 (no f16 _sp entries; precise's kernels never change). 0 = today's 64. gfx1151: 32 = the
+    // measured best count x KV heads (kernel bench ws4s, 8060S 2026-11-24 19:10, q8h, B/A vs 64 +-0.15 %: Ornith 2 KV heads ->
+    // 16 (0.63 .. 0.89 at 8192 .. 131072), Swift 4 -> 8 (0.71 .. 0.94; the one exception Swift 3 rows at 131072: S 8 1.017
+    // [1.015, 1.019], 64 best there)); gfx1201 0 (no attn_ws4 path)
+    std::uint16_t attn_ws4_split_blocks;
+    // v0252-8sws round 3: where the split constant of attn_ws4_split_blocks is used (flag attn_lsplit auto only; a forced
+    // WHIRL_ATTN_LSPLIT=N skips it): the largest MEASURED key count with a proven gain over 64 per row class (kernel bench ws4s
+    // TABLE runs, 8060S 2026-11-25 01:24-01:43, B/A whole 95 % interval < 1 at that key count and every smaller measured one;
+    // between that point and the next measured one nothing is known -> 64; above 262144 (the largest measured) -> 64)
+    Ws4SplitLimits ws4_split_limits;
     // v0252-8sq4 (PLAN V1-140 / V1-109; fast only, opt-in until the main session's screen shows a gain beyond its error,
     // ADR-0019; a default flip is one line here plus the pinned CHECKs in tests/device, tests/iso/device.profile,
     // tests/ops testAttnDq4F8 and tests/unit testDq4F8Flags' shipped pin). v0252-8sflip2: attn_dq4_row_order is the gfx1151
@@ -225,6 +249,8 @@ inline constexpr Profile k_profile_gfx1201{
     // v0252-l2split: one machine wave (64 blocks: Swift 4 kv heads -> 16 splits, Ornith 2 -> 32; today 64 each); the R9700
     // kt lsplit sweep (scratch/v0252_l2split/proposed) and the e2e A/B decide whether it stays
     .attn_lsplit_blocks = 64,
+    .attn_ws4_split_blocks = 0,  // v0252-8sws: no attn_ws4 path on gfx1201
+    .ws4_split_limits = {},      // v0252-8sws round 3: off (no attn_ws4 path)
     .attn_dq4_row_order = false,  // v0252-8sq4: no attn_dq4o in the gfx1201 object (attn_dq4 has the order)
     .dq4_min_keys = 0,            // v0252-8sq4 F8 split: opt-in (R9700 fast tg 96k inversion: its own screen later)
     .fast_kv_q8h_moe_ctx = 0,     // v0252-8sq4 fallback: opt-in (KvCaps::fast_q8h is false here, so inert today)
@@ -309,6 +335,13 @@ inline constexpr Profile k_profile_gfx1151{
     .attn_ws4r_q8 = 0,  // v0252-ws4r97b: the gfx1151 object has no attn_ws4r (attn_ws4 / attn_ws4g there)
     .attn_ws4r_f16 = 0,
     .attn_lsplit_blocks = 0,  // v0252-l2split: the gfx1151 decode path is attn_ws4 (constant 64 splits, DES-ATTN-8S); unchanged
+    .attn_ws4_split_blocks = 32,  // v0252-8sws: attn_ws4 / attn_ws4g q8 / q8h: Ornith (2 KV heads) 16 splits, Swift (4) 8
+    // v0252-8sws round 3: [0] S 8 (Swift shape), [1] S 16 (Ornith shape); class 0 draft row, 1..9 rows. First slower measured
+    // key count above each limit (B/A): Swift rows 3 131072 1.0086, 4 131072 1.0017, 5 262144 1.033, 6 65536 1.0041, 7 98304
+    // 1.006, 8 98304 0.9997 [0.9983, 1.0012] (flat, not a gain), 9 32768 1.011; Ornith rows 7 / 8 / 9 32768 1.027 / 1.019 / 1.008
+    .ws4_split_limits = {.on = true,
+                         .max_keys = {{262144, 262144, 262144, 98304, 98304, 196608, 49152, 65536, 65536, 16384},
+                                      {262144, 262144, 262144, 262144, 262144, 262144, 262144, 16384, 16384, 16384}}},
     // v0252-8sq4: opt-in until the screens progress/8sq4-order.json / 8sq4-minkeys.json / 8sq4-kvq8h.json show a gain beyond
     // the error (ADR-0019). On: attn_dq4_row_order = true, dq4_min_keys = the screened target, fast_kv_q8h_moe_ctx = 1 (or
     // the context the screen supports)

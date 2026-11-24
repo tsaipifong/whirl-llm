@@ -128,7 +128,15 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
     // does not apply. WHIRL_ATTN_WS4=0: the old path below.
     const bool ws4_path = f.attn_ws4 && k.attn_ws4 != nullptr && k.attn_ws4g[0] != nullptr && k.attn_ws4g[1] != nullptr && k.attn_ws4g[2] != nullptr &&
                           k.attn_wsplit1 != nullptr && !p.kv_q4 && hd == ws4::kD && grp_q <= 16 && (f.dbg_flags & 2) == 0;
-    u32 n_split = ws4_path ? std::min<u32>(ws4::kNs, (p.max_ctx + fd_chunk - 1) / fd_chunk) : std::min(f.fd_splits, (p.max_ctx + fd_chunk - 1) / fd_chunk);
+    // v0252-8sws (PLAN V1-88 on gfx1151): balance / fast q8 / q8h take the measured split constant (ws4SplitCount: 64 unless
+    // the flag, the profile row and the kernel table all give another); the kernels below are then the _sp entries of that count
+    // round 3: under auto the measured limits of the profile decide per step (ws4SplitForStep); a forced WHIRL_ATTN_LSPLIT=N skips them
+    u32 ws4_ns = ws4_path ? ws4SplitCount(p.n_head_kv, p.kv_q8, f.attn_lsplit, prof.attn_ws4_split_blocks, k) : static_cast<u32>(ws4::kNs);
+    if (ws4_path && f.attn_lsplit == kAttnLsplitAuto) ws4_ns = ws4SplitForStep(p, ws4_ns, prof.ws4_split_limits);
+    int ws4_si = -1;  // index into kernels::kWs4SplitCounts, -1 = 64 (today's entries)
+    for (int i = 0; i < 2; ++i)
+        if (ws4_ns != static_cast<u32>(ws4::kNs) && kernels::kWs4SplitCounts[i] == ws4_ns) ws4_si = i;
+    u32 n_split = ws4_path ? std::min<u32>(ws4_ns, (p.max_ctx + fd_chunk - 1) / fd_chunk) : std::min(f.fd_splits, (p.max_ctx + fd_chunk - 1) / fd_chunk);
     // FAST-8S-1 (q4 KV through attn_dq4): the smallest split count whose key partition (dq_per) is the
     // same as fd_splits' for every row: same partials, same combine order, so bitwise the same output. The
     // profile row says where it is on (the 8060S since FAST-8S-1, the R9700 since v0252-n2).
@@ -162,9 +170,9 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
         const i32 win = p.win;
         auto key = [&](i32 pp) {
             const i32 np = pp + 1;
-            const ws4::Range r0 = ws4::block_range(np, 0, ws4::kNs, win);
-            return std::array<i32, 3>{r0.b1 == ws4::kSink ? r0.b0 - 1 : 0, ws4::block_range(np, 1, ws4::kNs, win).b0,
-                                      ws4::block_range(np, 2, ws4::kNs, win).b0};
+            const int ns = static_cast<int>(ws4_ns);
+            const ws4::Range r0 = ws4::block_range(np, 0, ns, win);
+            return std::array<i32, 3>{r0.b1 == ws4::kSink ? r0.b0 - 1 : 0, ws4::block_range(np, 1, ns, win).b0, ws4::block_range(np, 2, ns, win).b0};
         };
         const bool known = p.rows_known && n > 1 && (f.dbg_flags & 4) == 0;
         u32 ng = 0, r = 0, widest = 1;
@@ -184,7 +192,7 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
         }
         if (widest == 1) {
             pl.kind = AttnDecodeKind::ws4;
-            pl.f = k.attn_ws4;
+            pl.f = ws4_si < 0 ? k.attn_ws4 : k.attn_ws4_sp[ws4_si];
             pl.grid = D(p.n_head_kv, n_split, ng);
             pl.block = D(128);
         } else {
@@ -192,7 +200,7 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
             const u32 cg = std::min<u32>(3, (widest * grp_q + 15) / 16);
             const u32 rpb = static_cast<u32>(ws4::rows_per_block(static_cast<int>(cg), static_cast<int>(grp_q)));
             pl.kind = AttnDecodeKind::ws4g;
-            pl.f = k.attn_ws4g[cg - 1];
+            pl.f = ws4_si < 0 ? k.attn_ws4g[cg - 1] : k.attn_ws4g_sp[ws4_si][cg - 1];
             pl.grid = D(p.n_head_kv * ((widest + rpb - 1) / rpb), n_split, ng);
             pl.block = D(256);
         }
@@ -266,6 +274,46 @@ std::uint32_t lsplitCount(std::uint32_t n_split, std::uint32_t n_head_kv, std::u
     const std::uint32_t blocks = flag == kAttnLsplitAuto ? row : flag;
     if (blocks == 0 || n_head_kv == 0) return n_split;
     return std::min(n_split, std::max<std::uint32_t>(2, blocks / n_head_kv));
+}
+
+// v0252-8sws: attention.h
+std::uint32_t ws4SplitCount(std::uint32_t n_head_kv, bool kv_q8, std::uint32_t flag, std::uint16_t row, const kernels::AttnKernels& k) {
+    const std::uint32_t full = static_cast<std::uint32_t>(ws4::kNs);
+    if (!kv_q8 || flag == 0) return full;
+    const std::uint32_t s = lsplitCount(full, n_head_kv, flag, row);
+    for (int i = 0; i < 2; ++i)
+        if (kernels::kWs4SplitCounts[i] == s && k.attn_ws4_sp[i] != nullptr && k.attn_ws4g_sp[i][0] != nullptr && k.attn_ws4g_sp[i][1] != nullptr &&
+            k.attn_ws4g_sp[i][2] != nullptr)
+            return s;
+    return full;
+}
+
+// v0252-8sws round 3: attention.h
+std::uint32_t ws4SplitForStep(const AttnDecodeProblem& p, std::uint32_t s, const device::Ws4SplitLimits& lim) {
+    const std::uint32_t full = static_cast<std::uint32_t>(ws4::kNs);
+    int si = -1;
+    for (int i = 0; i < 2; ++i)
+        if (kernels::kWs4SplitCounts[i] == s) si = i;
+    if (si < 0 || !lim.on || p.n == 0) return full;
+    const std::uint32_t n = p.n;
+    const bool known = p.rows_known && p.row_pos.size() >= n;
+    std::uint32_t cls = 0;
+    if (n == 1) {
+        cls = p.win != 0 ? 0u : 1u;
+    } else {
+        if (!known || n > 9 || p.row_base.size() < n) return full;
+        for (std::uint32_t r = 1; r < n; ++r)
+            if (p.row_base[r] != p.row_base[0] || p.row_pos[r] != p.row_pos[0] + static_cast<std::int32_t>(r)) return full;
+        cls = n;
+    }
+    std::uint64_t keys = 0;
+    if (known) {
+        for (std::uint32_t r = 0; r < n; ++r) keys = std::max<std::uint64_t>(keys, static_cast<std::uint64_t>(std::max<std::int32_t>(p.row_pos[r], 0)) + 1);
+    } else {
+        keys = p.max_ctx;  // one row the host does not know: its n_pos <= max_ctx
+    }
+    const std::uint32_t lm = lim.max_keys[si][cls];
+    return lm != 0 && keys <= lm ? s : full;
 }
 
 // v0252-ws4r97b: attention.h. 1 / 2 index the table's [plain, b] pair of the CG the wsplit choice took.

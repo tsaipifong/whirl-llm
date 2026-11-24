@@ -282,6 +282,12 @@ inline constexpr int kFdMaxSplits = 64;      // host cap on split count (Model::
 inline constexpr int kGdnMaxSeg = 16;        // GDN_MAX_SEG
 inline constexpr int kGdnMaxSnap = 15;       // GDN_MAX_SNAP
 inline constexpr int kMaxSmallBatch = 16;    // multi-token GEMV / small-batch kernels: 2..16 tokens
+// v0252-8sws: the split constants of the gfx1151 attn_ws4 / attn_ws4g q8 product entries besides 64 (AttnKernels::attn_ws4_sp /
+// attn_ws4g_sp index), and their entry names: cg 0 = attn_ws4_q8_sp<S>, cg 1..3 = attn_ws4g<cg>_q8_sp<S>
+inline constexpr std::uint32_t kWs4SplitCounts[2] = {8, 16};
+inline std::string ws4SplitName(int cg, std::uint32_t s) {
+    return (cg == 0 ? std::string("attn_ws4") : "attn_ws4g" + std::to_string(cg)) + "_q8_sp" + std::to_string(s);
+}
 inline constexpr int kMaxVerifyRows = 32;    // rows of one batched verify / MTP step (gemvx_v6_* past 16)
 inline constexpr int kMaxDrafts = 10;        // MTP drafts per verify cycle
 inline constexpr int kDFlashAttnKeys = 2304;  // DF_MAXK: keys (context ring + block) of dflash_attn; more: dflash_attn_long
@@ -739,6 +745,11 @@ struct AttnKernels {
     F attn_dq4o{};
     F attn_ws4{};  // gfx1151 4-wave pipelined attn_wsplit1 (same arguments / bits, one query per group): decode rows (WHIRL_ATTN_WS4=0: old path)
     F attn_ws4g[3]{};  // gfx1151 multi-row verify, CG 1..3 tiles (attn_ws4g{1,2,3}[_q8]; 256 threads, grid.x = n_kv x column groups)
+    // v0252-8sws (PLAN V1-88 on gfx1151): attn_ws4_q8 / attn_ws4g<cg>_q8 with the split constant kWs4SplitCounts[i] in place of
+    // 64 (names ws4SplitName; same arguments / threads / partial layout, grid.y = that count); q8 / q8h KV only, null otherwise
+    // and on gfx1201. Balance / fast only through ops::ws4SplitCount (another key partition = another combine order)
+    F attn_ws4_sp[2]{};
+    F attn_ws4g_sp[2][3]{};
     // v0252-ws4r97b (PLAN V1-87): gfx1201 4-wave pipelined attn_wsplit1 / attn_wsplit2 (same arguments / groups / grid /
     // 128 threads / bits; kt ws4r): [0] plain attn_ws4r{1,2}, [1] b attn_ws4r{1,2}b, with the _q8 suffix for q8 / q8h KV;
     // null for q8v / q4 KV and on gfx1151 (ops::attnWs4rFor, device::Profile::attn_ws4r_q8 / _f16, WHIRL_ATTN_WS4R)

@@ -398,6 +398,12 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
     k.attn_ws4 = L.opt(std::string("attn_ws4") + kvs);  // gfx1151 only (no q8v variant)
     if (kv == KvFormat::f16 || kv == KvFormat::q8 || kv == KvFormat::q8h)  // gfx1151 only (f16 / int8 K/V)
         for (int cg = 1; cg <= 3; ++cg) k.attn_ws4g[cg - 1] = L.opt(std::string("attn_ws4g") + std::to_string(cg) + (kv == KvFormat::f16 ? "" : "_q8"));
+    // v0252-8sws: the gfx1151 q8 / q8h attn_ws4 / attn_ws4g at the other split constants (ops::ws4SplitCount)
+    if (kv == KvFormat::q8 || kv == KvFormat::q8h)
+        for (int i = 0; i < 2; ++i) {
+            k.attn_ws4_sp[i] = L.opt(ws4SplitName(0, kWs4SplitCounts[i]));
+            for (int cg = 1; cg <= 3; ++cg) k.attn_ws4g_sp[i][cg - 1] = L.opt(ws4SplitName(cg, kWs4SplitCounts[i]));
+        }
     // v0252-ws4r97b: gfx1201 attn_ws4r (f16 and the int8 K/V layout of q8 / q8h only; no q8v / q4 variant)
     if (kv == KvFormat::f16 || kv == KvFormat::q8 || kv == KvFormat::q8h) {
         const std::string s = kv == KvFormat::f16 ? "" : "_q8";
