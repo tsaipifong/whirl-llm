@@ -1923,7 +1923,7 @@ void benchArgmax(Env& e) {
 // (contiguous rows, identity page table, as ops::chooseAttnPrefill's from_copy launch), n = WHIRL_KT_PV_N (default 2048, the
 // server's prefill forward) queries at the end of L keys (pos0 = L - n; WHIRL_KT_PV_L, default 32768,98304; --quick 8192),
 // Swift 24 / 4 and Ornith 16 / 2 heads (WHIRL_KT_PV_MODELS), grid ceil(n / 128) x heads, 256 threads, head-range launches
-// as the engine (<= 4096 x 128k query-key pairs per launch). Pairs: WHIRL_KT_PV_PAIRS "B/A,..." (default kt::attnPvPairs).
+// as the engine (<= 4096 x 128k query-key pairs per launch; F2 / F3 / F6: the variant's own qblk / threads). Pairs: WHIRL_KT_PV_PAIRS "B/A,..." (default kt::attnPvPairs).
 // Checks: A against the f64 CPU attention (queries 0 and n - 1, heads 0 and last; tolerance 1e-2 of the term sum for f16 /
 // int8, 3e-2 for int4: per-row int4 score codes), then B bitwise == A when both have the same Q.K^T product (the variants
 // move loads, never values), else B against the CPU with its own tolerance. Timing: Bench::runAB (ABBA pairs), row metric
@@ -2006,7 +2006,8 @@ void benchAttnPv(Env& e) {
             int parts = static_cast<int>(std::min<long long>(heads, (static_cast<long long>(n) * L + budget - 1) / budget));
             while (parts > 1 && heads % parts != 0) ++parts;
             // one launch series of kernel f into o (the engine's head ranges)
-            auto launchAll = [&c, dpt, dpos, dq, pk, pv, heads, nkv, n, parts](hip::Function f, const std::shared_ptr<Buf>& o) {
+            // geometry per variant (v0252-8sattn4: F2 / F3 64 queries x 128 threads, F6 384 threads)
+            auto launchAll = [&c, dpt, dpos, dq, pk, pv, heads, nkv, n, parts](hip::Function f, const AttnPvVariant& var, const std::shared_ptr<Buf>& o) {
                 wk::KvArgs a{};
                 a.k = pk->p();
                 a.v = pv->p();
@@ -2016,13 +2017,14 @@ void benchAttnPv(Env& e) {
                 const float sc = scale;
                 for (int p = 0; p < parts; ++p) {
                     const int h0 = p * hp;
-                    hip::launch(f, {static_cast<unsigned>(cdiv(n, 128)), static_cast<unsigned>(hp), 1}, {256, 1, 1}, 0, c.s, dq->p(), a, o->p(), heads, nkv, qs,
+                    hip::launch(f, {static_cast<unsigned>(attnPvBlocks(var, n)), static_cast<unsigned>(hp), 1}, {static_cast<unsigned>(var.threads), 1, 1}, 0, c.s,
+                                dq->p(), a, o->p(), heads, nkv, qs,
                                 dpos->p(), n, sc, h0);
                 }
             };
-            auto runOut = [&c, launchAll, out_el](hip::Function f, const std::shared_ptr<Buf>& o) {
+            auto runOut = [&c, launchAll, out_el](hip::Function f, const AttnPvVariant& var, const std::shared_ptr<Buf>& o) {
                 o->fill(0xff);
-                launchAll(f, o);
+                launchAll(f, var, o);
                 c.sync();
                 return o->down<float>(out_el);
             };
@@ -2089,21 +2091,23 @@ void benchAttnPv(Env& e) {
                 k.kernel = va.kernel;
                 k.kernel_b = vb.kernel;
                 k.fa = fa;
-                k.call = [launchAll, outa](hip::Function f, std::uint64_t) { launchAll(f, outa); };
-                k.call_b = [launchAll, outb, fb](std::uint64_t) { launchAll(fb, outb); };
-                k.run = [runOut, outa](hip::Function f) { return runOut(f, outa); };
+                const AttnPvVariant* pva = &va;  // static table: the pointers outlive the cell
+                const AttnPvVariant* pvb = &vb;
+                k.call = [launchAll, outa, pva](hip::Function f, std::uint64_t) { launchAll(f, *pva, outa); };
+                k.call_b = [launchAll, outb, fb, pvb](std::uint64_t) { launchAll(fb, *pvb, outb); };
+                k.run = [runOut, outa, pva](hip::Function f) { return runOut(f, *pva, outa); };
                 const double ta = tolFor(va.qbits);
                 k.verify = [verifyQ, ta](const std::vector<float>& got) { return verifyQ(got, ta); };
                 char rule[96];
                 std::snprintf(rule, sizeof rule, "f64-CPU-checked (tol %.0e of the term sum; not bitwise to)", tb);
                 k.b_rule = bits ? "bitwise ==" : rule;
-                k.bitwise_b = [runOut, verifyQ, outa, outb, fa, fb, bits, tb, out_el]() -> std::pair<std::size_t, std::size_t> {
-                    const std::vector<float> yb = runOut(fb, outb);
+                k.bitwise_b = [runOut, verifyQ, outa, outb, fa, fb, pva, pvb, bits, tb, out_el]() -> std::pair<std::size_t, std::size_t> {
+                    const std::vector<float> yb = runOut(fb, *pvb, outb);
                     if (!bits) {
                         const Result r = verifyQ(yb, tb);
                         return {r.n > 0 ? r.n : 1, r.pass ? 0 : (r.n > 0 ? r.n : 1)};
                     }
-                    const std::vector<float> ya = runOut(fa, outa);
+                    const std::vector<float> ya = runOut(fa, *pva, outa);
                     std::size_t mm = 0;
                     for (std::size_t i = 0; i < out_el; ++i) mm += std::memcmp(&ya[i], &yb[i], 4) != 0;
                     return {out_el, mm};

@@ -226,17 +226,26 @@ struct BenchOpts {
 //   V4 attn_pfx_i8r (int8, Q regs, no prefetch)  V5 attn_pfx_i4l (int4, Q LDS, no prefetch)
 //   V6 attn_pfx_i4lp (int4, Q LDS, deferred-consumer prefetch PF 2)  V6p1 attn_pfx_i4lp1 (int4, Q LDS, PF 1)
 //   V7 attn_pfx_i8p2 (int8, Q LDS, PF 2)       V1p attn_pfx_i4p (int4, Q regs, score loop pinned, no prefetch)
-// qbits 16 / 8 / 4 = the Q.K^T product; two variants with the same qbits give the same bits (same codes, exact integer
-// sums, same softmax / P.V), so the bench checks B bitwise == A for them and B against the CPU otherwise.
+// v0252-8sattn4 (f16 structure variants, class P = bitwise == V0; progress\v0252-8sattn4.HANDOFF.md):
+//   F1 attn_pfx_f16qg (Q re-read from memory every step, PF 2)   F2 attn_pfx_f16l64p (64-query block, Q in LDS, 4 producer
+//      waves stage K / V with PF 2: 4 + 4 waves, 256 threads)
+//   F3 attn_pfx_f16l64 (F2 without the prefetch)    F4 attn_pfx_f16pin (V0 with its score loop pinned)
+//   F6 attn_pfx_f16ws (F1 consumers: Q re-read; 8 consumer + 4 producer waves staging K / V with PF 2, 384 threads)
+// qbits 16 / 8 / 4 = the Q.K^T product; two variants with the same qbits give the same bits (same codes or the same f16
+// chain, exact integer sums, same softmax / P.V), so the bench checks B bitwise == A for them and B against the CPU
+// otherwise. Launch geometry: grid ceil(n / qblk) x heads, block `threads`.
 struct AttnPvVariant {
     const char* alias;
     const char* kernel;
     int qbits;
     const char* what;
+    int qblk = 128;     // queries per block
+    int threads = 256;  // threads per block
 };
 const std::vector<AttnPvVariant>& attnPvVariants();
 const AttnPvVariant* attnPvFind(const std::string& alias);  // nullptr = unknown
 bool attnPvBitwise(const AttnPvVariant& a, const AttnPvVariant& b);
+int attnPvBlocks(const AttnPvVariant& v, int n_tok);  // grid x: ceil(n_tok / qblk)
 struct AttnPvPair {
     std::string a, b;  // aliases: B is timed against A (paired ratio B / A)
 };

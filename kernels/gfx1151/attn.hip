@@ -764,7 +764,8 @@ __device__ __forceinline__ void fa_lds_barrier() {
 // registers (this lane's 8 bytes per 16-dim step, the partner half's 8 joined per step as the f16 kernel's join_halves),
 // I4: in LDS (128 x FA_K4S words = 17.4 KB, the B fragment read per step as the I8 form). Bitwise == the shipping form.
 // PIN (v0252-8sattn2, bench variant only; same values): the shipping int4 score loop with the one-A-fragment pin of the int8
-// form (attn_prefill_wmma_i4 hoists the step's fragment reads and spills 6 VGPRs).
+// form (attn_prefill_wmma_i4 hoists the step's fragment reads and spills 6 VGPRs). v0252-8sattn4: also the f16 score loop
+// (attn_pfx_f16pin, F4; the f16 kernel does not spill, so the pin can only change its schedule).
 template <int MODE, int Q8, bool SEG = false, bool I4 = false, bool I8 = false, int PF = 0, bool QX = false, bool PIN = false>
 __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
                       int q_stride, const int *pos, int n_tok, float scale, int h0,
@@ -774,7 +775,7 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
     static_assert(!I8 || (Q8 == 0 && MODE == 0 && !I4), "attn_prefill_wmma I8: f16 K / V, no probe mode, not with I4");
     static_assert(PF == 0 || I8 || (I4 && QX), "attn_prefill_wmma PF: the int8 form or the int4 form with Q in LDS only");
     static_assert(!QX || ((I8 || I4) && !SEG), "attn_prefill_wmma QX: int8 / int4 forms, one key range");
-    static_assert(!PIN || (I4 && !QX && !SEG), "attn_prefill_wmma PIN: the int4 form with Q in registers, one key range");
+    static_assert(!PIN || (!I8 && !QX && !SEG && MODE == 0), "attn_prefill_wmma PIN: the int4 / f16 forms with Q in registers, one key range");
     if constexpr (Q8) {
         attn_prefill_impl_q8kv<MODE, Q8>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);
         return;
@@ -1194,6 +1195,7 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
             for (int kt = 0; kt < FA_K / 16; ++kt) {
                 const half16 a = ld_frag16(&Ks[kt * 16 + lane % 16][16 * st]);
                 sc[kt] = WMMA16(a, qb, sc[kt]);
+                if constexpr (PIN) asm volatile("" : "+v"(sc[kt]));  // F4 (attn_pfx_f16pin) only
             }
         }
         }
@@ -1329,6 +1331,368 @@ extern "C" __global__ void __launch_bounds__(256)
     attn_pfx_i4p(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos, int n_tok,
                  float scale, int h0) {
     attn_prefill_impl<0, 0, false, true, false, 0, false, true>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);
+}
+
+// v0252-8sattn4 (PLAN V1-148): bench-only f16 structure variants of attn_prefill_wmma (kt-bench family attnpv F1..F6;
+// kt invariants in tests/kernels/test_attn.cpp); never selected by the engine. All class P: the same f16 Q / K / V values,
+// the same 16-WMMA f32 score chain per key tile in the same order, the same 32-key tiles from key 0, the shared softmax
+// (written out below with an equivalent integer causal test) and the same P.V order - only where Q lives, who stages K / V and when the K / V loads are issued differ, so the output
+// is bitwise == attn_prefill_wmma (all-masked tiles past a smaller block's last key are exact no-ops: alpha 1, P 0).
+// A separate function, so the shipping attn_prefill_impl is instruction-identical.
+//   NW  consumer waves (16 queries each): 8 -> 128-query block (as shipped), 4 -> 64-query block
+//   NP  producer waves (0: every thread stages K / V as shipped; 4: waves NW.. only load / stage K / V, the NW consumer
+//       waves only compute - they hold no staging registers)
+//   QM  Q placement: 0 registers (64 VGPRs, as shipped), 1 re-read from the f32 q (global, L0 / L2) at every 16-dim step of
+//       every key tile, 2 f16 in LDS (64-query block only: Q 32 KB + K 16 KB + V^T 16 KB = 64 KB, all three unpadded and
+//       XOR-swizzled by 16-byte chunk)
+//   PF  0 load at the top of the step (as shipped), 2 (deferred-consumer prefetch issued after the second barrier, as
+//       attn_prefill_impl PF 2) or 3 (NP 0 only: the same raw prefetch issued after the score loop, so it flies over the
+//       softmax and P.V - no VMEM wait of this wave can then fall behind it: vmcnt counts in order, and a QM 1 Q re-read
+//       inside the score loop would otherwise wait for the whole prefetch)
+//   PIN one score chain operand at a time (asm pin after every score WMMA, as the int forms); every built form passes 0 (F4,
+//       the pinned form, is the shipping attn_prefill_impl with its PIN: compiled here PIN only moved spills around)
+// Compile notes (ROCm 7.2, HANDOFF sec. 2): all 8 waves staging with PF 2 spills (Q in registers 55, 64-query + Q in LDS
+// 41), so the prefetch forms stage through producer waves; producers + Q in registers spills 10, so F6's consumers re-read Q.
+template <bool B> struct fa_bc {  // compile-time role of an attn_f16x_impl staging loop instance
+    static constexpr bool v = B;
+};
+template <int NW, int NP, int QM, int PF, int PIN>
+__device__ __forceinline__ void attn_f16x_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
+                      int q_stride, const int *pos, int n_tok, float scale, int h0) {
+    constexpr int QB = NW * 16;                 // queries per block
+    constexpr int NL = (NP ? NP : NW) * WARP;   // threads that stage K / V
+    constexpr int KE = FA_K * FA_D / 8 / NL;    // K half8 per staging thread
+    constexpr int VP = FA_K * FA_D / 32 / NL;   // V passes of (4 dims x 8 keys) per staging thread
+    constexpr bool QL = QM == 2;
+    static_assert(!QL || NW == 4, "attn_f16x: Q in LDS fits the 64-query block only");
+    static_assert(PF == 0 || PF == 2 || (PF == 3 && NP == 0), "attn_f16x: PF 0, 2 or 3 (3 without producer waves)");
+    static_assert(KE * NL * 8 == FA_K * FA_D && VP * NL * 32 == FA_K * FA_D, "attn_f16x: staging layout");
+    constexpr int KS = QL ? FA_D : FA_D + 8;  // K row stride (halves)
+    constexpr int VS = QL ? FA_K : FA_VS;     // V^T row stride (halves)
+    __shared__ _Float16 Ks[FA_K * KS];
+    __shared__ _Float16 Vt[FA_D * VS];
+    __shared__ _Float16 Qs[QL ? QB * FA_D : 8];
+    // QL: 16-byte chunk c of row r sits at chunk c ^ (r & 15) (K and Q: 16 rows of one fragment read hit 16 chunk slots);
+    // V^T: chunk (h >> 3) of row r at ((h >> 3) ^ (r >> 2)) & 3 (4 rows of 64 B per 256 B, 16 rows conflict-free)
+    auto kq_ofs = [](int r, int c) { return QL ? r * FA_D + ((c ^ (r & 15)) << 3) : r * KS + c * 8; };
+    auto vt_ofs = [](int r, int hh) {
+        return QL ? r * FA_K + ((((hh >> 3) ^ (r >> 2)) & 3) << 3) + (hh & 7) : fa_vt_off(r, hh);
+    };
+    const int tb = kv.tab0;
+    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP, tid = threadIdx.x;
+    const int h = blockIdx.y + h0, kvh = h / (n_head / n_kv);
+    const int q0 = blockIdx.x * QB;
+    const int pos0 = pos[0];
+    const int last_q = min(q0 + QB, n_tok) - 1;
+    const int n_keys = pos0 + last_q + 1;
+    const int k_beg = 0, k_end = n_keys;
+    const int rstep = n_kv * FA_D;
+    const bool producer = NP != 0 && wid >= NW;  // wave-uniform
+    if (QL && !producer) {
+        // the block's f16 Q (same conversion as attn_fa_qfrag.h) into LDS by the consumer waves (rows 16 wid ..; producer
+        // waves have no rows); the first loop barrier publishes it
+        const int my_qc = min(q0 + wid * 16 + lane % 16, n_tok - 1);
+        const float *qr = q + ((size_t)my_qc * n_head + h) * q_stride;
+#pragma unroll
+        for (int st = 0; st < FA_D / 16; ++st) {
+            const float4 a = *(const float4 *)(qr + 16 * st + 8 * (lane / 16));
+            const float4 b = *(const float4 *)(qr + 16 * st + 8 * (lane / 16) + 4);
+            *(half8 *)&Qs[kq_ofs(wid * 16 + lane % 16, 2 * st + lane / 16)] =
+                (half8){(_Float16)a.x, (_Float16)a.y, (_Float16)a.z, (_Float16)a.w,
+                        (_Float16)b.x, (_Float16)b.y, (_Float16)b.z, (_Float16)b.w};
+        }
+    }
+    // ---- staging: K / V of tile k0 into LDS (the shipping per-thread geometry generalised to NL threads)
+    // STG: this instance stages K / V; CONS: it computes (consume). NP 0: both; NP > 0: producers STG only, consumers CONS
+    // only - separate instances, so a consumer holds no staging registers and a producer no Q / O
+    auto stage_loop = [&](auto stg, auto cons, auto consume) {
+        constexpr bool STG = decltype(stg)::v, CONS = decltype(cons)::v;
+        const int lt = NP ? tid - NW * WARP : tid;
+        half8 kr8[KE];
+        fa_h4 vr[VP * 8];
+        auto vgeo = [&](int p, int &vd4, int &vkb) {
+            const int s = lt + NL * p;
+            vd4 = (s % 64) * 4;
+            vkb = s / 64;
+        };
+        // V^T store offsets of each pass (rows vd4 .. vd4 + 3 share the swizzle: + c * VS), as the shipping vsA / vsB
+        int vsA[VP], vsB[VP];
+#pragma unroll
+        for (int p = 0; p < VP; ++p) {
+            int vd4, vkb;
+            vgeo(p, vd4, vkb);
+            const int vtb = (vkb / 2) * 16 + (vkb % 2) * 4;
+            vsA[p] = vt_ofs(vd4, vtb);
+            vsB[p] = vt_ofs(vd4, vtb + 8);
+        }
+        auto loadKV = [&](int k0, int dl, bool mask) {
+#pragma unroll
+            for (int e = 0; e < KE; ++e) {
+                const int i = lt + e * NL, key = k0 + i / 32;
+                const int kc = min(key, n_keys - 1);
+                const half8 x = kv_ld8<0>(kv.k, kv.ks, (size_t)(unsigned)(kc + dl) * rstep + kvh * FA_D + (i % 32) * 8);
+                const half8 z = {0, 0, 0, 0, 0, 0, 0, 0};
+                kr8[e] = (mask && key >= n_keys) ? z : x;
+            }
+#pragma unroll
+            for (int p = 0; p < VP; ++p) {
+                int vd4, vkb;
+                vgeo(p, vd4, vkb);
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    const int key = k0 + vkb * 8 + r;
+                    const int kc = min(key, n_keys - 1);
+                    const fa_h4 x = kv_ld4<0>(kv.v, kv.vs, (size_t)(unsigned)(kc + dl) * rstep + kvh * FA_D + vd4);
+                    const fa_h4 z = {0, 0, 0, 0};
+                    vr[p * 8 + r] = (mask && key >= n_keys) ? z : x;
+                }
+            }
+        };
+        int dl2 = 0;
+        if constexpr (PF >= 2)
+            if (STG && k_beg + FA_K < k_end) dl2 = kv_delta(kv, tb, k_beg + FA_K);
+        for (int k0 = k_beg; k0 < k_end; k0 += FA_K) {
+            if constexpr (PF >= 2) fa_lds_barrier(); else __syncthreads();
+            int dln = 0;
+            if constexpr (STG) {
+                if constexpr (PF >= 2) {
+                    dln = dl2;
+                    if (k0 + 2 * FA_K < k_end) dl2 = kv_delta(kv, tb, k0 + 2 * FA_K);
+                    if (k0 == k_beg) {
+                        loadKV(k0, kv_delta(kv, tb, k0), true);
+                    } else if (k0 + FA_K > n_keys) {  // block-uniform: the last tile holds keys >= n_keys, zero them
+                        const half8 z8 = {0, 0, 0, 0, 0, 0, 0, 0};
+                        const fa_h4 z4 = {0, 0, 0, 0};
+#pragma unroll
+                        for (int e = 0; e < KE; ++e)
+                            if (k0 + (lt + e * NL) / 32 >= n_keys) kr8[e] = z8;
+#pragma unroll
+                        for (int p = 0; p < VP; ++p) {
+                            int vd4, vkb;
+                            vgeo(p, vd4, vkb);
+#pragma unroll
+                            for (int r = 0; r < 8; ++r)
+                                if (k0 + vkb * 8 + r >= n_keys) vr[p * 8 + r] = z4;
+                        }
+                    }
+                } else {
+                    loadKV(k0, kv_delta(kv, tb, k0), true);
+                }
+#pragma unroll
+                for (int e = 0; e < KE; ++e) {
+                    const int i = lt + e * NL;
+                    *(half8 *)&Ks[kq_ofs(i / 32, i % 32)] = kr8[e];
+                }
+#pragma unroll
+                for (int p = 0; p < VP; ++p) {
+#pragma unroll
+                    for (int c = 0; c < 4; ++c) {
+                        fa_h4 ev, od;
+#pragma unroll
+                        for (int r = 0; r < 4; ++r) {
+                            ev[r] = vr[p * 8 + 2 * r][c];
+                            od[r] = vr[p * 8 + 2 * r + 1][c];
+                        }
+                        *(fa_h4 *)&Vt[vsA[p] + c * VS] = ev;
+                        *(fa_h4 *)&Vt[vsB[p] + c * VS] = od;
+                    }
+                }
+            }
+            if constexpr (PF >= 2) fa_lds_barrier(); else __syncthreads();
+            if constexpr (STG && PF == 2)
+                if (k0 + FA_K < k_end) loadKV(k0 + FA_K, dln, false);  // raw: masked at the next store
+            // PF 3: the consumer calls mid() right after its score loop
+            auto mid = [&]() {
+                if constexpr (STG && PF == 3) {
+                    // the score loop and the loads are one unrolled block: without the barrier the scheduler hoists the
+                    // loads into the score loop and the 48 registers spill O
+                    __builtin_amdgcn_sched_barrier(0);
+                    if (k0 + FA_K < k_end) loadKV(k0 + FA_K, dln, false);
+                }
+            };
+            if constexpr (CONS) consume(k0, mid);
+        }
+    };
+    // ---- consumers: the shipping score / softmax / P.V of one tile; O and (QM 0) Q in registers
+    auto consumer = [&]() {
+        const int my_q = q0 + wid * 16 + lane % 16;
+        const int my_qc = min(my_q, n_tok - 1);
+        const int my_pos = pos0 + my_qc;
+        float8 o[FA_D / 16];
+#pragma unroll
+        for (int dt = 0; dt < FA_D / 16; ++dt) o[dt] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
+        float m = -INFINITY, l = 0.f;
+        half8 qf[QM == 0 ? FA_D / 16 : 1];
+        const float *qrow = q + ((size_t)my_qc * n_head + h) * q_stride;
+        if constexpr (QM == 0) {
+#pragma unroll
+            for (int st = 0; st < FA_D / 16; ++st) {
+                const float4 a = *(const float4 *)(qrow + 16 * st + 8 * (lane / 16));
+                const float4 b = *(const float4 *)(qrow + 16 * st + 8 * (lane / 16) + 4);
+                qf[st] = (half8){(_Float16)a.x, (_Float16)a.y, (_Float16)a.z, (_Float16)a.w,
+                                 (_Float16)b.x, (_Float16)b.y, (_Float16)b.z, (_Float16)b.w};
+            }
+        }
+        // per-lane LDS bases; kt, dt, st and the chunk are immediates (the shipping ld_frag16 / vlo / vhi form):
+        //   V^T logical chunk j of row dt * 16 + l16: QL vbo[j] + dt * 16 * VS (four bases, the swizzle does not depend on
+        //   dt); else with jj = j ^ 2 (dt & 1) as the shipping vlo / vhi: vbo[0] + jj * 8 (jj even), vbo[1] + (jj - 1) * 8
+        //   QL K / Q: element kt / wid * 4096 + (kx ^ (c << 3)) (chunk c ^ l16 of row l16; kx pinned per tile so the 32
+        //   xors are formed at their reads instead of hoisted into 32 VGPRs)
+        const int l16 = lane % 16;
+        int vbo[QL ? 4 : 2];
+        if constexpr (QL) {
+#pragma unroll
+            for (int j = 0; j < 4; ++j) vbo[j] = l16 * FA_K + (((j ^ (l16 >> 2)) & 3) << 3);
+        } else {
+            vbo[0] = l16 * FA_VS + (l16 >> 3) * 8;
+            vbo[1] = l16 * FA_VS + 8 - (l16 >> 3) * 8;
+        }
+        const int kx0 = l16 * FA_D + (l16 << 3);
+        auto tile = [&](int k0, auto mid) {
+            int kx = kx0;
+            float8 sc[FA_K / 16];
+#pragma unroll
+            for (int kt = 0; kt < FA_K / 16; ++kt) sc[kt] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
+            // QM 1: the f32 q of steps st, st + 1 in a two-slot ring; the load of step st + 2 is issued after step st's last
+            // score WMMA (asm pin on the row pointer that reads sc), so two loads are in flight and the 32 loads of a tile
+            // are never hoisted together (the PF 3 compile without the ring: all 32 at the top, 128 VGPRs, 372 spilled)
+            const float *qp = qrow + 8 * (lane / 16);
+            float4 qra[QM == 1 ? 2 : 1], qrb[QM == 1 ? 2 : 1];
+            if constexpr (QM == 1) {
+#pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    qra[j] = *(const float4 *)(qp + 16 * j);
+                    qrb[j] = *(const float4 *)(qp + 16 * j + 4);
+                }
+            }
+#pragma unroll
+            for (int st = 0; st < FA_D / 16; ++st) {
+                if constexpr (QL) asm volatile("" : "+v"(kx));  // per step: this step's 4 xors only
+                half16 qb;
+                if constexpr (QM == 0) {
+                    qb = join_halves(qf[st], lane);
+                } else if constexpr (QM == 1) {
+                    const float4 a = qra[st & 1], b = qrb[st & 1];
+                    qb = join_halves((half8){(_Float16)a.x, (_Float16)a.y, (_Float16)a.z, (_Float16)a.w,
+                                             (_Float16)b.x, (_Float16)b.y, (_Float16)b.z, (_Float16)b.w}, lane);
+                } else {
+                    const _Float16 *qs = Qs + wid * 16 * FA_D;
+                    const half8 lo = *(const half8 *)&qs[kx ^ ((2 * st) << 3)], hi = *(const half8 *)&qs[kx ^ ((2 * st + 1) << 3)];
+                    qb = __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+                }
+#pragma unroll
+                for (int kt = 0; kt < FA_K / 16; ++kt) {
+                    half8 lo, hi;
+                    if constexpr (QL) {
+                        lo = *(const half8 *)&Ks[kt * 16 * FA_D + (kx ^ ((2 * st) << 3))];
+                        hi = *(const half8 *)&Ks[kt * 16 * FA_D + (kx ^ ((2 * st + 1) << 3))];
+                    } else {
+                        lo = *(const half8 *)&Ks[(kt * 16 + l16) * KS + 16 * st];
+                        hi = *(const half8 *)&Ks[(kt * 16 + l16) * KS + 16 * st + 8];
+                    }
+                    const half16 a = __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+                    sc[kt] = WMMA16(a, qb, sc[kt]);
+                    if constexpr (PIN != 0) asm volatile("" : "+v"(sc[kt]));
+                }
+                if constexpr (QM == 1) {
+                    if (st + 2 < FA_D / 16) {
+                        asm volatile("" : "+v"(qp) : "v"(sc[FA_K / 16 - 1]));
+                        qra[st & 1] = *(const float4 *)(qp + 16 * (st + 2));
+                        qrb[st & 1] = *(const float4 *)(qp + 16 * (st + 2) + 4);
+                    }
+                }
+            }
+            mid();  // PF 3: the next tile's K / V loads
+            // mask + online softmax: shared/attn_fa_softmax.h written out with the causal test as
+            // `2 v + 16 kt <= my_pos - k0 - lane / 16` (constants on the left, one per-lane value) instead of forming the 16
+            // key indices k0 + 16 kt + CROW(lane, v) - the same integer test, the same float operations in the same order
+            float mx = -INFINITY;
+            const int dlim = my_pos - k0 - lane / 16;
+#pragma unroll
+            for (int kt = 0; kt < FA_K / 16; ++kt)
+#pragma unroll
+                for (int v = 0; v < 8; ++v) {
+                    const float x = (2 * v + 16 * kt <= dlim) ? sc[kt][v] * scale : -INFINITY;
+                    sc[kt][v] = x;
+                    mx = fmaxf(mx, x);
+                }
+            mx = fmaxf(mx, __shfl_xor(mx, 16, WARP));
+            const float m_new = fmaxf(m, mx);
+            const float alpha = (m == -INFINITY) ? 0.f : __expf(m - m_new);
+            float rs = 0.f;
+            half8 pt[FA_K / 16];
+#pragma unroll
+            for (int kt = 0; kt < FA_K / 16; ++kt)
+#pragma unroll
+                for (int v = 0; v < 8; ++v) {
+                    const float p = (sc[kt][v] == -INFINITY) ? 0.f : __expf(sc[kt][v] - m_new);
+                    rs += p;
+                    pt[kt][v] = (_Float16)p;
+                }
+            rs += __shfl_xor(rs, 16, WARP);
+            l = l * alpha + rs;
+            m = m_new;
+#pragma unroll
+            for (int dt = 0; dt < FA_D / 16; ++dt)
+#pragma unroll
+                for (int v = 0; v < 8; ++v) o[dt][v] *= alpha;
+#pragma unroll
+            for (int kt = 0; kt < FA_K / 16; ++kt) {
+                const half16 pb = join_halves(pt[kt], lane);
+#pragma unroll
+                for (int dt = 0; dt < FA_D / 16; ++dt) {
+                    // logical chunks 2 kt (lo) and 2 kt + 1 (hi) of V^T row dt * 16 + l16 (the shipping vlo / vhi reads)
+                    half8 lo, hi;
+                    if constexpr (QL) {
+                        lo = *(const half8 *)&Vt[vbo[2 * kt] + dt * 16 * VS];
+                        hi = *(const half8 *)&Vt[vbo[2 * kt + 1] + dt * 16 * VS];
+                    } else {
+                        const int C = (2 * kt) ^ (2 * (dt & 1));  // even
+                        lo = *(const half8 *)&Vt[vbo[0] + dt * 16 * VS + C * 8];
+                        hi = *(const half8 *)&Vt[vbo[1] + dt * 16 * VS + C * 8];
+                    }
+                    const half16 a = __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+                    o[dt] = WMMA16(a, pb, o[dt]);
+                    asm volatile("" : "+v"(o[dt]));  // one V fragment in flight at a time (as shipped)
+                }
+            }
+        };
+        stage_loop(fa_bc<NP == 0>{}, fa_bc<true>{}, tile);
+        if (my_q >= n_tok) return;
+        const float inv = 1.f / l;
+        const float *gate = q + ((size_t)my_q * n_head + h) * q_stride + FA_D;
+        float *orow = out + (size_t)my_q * n_head * FA_D + (size_t)h * FA_D;
+#pragma unroll
+        for (int dt = 0; dt < FA_D / 16; ++dt)
+#pragma unroll
+            for (int v = 0; v < 8; ++v) {
+                const int d = dt * 16 + CROW(lane, v);
+                orow[d] = o[dt][v] * inv / (1.f + __expf(-gate[d]));
+            }
+    };
+    if (producer) {
+        if constexpr (NP != 0) stage_loop(fa_bc<true>{}, fa_bc<false>{}, [](int, auto) {});
+    } else {
+        consumer();
+    }
+}
+#define FA_F16X_ENTRY(NAME, NTHR, NW_, NP_, QM_, PF_)                                                         \
+    extern "C" __global__ void __launch_bounds__(NTHR)                                                       \
+        NAME(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos, int n_tok, \
+             float scale, int h0) {                                                                          \
+        attn_f16x_impl<NW_, NP_, QM_, PF_, 0>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);   \
+    }
+// compile resources (ROCm 7.2, progress\v0252-8sattn4.HANDOFF.md sec. 2); the forms that spilled are not built (HANDOFF)
+FA_F16X_ENTRY(attn_pfx_f16qg, 256, 8, 0, 1, 2)    // F1: Q re-read from memory every step + PF 2 (all 8 waves stage)
+FA_F16X_ENTRY(attn_pfx_f16l64p, 256, 4, 4, 2, 2)  // F2: 64-query block, Q in LDS, 4 producer waves + PF 2
+FA_F16X_ENTRY(attn_pfx_f16l64, 256, 4, 4, 2, 0)   // F3: F2 without the prefetch (producers load at the top of the step)
+FA_F16X_ENTRY(attn_pfx_f16ws, 384, 8, 4, 1, 2)    // F6: F1's consumers (Q re-read) + 4 producer waves + PF 2
+// (F7 = F1 with PF 3, attn_f16x_impl<8, 0, 1, 3, 0>: compiled 256 VGPR + 284 spilled - not built, HANDOFF sec. 2)
+// F4: the shipping f16 kernel with its score loop pinned (one chain operand at a time, as the int forms)
+extern "C" __global__ void __launch_bounds__(256)
+    attn_pfx_f16pin(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos, int n_tok,
+                    float scale, int h0) {
+    attn_prefill_impl<0, 0, false, false, false, 0, false, true>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);
 }
 
 // q8 / q8h / q4 KV prefill (KG-3, the gfx1151 port of Q8P / FC-1c): the K and V of keys

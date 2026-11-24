@@ -676,9 +676,17 @@ const std::vector<AttnPvVariant>& attnPvVariants() {
         {"V6p1", "attn_pfx_i4lp1", 4, "int4 Q.K^T, Q codes in LDS, K / V prefetch as V2 (PF 1)"},
         {"V7", "attn_pfx_i8p2", 8, "int8 Q.K^T, Q codes in LDS, deferred-consumer K / V prefetch (PF 2)"},
         {"V1p", "attn_pfx_i4p", 4, "int4 Q.K^T, Q codes in registers, score loop pinned (no spill), no prefetch"},
+        // v0252-8sattn4: f16 structure variants, all class P (the shipping f16 chain, bitwise == V0)
+        {"F1", "attn_pfx_f16qg", 16, "f16 Q.K^T, Q re-read from memory every step, deferred-consumer K / V prefetch (PF 2)"},
+        {"F2", "attn_pfx_f16l64p", 16, "f16 Q.K^T, 64-query block, Q in LDS, 4 producer waves stage K / V with PF 2", 64, 256},
+        {"F3", "attn_pfx_f16l64", 16, "f16 Q.K^T, 64-query block, Q in LDS, 4 producer waves stage K / V, no prefetch", 64, 256},
+        {"F4", "attn_pfx_f16pin", 16, "f16 Q.K^T, Q in registers, score loop pinned, no prefetch"},
+        {"F6", "attn_pfx_f16ws", 16, "f16 Q.K^T, Q re-read from memory every step (as F1), 4 producer waves stage K / V with PF 2", 128, 384},
     };
     return v;
 }
+
+int attnPvBlocks(const AttnPvVariant& v, int n_tok) { return (n_tok + v.qblk - 1) / v.qblk; }
 
 const AttnPvVariant* attnPvFind(const std::string& alias) {
     for (const AttnPvVariant& v : attnPvVariants())
@@ -686,7 +694,8 @@ const AttnPvVariant* attnPvFind(const std::string& alias) {
     return nullptr;
 }
 
-bool attnPvBitwise(const AttnPvVariant& a, const AttnPvVariant& b) { return a.qbits == b.qbits && a.qbits != 16; }
+// v0252-8sattn4: f16 pairs are bitwise too (every f16 variant is class P: the shipping f16 chain, same order)
+bool attnPvBitwise(const AttnPvVariant& a, const AttnPvVariant& b) { return a.qbits == b.qbits; }
 
 std::vector<AttnPvPair> attnPvPairs(const std::string& spec, std::string& err) {
     err.clear();
