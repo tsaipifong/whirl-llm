@@ -1798,4 +1798,263 @@ void testAttnDq4Table() {
     std::printf("  testAttnDq4Table: %lld measured cells, %lld swept (%lld from the table or forced), %lld bad\n", cells, swept, from_table, bad);
 }
 
+// v0252-8sws (PLAN V1-88 on gfx1151): the gfx1151 attn_ws4 / attn_ws4g split count for q8 / q8h KV by machine fill - the
+// l2split rule (ops::lsplitCount, numerics flag attn_lsplit: precise 0, balance / fast auto) with the profile's
+// attn_ws4_split_blocks (gfx1151 32), returned only where the kernel table has that split constant
+// (kernels::kWs4SplitCounts 8 / 16: attn_ws4_q8_sp<S>, attn_ws4g<cg>_q8_sp<S>), else today's 64 and today's kernels.
+// Measured (kernel bench ws4s, 8060S 2026-11-24 19:10, q8h): Ornith (2 KV heads) best 16, Swift (4) best 8 in every cell
+// but Swift 3 rows at 131072 (64 best there; S 8 1.017). Pins: (0) profile / constants / names; (1) every measured cell
+// (model, rows 1 / 2 / 3 / draft row, keys 8192 .. 131072) -> the picked count, the _sp kernel of the CG today's plan takes,
+// everything else today's plan; (2) precise (flag 0) and f16 KV = today's plan and kernels; (3) the switch states; (4) the
+// R9700 unchanged; (5) row invariance (one count per model: rows 1..9, unknown rows); (6) a sweep of KV heads x GQA x rows x
+// keys x window: every launched count has its kernel, never a count the table lacks. Fails to build before v0252-8sws.
+// Round 3: (1) / (5) for the measured limit table (device::Profile::ws4_split_limits, ops::ws4SplitForStep).
+void testAttnDecodeWs4Split() {
+    namespace dv = whirl::device;
+    const auto& p97 = dv::k_profile_gfx1201;
+    const auto& p8s = dv::k_profile_gfx1151;
+    const std::uint32_t A = ops::kAttnLsplitAuto;
+    // (0)
+    CHECK(p8s.attn_ws4_split_blocks == 32 && p97.attn_ws4_split_blocks == 0);
+    CHECK(kn::kWs4SplitCounts[0] == 8 && kn::kWs4SplitCounts[1] == 16);
+    CHECK(kn::ws4SplitName(0, 8) == "attn_ws4_q8_sp8" && kn::ws4SplitName(2, 16) == "attn_ws4g2_q8_sp16" && kn::ws4SplitName(3, 8) == "attn_ws4g3_q8_sp8");
+    auto spTable = [](kn::KernelTable k, bool with8, bool with16) {
+        for (int i = 0; i < 2; ++i) {
+            const std::uint32_t s = kn::kWs4SplitCounts[i];
+            if ((s == 8 && !with8) || (s == 16 && !with16)) continue;
+            k.attn_ws4_sp[i] = tag(kn::ws4SplitName(0, s));
+            for (int cg = 1; cg <= 3; ++cg) k.attn_ws4g_sp[i][cg - 1] = tag(kn::ws4SplitName(cg, s));
+        }
+        return k;
+    };
+    static const kn::KernelTable k8 = attnTable(true, true, false, false);  // today's gfx1151 table (no _sp entries)
+    static const kn::KernelTable ks = spTable(k8, true, true), ks16 = spTable(k8, false, true);
+    CHECK(ops::ws4SplitCount(2, true, A, 32, ks) == 16 && ops::ws4SplitCount(4, true, A, 32, ks) == 8);
+    CHECK(ops::ws4SplitCount(4, true, A, 32, ks16) == 64);  // no S 8 entries -> 64
+    CHECK(ops::ws4SplitCount(2, false, A, 32, ks) == 64 && ops::ws4SplitCount(2, true, 0, 32, ks) == 64 && ops::ws4SplitCount(2, true, A, 0, ks) == 64);
+    CHECK(ops::ws4SplitCount(2, true, A, 32, k8) == 64);  // a table without the entries -> 64
+    {
+        kn::AttnKernels part;  // the S 16 entries without CG 1 / 2: a verify group would have no kernel -> 64
+        part.attn_ws4_sp[1] = tag(kn::ws4SplitName(0, 16));
+        part.attn_ws4g_sp[1][2] = tag(kn::ws4SplitName(3, 16));
+        CHECK(ops::ws4SplitCount(2, true, A, 32, part) == 64);
+    }
+    struct Shape {
+        const char* model;
+        std::uint32_t heads, nkv, pick;
+    };
+    const Shape shapes[] = {{"ornith", 16, 2, 16}, {"swift", 24, 4, 8}};
+    const std::int32_t kDraftWin = (16384 / 64) | ((65536 / 1024) << 16);
+    std::vector<std::int32_t> pos, base;
+    auto problem = [&](const Shape& sh, std::uint32_t L, std::uint32_t R, bool draft, bool q8) {
+        pos.clear();
+        base.clear();
+        for (std::uint32_t r = L - R; r < L; ++r) {
+            pos.push_back(static_cast<std::int32_t>(r));
+            base.push_back(0);
+        }
+        ops::AttnDecodeProblem q;
+        q.n = R;
+        q.head_dim = 256;
+        q.n_head = sh.heads;
+        q.n_head_kv = sh.nkv;
+        q.max_ctx = 262144;
+        q.kv_q8 = q8;
+        q.o_on_gemv = true;
+        q.rows_known = true;
+        q.row_pos = std::span<const std::int32_t>(pos);
+        q.row_base = std::span<const std::int32_t>(base);
+        q.win = draft ? kDraftWin : 0;
+        return q;
+    };
+    ops::AttnDecodeFlags f0, fa;  // f0 = precise (flag 0), fa = balance / fast (auto)
+    fa.attn_lsplit = A;
+    auto spName = [](const ops::AttnDecodePlan& t, std::uint32_t s) {
+        const std::string n = nameOf(t.f);  // today's kernel: attn_ws4 or attn_ws4g<cg> (fake names carry no _q8)
+        const int cg = n == "attn_ws4" ? 0 : n[9] - '0';
+        return kn::ws4SplitName(cg, s);
+    };
+    // round 3: the measured limits (kernel bench ws4s TABLE runs, 8060S 2026-11-25 01:24-01:43): the largest key count at which
+    // S beat 64 (whole 95 % interval < 1) with every smaller measured key count also faster; index 0 = the MTP draft row,
+    // 1..9 = rows. A hand copy of the profile table (the pin): Ornith S 16, Swift S 8
+    const std::uint32_t lim16[10] = {262144, 262144, 262144, 262144, 262144, 262144, 262144, 16384, 16384, 16384};
+    const std::uint32_t lim8[10] = {262144, 262144, 262144, 98304, 98304, 196608, 49152, 65536, 65536, 16384};
+    auto want = [&](const Shape& sh, std::uint32_t R, bool draft, std::uint32_t L) -> std::uint32_t {
+        const std::uint32_t* lim = sh.pick == 16 ? lim16 : lim8;
+        const std::uint32_t cls = draft ? 0 : R;
+        return cls <= 9 && L <= lim[cls] ? sh.pick : 64u;
+    };
+    long long cells = 0, on_cells = 0;
+    // (1) + (2): every measured (model, rows 1..9 / draft row, keys) cell, the keys just above each limit, and 262144 + 1
+    for (const Shape& sh : shapes)
+        for (const std::uint32_t L0 : {8192u, 16384u, 16385u, 32768u, 49152u, 49153u, 65536u, 65537u, 98304u, 98305u, 131072u, 196608u, 196609u, 262144u, 262145u})
+            for (int rs = 0; rs <= 9; ++rs) {  // 0 = the MTP draft row
+                if (rs == 0 && L0 < 65536) continue;
+                const std::uint32_t R = rs == 0 ? 1 : static_cast<std::uint32_t>(rs);
+                ops::AttnDecodeProblem q = problem(sh, L0, R, rs == 0, true);
+                q.max_ctx = 524288;
+                const auto t = ops::chooseAttnDecode(q, f0, ks, ks.caps, p8s);   // precise: today's
+                const auto t0 = ops::chooseAttnDecode(q, fa, k8, k8.caps, p8s);  // today's table: today's plan whatever the flag
+                const auto b = ops::chooseAttnDecode(q, fa, ks, ks.caps, p8s);
+                CHECK(t.grid.y == 64 && t.n_split == 64 && (nameOf(t.f) == "attn_ws4" || nameOf(t.f).rfind("attn_ws4g", 0) == 0));
+                CHECK(samePlan(t, t0));
+                const std::uint32_t w = want(sh, R, rs == 0, L0);
+                CHECK(ops::ws4SplitForStep(q, sh.pick, p8s.ws4_split_limits) == w);
+                if (w == 64) {
+                    CHECK(samePlan(b, t));  // above a limit: today's plan and kernels exactly
+                } else {
+                    CHECK(b.grid.y == w && b.n_split == w && nameOf(b.f) == spName(t, w));
+                    CHECK(b.kind == t.kind && b.grid.x == t.grid.x && b.grid.z == t.grid.z && b.block.x == t.block.x && b.combine_q8 == t.combine_q8 &&
+                          b.combine_grid.x == t.combine_grid.x && b.combine_grid.y == t.combine_grid.y);
+                    for (std::uint32_t g = 0; g < t.grid.z; ++g) CHECK(b.groups.first[g] == t.groups.first[g] && b.groups.count[g] == t.groups.count[g]);
+                    on_cells += 1;
+                }
+                // f16 KV (precise's kernel; balance only with a forced format): today's plan under auto too
+                const ops::AttnDecodeProblem qf = problem(sh, L0, R, rs == 0, false);
+                CHECK(samePlan(ops::chooseAttnDecode(qf, fa, ks, ks.caps, p8s), ops::chooseAttnDecode(qf, f0, ks, ks.caps, p8s)));
+                CHECK(ops::chooseAttnDecode(qf, fa, ks, ks.caps, p8s).grid.y == 64);
+                cells += 1;
+            }
+    CHECK(cells == 2 * (15 * 9 + 9) && on_cells > 100);
+    // the measured slower cells of round 2 are all 64 now (Ornith rows 7..9 from 32768; Swift rows 3 / 4 at 131072, 5 at 262144,
+    // 6 at 65536, 7 / 8 at 98304, 9 at 32768)
+    CHECK(want(shapes[0], 7, false, 32768) == 64 && want(shapes[1], 3, false, 131072) == 64 && want(shapes[1], 4, false, 131072) == 64 &&
+          want(shapes[1], 5, false, 262144) == 64 && want(shapes[1], 6, false, 65536) == 64 && want(shapes[1], 7, false, 98304) == 64 &&
+          want(shapes[1], 8, false, 98304) == 64 && want(shapes[1], 9, false, 32768) == 64);
+    // (3) the switch (WHIRL_ATTN_LSPLIT -> flag attn_lsplit): 0 = 64; N = N blocks (Swift 64 -> 16: an _sp entry; Ornith 64 ->
+    // 32: none -> 64; 128 -> 32 / 64: none -> 64); the profile row decides under auto (row 0 -> 64)
+    {
+        const ops::AttnDecodeProblem qs = problem(shapes[1], 32768, 2, false, true), qo = problem(shapes[0], 32768, 2, false, true);
+        auto gy = [&](const ops::AttnDecodeProblem& q, std::uint32_t fl, const dv::Profile& pr) {
+            ops::AttnDecodeFlags g;
+            g.attn_lsplit = fl;
+            return ops::chooseAttnDecode(q, g, ks, ks.caps, pr).grid.y;
+        };
+        CHECK(gy(qs, 0, p8s) == 64 && gy(qo, 0, p8s) == 64);
+        CHECK(gy(qs, A, p8s) == 8 && gy(qo, A, p8s) == 16);
+        CHECK(gy(qs, 32, p8s) == 8 && gy(qo, 32, p8s) == 16);
+        CHECK(gy(qs, 64, p8s) == 16 && gy(qo, 64, p8s) == 64);
+        CHECK(gy(qs, 128, p8s) == 64 && gy(qo, 128, p8s) == 64);
+        dv::Profile poff = p8s;
+        poff.attn_ws4_split_blocks = 0;
+        CHECK(gy(qs, A, poff) == 64 && gy(qo, A, poff) == 64);
+        // the attn_wsplit fallback on the 8060S (WHIRL_ATTN_WS4=0) keeps today's split: its profile row attn_lsplit_blocks is 0
+        ops::AttnDecodeFlags gw = fa, tw = f0;
+        gw.attn_ws4 = tw.attn_ws4 = false;
+        CHECK(samePlan(ops::chooseAttnDecode(qs, gw, ks, ks.caps, p8s), ops::chooseAttnDecode(qs, tw, ks, ks.caps, p8s)));
+    }
+    // (4) the R9700: no attn_ws4 path; the _sp entries change nothing there (the l2split rule of its own branch stays)
+    {
+        static const kn::KernelTable kb = attnTable(false, false, true, true);
+        static const kn::KernelTable kq = ws4rTable(kb, true), kqs = spTable(kq, true, true);
+        for (const Shape& sh : shapes)
+            for (const std::uint32_t R : {1u, 2u, 4u}) {
+                const ops::AttnDecodeProblem q = problem(sh, 70000, R, false, true);
+                for (const std::uint32_t fl : {A, 0u})
+                    for (const ops::AttnDecodeFlags* fp : {&f0, &fa}) {
+                        ops::AttnDecodeFlags g = *fp;
+                        g.attn_lsplit = fl;
+                        CHECK(samePlan(ops::chooseAttnDecode(q, g, kqs, kqs.caps, p97), ops::chooseAttnDecode(q, g, kq, kq.caps, p97)));
+                    }
+            }
+    }
+    // (5) round 3 (the count now depends on the step's rows and largest n_pos; the run stays deterministic): one count per launch
+    // (grid.y, the group key and the kernel use the same S); the key count compared with the limit is the step's largest
+    // n_pos (max row_pos + 1), or max_ctx when the host does not know the rows; rows 10+ / several sequences / gapped rows /
+    // unknown multi-row steps (not measured) -> 64; a forced N (WHIRL_ATTN_LSPLIT=N) skips the limits, flag 0 = 64 always
+    for (const Shape& sh : shapes) {
+        // the largest n_pos of the step decides (7 rows: Ornith limit 16384, Swift 65536)
+        {
+            ops::AttnDecodeProblem q7 = problem(sh, 16384, 7, false, true);  // largest n_pos 16384
+            CHECK(ops::chooseAttnDecode(q7, fa, ks, ks.caps, p8s).grid.y == sh.pick);
+            ops::AttnDecodeProblem q7b = problem(sh, 16385, 7, false, true);  // largest n_pos 16385: Ornith over its limit 16384
+            CHECK(ops::chooseAttnDecode(q7b, fa, ks, ks.caps, p8s).grid.y == (sh.pick == 16 ? 64u : sh.pick));
+        }
+        // rows are grouped by the ranges of the count launched, not of 64: n_pos 1024 / 1025 share every 64-split range
+        // (64 keys a split) but not the S ranges (Ornith 16: 64 / 128 keys a split; Swift 8: 128 / 192)
+        {
+            const auto bg = ops::chooseAttnDecode(problem(sh, 1025, 2, false, true), fa, ks, ks.caps, p8s);
+            const auto tg = ops::chooseAttnDecode(problem(sh, 1025, 2, false, true), f0, ks, ks.caps, p8s);
+            CHECK(tg.grid.z == 1 && bg.grid.z == 2 && bg.groups.count[0] == 1 && bg.groups.count[1] == 1 && nameOf(bg.f) == kn::ws4SplitName(0, sh.pick));
+        }
+        // unknown rows: one row -> max_ctx against the rows-1 limit (262144); several rows -> 64
+        {
+            ops::AttnDecodeProblem qu = problem(sh, 50000, 1, false, true);
+            qu.rows_known = false;
+            qu.row_pos = {};
+            qu.row_base = {};
+            qu.max_ctx = 262144;
+            CHECK(ops::chooseAttnDecode(qu, fa, ks, ks.caps, p8s).grid.y == sh.pick);
+            qu.max_ctx = 262208;
+            CHECK(ops::chooseAttnDecode(qu, fa, ks, ks.caps, p8s).grid.y == 64);
+            ops::AttnDecodeProblem qu3 = problem(sh, 50000, 3, false, true);
+            qu3.rows_known = false;
+            CHECK(ops::chooseAttnDecode(qu3, fa, ks, ks.caps, p8s).grid.y == 64);
+        }
+        // rows 10+, two sequences, gapped positions: not measured -> 64
+        {
+            CHECK(ops::chooseAttnDecode(problem(sh, 8192, 10, false, true), fa, ks, ks.caps, p8s).grid.y == 64);
+            ops::AttnDecodeProblem q2 = problem(sh, 8192, 2, false, true);
+            base[1] = 4096;  // the second row in another sequence
+            CHECK(ops::chooseAttnDecode(q2, fa, ks, ks.caps, p8s).grid.y == 64);
+            ops::AttnDecodeProblem qg = problem(sh, 8192, 2, false, true);
+            pos[0] -= 5;  // gapped
+            CHECK(ops::chooseAttnDecode(qg, fa, ks, ks.caps, p8s).grid.y == 64);
+        }
+        // the draft row has its own class (window on, one row): Swift draft 262144 vs rows 1 262144 - same value; checked via
+        // the function with a table whose draft entry differs
+        {
+            dv::Ws4SplitLimits l = p8s.ws4_split_limits;
+            const int si = sh.pick == 8 ? 0 : 1;
+            l.max_keys[si][0] = 8192;  // draft row only up to 8192
+            const ops::AttnDecodeProblem qd = problem(sh, 65536, 1, true, true), q1 = problem(sh, 65536, 1, false, true);
+            CHECK(ops::ws4SplitForStep(qd, sh.pick, l) == 64 && ops::ws4SplitForStep(q1, sh.pick, l) == sh.pick);
+            l.max_keys[si][1] = 8192;  // rows-1 only up to 8192, draft up to 262144
+            l.max_keys[si][0] = 262144;
+            CHECK(ops::ws4SplitForStep(qd, sh.pick, l) == sh.pick && ops::ws4SplitForStep(q1, sh.pick, l) == 64);
+            dv::Ws4SplitLimits off = l;
+            off.on = false;
+            CHECK(ops::ws4SplitForStep(qd, sh.pick, off) == 64 && ops::ws4SplitForStep(problem(sh, 8192, 2, false, true), 64, l) == 64);
+        }
+        // a forced N skips the limits but not the kernel table; flag 0 = 64
+        {
+            ops::AttnDecodeProblem qf = problem(sh, 131072, 9, false, true);  // over every rows-9 limit
+            ops::AttnDecodeFlags g = f0;
+            g.attn_lsplit = 32;
+            CHECK(ops::chooseAttnDecode(qf, g, ks, ks.caps, p8s).grid.y == sh.pick);
+            CHECK(ops::chooseAttnDecode(qf, fa, ks, ks.caps, p8s).grid.y == 64);
+            g.attn_lsplit = 0;
+            CHECK(samePlan(ops::chooseAttnDecode(qf, g, ks, ks.caps, p8s), ops::chooseAttnDecode(qf, f0, k8, k8.caps, p8s)));
+        }
+        ops::AttnDecodeProblem qsm = problem(sh, 400, 1, false, true);
+        qsm.max_ctx = 512;
+        const auto bs = ops::chooseAttnDecode(qsm, fa, ks, ks.caps, p8s);
+        CHECK(bs.grid.y == 8 && nameOf(bs.f) == kn::ws4SplitName(0, sh.pick));
+    }
+    // (6) sweep: every plan on the ws4 path launches 64 with today's kernel or S with that S's entry of the same CG
+    long long swept = 0, bad = 0, on = 0;
+    for (const std::uint32_t nkv : {1u, 2u, 3u, 4u, 6u, 8u})
+        for (const std::uint32_t grp : {1u, 2u, 4u, 6u, 8u, 16u})
+            for (const kn::KernelTable* kt : {&k8, &ks, &ks16})
+                for (const std::uint32_t R : {1u, 2u, 3u, 5u, 9u, 17u})
+                    for (const std::uint32_t L : {300u, 4097u, 65536u, 131072u})
+                        for (const bool draft : {false, true}) {
+                            if (R > L) continue;
+                            const Shape sh{"sweep", nkv * grp, nkv, 0};
+                            const ops::AttnDecodeProblem q = problem(sh, L, R, draft, true);
+                            const auto t = ops::chooseAttnDecode(q, f0, *kt, kt->caps, p8s), b = ops::chooseAttnDecode(q, fa, *kt, kt->caps, p8s);
+                            ++swept;
+                            if (b.grid.y == t.grid.y) {
+                                bad += !samePlan(b, t);
+                                continue;
+                            }
+                            ++on;
+                            const std::uint32_t s = b.grid.y;
+                            const bool have = (s == 8 && kt->attn_ws4_sp[0] != nullptr) || (s == 16 && kt->attn_ws4_sp[1] != nullptr);
+                            bad += !have || nameOf(b.f) != spName(t, s) || ops::lsplitCount(64, nkv, A, 32) != s || b.grid.x != t.grid.x || b.grid.z != t.grid.z;
+                        }
+    CHECK(swept > 1000 && bad == 0 && on > 0);
+    std::printf("  testAttnDecodeWs4Split: %lld measured cells, %lld swept (%lld re-split), %lld bad\n", cells, swept, on, bad);
+}
+
 }  // namespace

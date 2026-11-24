@@ -85,7 +85,10 @@ template <> struct Ws4Raw<2> {  // int4: K 4 x 16 nibbles + scale, V 8 keys x 8 
 // their results at the join, i.e. wait right away (the prefetch then only covers the staging).
 // f16 / int8 use BF (+13% for int8); int4 does not (BF needs 4 more VGPRs than 256 there).
 // dl: kv_delta(kv, tb, k0), looked up by the caller (32-key chunks never straddle a page)
-template <int F, bool BF>
+// TAG (v0252-8sws): 0 for the shipping entries; the bench-only entries (split constant NS != ws4::kNs) pass NS, so they get
+// their own instantiations of ws4_load_dl / ws4_load / ws4_stage: sharing them changed the shipping attn_ws4 / attn_ws4_q8
+// code (measured by the code-object comparison; same source, so it is the compiler's whole-module optimization)
+template <int F, bool BF, int TAG = 0>
 __device__ __forceinline__ void ws4_load_dl(Ws4Raw<F> &r, const KvArgs &kv, int dl, int k0, int b1, int g, int n_kv, int tv) {
 #pragma unroll
     for (int p = 0; p < ws4::k_pieces(F); ++p) {
@@ -128,13 +131,13 @@ __device__ __forceinline__ void ws4_load_dl(Ws4Raw<F> &r, const KvArgs &kv, int 
         }
     }
 }
-template <int F, bool BF>
+template <int F, bool BF, int TAG = 0>
 __device__ __forceinline__ void ws4_load(Ws4Raw<F> &r, const KvArgs &kv, int tb, int k0, int b1, int g, int n_kv, int tv) {
-    ws4_load_dl<F, BF>(r, kv, kv_delta(kv, tb, k0), k0, b1, g, n_kv, tv);
+    ws4_load_dl<F, BF, TAG>(r, kv, kv_delta(kv, tb, k0), k0, b1, g, n_kv, tv);
 }
 
 // dequantize / move the raw chunk k0 into Ks [32][kQs] and Vt (attn_wsplit_impl key permutation)
-template <int F>
+template <int F, int TAG = 0>
 __device__ __forceinline__ void ws4_stage(const Ws4Raw<F> &r, _Float16 (*Ks)[ws4::kQs], _Float16 *Vt, int k0, int b1, int tv) {
 #pragma clang fp contract(off)
 #pragma unroll
@@ -196,10 +199,23 @@ __device__ __forceinline__ void ws4_stage(const Ws4Raw<F> &r, _Float16 (*Ks)[ws4
 // 17 % slower at 32k / 128k, while the int8 kernels got faster (ws4g2_q8 128k B/A 0.81, ws4_q8 0.96).
 // Compile-time, per format, like llama.cpp fattn-vec.cuh:86-99 (progress\v0251-q8mport.PRIOR_ART.md).
 __host__ __device__ constexpr int ws4_tu(int F) { return F == 1 ? 3 : 0; }
-template <int F, int PD, bool BF, int TU = 0>
+// v0252-8sws: the key range of a split under split constant NS. NS == ws4::kNs (every shipping entry) makes exactly the call
+// of before (ws4::block_range(.., ws4::kNs, ..)); the bench-only NS use their own copy ws4::block_range_ns<NS> (see
+// attn_ws4_index.h: another ns passed to block_range changed the shipping kernels' code)
+template <int NS>
+__device__ __forceinline__ ws4::Range ws4_range(int n_pos, int split, int win) {
+    if constexpr (NS == ws4::kNs)
+        return ws4::block_range(n_pos, split, ws4::kNs, win);
+    else
+        return ws4::block_range_ns<NS>(n_pos, split, win);
+}
+// NS: the split rule constant (ws4::kNs for every shipping entry; other values only in the bench-only entries below)
+// TAG: 0 = the shipping helper instantiations; the bench-only entries pass TAG = NS (their own, see ws4_load_dl)
+template <int F, int PD, bool BF, int TU = 0, int NS = ws4::kNs, int TAG = 0>
 __device__ __forceinline__ void attn_ws4_impl(const float *q, const KvArgs &kv, float *part_ml, float *part_acc, int n_head, int n_kv,
                                               int q_stride, const int *pos, float scale, const int *skip, const AwGroups &groups) {
 #pragma clang fp contract(off)
+    constexpr int kTag = TAG;
     if (skip != nullptr && *skip) return;
     __shared__ __align__(16) _Float16 Qs[16][ws4::kQs];
     __shared__ __align__(16) _Float16 Ks[AW_K][ws4::kQs];
@@ -212,7 +228,7 @@ __device__ __forceinline__ void attn_ws4_impl(const float *q, const KvArgs &kv, 
     const int ncol = count * grp;  // <= 16 (one query per group on gfx1151)
     const int tb = kv_tb(kv, first);
     const int n_pos = pos[first + count - 1] + 1;
-    const ws4::Range rg = ws4::block_range(n_pos, split, ws4::kNs, kv.win);
+    const ws4::Range rg = ws4_range<NS>(n_pos, split, kv.win);
     const int b0 = rg.b0, b1 = rg.b1;
     const size_t ml_q = (size_t)n_split * n_head * 2, acc_q = (size_t)n_split * n_head * AW_D;
     const int col = lane % 16;
@@ -229,15 +245,15 @@ __device__ __forceinline__ void attn_ws4_impl(const float *q, const KvArgs &kv, 
     }
     const int nch = (b1 - b0 + AW_K - 1) / AW_K;
     Ws4Raw<F> raw[PD];
-    ws4_load<F, BF>(raw[0], kv, tb, b0, b1, g, n_kv, tv);
+    ws4_load<F, BF, kTag>(raw[0], kv, tb, b0, b1, g, n_kv, tv);
     // Q^T (f16) of the group's columns, as attn_wsplit_impl
     for (int i = tv; i < 16 * (AW_D / 8); i += 128) {
 #include "shared/attn_qs_f16.h"  // Qs[c][d8..+8) = f16 Q of column c (ADR-0005)
     }
-    ws4_stage<F>(raw[0], Ks, Vt, b0, b1, tv);
+    ws4_stage<F, kTag>(raw[0], Ks, Vt, b0, b1, tv);
 #pragma unroll
     for (int j = 1; j <= PD; ++j)
-        if (BF || j < nch) ws4_load<F, BF>(raw[j % PD], kv, tb, b0 + min(j, nch - 1) * AW_K, b1, g, n_kv, tv);
+        if (BF || j < nch) ws4_load<F, BF, kTag>(raw[j % PD], kv, tb, b0 + min(j, nch - 1) * AW_K, b1, g, n_kv, tv);
     // TU & 2: page-table entry of the first in-loop load (chunk min(1 + PD, nch - 1))
     int dl_next = 0;
     if constexpr ((TU & 2) != 0) dl_next = kv_delta(kv, tb, b0 + min(1 + PD, nch - 1) * AW_K);
@@ -275,15 +291,15 @@ __device__ __forceinline__ void attn_ws4_impl(const float *q, const KvArgs &kv, 
 #endif
                 if (c + 1 < nch) {
                     ws4_bar<TU & 1>();  // LB2: Vt, Ps read
-                    ws4_stage<F>(raw[(s + 1) % PD], Ks, Vt, k0 + AW_K, b1, tv);
+                    ws4_stage<F, kTag>(raw[(s + 1) % PD], Ks, Vt, k0 + AW_K, b1, tv);
                     // BF: unconditional (see ws4_load); past the last chunk it reloads the last
                     // one (L2), never used
                     if constexpr ((TU & 2) == 0) {
                         if (WS4_DBG != 2 && (BF || c + 1 + PD < nch))
-                            ws4_load<F, BF>(raw[(s + 1) % PD], kv, tb, min(k0 + (1 + PD) * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, tv);
+                            ws4_load<F, BF, kTag>(raw[(s + 1) % PD], kv, tb, min(k0 + (1 + PD) * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, tv);
                     } else {
                         if (WS4_DBG != 2 && (BF || c + 1 + PD < nch))
-                            ws4_load_dl<F, BF>(raw[(s + 1) % PD], kv, dl_next, min(k0 + (1 + PD) * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, tv);
+                            ws4_load_dl<F, BF, kTag>(raw[(s + 1) % PD], kv, dl_next, min(k0 + (1 + PD) * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, tv);
                         // the entry of the following load (clamped as that load), issued after this one
                         dl_next = kv_delta(kv, tb, min(k0 + (2 + PD) * AW_K, b0 + (nch - 1) * AW_K));
                     }
@@ -315,6 +331,29 @@ WS4_ENTRY(attn_ws4_q4, 2, 1, false)
 // Prefetch depth 2 (template PD, design F7) does not fit any format with ROCm 7.2: 256 VGPRs
 // and 50-140 spilled once the prefetch really overlaps (and slower than depth 1), so all use 1.
 #undef WS4_ENTRY
+// v0252-8sws (PLAN V1-88 on gfx1151): BENCH-ONLY entries (whirl-kernel-test --bench ws4s; the host never loads them): the
+// shipping attn_ws4 / attn_ws4_q8 with the split rule constant NS in place of ws4::kNs (grid.y must be NS). Same arguments,
+// 128 threads and partial layout; another NS = other key ranges, i.e. another combine order (not bitwise).
+#define BENCH_WS4_NS(name, F, PD, BF, NS)                                                                                                 \
+    extern "C" __global__ void __launch_bounds__(128)                                                                                 \
+        name(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv, int q_stride, const int *pos, float scale, \
+             const int *skip, AwGroups groups) {                                                                                      \
+        attn_ws4_impl<F, PD, BF, ws4_tu(F), NS, NS>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);               \
+    }
+// _ns64 = the A/A controls: split constant 64 as the shipping entries, through the bench instantiation (TAG 64)
+BENCH_WS4_NS(attn_ws4_ns64, 0, 1, true, 64)
+BENCH_WS4_NS(attn_ws4_q8_ns64, 1, 1, true, 64)
+BENCH_WS4_NS(attn_ws4_ns8, 0, 1, true, 8)
+BENCH_WS4_NS(attn_ws4_ns16, 0, 1, true, 16)
+BENCH_WS4_NS(attn_ws4_ns32, 0, 1, true, 32)
+BENCH_WS4_NS(attn_ws4_ns128, 0, 1, true, 128)
+// v0252-8sws round 2: PRODUCT entries (kernels::ws4SplitName; loaded for q8 / q8h KV, launched by ops::ws4SplitCount in balance
+// / fast: gfx1151 Ornith 16, Swift 8): the measured split constants of attn_ws4_q8, same instantiation path as the bench entries
+BENCH_WS4_NS(attn_ws4_q8_sp8, 1, 1, true, 8)
+BENCH_WS4_NS(attn_ws4_q8_sp16, 1, 1, true, 16)
+BENCH_WS4_NS(attn_ws4_q8_ns32, 1, 1, true, 32)
+BENCH_WS4_NS(attn_ws4_q8_ns128, 1, 1, true, 128)
+#undef BENCH_WS4_NS
 
 // ---------------------------------------------------------------------------
 // attn_ws4g<CG>: multi-row verify (design 3.3 mode A, T0 result; task T3). One block reads the
@@ -430,7 +469,8 @@ __device__ __forceinline__ void ws4g_stage(const Ws4gRaw<F> &r, _Float16 (*Ks)[w
 // TU: the attn_ws4_impl schedule bits (1 inline-asm barriers, 2 page-table lookahead; 0 = the v0.2.5 code);
 // the entries pass ws4_tu(F) (int8 3, f16 0)
 // (lookahead: int8 entries only; f16 CG 3 spilled 5 -> 14 VGPRs with it)
-template <int F, int CG, int TU = 0>
+// NS: the split rule constant (ws4::kNs for every shipping entry; other values only in the bench-only entries below)
+template <int F, int CG, int TU = 0, int NS = ws4::kNs>
 __device__ __forceinline__ void attn_ws4g_impl(const float *q, const KvArgs &kv, float *part_ml, float *part_acc, int n_head, int n_kv,
                                                int q_stride, const int *pos, float scale, const int *skip, const AwGroups &groups) {
 #pragma clang fp contract(off)
@@ -465,7 +505,7 @@ __device__ __forceinline__ void attn_ws4g_impl(const float *q, const KvArgs &kv,
     }
     const int tb = kv_tb(kv, first);
     const int n_pos = pmax + 1;
-    const ws4::Range rg = ws4::block_range(n_pos, split, ws4::kNs, kv.win);
+    const ws4::Range rg = ws4_range<NS>(n_pos, split, kv.win);
     const int b0 = rg.b0, b1 = rg.b1;
     const size_t ml_q = (size_t)n_split * n_head * 2, acc_q = (size_t)n_split * n_head * AW_D;
     // per tile c: this lane's column, its row (crow_), position (mp); output row / head
@@ -662,3 +702,36 @@ WS4G_ENTRY(attn_ws4g1_q8, 1, 1)
 WS4G_ENTRY(attn_ws4g2_q8, 1, 2)
 WS4G_ENTRY(attn_ws4g3_q8, 1, 3)
 #undef WS4G_ENTRY
+// v0252-8sws: BENCH-ONLY entries (whirl-kernel-test --bench ws4s; the host never loads them): attn_ws4g1 / attn_ws4g2 [_q8]
+// (the verify rows 2 / 3 of Swift and Ornith) with the split rule constant NS in place of ws4::kNs (grid.y must be NS)
+#define BENCH_WS4G_NS(name, F, CG, NS)                                                                                                    \
+    extern "C" __global__ void __launch_bounds__(256)                                                                                 \
+        name(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv, int q_stride, const int *pos, float scale, \
+             const int *skip, AwGroups groups) {                                                                                      \
+        attn_ws4g_impl<F, CG, ws4_tu(F), NS>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);                      \
+    }
+// _ns64 = the A/A controls (split constant 64: the same impl instantiation as the shipping attn_ws4g1 / attn_ws4g2 [_q8])
+BENCH_WS4G_NS(attn_ws4g1_ns64, 0, 1, 64)
+BENCH_WS4G_NS(attn_ws4g2_ns64, 0, 2, 64)
+BENCH_WS4G_NS(attn_ws4g1_q8_ns64, 1, 1, 64)
+BENCH_WS4G_NS(attn_ws4g2_q8_ns64, 1, 2, 64)
+BENCH_WS4G_NS(attn_ws4g1_ns8, 0, 1, 8)
+BENCH_WS4G_NS(attn_ws4g1_ns16, 0, 1, 16)
+BENCH_WS4G_NS(attn_ws4g1_ns32, 0, 1, 32)
+BENCH_WS4G_NS(attn_ws4g1_ns128, 0, 1, 128)
+BENCH_WS4G_NS(attn_ws4g2_ns8, 0, 2, 8)
+BENCH_WS4G_NS(attn_ws4g2_ns16, 0, 2, 16)
+BENCH_WS4G_NS(attn_ws4g2_ns32, 0, 2, 32)
+BENCH_WS4G_NS(attn_ws4g2_ns128, 0, 2, 128)
+// v0252-8sws round 2: PRODUCT entries attn_ws4g<cg>_q8_sp<S> (CG 1..3; see attn_ws4_q8_sp8 above)
+BENCH_WS4G_NS(attn_ws4g1_q8_sp8, 1, 1, 8)
+BENCH_WS4G_NS(attn_ws4g1_q8_sp16, 1, 1, 16)
+BENCH_WS4G_NS(attn_ws4g3_q8_sp8, 1, 3, 8)
+BENCH_WS4G_NS(attn_ws4g3_q8_sp16, 1, 3, 16)
+BENCH_WS4G_NS(attn_ws4g1_q8_ns32, 1, 1, 32)
+BENCH_WS4G_NS(attn_ws4g1_q8_ns128, 1, 1, 128)
+BENCH_WS4G_NS(attn_ws4g2_q8_sp8, 1, 2, 8)
+BENCH_WS4G_NS(attn_ws4g2_q8_sp16, 1, 2, 16)
+BENCH_WS4G_NS(attn_ws4g2_q8_ns32, 1, 2, 32)
+BENCH_WS4G_NS(attn_ws4g2_q8_ns128, 1, 2, 128)
+#undef BENCH_WS4G_NS

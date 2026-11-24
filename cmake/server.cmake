@@ -148,9 +148,12 @@ add_executable(whirl-bench-out-tests ${CMAKE_SOURCE_DIR}/tests/bench/bench_out_t
 add_executable(whirl-kt-bench-tests
   ${CMAKE_SOURCE_DIR}/tests/kernels/unit/kt_bench_tests.cpp
   ${CMAKE_SOURCE_DIR}/tests/kernels/kt_bench.cpp
-  ${CMAKE_SOURCE_DIR}/tests/kernels/kt_dq4s.cpp)
+  ${CMAKE_SOURCE_DIR}/tests/kernels/kt_dq4s.cpp
+  ${CMAKE_SOURCE_DIR}/tests/kernels/kt_ws4s.cpp)
 # v0252-8sq5: the dq4s bench table pairs every split count against ops::dq4Splits (the production rule; whirl_ops has no HIP)
 target_link_libraries(whirl-kt-bench-tests PRIVATE whirl_ops)
+# v0252-8sws: the ws4s table's B kernels must be bench entries of kernels/gfx1151/attn_ws4.hip (the test reads that source)
+target_compile_definitions(whirl-kt-bench-tests PRIVATE WHIRL_KT_SRC_DIR="${CMAKE_SOURCE_DIR}")
 
 # feat026-ggemv: the float-order contract of the gfx1151 gemvk kernels (wave / group walk, header extraction, token
 # slots) emulated on the CPU against gemv1s / gemvw (bitwise) and a double dot; no HIP.
