@@ -592,13 +592,18 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     // WHIRL_Q8DEC=1 clears in precise): WHIRL_MOEP_COMB=5 (atomic scatter, f32 order varies run to run) is fast-only;
     // 3 / 4 (f16 expert outputs, the balance item f16 intermediates) never in precise. Refused as bug-fastonly does: the
     // mode's own combine stays (moepCombDefault) and Plan::ignored says so; ops::chooseMoe checks the mode again.
-    if (const Raw& v = e.moep_comb; v && F.moep_comb >= 3 && F.moep_comb <= 5) {
+    // v0252-8sdet (PLAN V1-140): 6 = the fixed-point (i32) combine fused into the down projection (order-independent,
+    // 4-bit-level rounding of each expert output): fast-only like 5.
+    if (const Raw& v = e.moep_comb; v && F.moep_comb >= 3 && F.moep_comb <= 6) {
         const char* why = nullptr;
         std::string tail;
         if (F.moep_comb == 5 && p.mode != Mode::fast) {
             why = "the atomic-scatter MoE combine (f32 order varies run to run) is fast-only";
             tail = std::format(" ({} never takes it)", modeName(p.mode));
-        } else if (F.moep_comb != 5 && p.mode == Mode::precise) {
+        } else if (F.moep_comb == 6 && p.mode != Mode::fast) {
+            why = "the fixed-point MoE combine (i32 sums, 4-bit-level) is fast-only";
+            tail = std::format(" ({} never takes it)", modeName(p.mode));
+        } else if (F.moep_comb != 5 && F.moep_comb != 6 && p.mode == Mode::precise) {
             why = "f16 MoE expert outputs are a balance item";
             tail = " (precise never takes them)";
         }

@@ -802,6 +802,12 @@ struct MoeKernels {
     std::array<F, kMoepDnN> moep_dhs{};
     std::array<F, kMoepGuN> moep_fq_gu{};
     std::array<F, kMoepDnN> moep_fq_dn{}, moep_fq_dh{}, moep_fq_dhs{}, moep_fq_da{};
+    // v0252-8sdet (optional, gfx1151, opt-in COMB 6, fast): gemm_moepdi_<v> (i32 fixed-point combine fused into the down
+    // projection, order-independent) and moe_fix_zero (clears its sums + counters)
+    std::array<F, kMoepDnN> moep_di{};
+    // v0252-8sdet round 3: the fused-dequant twin gemm_moepfqdi_<v> (moe_prefill_fq.hip; null where gemm_moepfqdn_<v> is null)
+    std::array<F, kMoepDnN> moep_fq_di{};
+    F moe_fix_zero{};
     // v0252-f5 moeskip (optional, fast; kernels/moe_skip.hip, kernels/gfx1151/moe_skip.hip, kernels/shared/moe_skip.h)
     F moe_topk_skip{}, moe_skip_apply{}, moe_route_skip{}, moe_combine_skip{};  // both code objects
     F moe_gu_skip_mx{}, moe_down_skip_mx{};    // generic MXFP4 decode experts (moe_gu_skip_mxfp4 / moe_down_skip_mxfp4), both

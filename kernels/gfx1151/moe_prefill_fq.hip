@@ -168,20 +168,26 @@ __device__ void moepfq_gu_impl(const uint8_t *__restrict__ W1, const uint8_t *__
     }
 }
 
-// ---------------------------------------------------------------- E: down (twin of moepdn_impl, EPI 0 / 2 / 4 / 5)
+// ---------------------------------------------------------------- E: down (twin of moepdn_impl, EPI 0 / 2 / 4 / 5 / 6)
+// v0252-8sdet: EPI 6 = gemm_moepfqdi_* (COMB 6, fast): the same integer adds and last-arriver tail as gemm_moepdi_*
+// (moe_prefill_mt.hip moep_fix_finalize); the WMMA chains are gemm_moepdn's (this twin's invariance), so the addends, the
+// i32 sums and x are BITWISE those of gemm_moepdi_* (kt moemx row "gemm_moepfqdi_<v> == gemm_moepdi_<v>").
 template <int BK, int BM, int WM, int BNMAX, int EPI>
 __device__ void moepfq_dn_impl(const uint8_t *__restrict__ Wall, uint64_t row_bytes, int rows_e, const _Float16 *__restrict__ Xall,
                                void *__restrict__ Yv, int ncols, const int4 *__restrict__ tiles, const int *__restrict__ n_tiles,
-                               const int *__restrict__ perm, const float *__restrict__ w, float *__restrict__ x, int K) {
+                               const int *__restrict__ perm, const float *__restrict__ w, float *__restrict__ x, int K,
+                               const int *__restrict__ inv = nullptr, const float *__restrict__ sg = nullptr,
+                               const float *__restrict__ ysh = nullptr, int *__restrict__ cnt = nullptr, float qlim = 0.f) {
     constexpr int NTH = 256, NW = NTH / 32;
     constexpr int WN = NW / WM, TM = BM / 16 / WM;
     constexpr int NF = BNMAX / 16, FPW = NF / WN;
     constexpr int LD = BK + 8;
     static_assert(NW % WM == 0 && BM % (16 * WM) == 0 && TM >= 1 && NF % WN == 0 && FPW >= 1, "wave layout");
-    static_assert(EPI == 0 || EPI == 2 || EPI == 4 || EPI == 5, "epilogue (no fused-combine twins)");
+    static_assert(EPI == 0 || EPI == 2 || EPI == 4 || EPI == 5 || EPI == 6, "epilogue (no fused-combine twins but the fixed-point one)");
     using Fetch = MoepFqFetch<BK, BM, BNMAX>;
     float *__restrict__ Y = (float *)Yv;
     _Float16 *__restrict__ Yh = (_Float16 *)Yv;
+    int *__restrict__ Yi = (int *)Yv;  // EPI 6: the i32 sums
     const int nrb = moep::nrb(rows_e, BM);
     const int ti = moep::blockTile((int)blockIdx.x, nrb), rb = moep::blockRb((int)blockIdx.x, nrb);
     if (ti >= *n_tiles) return;
@@ -253,6 +259,15 @@ __device__ void moepfq_dn_impl(const uint8_t *__restrict__ Wall, uint64_t row_by
                         const int row = m0 + (wm * TM + i) * 16 + CROW(lane, v);
                         if (row < rows_e) unsafeAtomicAdd(&x[(size_t)tok * rows_e + row], wp * acc[i][f][v]);
                     }
+                } else if constexpr (EPI == 6) {
+                    const int p = perm[tl.y + t], tok = p / K;
+                    const float wp = w[p];
+#pragma unroll
+                    for (int v = 0; v < 8; ++v) {
+                        const int row = m0 + (wm * TM + i) * 16 + CROW(lane, v);
+                        // integer add (global_atomic_add_u32, no return): exact, so the order of the blocks does not matter
+                        if (row < rows_e) atomicAdd(&Yi[(size_t)tok * rows_e + row], moep::fxQuant(wp * acc[i][f][v], qlim));
+                    }
                 } else {
 #pragma unroll
                     for (int v = 0; v < 8; ++v) {
@@ -265,6 +280,7 @@ __device__ void moepfq_dn_impl(const uint8_t *__restrict__ Wall, uint64_t row_by
                 }
             }
         }
+        if constexpr (EPI == 6) moep_fix_finalize<BM, BNMAX>(n_tok, perm + tl.y, inv, K, rb, nrb, m0, rows_e, Yi, sg, ysh, x, cnt);
     }
 }
 
@@ -297,6 +313,14 @@ __device__ void moepfq_dn_impl(const uint8_t *__restrict__ Wall, uint64_t row_by
                                      int ncols, const int4 *tiles, const int *n_tiles, const int *perm,             \
                                      const float *w, float *x, int K) {                                             \
         moepfq_dn_impl<BK, BM, WM, BN, 4>(W, row_bytes, rows_e, X, nullptr, ncols, tiles, n_tiles, perm, w, x, K);   \
+    }                                                                                                               \
+    extern "C" __global__ void __launch_bounds__(256)                                                               \
+        gemm_moepfqdi_##NAME##_mxfp4(const uint8_t *W, uint64_t row_bytes, int rows_e, const _Float16 *X, int *acc, \
+                                     int ncols, const int4 *tiles, const int *n_tiles, const int *perm,             \
+                                     const int *inv, const float *w, const float *sg, const float *ysh, float *x,   \
+                                     int *cnt, int K, float qlim) {                                                 \
+        moepfq_dn_impl<BK, BM, WM, BN, 6>(W, row_bytes, rows_e, X, acc, ncols, tiles, n_tiles, perm, w, x, K, inv, sg,\
+                                          ysh, cnt, qlim);                                                          \
     }
 MOEPFQGU_ENTRY(g64n64k64, 64, 64, 64)
 MOEPFQGU_ENTRY(g64n128k64, 64, 128, 64)

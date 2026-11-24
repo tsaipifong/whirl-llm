@@ -6,6 +6,8 @@
 #include "whirl/ops/moe.h"
 #include "whirl/ops/matmul.h"  // preciseRows
 
+#include <algorithm>  // v0252-8sdet: std::min (COMB 6 zero grid)
+
 namespace whirl::ops {
 
 namespace {
@@ -81,6 +83,7 @@ bool skipOk(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k
     if (k.moe_route_skip == nullptr || pl.comb_fused || pl.ydh) return false;
     if ((pl.kind == MoePrefillKind::fused_gu || pl.kind == MoePrefillKind::moep) && k.moe_tiles_skip == nullptr) return false;
     if (pl.comb_atomic) return true;  // the down GEMM adds w * y over the tiles' (kept) positions; moe_combine4 K = 0 adds the shared expert
+    if (pl.comb_fix) return true;     // v0252-8sdet: the same, the last arriver counts the token's kept slots (inv >= 0)
     return pl.comb4 ? k.moe_combine4_skip != nullptr : k.moe_combine_skip != nullptr;
 }
 // v0252-combfix (PLAN V1-119; KB v0252-ornbal:moep-comb3-row-floor-schedule-dependence): the f16 expert-output class
@@ -124,15 +127,28 @@ Function moepFqTwin(Function fn, const kernels::MoeKernels& k) {
     for (int v = 0; v < kernels::kMoepGuN; ++v)
         if (fn == k.moep_gu[v]) return k.moep_fq_gu[v] != nullptr ? k.moep_fq_gu[v] : fn;
     for (int v = 0; v < kernels::kMoepDnN; ++v) {
-        const Function base[] = {k.moep_dn[v], k.moep_dh[v], k.moep_dhs[v], k.moep_da[v]};
-        const Function twin[] = {k.moep_fq_dn[v], k.moep_fq_dh[v], k.moep_fq_dhs[v], k.moep_fq_da[v]};
-        for (int i = 0; i < 4; ++i)
+        // v0252-8sdet round 3: + gemm_moepdi -> gemm_moepfqdi (COMB 6; same arguments, same bits)
+        const Function base[] = {k.moep_dn[v], k.moep_dh[v], k.moep_dhs[v], k.moep_da[v], k.moep_di[v]};
+        const Function twin[] = {k.moep_fq_dn[v], k.moep_fq_dh[v], k.moep_fq_dhs[v], k.moep_fq_da[v], k.moep_fq_di[v]};
+        for (int i = 0; i < 5; ++i)
             if (fn == base[i]) return twin[i] != nullptr ? twin[i] : fn;
     }
     return fn;
 }
 
 u32 moeTile(u32 n, u32 K, u32 R) { return n * K < 48 * R ? 32 : moe_bn; }
+
+// v0252-8sdet: the per-addend clamp of COMB 6 = kernels/moep_map.h moep::fxLimit(K) (the host side does not include the
+// kernel header: module boundary); the largest integral float lim with K * lim <= INT32_MAX (K 8: 268435440). The kernel
+// unit test (kernels.moe testMoepFixSum) pins fxLimit, the ops test pins this value for K 8.
+namespace {
+float moepFixLimit(u32 K) {
+    const long long cap = 2147483647LL / (K < 1 ? 1 : static_cast<long long>(K));
+    long long m = cap;
+    while (static_cast<long long>(static_cast<float>(m)) > cap) --m;
+    return static_cast<float>(m);
+}
+}  // namespace
 
 int moepGuFor(u32 n, u32 K, u32 R, const MoeFlags& f, const kernels::MoeKernels& k) {
     const int w = f.moep_guw;
@@ -237,6 +253,16 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
             pl.comb_atomic = true;
             if (dna_ok) gridv = f.moep_dna;  // v0252-8smoe2 (D)
             pl.fdn = k.moep_da[gridv];
+        } else if (atomic_ok && f.moep_comb == 6 && k.moep_di[dv] != nullptr && k.moe_fix_zero != nullptr && K >= 2 &&
+                   (f.moe_skip_thr <= 0.f || f.moe_skip_min >= 1)) {
+            // v0252-8sdet (PLAN V1-140): COMB 6, the order-independent fixed-point combine (fast only: the atomic class).
+            // K >= 2: moe_yd (n * K * E f32) holds the n * E sums + n * nrb counters; moeskip min-keep >= 1: every token
+            // has a kept slot, so its last arriver exists (the shared expert and the sum reach x)
+            pl.comb_fix = true;
+            const bool dni_ok = f.moep_dna >= 0 && f.moep_dna < kernels::kMoepDnN && k.moep_di[f.moep_dna] != nullptr &&
+                                kernels::kMoepDn[f.moep_dna].bn == kernels::kMoepDn[f.moep_dn].bn;
+            if (dni_ok) gridv = f.moep_dna;  // lever D's variant for the atomic forms
+            pl.fdn = k.moep_di[gridv];
         }
         if (pl.ydh || pl.comb_atomic) {
             pl.bits = MoeBits::moe_lossy_gemm;  // not the f16 GEMM class (balance item f16 intermediates / fast candidate)
@@ -246,6 +272,16 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f_in, const kernels::MoeK
         pl.gu_pgrid = D(pl.max_tiles64 * ((F + vg.gr - 1) / vg.gr));
         const kernels::MoepDnVariant& vd = kernels::kMoepDn[gridv];
         pl.dn_pgrid = D(max_tiles * ((E + vd.bm - 1) / vd.bm));
+        if (pl.comb_fix) {
+            // v0252-8sdet: sums [n][E] i32 then counters [n][nrb] in moe_yd, cleared by moe_fix_zero (int4 stores)
+            pl.bits = MoeBits::moe_lossy_gemm;
+            pl.comb4 = false;
+            const std::uint64_t nrb = (E + vd.bm - 1) / vd.bm, words = static_cast<std::uint64_t>(n) * E + static_cast<std::uint64_t>(n) * nrb;
+            pl.fix_cnt_off = static_cast<std::uint64_t>(n) * E * 4;
+            pl.fix_words4 = static_cast<u32>((words + 3) / 4);
+            pl.fix_zero_grid = D(static_cast<u32>(std::min<std::uint64_t>((pl.fix_words4 + 255) / 256, 1024)));
+            pl.fix_lim = moepFixLimit(K);
+        }
         if (pl.comb_fused) pl.comb4 = false;
         // v0252-8smoe2 (E): the fused-dequant twins (same arguments, grid and bits) where present and the shapes allow
         if (f.moep_fq && moepFqShapeOk(p.gate_ncols, p.down_ncols)) {

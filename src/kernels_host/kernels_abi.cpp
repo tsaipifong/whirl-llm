@@ -519,7 +519,10 @@ void loadMoe(MoeKernels& k, const Loader& L) {
         k.moep_fq_dh[v] = L.opt(std::string("gemm_moepfqdh_") + kMoepDn[v].name + "_mxfp4");
         k.moep_fq_dhs[v] = L.opt(std::string("gemm_moepfqdhs_") + kMoepDn[v].name + "_mxfp4");
         k.moep_fq_da[v] = L.opt(std::string("gemm_moepfqda_") + kMoepDn[v].name + "_mxfp4");
+        k.moep_di[v] = L.opt(std::string("gemm_moepdi_") + kMoepDn[v].name + "_mxfp4");  // v0252-8sdet (COMB 6)
+        k.moep_fq_di[v] = L.opt(std::string("gemm_moepfqdi_") + kMoepDn[v].name + "_mxfp4");  // v0252-8sdet round 3 (COMB 6, fq twin)
     }
+    k.moe_fix_zero = L.opt("moe_fix_zero");  // v0252-8sdet (COMB 6)
     for (int v = 0; v < kMoepGuN; ++v) k.moep_fq_gu[v] = L.opt(std::string("gemm_moepfqgu_") + kMoepGu[v].name + "_mxfp4");  // v0252-8smoe2 (E)
     k.moe_combine4 = L.opt("moe_combine4");
     k.moe_combine4h = L.opt("moe_combine4h");
