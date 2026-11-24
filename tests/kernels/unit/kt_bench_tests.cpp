@@ -780,7 +780,24 @@ static void test_attnpv_variants() {
     check("attnpv: V6p1 = attn_pfx_i4lp1 (int4, Q in LDS, PF1 as shipped in V2)", kern["V6p1"] == "attn_pfx_i4lp1");
     check("attnpv: V7 = attn_pfx_i8p2 (int8, Q in LDS, deferred-consumer prefetch)", kern["V7"] == "attn_pfx_i8p2");
     check("attnpv: V1p = attn_pfx_i4p (int4, Q in registers, score loop pinned, no prefetch)", kern["V1p"] == "attn_pfx_i4p");
-    check("attnpv: 10 variants", vs.size() == 10, std::to_string(vs.size()));
+    // v0252-8sattn4: the f16 structure variants (class P: bitwise == V0 by construction; tests/kernels/test_attn.cpp proves it
+    // on the card)
+    check("attnpv: F1 = attn_pfx_f16qg (f16, Q re-read from memory every step, PF2)", kern["F1"] == "attn_pfx_f16qg");
+    check("attnpv: F2 = attn_pfx_f16l64p (f16, 64-query block, Q in LDS, producer waves, PF2)", kern["F2"] == "attn_pfx_f16l64p");
+    check("attnpv: F3 = attn_pfx_f16l64 (f16, 64-query block, Q in LDS, no prefetch)", kern["F3"] == "attn_pfx_f16l64");
+    check("attnpv: F4 = attn_pfx_f16pin (f16, score loop pinned)", kern["F4"] == "attn_pfx_f16pin");
+    check("attnpv: F6 = attn_pfx_f16ws (f16, Q re-read, 8 consumer + 4 producer waves, PF2)", kern["F6"] == "attn_pfx_f16ws");
+    check("attnpv: 15 variants", vs.size() == 15, std::to_string(vs.size()));
+    // launch geometry: 128 queries x 256 threads unless the variant says otherwise
+    auto geo = [&](const char* a, int qblk, int thr) {
+        const AttnPvVariant* v = attnPvFind(a);
+        return v && v->qblk == qblk && v->threads == thr;
+    };
+    check("attnpv: geometry V0 / V6 / F1 / F4 128 x 256", geo("V0", 128, 256) && geo("V6", 128, 256) && geo("F1", 128, 256) && geo("F4", 128, 256));
+    check("attnpv: geometry F2 / F3 64 queries x 256 threads (4 consumer + 4 producer waves)", geo("F2", 64, 256) && geo("F3", 64, 256));
+    check("attnpv: geometry F6 128 queries x 384 threads", geo("F6", 128, 384));
+    check("attnpv: grid of n = 200: 2 blocks of 128, 4 of 64", attnPvBlocks(*attnPvFind("V0"), 200) == 2 && attnPvBlocks(*attnPvFind("F2"), 200) == 4 &&
+                                                                    attnPvBlocks(*attnPvFind("F6"), 128) == 1);
     // bits: the same score codes and integer sums give the same output; f16 vs int never
     auto bw = [&](const char* a, const char* b) {
         const AttnPvVariant *va = attnPvFind(a), *vb = attnPvFind(b);
@@ -789,6 +806,12 @@ static void test_attnpv_variants() {
     check("attnpv: V6 vs V1 bitwise (same int4 codes, exact integer sums)", bw("V6", "V1") && bw("V5", "V1") && bw("V6p1", "V1") && bw("V1p", "V1"));
     check("attnpv: V4 / V3 / V7 vs V2 bitwise (same int8 codes)", bw("V4", "V2") && bw("V3", "V2") && bw("V7", "V2"));
     check("attnpv: int vs f16 not bitwise, int4 vs int8 not bitwise", !bw("V1", "V0") && !bw("V2", "V0") && !bw("V6", "V2"));
+    check("attnpv: every F (class P) vs V0 bitwise", bw("F1", "V0") && bw("F2", "V0") && bw("F3", "V0") && bw("F4", "V0") && bw("F6", "V0"));
+    check("attnpv: F2 vs F3, F1 vs F6 bitwise", bw("F2", "F3") && bw("F1", "F6"));
+    check("attnpv: F vs int not bitwise", !bw("F1", "V1") && !bw("F6", "V2"));
+    std::string ferr;
+    const auto fp = attnPvPairs("F1/V0,F2/V0,F3/V0,F4/V0,F6/V0,F2/F3", ferr);
+    check("attnpv: the F pair list parses", ferr.empty() && fp.size() == 6 && fp[5].b == "F2" && fp[5].a == "F3", ferr);
     check("attnpv: unknown alias -> nullptr", attnPvFind("V9") == nullptr);
     // the default pair list: the brief's pairs (each variant vs V0, V6 vs V1) without V4 (256 VGPRs + 10 spilled: does not
     // fit, selectable by name only), then the one-change pairs (pin, Q in LDS, each prefetch form vs its no-prefetch twin)

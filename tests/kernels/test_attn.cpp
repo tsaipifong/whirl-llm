@@ -1102,6 +1102,63 @@ void testAttn(Ctx& c) {
                         }
                     }
                 }
+                // v0252-8sattn4 (PLAN V1-148): the f16 structure variants of family attnpv (class P, bench only, never selected
+                // by the engine): the shipping f16 chain in the same order, only Q placement / staging roles / load timing
+                // differ, so each must be bitwise == attn_prefill_wmma (both models' shapes, pos L - n and 0, n = 200 / 130:
+                // partial last block of 128 and of 64 queries, head-range launches). Own launch geometry per variant:
+                //   attn_pfx_f16qg   F1 Q re-read from memory every step + PF 2          128 queries, 256 threads
+                //   attn_pfx_f16l64p F2 64-query block, Q in LDS, 4 producer waves + PF 2  64 queries, 256 threads
+                //   attn_pfx_f16l64  F3 F2 without the prefetch                            64 queries, 256 threads
+                //   attn_pfx_f16pin  F4 score loop pinned                                 128 queries, 256 threads
+                //   attn_pfx_f16ws   F6 Q re-read (F1) + 4 producer waves (PF 2)           128 queries, 384 threads
+                // A code object with attn_pfx_i4lp but not these is the build before this item: FAIL, not skip.
+                {
+                    struct FxCase {
+                        const char* var;
+                        int qblk, thr;
+                    };
+                    const FxCase fx[] = {{"attn_pfx_f16qg", 128, 256}, {"attn_pfx_f16l64p", 64, 256}, {"attn_pfx_f16l64", 64, 256},
+                                         {"attn_pfx_f16pin", 128, 256}, {"attn_pfx_f16ws", 128, 384}};
+                    const bool have_pv = static_cast<bool>(c.fnOpt("attn_pfx_i4lp"));
+                    for (const FxCase& fc : fx) {
+                        auto fv = c.fnOpt(fc.var);
+                        if (!fv) {
+                            if (!have_pv) {
+                                c.rep.skip("attn", std::string(fc.var) + tag, "no attnpv variants in this code object");
+                                continue;
+                            }
+                            Result r;
+                            r.name = std::string(fc.var) + " present next to attn_pfx_i4lp" + tag;
+                            r.pass = false;
+                            r.note = "the f16 bench variant is missing from this code object";
+                            c.rep.add(r);
+                            continue;
+                        }
+                        auto fr = c.fn("attn_prefill_wmma");
+                        for (const auto& [nh, nkv] : {std::pair{24, 4}, std::pair{16, 2}}) {
+                            const std::size_t cnt = static_cast<std::size_t>(n) * nh * kHd;
+                            for (const int p0 : {L - n, 0}) {
+                                Buf dpos(std::vector<int>{p0});
+                                const std::string where =
+                                    " (" + std::to_string(nh) + " / " + std::to_string(nkv) + " heads) at pos " + std::to_string(p0) + tag;
+                                Buf orf(static_cast<std::size_t>(n) * kHeads * kHd * 4), ov(orf.bytes()), oh(orf.bytes());
+                                for (Buf* b : {&orf, &ov, &oh}) b->fill(0x7f);
+                                auto launchFx = [&](hip::Function fn, int qblk, int thr, Buf& o, int h0, int nh_launch) {
+                                    hip::launch(fn, {cdiv(n, qblk), static_cast<unsigned>(nh_launch), 1}, {static_cast<unsigned>(thr), 1, 1}, 0, c.s, dqp.p(),
+                                                pool.args(), o.p(), nh, nkv, kQStride, dpos.p(), n, kScale, h0);
+                                };
+                                launchFx(fr, 128, 256, orf, 0, nh);
+                                launchFx(fv, fc.qblk, fc.thr, ov, 0, nh);
+                                for (const int h0 : {0, nh / 2}) launchFx(fv, fc.qblk, fc.thr, oh, h0, nh / 2);
+                                c.sync();
+                                const auto vr = orf.down<float>(cnt);
+                                c.rep.add(cmpExact(std::string(fc.var) + " == attn_prefill_wmma" + where, ov.down<float>(cnt), vr, Kind::invariant));
+                                c.rep.add(cmpExact(std::string(fc.var) + " head-range launches == attn_prefill_wmma" + where, oh.down<float>(cnt), vr,
+                                                   Kind::invariant));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
