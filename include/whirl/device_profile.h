@@ -267,10 +267,12 @@ inline constexpr Profile k_profile_gfx1151{
     .gemvk_dense = {0, 0, 0, 0, 7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
     .gemvk_moe = {},
     .gemvh_grid_by_rows = true,
-    // v0252-8sdec (PLAN V1-142) / v0252-8sopen: opt-in. Screens progress/8sdec-screen2.json and 8sdec-screen2-bands
-    // (2026-11-23) were OPEN (tg 2048 +1.16 % +-2.46, tg 8192 +1.53 % +-8.66, tg 32768 +2.60 % +-6.61; ADR-0019: not a
-    // default until a cell gains beyond its error).
-    .gemvh_group_dense = false,  // v0252-8sopen: opt-in, WHIRL_GEMVH_GRP=1 turns the grouped gemvh on (same bits)
+    // v0252-8sdec (PLAN V1-142) / v0252-8sgrp: the default (precise dense MXFP4 only, numerics.cpp loadFlags). Screens
+    // 8sdec-grp2 20261124-0314, 8sdec-screen2 20261123-0912, 8sdec-screen2-bands 20261123-1127, 8sdec-grp2-long
+    // 20261124-0828 (Swift precise, WHIRL_GEMVH_GRP=1 vs the one-launch path, same exe): tg 8192 +2.36 % +- 2.00 (gain),
+    // tg 2048 +1.44 % +- 2.52, tg 32768 +2.60 % +- 3.41, tg 98304 +0.36 % +- 6.46 (open, no loss), prefill flat; precise
+    // bits SAME every round, kt gemvhg invariant. WHIRL_GEMVH_GRP=0 = one gemvh launch per matrix.
+    .gemvh_group_dense = true,  // v0252-8sgrp: default on (8060S precise decode / verify, same bits)
     .h16_from_candidates = true,
     .gemms_tie_larger_bm = true,
     .fdq_default = 2,  // t2 (v0251-a3port; v0251-judge1 sec 1 screening)

@@ -1488,6 +1488,10 @@ static void testKgVarFlag() {
 // v0252-8sopen: no shipped row sets it any more (screens 8sdec-screen2 / -bands OPEN, ADR-0019), so the default is off on
 // both cards and WHIRL_GEMVH_GRP=1 is the opt-in (on in every mode, precise included, on the 8060S dense plan); the
 // profile rule itself is still pinned through a target with gemvh_grp_profile forced on.
+// v0252-8sgrp: the gfx1151 row is on again (screens 8sdec-grp2 20261124-0314 / -screen2 / -bands / -grp2-long: precise
+// tg 8192 +2.36 % +- 2.00, bits SAME every round), and the profile default is PRECISE ONLY (the screened cell): balance /
+// fast plans keep the flag off (their bitsKey does not move); "0" -> off and any other value -> on in every mode as before;
+// MoE stays off (Ornith not screened); gfx1201 stays off.
 static void testGemvhGrpDefault() {
     auto planOf = [](const char* mode, const nu::Target& t, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -1499,8 +1503,10 @@ static void testGemvhGrpDefault() {
         for (const char* model : {"swift", "moe"})
             for (const char* mode : {"precise", "balance", "fast"}) {
                 const nu::Target t = target(c, model, false);
-                const bool want = false;  // v0252-8sopen: opt-in on both cards
-                NCHECK(!t.gemvh_grp_profile, "gemvh_grp {} {} {}: profile row on (want off since v0252-8sopen)", c.name, model, mode);
+                const bool is_8060s = std::string_view(c.name) == "8060s", precise = std::string_view(mode) == "precise";
+                // v0252-8sgrp: default on only for 8060S dense precise
+                const bool want = is_8060s && std::string_view(model) == "swift" && precise;
+                NCHECK(t.gemvh_grp_profile == is_8060s, "gemvh_grp {} {} {}: profile row {} (want {})", c.name, model, mode, t.gemvh_grp_profile, is_8060s);
                 const nu::Plan p = planOf(mode, t, {});
                 NCHECK(p.flags.gemvh_grp == want, "gemvh_grp {} {} {}: {} (want {})", c.name, model, mode, p.flags.gemvh_grp, want);
                 const nu::Plan off = planOf(mode, t, {{"GEMVH_GRP", "0"}}), on = planOf(mode, t, {{"GEMVH_GRP", "1"}});
@@ -1512,19 +1518,30 @@ static void testGemvhGrpDefault() {
                 nu::Target t0 = t;
                 t0.gemvh_grp_profile = false;
                 NCHECK(!planOf(mode, t0, {}).flags.gemvh_grp, "gemvh_grp {} {} {}: on without the profile row", c.name, model, mode);
-                // the profile rule (a row with gemvh_group_dense on): dense on, MoE off, "0" still wins
+                // the profile rule (a row with gemvh_group_dense on): dense precise on, MoE / balance / fast off, "0" still wins
                 nu::Target t1 = t;
                 t1.gemvh_grp_profile = true;
-                const bool want1 = std::string_view(model) == "swift";
+                const bool want1 = std::string_view(model) == "swift" && precise;
                 const nu::Plan p1 = planOf(mode, t1, {});
                 NCHECK(p1.flags.gemvh_grp == want1 && !planOf(mode, t1, {{"GEMVH_GRP", "0"}}).flags.gemvh_grp && !p1.lossy_override,
                        "gemvh_grp {} {} {}: profile row on -> {} (want {}), env 0 off", c.name, model, mode, p1.flags.gemvh_grp, want1);
             }
-    // v0252-8sopen: the three switch states on the 8060S dense MXFP4 plan in precise (the cell the grouped gemvh serves)
+    // v0252-8sgrp: the three switch states on the 8060S dense MXFP4 plan in precise (the cell the grouped gemvh serves)
     const nu::Target ts = target(card("8060s"), "swift", false);
-    const bool st_unset = planOf("precise", ts, {}).flags.gemvh_grp, st_0 = planOf("precise", ts, {{"GEMVH_GRP", "0"}}).flags.gemvh_grp,
-               st_1 = planOf("precise", ts, {{"GEMVH_GRP", "1"}}).flags.gemvh_grp;
-    NCHECK(!st_unset && !st_0 && st_1, "gemvh_grp 8060s swift precise: unset {} / 0 {} / 1 {} (want off / off / on)", st_unset, st_0, st_1);
+    const nu::Plan pu = planOf("precise", ts, {}), p0 = planOf("precise", ts, {{"GEMVH_GRP", "0"}});
+    const bool st_unset = pu.flags.gemvh_grp, st_0 = p0.flags.gemvh_grp, st_1 = planOf("precise", ts, {{"GEMVH_GRP", "1"}}).flags.gemvh_grp,
+               st_x = planOf("precise", ts, {{"GEMVH_GRP", "yes"}}).flags.gemvh_grp;
+    NCHECK(st_unset && !st_0 && st_1 && st_x, "gemvh_grp 8060s swift precise: unset {} / 0 {} / 1 {} / yes {} (want on / off / on / on)", st_unset, st_0,
+           st_1, st_x);
+    // the default 8060S precise bitsKey differs from the WHIRL_GEMVH_GRP=0 one only in gemvh_grp (1 vs 0); the log line is the same
+    std::string ku = pu.bitsKey(), k0 = p0.bitsKey();
+    const std::size_t iu = ku.find("gemvh_grp=1;"), i0 = k0.find("gemvh_grp=0;");
+    NCHECK(iu != std::string::npos && i0 == iu && ku.replace(iu, 12, "gemvh_grp=0;") == k0 && nu::logLine(pu) == nu::logLine(p0),
+           "gemvh_grp 8060s swift precise: bitsKey / logLine of the default vs =0");
+    // balance / fast plans on the 8060S do not move with the new default
+    for (const char* m : {"balance", "fast"})
+        NCHECK(!planOf(m, ts, {}).flags.gemvh_grp && planOf(m, ts, {}).bitsKey() == planOf(m, ts, {{"GEMVH_GRP", "0"}}).bitsKey(),
+               "gemvh_grp 8060s swift {}: default on or bitsKey moved", m);
 }
 
 static void testAttnSxFlag() {

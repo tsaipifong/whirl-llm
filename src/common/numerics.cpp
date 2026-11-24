@@ -466,8 +466,10 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     F.moe_fuse = flagOr(e.moe_fuse, !t.gfx1151 && t.moe);
     F.gemvh_f32 = flagOr(e.gemvh_f32, false);
     // v0252-8sdec (PLAN V1-142): the precise grouped gemvh, default on dense models where the device profile says so
-    // (no row does since v0252-8sopen: opt-in by WHIRL_GEMVH_GRP=1); bitwise (same per-tile kernel body), so every mode carries the flag and only precise rows use it
-    F.gemvh_grp = flagOr(e.gemvh_grp, t.gemvh_grp_profile && !t.moe);
+    // (v0252-8sgrp: the gfx1151 row); bitwise (same per-tile kernel body). v0252-8sgrp: the profile default is precise only
+    // (the screened cell): balance / fast plans keep it off (their bitsKey does not move); WHIRL_GEMVH_GRP still sets it in
+    // every mode by the envFlag rule ("0" off, any other value on); MoE models off (Ornith not screened)
+    F.gemvh_grp = flagOr(e.gemvh_grp, t.gemvh_grp_profile && !t.moe && r.mode == Mode::precise);
     // tune.cpp:852-861
     if (e.fp8) F.fp8_prefill = *e.fp8 != "0";
     if (e.fp8 && *e.fp8 == "0") F.moe_fp8 = false;
