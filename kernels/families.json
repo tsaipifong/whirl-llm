@@ -94,6 +94,7 @@
     "kernels/gfx1151/moe.hip",
     "kernels/gfx1151/moe_prefill_mt.hip",
     "kernels/gfx1151/moe_prefill_fq.hip",
+    "kernels/gfx1151/moe_prefill_fx.hip",
     "kernels/gfx1151/moe_router.hip",
     "kernels/gfx1151/moe_skip.hip"
    ],

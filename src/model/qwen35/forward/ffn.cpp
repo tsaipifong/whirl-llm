@@ -293,6 +293,9 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
     // prefill: group (token, slot) pairs by expert, grouped GEMMs, combine
     const u32 pairs = n * K;
     const u32 bn = pl.bn;
+    // v0252-8sdet round 4: any prefill plan but COMB 6 may write moe_yd (expert outputs): its fixed-point region is no longer
+    // known zero
+    if (!pl.comb_fix) moe_fix_clean = 0;
     // v0252-f5 moeskip: moe_route_skip parks the dropped pairs after the kept positions (inv -1); the tiles cover kept pairs only
     hip::launch(pl.skip ? k.moe_route_skip : k.moe_route, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(bn), moe_perm, moe_inv, moe_tiles,
                 moe_ntiles);
@@ -334,7 +337,7 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
         mark(OpClass::misc);
         hip::launch(pl.fgu, pl.gu_pgrid, D(256), 0, stream, mo.gate.ptr, mo.up.ptr, mo.gate.row_bytes, I(F), moe_x16, moe_yg, I(E), moe_tiles64,
                     moe_ntiles64);
-        if (!pl.comb_fused && !pl.comb_atomic)
+        if (!pl.downInCombine())  // v0252-8sdet round 3: the fused / atomic / fixed-point forms launch the down below
             hip::launch(pl.fdn, pl.dn_pgrid, D(256), 0, stream, mo.down.ptr, mo.down.row_bytes, I(E), moe_yg, moe_yd, I(F), moe_tiles, moe_ntiles);
         mark(OpClass::matmul);
     } else if (pl.kind == ops::MoePrefillKind::gemmr) {
@@ -374,6 +377,26 @@ void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat
             hip::launch(k.moe_combine4, pl.comb_grid, D(256), 0, stream, x, ysh, moe_sg, moe_yd, moe_inv, moe_w, I(E), I(0));
         hip::launch(pl.fdn, pl.dn_pgrid, D(256), 0, stream, mo.down.ptr, mo.down.row_bytes, I(E), moe_yg, I(F), moe_tiles, moe_ntiles, moe_perm,
                     moe_w, x, I(K));
+        mark(OpClass::matmul);
+    } else if (pl.comb_fix) {
+        // v0252-8sdet (PLAN V1-140, COMB 6, fast): clear the i32 sums + counters in moe_yd (unused by this plan otherwise),
+        // then the down GEMM adds w * y as fixed-point integers and the last arriver of each (token, row block) adds the
+        // converted sum + sg * ysh into x - the same bits whatever order the blocks run in
+        // round 4 (screen 20261124-1301: one clear per layer cost ~0.3-0.7 %): the region is cleared only when it may be
+        // dirty - the first COMB 6 block after another prefill plan or the allocation, or a block needing more words than
+        // the last clear covered; every gemm_moep[fq]di launch leaves the words it used zero (moe_fix_clean, scratch.h)
+        const std::uint64_t fix_words = static_cast<std::uint64_t>(pl.fix_words4) * 4;
+        if (moe_fix_clean < fix_words) {
+            hip::launch(k.moe_fix_zero, pl.fix_zero_grid, D(256), 0, stream, moe_yd, I(pl.fix_words4));
+            moe_fix_clean = fix_words;
+        }
+        try {
+            hip::launch(pl.fdn, pl.dn_pgrid, D(256), 0, stream, mo.down.ptr, mo.down.row_bytes, I(E), moe_yg, moe_yd, I(F), moe_tiles, moe_ntiles,
+                        moe_perm, moe_inv, moe_w, moe_sg, ysh, x, moe_yd + pl.fix_cnt_off, I(K), pl.fix_lim);
+        } catch (...) {
+            moe_fix_clean = 0;  // not known what ran: clear before the next COMB 6 block
+            throw;
+        }
         mark(OpClass::matmul);
     } else if (pl.skip) {
         // v0252-f5 moeskip: the dropped slots (inv -1) are left out of the sum (never comb_fused / ydh: chooseMoe)

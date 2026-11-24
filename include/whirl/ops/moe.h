@@ -168,6 +168,21 @@ struct MoePlan {
                                      // v0252-moedf16: also the fp8 kind with COMB 3 (fdn = gemm8r_moeh / _moe32h, W2 = null)
     bool comb_atomic = false;        // moep, fast candidate: fdn = gemm_moepda_* (x += w * y), shared expert first by
                                      // moe_combine4 with K = 0; no combine launch after
+    // v0252-8sdet (PLAN V1-140): COMB 6, fast only, opt-in - fdn = gemm_moepdi_* (i32 fixed-point sums of w * y by integer
+    // atomics in moe_yd's first n * E words, the last arriver of each (token, row block) adds the converted sum + sg * ysh
+    // into x: the same output from identical runs); before it moe_fix_zero(moe_yd, fix_words4) on fix_zero_grid clears the
+    // sums and the counters at byte fix_cnt_off of moe_yd; fix_lim = the per-addend clamp (kernels/moep_map.h fxLimit(K)).
+    // No combine launch (comb4 false).
+    bool comb_fix = false;
+    // v0252-8sdet round 3: the moep down projection is launched by the combine step (fused / atomic / fixed-point forms,
+    // each with its own argument list), not by the grouped-GEMM step with the plain (W .. Y, tiles) list. The one
+    // predicate qwen35::Context::moeBlock uses (a plan that launched COMB 6's 17-argument kernel with the 8 plain
+    // arguments crashed in hipModuleLaunchKernel on the 8060S, 2026-11-24).
+    bool downInCombine() const { return comb_fused || comb_atomic || comb_fix; }
+    std::uint64_t fix_cnt_off = 0;
+    std::uint32_t fix_words4 = 0;
+    float fix_lim = 0.f;
+    Dim3 fix_zero_grid{};
     Dim3 comb_grid{};
     // v0252-f5 (moeskip): this block drops slots. The routing writes id -1 / weight 0 for them (moe_topk_skip, or
     // moe_skip_apply after the fused router), gu / down are the skip entry points (decode), and the prefill launches take

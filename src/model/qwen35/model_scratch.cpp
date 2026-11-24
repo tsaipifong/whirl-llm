@@ -153,6 +153,7 @@ void Model::allocScratch(u32 fd_splits_, u32 dq_ctx) {
         m.moe_yg = m.alloc(B * Kx * F * f4);
         m.moe_yu = m.alloc(B * Kx * F * f4);
         m.moe_yd = m.alloc(B * Kx * E * f4);
+        m.moe_fix_clean = 0;  // v0252-8sdet round 4: a new moe_yd holds no known zeros
         m.moe_sx = m.alloc(B * Kx * f4);
     }
     // sizing self-check: the pre-load estimate (bufferBytes, the server's auto-shrink) must cover what was just

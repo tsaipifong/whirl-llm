@@ -51,4 +51,41 @@ MOEP_HD int fqSb(int s, int BK) { return s % (BK / 32); }
 // MXFP4 sub-block index inside the 256-value super-block of chunk k0 (k0 % BK == 0, BK in {32, 64})
 MOEP_HD int fqIb(int k0, int sb) { return ((k0 & 255) >> 5) + sb; }
 
+// v0252-8sdet (PLAN V1-140, COMB 6, fast only): the order-independent fixed-point MoE combine (gemm_moepdi_*, EPI 6).
+// Each routed addend a = w * y is rounded to the grid 2^-kFxShift (q = fxQuant(a, lim), an i32) and added into an i32 sum
+// per (token, row) by integer atomics: integer addition mod 2^32 is exact, commutative and associative, so the sum does
+// not depend on the order the blocks run in. The last arriver of a (token, row block) converts once (fxValue) and adds
+// it (+ sg * ysh) into x. Error: |q * 2^-S - a| <= 2^-(S+1) per unclamped addend (S = 14: 3.05e-5, below one f16 rounding
+// of any |a| >= 1/16), so |fxValue(sum) - sum a| <= kept * 2^-(S+1) + one f32 rounding of the value. Overflow: each q is
+// clamped to +-lim with K * lim <= INT32_MAX, so the true sum of <= K addends fits i32 (partial sums may wrap mod 2^32:
+// harmless, only the final sum is read); lim * 2^-S = 16383.999 for K = 8. NaN -> 0, +-inf -> +-lim (deterministic).
+constexpr int kFxShift = 14;
+MOEP_HD float fxScale() { return static_cast<float>(1 << kFxShift); }
+// the largest integral float lim with K * lim <= INT32_MAX (host: passed to the kernel as an argument)
+inline float fxLimit(int K) {
+    const long long cap = 2147483647LL / (K < 1 ? 1 : K);
+    long long m = cap;
+    while (static_cast<long long>(static_cast<float>(m)) > cap) --m;
+    return static_cast<float>(m);
+}
+// round a * 2^S to the nearest integer (ties to even), clamped to +-lim; no library call (host and device the same)
+MOEP_HD int fxQuant(float a, float lim) {
+    float s = a * fxScale();
+    s = s > lim ? lim : s;
+    s = s < -lim ? -lim : s;
+    if (!(s == s)) s = 0.f;  // NaN
+    int i = static_cast<int>(s);  // toward zero; |s| <= lim < 2^31
+    const float r = s - static_cast<float>(i);  // exact: s and i share the binade (or i = 0)
+    if (r > 0.5f || (r == 0.5f && (i & 1))) ++i;
+    else if (r < -0.5f || (r == -0.5f && (i & 1))) --i;
+    return i;
+}
+MOEP_HD float fxValue(int sum) { return static_cast<float>(sum) * (1.f / fxScale()); }
+// kept (routed, not moeskip-dropped) slots of token tok: inv[tok * K + k] >= 0 (moe_route_skip parks the dropped ones at -1)
+MOEP_HD int fxKept(const int* inv, int tok, int K) {
+    int c = 0;
+    for (int k = 0; k < K; ++k) c += inv[tok * K + k] >= 0 ? 1 : 0;
+    return c;
+}
+
 }  // namespace moep

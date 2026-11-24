@@ -1262,6 +1262,8 @@ static void testMoepCombMode() {
     };
     const std::string atomic = "the atomic-scatter MoE combine (f32 order varies run to run) is fast-only";
     const std::string f16 = "f16 MoE expert outputs are a balance item";
+    // v0252-8sdet (PLAN V1-140): 6 = the fixed-point (i32) combine fused into the down projection, fast-only like 5
+    const std::string fix = "the fixed-point MoE combine (i32 sums, 4-bit-level) is fast-only";
     for (const CardFake& c : k_cards)
         for (const char* model : {"swift", "moe"}) {
             const nu::Target t = target(c, model, false);
@@ -1271,15 +1273,17 @@ static void testMoepCombMode() {
                 for (const char* mode : {"precise", "balance", "fast"}) {
                     const std::string cell = std::format("B26-41 {} {} {} q8dec='{}'", c.name, model, mode, q8);
                     const nu::Plan base = planOf(mode, t, extra);
-                    for (const char* v : {"0", "1", "2", "3", "4", "5", "5z"}) {
+                    for (const char* v : {"0", "1", "2", "3", "4", "5", "5z", "6"}) {
                         auto vals = extra;
                         vals.emplace_back("MOEP_COMB", v);
                         const nu::Plan p = planOf(mode, t, vals);
                         const unsigned want = static_cast<unsigned>(std::strtoul(v, nullptr, 10));
                         const bool precise = std::string_view(mode) == "precise", fast = std::string_view(mode) == "fast";
-                        const bool refuse = (want == 5 && !fast) || ((want == 3 || want == 4) && precise);
+                        const bool refuse = ((want == 5 || want == 6) && !fast) || ((want == 3 || want == 4) && precise);
                         if (refuse) {
-                            const std::string why = want == 5 ? atomic + std::format(" ({} never takes it)", mode) : f16 + " (precise never takes them)";
+                            const std::string why = want == 5   ? atomic + std::format(" ({} never takes it)", mode)
+                                                    : want == 6 ? fix + std::format(" ({} never takes it)", mode)
+                                                                : f16 + " (precise never takes them)";
                             NCHECK(p.flags.moep_comb == base.flags.moep_comb, "{}: WHIRL_MOEP_COMB={} must keep the mode's combine {} (got {})", cell, v,
                                    base.flags.moep_comb, p.flags.moep_comb);
                             NCHECK(p.bitsKey() == base.bitsKey() && p.overrides == base.overrides && nu::logLine(p) == nu::logLine(base),

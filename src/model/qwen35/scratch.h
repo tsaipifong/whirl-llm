@@ -74,6 +74,11 @@ struct Scratch {
     // v0251-a7port: not allocated (0): the gfx1151 default combine (moe_combine4) needs none, and WHIRL_MOEP_COMB=2 / 4
     // fall back to the plain down twin + combine (ops::chooseMoe cnt_ok), so no buffer size or estimate changes
     DevPtr moe_cnt = 0;
+    // v0252-8sdet round 4 (COMB 6): how many leading 32-bit words of moe_yd are known to be zero at the stream's current
+    // point (host bookkeeping, no device read). A gemm_moep[fq]di launch leaves the sums + counters it used zero (last
+    // arriver: atomic swap + counter reset), so ffn.cpp launches moe_fix_zero only when a COMB 6 block needs more words
+    // than this; any other MoE prefill plan (it may write moe_yd) and a throwing COMB 6 launch set it to 0; allocation too.
+    std::uint64_t moe_fix_clean = 0;
     // v0251-a11port (feat026-router): the fused router's block counter, one zeroed u32 the kernel resets (graph-capture
     // safe). Not an allocation of its own: bytes 8..11 of the zeroed 16-byte moe_ntiles (moe_route writes bytes 0..3
     // only), so no buffer size or estimate changes on either card

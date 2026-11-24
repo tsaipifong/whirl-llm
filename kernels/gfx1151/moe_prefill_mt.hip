@@ -176,11 +176,52 @@ __device__ __forceinline__ void moep_store_h16_staged(const float8 (&acc)[TM][FP
     }
 }
 
+// v0252-8sdet (COMB 6): the last-arriver tail of the fixed-point combine, shared by gemm_moepdi_* (moepdn_impl EPI 6) and
+// its fused-dequant twin gemm_moepfqdi_* (moe_prefill_fq.hip): after this block's integer adds, count each of its tokens on
+// cnt[tok][rb]; the block that brings a counter to the token's kept slots (moep::fxKept) converts the i32 sum of every row
+// of the row block once, adds sg * ysh and adds the result into x, leaving the sum and the counter zeroed.
+template <int BM, int BNMAX>
+__device__ __forceinline__ void moep_fix_finalize(int n_tok, const int *__restrict__ ptile, const int *__restrict__ inv, int K, int rb,
+                                                  int nrb, int m0, int rows_e, int *__restrict__ Yi, const float *__restrict__ sg,
+                                                  const float *__restrict__ ysh, float *__restrict__ x, int *__restrict__ cnt) {
+    constexpr int NTH = 256;
+    __shared__ int fin6[BNMAX];
+    __shared__ int nfin6;
+    if (threadIdx.x == 0) nfin6 = 0;
+    __threadfence();  // release: this block's integer adds before its counter increments
+    __syncthreads();
+    for (int t = threadIdx.x; t < n_tok; t += NTH) {
+        const int tok = ptile[t] / K;
+        int *c = cnt + moep::cntSlot(tok, rb, nrb);
+        if (atomicAdd(c, 1) == moep::fxKept(inv, tok, K) - 1) {
+            *c = 0;  // every kept slot of this (token, row block) has added: leave the counter zeroed
+            fin6[atomicAdd(&nfin6, 1)] = tok;
+        }
+    }
+    __syncthreads();
+    const int nf = nfin6;
+    if (nf == 0) return;
+    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");  // the other blocks' adds into these sums
+    for (int q = threadIdx.x; q < nf * BM; q += NTH) {
+        const int tok = fin6[q / BM], cc = m0 + q % BM;
+        if (cc >= rows_e) continue;
+        const size_t o = (size_t)tok * rows_e + cc;
+        // the sum read and zeroed in one L2 atomic (coherent with the other blocks' adds); one conversion, then the shared
+        // expert, then x: a fixed order of f32 operations per element
+        float v = moep::fxValue(atomicExch(&Yi[o], 0));
+        if (ysh != nullptr) v += sg[tok] * ysh[o];
+        x[o] += v;
+    }
+}
+
 // ---------------------------------------------------------------- down (+ optional fused combine)
 // Block: 8 waves as WM (rows) x WN (token columns); wave (wm, wn) holds TM = BM / 16 / WM row fragments and token
 // fragments wn, wn + WN, ... of one expert's tile of up to BNMAX tokens. Y: f32 [pos][rows_e] exactly as gemm_moe32r.
 // EPI: 0 = Y f32 (gemm_moepdn), 1 = Y f32 + fused combine (gemm_moepdc), 2 = Y f16 (gemm_moepdh), 3 = Y f16 + fused
-// combine (gemm_moepdhc), 4 = x += w * y by f32 atomics, no Y (gemm_moepda).
+// combine (gemm_moepdhc), 4 = x += w * y by f32 atomics, no Y (gemm_moepda), 6 (v0252-8sdet, COMB 6, fast) = i32 fixed-point
+// sums of w * y by integer atomics into Yv (int [tok][rows_e], zeroed by moe_fix_zero), then the last arriver of each
+// (token, row block) - counter target = the token's kept slots (moep::fxKept: moeskip parks dropped slots at inv -1) -
+// adds fxValue(sum) + sg * ysh into x and leaves the sum and the counter zeroed (gemm_moepdi, kernels/gfx1151/moe_prefill_fx.hip).
 // Fused combine (EPI 1, 3): after Y is stored, the block counts each of its tokens on cnt[tok][rb]; the block that brings a counter to
 // K (all K experts of that token written for this row block) computes x[tok][rows] += sum_k w * yd + sg * ysh in
 // moe_combine's order and resets the counter to 0 (cnt must start zeroed once; it is left zeroed).
@@ -189,7 +230,7 @@ __device__ void moepdn_impl(const uint8_t *__restrict__ Wall, uint64_t row_bytes
                             void *__restrict__ Yv, int ncols, const int4 *__restrict__ tiles, const int *__restrict__ n_tiles,
                             const int *__restrict__ perm, const int *__restrict__ inv, const float *__restrict__ w,
                             const float *__restrict__ sg, const float *__restrict__ ysh, float *__restrict__ x,
-                            int *__restrict__ cnt, int K) {
+                            int *__restrict__ cnt, int K, float qlim = 0.f) {
     constexpr int NTH = 256, NW = NTH / 32;
     constexpr int WN = NW / WM, TM = BM / 16 / WM;
     constexpr int NF = BNMAX / 16, FPW = NF / WN;
@@ -197,10 +238,11 @@ __device__ void moepdn_impl(const uint8_t *__restrict__ Wall, uint64_t row_bytes
     constexpr int A_PER = BM * GPR / NTH, B_PER = BNMAX * GPR / NTH;
     static_assert(NW % WM == 0 && BM % (16 * WM) == 0 && TM >= 1 && NF % WN == 0 && FPW >= 1, "wave layout");
     static_assert(BM * GPR % NTH == 0 && BNMAX * GPR % NTH == 0 && BK % 16 == 0, "tile/threads");
-    static_assert(EPI >= 0 && EPI <= 5, "epilogue");  // v0252-8smoe2: 5 = gemm_moepdhs (Y f16, coalesced through LDS)
+    static_assert(EPI >= 0 && EPI <= 6, "epilogue");  // v0252-8smoe2: 5 = gemm_moepdhs (Y f16, coalesced through LDS); v0252-8sdet: 6
     constexpr bool FUSE = EPI == 1 || EPI == 3, YH = EPI == 2 || EPI == 3;
     float *__restrict__ Y = (float *)Yv;
     _Float16 *__restrict__ Yh = (_Float16 *)Yv;
+    int *__restrict__ Yi = (int *)Yv;  // EPI 6: the i32 sums
     const int nrb = moep::nrb(rows_e, BM);
     const int ti = moep::blockTile((int)blockIdx.x, nrb), rb = moep::blockRb((int)blockIdx.x, nrb);
     if (ti >= *n_tiles) return;
@@ -297,6 +339,15 @@ __device__ void moepdn_impl(const uint8_t *__restrict__ Wall, uint64_t row_bytes
                     // unsafeAtomicAdd: the native global_atomic_add_f32 (atomicAdd compiles to a CAS loop on gfx11)
                     if (row < rows_e) unsafeAtomicAdd(&x[(size_t)tok * rows_e + row], wp * acc[i][f][v]);
                 }
+            } else if constexpr (EPI == 6) {
+                const int p = perm[tl.y + t], tok = p / K;
+                const float wp = w[p];
+#pragma unroll
+                for (int v = 0; v < 8; ++v) {
+                    const int row = m0 + (wm * TM + i) * 16 + CROW(lane, v);
+                    // integer add (global_atomic_add_u32, no return): exact, so the order of the blocks does not matter
+                    if (row < rows_e) atomicAdd(&Yi[(size_t)tok * rows_e + row], moep::fxQuant(wp * acc[i][f][v], qlim));
+                }
             } else {
 #pragma unroll
                 for (int v = 0; v < 8; ++v) {
@@ -342,6 +393,7 @@ __device__ void moepdn_impl(const uint8_t *__restrict__ Wall, uint64_t row_bytes
             x[(size_t)t * C + c] += acc_c;
         }
     }
+    if constexpr (EPI == 6) moep_fix_finalize<BM, BNMAX>(n_tok, perm + tl.y, inv, K, rb, nrb, m0, rows_e, Yi, sg, ysh, x, cnt);
 }
 
 // moe_combine with 4 consecutive columns per thread (C % 4 == 0); per element the moe_combine expression and order.
