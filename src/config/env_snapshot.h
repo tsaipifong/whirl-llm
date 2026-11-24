@@ -65,12 +65,14 @@ public:
     Value moep_dhs, moep_dna, moep_fq;
     // numerics::loadFlags (v0252-8sq4, F8): WHIRL_DQ4_ORDER, WHIRL_DQ4_MINKEYS; Model::load (fallback): WHIRL_FAST_KVQ8H
     Value dq4_order, dq4_min_keys, fast_kvq8h;
+    // numerics::loadFlags (v0252-8sq5): WHIRL_DQ4_SPLITS (the q4 decode split count: profile table / today's rule / forced)
+    Value dq4_splits;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 81;  // v0252-8sattn3: + attn_i4pf (80 -> 81)  // v0252-8sq4: + dq4_order, dq4_min_keys, fast_kvq8h (77 -> 80)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (74 -> 77)  // v0252-8smoe: + moep_guw (72 -> 73; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (73 -> 74)
+    static constexpr std::size_t n_names = 82;  // v0252-8sq5: + dq4_splits (81 -> 82)  // v0252-8sattn3: + attn_i4pf (80 -> 81)  // v0252-8sq4: + dq4_order, dq4_min_keys, fast_kvq8h (77 -> 80)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (74 -> 77)  // v0252-8smoe: + moep_guw (72 -> 73; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (73 -> 74)
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

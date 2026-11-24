@@ -71,6 +71,42 @@ u32 dq4MinKeysSplits(std::span<const i32> row_pos, i32 win, u32 full, u32 min_ke
     return std::min(s, full);
 }
 
+// v0252-8sq5: attention.h
+bool dq4GridOk(std::span<const i32> row_pos, i32 win, u32 s, u32 full) {
+    if (s < 1 || s > std::min<u32>(full, 256) || row_pos.empty()) return false;
+    if (win != 0 && s < 8) return false;
+    for (const i32 p : row_pos)
+        if (p < 0 || dq4Part(p + 1, win, s)[2] > static_cast<i32>(s)) return false;
+    return true;
+}
+
+// v0252-8sq5 (PLAN V1-109): attention.h
+u32 dq4TableSplits(std::span<const i32> row_pos, std::span<const i32> row_base, i32 win, u32 full, u32 flag, const device::Dq4SplitTable& t) {
+    if (flag == 0 || row_pos.empty()) return 0;
+    if (flag != kDq4SplitsAuto) return flag <= 256 && dq4GridOk(row_pos, win, flag, full) ? flag : 0;
+    if (!t.on) return 0;
+    const std::size_t n = row_pos.size();
+    i32 n_max = 0;
+    for (const i32 p : row_pos) n_max = std::max(n_max, p + 1);
+    // the window is active when the kernel takes its window branch (dq4Part at a grid >= 8; the threshold and w0 > 256)
+    const bool win_on = win != 0 && dq4Part(n_max, win, 8)[0] == 1;
+    std::size_t cls = 0;
+    if (n == 1) {
+        cls = win_on ? 3 : 0;
+    } else {
+        if (n > 3 || win != 0 || row_base.size() < n) return 0;
+        for (std::size_t r = 1; r < n; ++r)
+            if (row_base[r] != row_base[0] || row_pos[r] != row_pos[0] + static_cast<i32>(r)) return 0;
+        cls = n - 1;
+    }
+    u32 s = 0;
+    for (const device::Dq4SplitStep& st : t.steps[cls]) {
+        if (st.splits == 0 || st.keys > static_cast<u32>(n_max)) break;
+        s = st.splits;
+    }
+    return s != 0 && dq4GridOk(row_pos, win, s, full) ? s : 0;
+}
+
 // attn_split / attn_wsplit split size for n_pos positions (whole FD_CH chunks).
 i32 awPer(i32 n_pos, u32 n_split) {
     const i32 span = static_cast<i32>(n_split * fd_chunk);
@@ -102,8 +138,16 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
     // target instead (another partition and combine order: output may change, which fast allows); same conditions
     const bool dq4_rule = !ws4_path && p.kv_q4 && f.attn_dq4 && k.attn_dq4 != nullptr && grp_q <= 8 && p.rows_known && k.attn_wsplit1 != nullptr &&
                           hd == 256 && (f.dbg_flags & 2) == 0;
+    // v0252-8sq5 (PLAN V1-109, fast only: q4 KV): the measured table (profile dq4_split_table, flag dq4_splits auto) or a forced
+    // count, where dq4TableSplits decides (a valid grid for these rows); else today's rule. WHIRL_DQ4_MINKEYS, when set, wins
+    const u32 dq4_tab = dq4_rule && f.dq4_min_keys == 0
+                            ? dq4TableSplits(p.row_pos.first(n), p.row_base.size() >= n ? p.row_base.first(n) : std::span<const i32>{}, p.win, n_split,
+                                             f.dq4_splits, prof.dq4_split_table)
+                            : 0u;
     if (dq4_rule && f.dq4_min_keys != 0)
         n_split = dq4MinKeysSplits(p.row_pos.first(n), p.win, n_split, f.dq4_min_keys);
+    else if (dq4_tab != 0)
+        n_split = dq4_tab;
     else if (dq4_rule && prof.attn_dq4_dynamic_splits && f.dq4_dyn)
         n_split = dq4Splits(p.row_pos.first(n), p.win, n_split);
     // v0252-l2split (PLAN V1-88): f16 / q8 / q8h KV on the attn_wsplit / attn_ws4r branch below (the conditions of that
