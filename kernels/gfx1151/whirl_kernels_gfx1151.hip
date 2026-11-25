@@ -43,3 +43,4 @@
 #include "gemv_hg.hip"             // v0252-8sdec: grouped precise gemvh (gemvhg_<T>; LAST: no existing kernel moves)
 #include "moe_prefill_fq.hip"       // v0252-8smoe2: moep twins - coalesced f16 down epilogue (C), fused-dequant expert GEMMs (E); opt-in (LAST: no existing kernel moves)
 #include "moe_prefill_fx.hip"       // v0252-8sdet: COMB 6 order-independent fixed-point combine (gemm_moepdi_*, moe_fix_zero); opt-in (LAST: no existing kernel moves)
+#include "gdn_select.hip"           // v0252-e1s8: capability marker whirl_cap_gdn_select of the DeltaNet select mode (LAST: no existing kernel moves)

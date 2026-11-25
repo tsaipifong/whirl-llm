@@ -41,8 +41,20 @@ struct Arm {
     MockModel::E1Counts e1{};
 };
 
+// v0252-e1s8 (PLAN V1-93 P2a): true = every case of this file runs on a model in DeltaNet snapshot mode with the select mode
+// (the gfx1151 / Radeon 8060S path, MockConfig::snap_select; e1_snap_tests.inc runs the suite that way)
+bool g_snap = false;
+
+void applyMode(ServerSetup& su) {
+    if (!g_snap) return;
+    su.mc.replay = false;
+    su.mc.snap_select = true;
+    su.mc.snap_sets = qwen35::gdn_max_snap;  // (whirl-server's startup allocates them: startup_steps.h)
+}
+
 ServerSetup setup(std::uint32_t e1, std::uint32_t nd, std::uint32_t spec_acc = 0) {
     ServerSetup su = baseSetup();
+    applyMode(su);
     su.mc.parallel = 1;
     su.mc.pool_tokens = 131072;
     su.eo.mtp_auto = false;
@@ -364,6 +376,7 @@ void testE1AheadDrain() {
         std::size_t no_ngram[2] = {0, 0};  // requests whose stats line says "n-gram drafts in 0 of N cycles"
         for (std::uint32_t arm = 0; arm < 2; ++arm) {
             ServerSetup su = baseSetup();
+            e1ahead::applyMode(su);  // v0252-e1s8
             su.mc.markov = c.markov;
             su.mc.pool_tokens = 131072;
             su.eo.ngram = c.markov > 0;
@@ -527,7 +540,8 @@ void testE1AheadEnv() {
 #ifdef WHIRL_SOURCE_DIR
         CHECK(sm.find("chooseE1(e1_env, qwen35::e1Default(model.cfg.moe, model.arch),") != std::string::npos);
         CHECK(sm.find(".fast = nreq.mode == numerics::Mode::fast,") != std::string::npos);
-        CHECK(doc.find("Not set: `2` for MoE models (Ornith) on the Radeon AI PRO R9700") != std::string::npos);
+        CHECK(doc.find("Not set: `2` for MoE models (Ornith) on the Radeon AI PRO R9700 and the Radeon 8060S") != std::string::npos);
+        CHECK(doc.find("not set, the 8060S keeps `0`") == std::string::npos);  // v0252-e1s8 round 3: no longer true
         CHECK(doc.find("The reply is the same with every value in the same mode") != std::string::npos);
 #endif
         struct Row {
@@ -535,7 +549,7 @@ void testE1AheadEnv() {
             bool moe;
             std::uint32_t want;
         };
-        const Row rows[] = {{hip::Arch::gfx1201, true, 2}, {hip::Arch::gfx1201, false, 0}, {hip::Arch::gfx1151, true, 0}, {hip::Arch::gfx1151, false, 0}};
+        const Row rows[] = {{hip::Arch::gfx1201, true, 2}, {hip::Arch::gfx1201, false, 0}, {hip::Arch::gfx1151, true, 2}, {hip::Arch::gfx1151, false, 0}};  // (v0252-e1s8 round 3: 8060S MoE 2)
         const E1Site exact{.mtp = true, .dflash = false, .relax = false, .fast = false, .model_ok = true};
         E1Site fast = exact;  // fast mode with its relaxed-acceptance arm
         fast.relax = true;
@@ -644,10 +658,14 @@ void testE1AheadLen() {
     CHECK(pol.find("v0252-e1long:regression-root-cause") != std::string::npos);
     for (const char* v : {"+18.13", "+1.56", "-3.77", "+49.88", "+42.28"}) CHECK(pol.find(v) != std::string::npos);
     // whirl-server gives the limit to the DEFAULT only; the per-cycle test is in the decode cycle (both paths)
-    CHECK(sm.find("e1DefaultCtxMax(e1c, qwen35::e1_default_ctx_max)") != std::string::npos);
+    // (v0252-e1s8 round 2: the boundary of the card the server runs on, device::Profile::e1_ctx_max through qwen35::e1CtxMax)
+    CHECK(sm.find("e1DefaultCtxMax(e1c, qwen35::e1CtxMax(model.arch))") != std::string::npos);
+    CHECK(sm.find("e1DefaultCtxMax(e1c, qwen35::e1_default_ctx_max)") == std::string::npos);
     CHECK(dec.find("e1LenAllows(opt_.e1_ctx_max") != std::string::npos);
     CHECK(doc.find("below `65536` tokens of context") != std::string::npos);  // the default's boundary, in the env table
     CHECK(rel0.find("below 65536 tokens of context") != std::string::npos);   // and in the release A/B list
+    CHECK(rel0.find("the Radeon 8060S below 8192") != std::string::npos);     // v0252-e1s8 round 3: the 8060S default and its boundary
+    CHECK(doc.find("the Radeon 8060S below `8192`") != std::string::npos);
 #else
     CHECK(false);  // whirl-server-tests is built with WHIRL_SOURCE_DIR (cmake/server.cmake): the source checks must run
 #endif

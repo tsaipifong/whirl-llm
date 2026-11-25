@@ -265,7 +265,10 @@ void testProfiles() {
     // v0252-e1def (PLAN V1-93): the E1 one-cycle lookahead (WHIRL_E1=2) is the default of MoE models on the R9700 only
     // (dense models there and both model classes on the Radeon 8060S keep 0)
     CHECK(a.e1_dense == 0 && a.e1_moe == 2);
-    CHECK(b.e1_dense == 0 && b.e1_moe == 0);
+    CHECK(b.e1_dense == 0 && b.e1_moe == 2);  // v0252-e1s8 round 3: the 8060S runs the lookahead for MoE by default
+    // v0252-e1s8 round 2 (B): the E1 default's context limit per code object (gfx1201 = the R9700 measurement 65536; gfx1151 =
+    // 8192, the largest length with a measured gain, screen e1s8-orn 20261125-0619; the main session sets the final value)
+    CHECK(a.e1_ctx_max == 65536 && b.e1_ctx_max == 8192);
     // v0252-l2split (PLAN V1-88): the decode / verify split count by machine fill: R9700 64 blocks = 32 WGPs x 2 attn_ws4r
     // blocks (one machine wave); the 8060S 0 (its attn_ws4 path keeps the constant 64 splits)
     CHECK(a.attn_lsplit_blocks == 64);

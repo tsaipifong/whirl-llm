@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "spec_accept.h"  // kernels/ (feat026-acc; v0252-e1p1b NPEND / device position)
+#include "gdn_select.h"   // kernels/ (v0252-e1s8: the select rule)
 
 template <>
 struct whirl::hip::LaunchArgPtrWords<SpecAccArgs> : whirl::hip::LaunchArgNoPtrWords {};
@@ -317,6 +318,167 @@ void testGdnReplayCount(Ctx& c) {
     c.rep.add(branchHits("gdn replay-count launches run " + std::to_string(launches), launches, launches > 0));
 }
 
+// ---- v0252-e1s8: the DeltaNet SELECT mode (gfx1151 snapshot mode, kernels/gdn_select.h). Round 2: the select entries are
+// their own kernels (kernels/gfx1151/gdn_select.hip: gdn_conv_l2_sel, gdn_abconv_sel_<T>, gdn_step_norm_sel); the shipping
+// entries are untouched. A select launch (pend = an NPEND word c + 1, npend = m, snap[0 .. m] = candidates, state = spare)
+// against the SHIPPING in-place launch from a copy of candidate c: the spare == the in-place final state, each output
+// snapshot == the in-place snapshot, out / xq / xd equal, the candidate read and the candidates not written untouched -
+// bitwise, for m 1 / 3, nd 1 .. m, every c in 0 .. m, in two head shapes: Swift-like (16 k-heads / 48 v-heads) and Ornith
+// (16 k-heads / 32 v-heads).
+void testGdnSelect(Ctx& c) {
+    if (!c.k.caps.gdn_select || !c.k.gdn_conv_l2_sel || !c.k.gdn_step_norm_sel) {
+        c.rep.skip("e1in", "gdn select mode", "select-mode fused DeltaNet kernels not in this code object (gfx1201: replay mode)");
+        return;
+    }
+    const float eps = 1e-6f, scale = 1.0f / std::sqrt(128.0f);
+    const int maxr = 4;
+    std::size_t launches = 0;
+    struct Shape {
+        const char* name;
+        int nk, nv;
+    };
+    for (const Shape sh : {Shape{"swift-like 16/48", 16, 48}, Shape{"ornith 16/32", 16, 32}}) {
+        const int nk = sh.nk, nv = sh.nv;
+        const int ch = 2 * nk * kDk + nv * kDv, d_inner = nv * kDv;
+        const std::vector<float> convw = c.randn(static_cast<std::size_t>(ch) * 4, 0.5f);
+        const std::vector<float> xin = c.randn(static_cast<std::size_t>(maxr) * ch, 0.5f);
+        const std::vector<float> qkv = c.randn(static_cast<std::size_t>(maxr) * ch, 0.1f);
+        std::vector<float> g = c.randn(static_cast<std::size_t>(maxr) * nv, 0.1f);
+        for (float& v : g) v = -std::fabs(v);
+        const std::vector<float> beta = c.randu(static_cast<std::size_t>(maxr) * nv, 0.f, 1.f);
+        const std::vector<float> z = c.randn(static_cast<std::size_t>(maxr) * d_inner);
+        const std::vector<float> wn = c.randn(kDv, 0.5f);
+        Buf dconvw(convw), dxin(xin), dq(qkv), dg(g), db(beta), dz(z), dwn(wn);
+        for (const int m : {1, 3}) {
+            for (int nd = 1; nd <= m; ++nd) {
+                for (int cc = 0; cc <= m; ++cc) {
+                    const std::string tag = std::string(" (") + sh.name + ", m " + std::to_string(m) + ", nd " + std::to_string(nd) + ", c " +
+                                            std::to_string(cc) + ")";
+                    const int nrows = nd + 1;
+                    const std::vector<int> word{cc + 1};
+                    Buf dword(word);
+                    // ---- conv: gdn_conv_l2_sel vs gdn_conv_l2, gdn_abconv_sel_<T> vs gdn_abconv_<T> (conv blocks); state 3 * ch
+                    struct ConvPair {
+                        std::string name;
+                        hip::Function ship, sel;
+                        bool ab;
+                    };
+                    const ConvPair pairs[] = {{"gdn_conv_l2", c.k.gdn_conv_l2, c.k.gdn_conv_l2_sel, false},
+                                              {"gdn_abconv_q8_0 (conv blocks)", c.fnOpt("gdn_abconv_q8_0"), c.fnOpt("gdn_abconv_sel_q8_0"), true},
+                                              {"gdn_abconv_mxfp4 (conv blocks)", c.fnOpt("gdn_abconv_mxfp4"), c.fnOpt("gdn_abconv_sel_mxfp4"), true}};
+                    for (const ConvPair& cp : pairs) {
+                        if (!cp.ship || !cp.sel) {
+                            c.rep.skip("e1in", cp.name + " select", "kernel not present");
+                            continue;
+                        }
+                        const std::size_t sn = 3 * static_cast<std::size_t>(ch);
+                        std::vector<std::vector<float>> cand;
+                        for (int j = 0; j <= m; ++j) cand.push_back(c.randn(sn));
+                        auto go = [&](hip::Function f, const wk::GdnSegs& sgs, DevPtr out) {
+                            if (cp.ab)
+                                hip::launch(f, {static_cast<unsigned>(ch / 128), 1, 1}, {256, 1, 1}, 0, c.s, DevPtr{0}, DevPtr{0}, std::uint64_t{0}, DevPtr{0},
+                                            DevPtr{0}, DevPtr{0}, DevPtr{0}, DevPtr{0}, DevPtr{0}, 0, 4, 0, dxin.p(), dconvw.p(), out, ch, 2 * nk, eps, sgs);
+                            else
+                                hip::launch(f, {static_cast<unsigned>(ch / 128), 1, 1}, {128, 1, 1}, 0, c.s, dxin.p(), dconvw.p(), out, ch, 2 * nk, eps, sgs);
+                        };
+                        Buf live(cand[static_cast<std::size_t>(cc)]), o_p(static_cast<std::size_t>(maxr) * ch * 4);
+                        std::vector<Buf> sp;
+                        for (int r = 0; r < nd; ++r) sp.emplace_back(sn * 4);
+                        o_p.zero();
+                        wk::GdnSegs sa;
+                        sa.s[0].state = live.p();
+                        sa.s[0].nrows = nrows;
+                        for (int r = 0; r < nd; ++r) sp[static_cast<std::size_t>(r)].zero(), sa.s[0].snap[r] = sp[static_cast<std::size_t>(r)].p();
+                        go(cp.ship, sa, o_p.p());
+                        std::vector<Buf> P;
+                        for (int j = 0; j <= m; ++j) P.emplace_back(cand[static_cast<std::size_t>(j)]);
+                        Buf spare(sn * 4), o_s(static_cast<std::size_t>(maxr) * ch * 4);
+                        spare.fill(0x5a);
+                        o_s.zero();
+                        wk::GdnSegs ss;
+                        ss.s[0].state = spare.p();
+                        ss.s[0].nrows = nrows;
+                        for (int j = 0; j <= m; ++j) ss.s[0].snap[j] = P[static_cast<std::size_t>(j)].p();
+                        ss.s[0].pend = dword.p();
+                        ss.s[0].npend = m;
+                        go(cp.sel, ss, o_s.p());
+                        c.sync();
+                        launches += 2;
+                        const std::string kn = cp.name;
+                        c.rep.add(cmpExact(kn + " select: spare == in-place final" + tag, spare.down<float>(sn), live.down<float>(sn), Kind::invariant));
+                        c.rep.add(cmpExact(kn + " select: out == in place" + tag, o_s.down<float>(static_cast<std::size_t>(nrows) * ch),
+                                           o_p.down<float>(static_cast<std::size_t>(nrows) * ch), Kind::invariant));
+                        std::vector<float> got_snap, want_snap, got_keep, want_keep;
+                        for (int r = 0; r < nd; ++r) {
+                            const std::vector<float> x = P[static_cast<std::size_t>(gdn_sel_out(r, cc))].down<float>(sn), y = sp[static_cast<std::size_t>(r)].down<float>(sn);
+                            got_snap.insert(got_snap.end(), x.begin(), x.end());
+                            want_snap.insert(want_snap.end(), y.begin(), y.end());
+                        }
+                        for (int j = 0; j <= m; ++j) {
+                            bool written = false;
+                            for (int r = 0; r < nd; ++r) written = written || gdn_sel_out(r, cc) == j;
+                            if (written) continue;
+                            const std::vector<float> x = P[static_cast<std::size_t>(j)].down<float>(sn);
+                            got_keep.insert(got_keep.end(), x.begin(), x.end());
+                            want_keep.insert(want_keep.end(), cand[static_cast<std::size_t>(j)].begin(), cand[static_cast<std::size_t>(j)].end());
+                        }
+                        c.rep.add(cmpExact(kn + " select: snapshots == in place" + tag, got_snap, want_snap, Kind::invariant));
+                        c.rep.add(cmpExact(kn + " select: the candidate read (and the unused ones) untouched" + tag, got_keep, want_keep, Kind::invariant));
+                    }
+                    // ---- delta rule: gdn_step_norm_sel vs gdn_step_norm; state nv * 128 * 128
+                    {
+                        const std::size_t sn = static_cast<std::size_t>(nv) * kDk * kDv;
+                        std::vector<std::vector<float>> cand;
+                        for (int j = 0; j <= m; ++j) cand.push_back(c.randn(sn, 0.1f));
+                        const std::size_t no = static_cast<std::size_t>(nrows) * d_inner;
+                        auto go = [&](hip::Function f, const wk::GdnSegs& sgs, Buf& y, Buf& q, Buf& d) {
+                            hip::launch(f, {static_cast<unsigned>(nv), 1, 1}, {512, 1, 1}, 0, c.s, dq.p(), dg.p(), db.p(), dz.p(), dwn.p(), y.p(), q.p(), d.p(), nk,
+                                        scale, eps, nv, ch, sgs);
+                        };
+                        Buf live(cand[static_cast<std::size_t>(cc)]), y_p(no * 4), q_p(no), d_p(no / 32 * 4);
+                        y_p.zero(), q_p.zero(), d_p.zero();
+                        std::vector<Buf> sp;
+                        for (int r = 0; r < nd; ++r) sp.emplace_back(sn * 4);
+                        wk::GdnSegs sa;
+                        sa.s[0].state = live.p();
+                        sa.s[0].nrows = nrows;
+                        for (int r = 0; r < nd; ++r) sp[static_cast<std::size_t>(r)].zero(), sa.s[0].snap[r] = sp[static_cast<std::size_t>(r)].p();
+                        go(c.k.gdn_step_norm, sa, y_p, q_p, d_p);
+                        std::vector<Buf> P;
+                        for (int j = 0; j <= m; ++j) P.emplace_back(cand[static_cast<std::size_t>(j)]);
+                        Buf spare(sn * 4), y_s(no * 4), q_s(no), d_s(no / 32 * 4);
+                        spare.fill(0x5a), y_s.zero(), q_s.zero(), d_s.zero();
+                        wk::GdnSegs ss;
+                        ss.s[0].state = spare.p();
+                        ss.s[0].nrows = nrows;
+                        for (int j = 0; j <= m; ++j) ss.s[0].snap[j] = P[static_cast<std::size_t>(j)].p();
+                        ss.s[0].pend = dword.p();
+                        ss.s[0].npend = m;
+                        go(c.k.gdn_step_norm_sel, ss, y_s, q_s, d_s);
+                        c.sync();
+                        launches += 2;
+                        const std::string kn = "gdn_step_norm";
+                        c.rep.add(cmpExact(kn + " select: spare == in-place final" + tag, spare.down<float>(sn), live.down<float>(sn), Kind::invariant));
+                        c.rep.add(cmpExact(kn + " select: out == in place" + tag, y_s.down<float>(no), y_p.down<float>(no), Kind::invariant));
+                        c.rep.add(cmpExact(kn + " select: xq == in place" + tag, q_s.down<std::int8_t>(no), q_p.down<std::int8_t>(no), Kind::invariant));
+                        c.rep.add(cmpExact(kn + " select: xd == in place" + tag, d_s.down<float>(no / 32), d_p.down<float>(no / 32), Kind::invariant));
+                        std::vector<float> got_snap, want_snap;
+                        for (int r = 0; r < nd; ++r) {
+                            const std::vector<float> x = P[static_cast<std::size_t>(gdn_sel_out(r, cc))].down<float>(sn), y = sp[static_cast<std::size_t>(r)].down<float>(sn);
+                            got_snap.insert(got_snap.end(), x.begin(), x.end());
+                            want_snap.insert(want_snap.end(), y.begin(), y.end());
+                        }
+                        c.rep.add(cmpExact(kn + " select: snapshots == in place" + tag, got_snap, want_snap, Kind::invariant));
+                        c.rep.add(cmpExact(kn + " select: the candidate read untouched" + tag, P[static_cast<std::size_t>(cc)].down<float>(sn),
+                                           cand[static_cast<std::size_t>(cc)], Kind::invariant));
+                    }
+                }
+            }
+        }
+    }
+    c.rep.add(branchHits("gdn select-mode launches run " + std::to_string(launches), launches, launches > 0));
+}
+
 // ---- spec_accept_rows: the position from the NPOS word == by value
 void testSpecAccDevPos(Ctx& c) {
     if (!c.k.spec_accept_rows) {
@@ -422,6 +584,7 @@ void testE1Inputs(Ctx& c) {
     testSetRowsDp(c);
     testRmsnormRowsDv(c);
     testGdnReplayCount(c);
+    testGdnSelect(c);  // v0252-e1s8
     testSpecAccDevPos(c);
 }
 

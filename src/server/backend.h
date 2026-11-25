@@ -117,8 +117,17 @@ public:
     // ---- v0252-e1p1b (E1, WHIRL_E1; PLAN V1-93 P1b): the next cycle's inputs from the control words the accept kernel
     // wrote (qwen35::ctl_acc / ctl_chosen / ctl_npos / ctl_npend) instead of host values: VSeg::dev, MSeg::e1_rows,
     // setPending(s, qwen35::npend_dev) and SpecAccArgs::pos < 0. e1InputsOk: the model supports it (the device-input
-    // kernels, the accept kernel, DeltaNet replay mode). Default: no (the engine never takes the E1 path then).
+    // kernels, the accept kernel, DeltaNet replay mode - or v0252-e1s8 snapshot mode with the select mode below). Default: no
+    // (the engine never takes the E1 path then).
     virtual bool e1InputsOk() const { return false; }
+    // ---- v0252-e1s8 (E1 in DeltaNet snapshot mode, gfx1151; kernels/gdn_select.h): in snapshot mode (gdnReplay() false)
+    // setPending(s, qwen35::npend_dev) marks the sequence's NEXT verify as a select verify (its input state is chosen on the
+    // device by the NPEND word the accept of the verify before it writes; its outputs go to buffers other than that input).
+    // settleSelect(s, acc): the host has read that accept (acc accepted drafts, after the end-of-turn cut, = the device's
+    // words): rename the state buffers; until the next verify, dropPending(s) gives the sequence the state after that
+    // accepted cycle back (the select verify in flight is dropped). Called only for a model whose e1InputsOk() holds in
+    // snapshot mode. Default: nothing (no such model).
+    virtual void settleSelect(std::uint32_t s, std::uint32_t acc) { (void)s, (void)acc; }
     virtual void specAccept(const SpecAccArgs& /*a*/, std::int32_t* /*host*/) {}
     virtual void readSpecTab(SpecNextTab& /*t*/) {}
     // speculative sampling of MTP drafts (numerics item specsample): per sequence, set before the

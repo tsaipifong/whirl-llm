@@ -82,6 +82,20 @@ void Context::run(u32 n) {
         } else {
             commitSeq(cur_seq);
         }
+    } else if (bplan == nullptr) {
+        // v0252-e1s8 (snapshot mode): a forward that is not a verify runs on the live state - a select mark or a held spare
+        // state of the sequence is void from here (the engine drains the lookahead before any other work)
+        const auto clearSel = [this](u32 s) {
+            if (s >= seqs.size()) return;
+            seqs[s].npend = 0;
+            seqs[s].held = false;
+            seqs[s].sel_cm = -1;
+        };
+        if (!psegs.empty()) {
+            for (const PRows& ps : psegs) clearSel(ps.seq);
+        } else {
+            clearSel(cur_seq);
+        }
     }
     xq_src = 0;
     x16_src = 0;

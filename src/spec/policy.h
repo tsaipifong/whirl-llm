@@ -59,6 +59,9 @@ std::uint32_t e1Default(bool moe, hip::Arch arch = device::k_default_arch);
 // lookahead removes is a shrinking share of a cycle whose attention over the KV grows with the length, while the
 // lookahead's own per-cycle cost grows with it - so the sign flips with length and one global default cannot be right.
 inline constexpr std::uint32_t e1_default_ctx_max = 65536;
+// v0252-e1s8 round 2: the boundary of THIS code object (device::Profile::e1_ctx_max: the R9700 row = e1_default_ctx_max
+// above, the 8060S row its own measured value); whirl-server gives it to the default (server::e1DefaultCtxMax)
+std::uint32_t e1CtxMax(hip::Arch arch = device::k_default_arch);
 
 // ---- draft-head vocabulary subset (T5-1b): WHIRL_DRAFT_VOCAB = 48k | 64k | <file> | off | N
 // File for a WHIRL_DRAFT_VOCAB value: "48k" / "64k" / ... -> <dir>/subset_48k.bin, anything else

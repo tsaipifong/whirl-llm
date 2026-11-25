@@ -87,7 +87,8 @@ std::optional<bool> requiredKernelAbsentOk(const std::string& arch, const std::s
         // and the gfx1151-only 4-wave attention (attn8s: attn_ws4 / attn_ws4g*)
         {"gfx1201", {"moe gemm_moegu", "moemx gemm_moegu", "moef gemm_moegu", "moef moe_gu_f_f32", "moef moe_gu_f_f16", "ws4 attn_ws4",
                      "ws4g attn_ws4g",
-                     "attn attn_sx"}},  // v0252-strixc2: the balance prefill attention is in the gfx1151 code object only
+                     "attn attn_sx",    // v0252-strixc2: the balance prefill attention is in the gfx1151 code object only
+                     "e1in gdn select"}},  // v0252-e1s8: the DeltaNet select mode (snapshot-mode E1) is gfx1151 only
         // gfx1151 (full 8060S run, INT-RC4F): no fp8 path, no gfx1201 precise MoE prefill GEMMs, no precise
         // MoE expert kernel for f32 / f16 experts; no gfx1201 4-wave attention attn_ws4r* (v0252-ws4r97); no DeltaNet replay kernels and no gdn_step_norm_v0 (the
         // gfx1151 fused_decode.hip has neither: verify takes the snapshot path); no moe_mxfp4.hip (MXFP4

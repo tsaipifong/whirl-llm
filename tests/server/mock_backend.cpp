@@ -2,6 +2,8 @@
 
 #include "mock_backend.h"
 
+#include "../../kernels/gdn_select.h"  // v0252-e1s8: the select rule the gfx1151 kernels and the model use
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -116,6 +118,7 @@ MockModel::MockModel(device::Backend& ops, const Tokenizer& tok, const MockConfi
         vc_.push_back(ops_.malloc(static_cast<std::uint64_t>(pool_pages_) * kPage * kVRow));
         for (std::uint32_t r : xrow_) xc_.push_back(ops_.malloc(static_cast<std::uint64_t>(pool_pages_) * kPage * r));
     }
+    if (!mc.replay && mc.snap_sets > 0) ensureSnapshots(mc.snap_sets);  // v0252-e1s8
 }
 
 MockModel::~MockModel() {
@@ -126,6 +129,13 @@ MockModel::~MockModel() {
             if (p) ops_.free(p);
         ops_.free(s.hid);
     }
+    for (auto* t : {&spconv_, &spssm_})
+        for (auto p : *t)
+            if (p) ops_.free(p);
+    for (auto* ts : {&pconv_, &pssm_})
+        for (auto& t : *ts)
+            for (auto p : t)
+                if (p) ops_.free(p);
     for (auto p : kc_) ops_.free(p);
     for (auto p : vc_) ops_.free(p);
     for (auto p : xc_) ops_.free(p);
@@ -164,13 +174,20 @@ std::vector<server::KvArr> MockModel::kvArrays() const {
     return out;
 }
 
-std::uint64_t MockModel::readH(const Seq& s) const {
+std::uint64_t MockModel::readH(const Seq& s) const { return readHAt(s.conv, s.ssm); }
+
+// v0252-e1s8: the recurrent hash of any state table (the live state, a snapshot set, the spare set)
+std::uint64_t MockModel::readHAt(std::span<const server::DevPtr> conv, std::span<const server::DevPtr> ssm) const {
     std::uint64_t h = 0;
     bool first = true, bad = false;
     for (std::uint32_t i = 0; i < cfg_.n_layer; ++i) {
-        if (s.ssm[i] == 0) continue;
-        const std::uint64_t* ss = at<std::uint64_t>(s.ssm[i]);
-        const std::uint64_t* cc = at<std::uint64_t>(s.conv[i]);
+        if (cfg_.isAttn(i)) continue;
+        if (i >= ssm.size() || i >= conv.size() || ssm[i] == 0 || conv[i] == 0) {
+            bad = true;  // a DeltaNet layer without a buffer
+            continue;
+        }
+        const std::uint64_t* ss = at<std::uint64_t>(ssm[i]);
+        const std::uint64_t* cc = at<std::uint64_t>(conv[i]);
         if (first) {
             h = ss[0];
             first = false;
@@ -348,6 +365,12 @@ void MockModel::prefillOne(std::uint32_t si, std::span<const std::uint32_t> toks
 
 void MockModel::commitSeq(std::uint32_t si) {
     Seq& s = seqs_[si];
+    // v0252-e1s8 (snap_select): nothing to replay in snapshot mode; a prefill forward drops a select mark (Context::run)
+    if (physical()) {
+        s.npend = 0;
+        s.held = false;
+        return;
+    }
     if (s.npend == 0) return;
     // v0252-e1p1b (E1): qwen35::npend_dev = the count is the NPEND control word (what the GDN kernels read at snap[0])
     std::uint32_t n = s.npend;
@@ -376,9 +399,39 @@ MockModel::E1Counts MockModel::e1Counts() const {
 void MockModel::ensureSnapshots(std::uint32_t n) {
     snap_sets_ = std::max(snap_sets_, std::min(n, qwen35::gdn_max_snap));
     if (snaps_.size() < snap_sets_) snaps_.resize(snap_sets_);
+    // v0252-e1s8 (snap_select): real buffers per set, like Context::ensureSnapshots
+    while (physical() && pconv_.size() < snap_sets_) {
+        pconv_.push_back(allocStateTable());
+        pssm_.push_back(allocStateTable());
+        powner_.push_back(~0u);
+    }
+}
+
+std::vector<server::DevPtr> MockModel::allocStateTable() {
+    std::vector<server::DevPtr> t(cfg_.n_layer, 0);
+    for (std::uint32_t i = 0; i < cfg_.n_layer; ++i)
+        if (!cfg_.isAttn(i)) t[i] = ops_.malloc(std::max(convBytes(), ssmBytes()));
+    return t;
 }
 
 void MockModel::restoreSeqSnapshot(std::uint32_t s, std::uint32_t set) {
+    if (physical()) {
+        // v0252-e1s8: the pointer swap of Model::restoreSeqSnapshot (model_kv.cpp)
+        if (set >= pconv_.size() || powner_[set] != s) {
+            poison_ += 1;
+            return;
+        }
+        Seq& q = seqs_[s];
+        for (std::uint32_t i = 0; i < cfg_.n_layer; ++i) {
+            if (cfg_.isAttn(i)) continue;
+            std::swap(q.conv[i], pconv_[set][i]);
+            std::swap(q.ssm[i], pssm_[set][i]);
+        }
+        powner_[set] = ~0u;
+        q.npend = 0;
+        q.held = false;
+        return;
+    }
     // replay keeps no snapshots: a restore there is a bookkeeping error
     if (mc_.replay || set >= snaps_.size() || snaps_[set].seq != s) {
         poison_ += 1;
@@ -386,6 +439,62 @@ void MockModel::restoreSeqSnapshot(std::uint32_t s, std::uint32_t set) {
     }
     writeH(seqs_[s], snaps_[set].h);
     seqs_[s].npend = 0;
+}
+
+// v0252-e1s8 (snap_select): the end of a request inside the lookahead window - the state after the cycle the host read last
+// is in the spare set (settleSelect put it there); the dropped cycle's outputs never become the state
+void MockModel::dropPending(std::uint32_t s) {
+    Seq& q = seqs_[s];
+    q.npend = 0;
+    if (physical() && q.held) {
+        for (std::uint32_t i = 0; i < cfg_.n_layer; ++i) {
+            if (cfg_.isAttn(i)) continue;
+            std::swap(q.conv[i], spconv_[i]);
+            std::swap(q.ssm[i], spssm_[i]);
+        }
+        sel_given_ += 1;
+    }
+    q.held = false;
+}
+
+// v0252-e1s8: the host learnt the accepted count of the verify before the select verify in flight: rename the tables
+// (kernels/gdn_select.h gdn_sel_settle, per layer, as Model::settleSelect)
+void MockModel::settleSelect(std::uint32_t s, std::uint32_t acc) {
+    Seq& q = seqs_[s];
+    if (!physical() || q.sel_cm < 0) {
+        sel_bad_ += 1;
+        poison_ += 1;
+        return;
+    }
+    const int m = q.sel_cm;
+    const int c = gdn_sel_pick(static_cast<int>(acc) + 1, m);
+    for (std::uint32_t i = 0; i < cfg_.n_layer; ++i) {
+        if (cfg_.isAttn(i)) continue;
+        std::vector<server::DevPtr> sc(static_cast<std::size_t>(m) + 1), ss(static_cast<std::size_t>(m) + 1);
+        for (int r = 0; r < m; ++r) {
+            sc[r] = pconv_[r][i];
+            ss[r] = pssm_[r][i];
+        }
+        gdn_sel_settle(sc.data(), m, q.conv[i], spconv_[i], c);
+        gdn_sel_settle(ss.data(), m, q.ssm[i], spssm_[i], c);
+        for (int r = 0; r < m; ++r) {
+            pconv_[r][i] = sc[r];
+            pssm_[r][i] = ss[r];
+        }
+    }
+    for (int r = 0; r < m; ++r) powner_[r] = s;
+    q.sel_cm = -1;
+    q.held = true;
+    sel_settles_ += 1;
+}
+
+MockModel::SelCounts MockModel::selCounts() const {
+    SelCounts c;
+    c.selects = sel_selects_.load();
+    c.settles = sel_settles_.load();
+    c.given_back = sel_given_.load();
+    c.bad_settles = sel_bad_.load();
+    return c;
 }
 
 void MockModel::mapPages(std::uint32_t s, std::uint32_t first, std::span<const std::int32_t> phys) {
@@ -401,6 +510,8 @@ void MockModel::reset() {
     writeH(s, kH0);
     s.npend = 0;
     s.pend.clear();
+    s.held = false;   // v0252-e1s8
+    s.sel_cm = -1;
 }
 
 // one prefill forward of n rows: the real model's limit (forward.cpp: n > max_batch -> BatchTooLarge)
@@ -636,8 +747,12 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
         // v0252-e1p1b (E1): row 0 and the position from the control words the last accept wrote (set_rows_dp); the host copy
         // must agree in the synchronous cycle
         std::uint32_t next = sg.next, pos = sg.pos;
+        // v0252-e1s8 (snap_select): a sequence marked by setPending(s, npend_dev) selects its input from the NPEND word
+        const bool sel = physical() && s.npend == qwen35::npend_dev;
+        // (as Context::verifyBatchEnqueue: one sequence, at most as many drafts as the verify it selects from, MTP drafts)
+        if (sel && (segs.size() != 1 || sg.nd > s.sel_m || !sg.drafts.empty())) throw std::runtime_error("BadBatch");
         if (sg.dev) {
-            if (!mc_.replay || !sg.drafts.empty()) throw std::runtime_error("BadBatch");  // as Context::verifyBatchEnqueue
+            if ((!mc_.replay && !physical()) || !sg.drafts.empty()) throw std::runtime_error("BadBatch");  // as Context::verifyBatchEnqueue
             next = static_cast<std::uint32_t>(s.ctl[WHIRL_SA_CTL_CHOSEN]);
             pos = static_cast<std::uint32_t>(s.ctl[WHIRL_SA_CTL_NPOS]);
             if (sg.next == qwen35::tok_dev) {
@@ -658,7 +773,26 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
         // the real model's limits (Context::verifyBatchEnqueue, mtp_verify.cpp:165; verifyRows() = max_small_batch by default)
         if (toks.size() > qwen35::max_small_batch || row + toks.size() > verifyRows()) throw std::runtime_error("BatchTooLarge");
         if (pos + toks.size() > mc_.slot_ctx) throw std::runtime_error("ContextTooLong");
-        const State st0{readH(s), kvPrefix(s, pos), pos};
+        // v0252-e1s8 (snap_select): the buffers this verify reads and writes, as the gfx1151 kernels see the segment table
+        // (Context::gdnSegsBatch): input = live, or candidate c of the select; snapshot i -> set snap + i, or the candidate
+        // gdn_sel_out(i, c); final -> live, or the spare set
+        const int sel_m = static_cast<int>(s.sel_m);
+        int sel_c = 0;
+        if (sel) {
+            if (spconv_.empty()) {
+                spconv_ = allocStateTable();
+                spssm_ = allocStateTable();
+            }
+            sel_c = gdn_sel_pick(s.ctl[WHIRL_SA_CTL_NPEND], sel_m);
+            e1_npend_ += 1;  // the count came from the NPEND word
+            sel_selects_ += 1;
+            for (int j = 0; j < sel_m; ++j)
+                if (powner_[j] != sg.seq) poison_ += 1;  // a candidate set another sequence wrote
+        }
+        const auto candConv = [&](int j) -> std::span<const server::DevPtr> { return j < sel_m ? pconv_[j] : s.conv; };
+        const auto candSsm = [&](int j) -> std::span<const server::DevPtr> { return j < sel_m ? pssm_[j] : s.ssm; };
+        const std::uint64_t h_in = sel ? readHAt(candConv(sel_c), candSsm(sel_c)) : readH(s);
+        const State st0{h_in, kvPrefix(s, pos), pos};
         State st = st0;
         const std::uint64_t E = cfg_.n_embd;
         s.pend.clear();
@@ -676,9 +810,26 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
             rows_run_ += 1;
             // replay off: set snap + i holds the state after row i (next + i drafts kept)
             if (!mc_.replay && i < sg.nd) snaps_[snap + i] = Snap{sg.seq, st.h};
+            if (physical() && i < sg.nd) {
+                if (sel) {
+                    const int j = gdn_sel_out(static_cast<int>(i), sel_c);
+                    writeHTo(candConv(j), candSsm(j), st.h);
+                } else {
+                    writeHTo(pconv_[snap + i], pssm_[snap + i], st.h);
+                    powner_[snap + i] = sg.seq;
+                }
+            }
         }
         s.npend = 0;
-        if (!mc_.replay) {
+        if (physical()) {
+            // the final state: in place, or (select) into the spare set - never the candidate it read
+            if (sel) writeHTo(spconv_, spssm_, st.h);
+            else writeH(s, st.h);
+            s.sel_cm = sel ? sel_m : -1;
+            s.sel_m = sg.nd;
+            s.held = false;
+            s.pend.clear();
+        } else if (!mc_.replay) {
             // the state advances over every row; the engine restores a snapshot when drafts are rejected
             writeH(s, st.h);
             s.pend.clear();

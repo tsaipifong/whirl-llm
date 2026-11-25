@@ -175,8 +175,17 @@ u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
         const VSeg& sg = segs[kk];
         if (sg.pos + sg.nd + 1 > max_ctx) throw ModelError("ContextTooLong");
         if (sg.nd + 1 > max_small_batch || n + sg.nd + 1 > verifyRows()) throw ModelError("BatchTooLarge");
-        // E1 rows: MTP drafts in replay mode with the device-input kernel, no image (the vision rows need host positions)
-        if (sg.dev && (!gdn_replay || !sg.drafts.empty() || !k.set_rows_dp || visOf(sg.seq) != nullptr)) throw ModelError("BadBatch");
+        // E1 rows: MTP drafts in replay mode (v0252-e1s8: or snapshot mode with the select kernels) with the device-input
+        // kernel, no image (the vision rows need host positions)
+        if (sg.dev && ((!gdn_replay && !selectOk()) || !sg.drafts.empty() || !k.set_rows_dp || visOf(sg.seq) != nullptr))
+            throw ModelError("BadBatch");
+        // v0252-e1s8: a select verify (snapshot mode, setPending(s, npend_dev)): one sequence, MTP drafts, at most as many
+        // drafts as the verify it selects from (kernels/gdn_select.h)
+        const Seq& sq_k = seqs[sg.seq];
+        if (!gdn_replay && sq_k.npend == npend_dev &&
+            (!selectOk() || segs.size() != 1 || sg.nd > sq_k.sel_m || sq_k.sel_m >= gdn_max_snap || sq_k.sel_m > snap_sets ||
+             !sg.drafts.empty()))
+            throw ModelError("BadBatch");
         any_dev = any_dev || sg.dev;
         plan.snap_base[kk] = snaps;
         snaps += sg.nd;
@@ -199,10 +208,12 @@ u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
     if (!gdn_replay) {
         if (snaps > gdn_max_snap) throw ModelError("BatchTooLarge");
         ensureSnapshots(snaps);
+        if (seqs[segs[0].seq].npend == npend_dev) ensureSelectSpare();  // v0252-e1s8: a select verify's final state
     }
     // E1: the host does not know the rows' positions -> 0 = unknown (attention: one row per group, bitwise the same as
     // the grouped launch, src/ops/attention.cpp chooseAttnDecode rows_known)
     row_n = any_dev ? 0 : n;
+    row_seq1 = any_dev && segs.size() == 1 ? n : 0;  // v0252-e1s8 round 2 (C): one sequence, device positions pos + r
     for (u32 ri = 0; ri < n; ++ri) {
         row_pos[ri] = tab.pos[ri];
         row_base[ri] = tab.base[ri];
@@ -236,6 +247,7 @@ u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
             m.keep_hidden = false;
             m.all_logits = false;
             m.bplan = nullptr;
+            m.row_seq1 = 0;
             m.small_max = max_small_batch;
         }
     } reset_flags{*this};
@@ -245,6 +257,16 @@ u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
     // the kept rows of the previous verify are in the state now
     if (gdn_replay)
         for (const VSeg& sg : segs) seqs[sg.seq].npend = 0;
+    else
+        for (const VSeg& sg : segs) {
+            // v0252-e1s8 (snapshot mode): what the next select verify of the sequence selects from, and whether this one
+            // selected (its settle is due when the host reads the verify before it)
+            Seq& q = seqs[sg.seq];
+            q.sel_cm = q.npend == npend_dev ? static_cast<i32>(q.sel_m) : -1;
+            q.sel_m = sg.nd;
+            q.npend = 0;
+            q.held = false;
+        }
     // relaxacc one-pass check (v0252-f1): the argmax kernel also ranks the MTP drafts of the requested segments
     if (!relaxRankEnqueue(rr, n, out_tok, dst, relaxRankSrc(segs, rr.mask))) argmaxToEnqueue(n, out_tok, dst);
     return n;

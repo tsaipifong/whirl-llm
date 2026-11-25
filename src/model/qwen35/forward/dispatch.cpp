@@ -497,6 +497,13 @@ bool Context::wideCapable() const {
 
 bool Context::wideOk() const { return wideCapable() && gdn_replay; }
 
+// v0252-e1s8 (E1 in snapshot mode): select verifies need snapshot mode, the fused segment kernels and a code object whose
+// fused DeltaNet kernels read GdnSeg::pend as the select mode (the gfx1151 set; the gfx1201 set reads it as replay)
+// v0252-e1s8 round 2 (A): context.h (here next to selectOk: every forward.* module that links dispatch.cpp has it)
+bool Context::selectTwinsOk() const { return k.caps.gdn_select && k.gdn_conv_l2_sel != nullptr && k.gdn_step_norm_sel != nullptr; }
+
+bool Context::selectOk() const { return !gdn_replay && selectTwinsOk() && fusedDecode(); }
+
 void Context::rmsnormQ8(DevPtr xin, DevPtr w, DevPtr out, u32 n) {
     hip::launch(k.rmsnorm_q8, D(n), D(1024), 0, stream, xin, w, out, xq, xd, I(cfg.n_embd), cfg.eps);
     xq_src = out;

@@ -49,6 +49,10 @@
 #include "model/qwen35/load_types.h"
 #include "model/qwen35/model_error.h"
 
+namespace whirl::ops {
+struct GdnDecodePlan;  // whirl/ops/gdn.h (v0252-e1s8 round 2: Context::gdnDecodeFns; only forward/gdn.cpp needs the body)
+}  // namespace whirl::ops
+
 namespace whirl::qwen35 {
 
 // ---------------------------------------------------------------------------
@@ -254,6 +258,13 @@ public:
     std::span<DevPtr> conv_state, ssm_state;
     std::array<std::vector<DevPtr>, gdn_max_snap> snap_conv, snap_ssm;
     std::uint32_t snap_sets = 0;
+    // v0252-e1s8 (E1 in snapshot mode, kernels/gdn_select.h): the SPARE recurrent-state set a select verify writes its final
+    // state into (per layer, 0 for attention layers; allocated by the first select verify, ensureSelectSpare)
+    std::vector<DevPtr> e1_conv, e1_ssm;
+    // v0252-e1s8 round 2 (C): the rows of the verify forward in flight when it is ONE sequence whose positions only the device
+    // knows (an E1 verify of one slot: consecutive positions from its NPOS word); 0 otherwise (verifyBatchEnqueue sets and
+    // clears it around its forward; attn.cpp gives it to ops::AttnDecodeProblem::rows_one_seq)
+    std::uint32_t row_seq1 = 0;
     DevPtr gate = 0;
     bool gdn_replay = false;
     std::vector<std::uint32_t> gdn_ord;
@@ -346,10 +357,39 @@ public:
     std::uint64_t pendLayerBytes() const;
     void selectSeq(std::uint32_t s);
     void commitSeq(std::uint32_t s);
+    // (v0252-e1s8: in snapshot mode with a settled select verify in flight - Seq::held - the state of the cycle the host read
+    // last is in the spare set: live and spare change places, so the dropped verify's outputs never become the state)
     void dropPending(std::uint32_t s) {
-        if (s < seqs.size()) seqs[s].npend = 0;
+        if (s >= seqs.size()) return;
+        Seq& sq = seqs[s];
+        sq.npend = 0;
+        if (sq.held && e1_conv.size() == sq.conv.size())
+            for (std::size_t i = 0; i < sq.conv.size(); ++i) {
+                if (sq.ssm[i] == 0) continue;
+                std::swap(sq.conv[i], e1_conv[i]);
+                std::swap(sq.ssm[i], e1_ssm[i]);
+            }
+        sq.held = false;
     }
     void ensureSnapshots(std::uint32_t n);
+    // v0252-e1s8 (E1 in snapshot mode; ServerModel::settleSelect): the host read the accept of the verify a select verify
+    // selected from (acc accepted drafts): rename the snapshot-set / live / spare tables of sequence s (gdn_sel_settle per
+    // layer). ModelError "NothingToSettle" when the sequence's last verify did not select. selectOk: this model can run select
+    // verifies (snapshot mode, fused decode, a code object with the select-mode kernels: Caps::gdn_select)
+    void settleSelect(std::uint32_t s, std::uint32_t acc);
+    bool selectOk() const;
+    void ensureSelectSpare();
+    // v0252-e1s8 round 2 (A): the select verify launches the code object's OWN select entries (kernels/gfx1151/
+    // gdn_select.hip), never the shipping ones. selectTwinsOk: Caps::gdn_select and the conv / step twins are loaded;
+    // isSelect: a snapshot-mode segment table with a select segment (pend != 0; replay tables carry pend and never select);
+    // gdnDecodeFns: the conv launch (gdn_conv_l2, or the plan's gdn_abconv_<T>) and gdn_step_norm of one DeltaNet layer of a
+    // fused decode / verify, or their twins when select (null: the object lacks the twin)
+    struct GdnDecodeFns {
+        hip::Function conv = nullptr, step = nullptr;
+    };
+    bool selectTwinsOk() const;
+    bool isSelect(const GdnSegs& segs) const;
+    GdnDecodeFns gdnDecodeFns(const ops::GdnDecodePlan& dp, GgmlType beta_ty, bool select) const;
     void reset();
 
     // ---- single-sequence forward

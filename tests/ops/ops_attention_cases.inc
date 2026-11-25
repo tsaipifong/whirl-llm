@@ -1991,6 +1991,40 @@ void testAttnDecodeWs4Split() {
             qu3.rows_known = false;
             CHECK(ops::chooseAttnDecode(qu3, fa, ks, ks.caps, p8s).grid.y == 64);
         }
+        // v0252-e1s8 round 2 (C): an E1 verify of ONE slot - rows the host does not know, but one sequence at consecutive
+        // positions (AttnDecodeProblem::rows_one_seq, set only on that path) -> the rows class against max_ctx (the upper
+        // bound of every n_pos, as the one-row unknown case); without the field (any other unknown multi-row step) 64 as before
+        {
+            auto e1p = [&](std::uint32_t rows, std::uint32_t max_ctx, bool one_seq, bool q8) {
+                ops::AttnDecodeProblem q = problem(sh, 50000, rows, false, q8);
+                q.rows_known = false;
+                q.row_pos = {};
+                q.row_base = {};
+                q.rows_one_seq = one_seq;
+                q.max_ctx = max_ctx;
+                return q;
+            };
+            // 2 rows (Ornith / Swift with one draft): the rows-2 limit is 262144 for both counts
+            CHECK(ops::chooseAttnDecode(e1p(2, 32768, true, true), fa, ks, ks.caps, p8s).grid.y == sh.pick);
+            CHECK(ops::chooseAttnDecode(e1p(2, 262144, true, true), fa, ks, ks.caps, p8s).grid.y == sh.pick);
+            CHECK(ops::chooseAttnDecode(e1p(2, 262208, true, true), fa, ks, ks.caps, p8s).grid.y == 64);
+            CHECK(ops::chooseAttnDecode(e1p(2, 32768, false, true), fa, ks, ks.caps, p8s).grid.y == 64);  // round 1 / not E1
+            // 3 rows: rows-3 limit S 8 98304 (Swift), S 16 262144 (Ornith)
+            CHECK(ops::chooseAttnDecode(e1p(3, 98304, true, true), fa, ks, ks.caps, p8s).grid.y == sh.pick);
+            CHECK(ops::chooseAttnDecode(e1p(3, 131072, true, true), fa, ks, ks.caps, p8s).grid.y == (sh.pick == 8 ? 64u : sh.pick));
+            // rows 10+: no class -> 64; precise (flag 0) and f16 KV -> 64 (today's plan)
+            CHECK(ops::chooseAttnDecode(e1p(10, 8192, true, true), fa, ks, ks.caps, p8s).grid.y == 64);
+            CHECK(ops::chooseAttnDecode(e1p(2, 8192, true, true), f0, ks, ks.caps, p8s).grid.y == 64);
+            CHECK(ops::chooseAttnDecode(e1p(2, 8192, true, false), fa, ks, ks.caps, p8s).grid.y == 64);
+            // the field never changes a step whose rows the host knows (every non-E1 plan)
+            ops::AttnDecodeProblem qk = problem(sh, 16385, 7, false, true);
+            const auto before = ops::chooseAttnDecode(qk, fa, ks, ks.caps, p8s);
+            qk.rows_one_seq = true;
+            CHECK(samePlan(ops::chooseAttnDecode(qk, fa, ks, ks.caps, p8s), before));
+            // the function itself: unknown rows of one sequence = class n vs max_ctx
+            CHECK(ops::ws4SplitForStep(e1p(2, 65536, true, true), sh.pick, p8s.ws4_split_limits) == sh.pick);
+            CHECK(ops::ws4SplitForStep(e1p(2, 65536, false, true), sh.pick, p8s.ws4_split_limits) == 64);
+        }
         // rows 10+, two sequences, gapped positions: not measured -> 64
         {
             CHECK(ops::chooseAttnDecode(problem(sh, 8192, 10, false, true), fa, ks, ks.caps, p8s).grid.y == 64);

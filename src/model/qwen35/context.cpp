@@ -9,6 +9,7 @@
 #include "device/backend.h"
 
 #include <algorithm>
+#include <array>
 #include <utility>
 #include <vector>
 
@@ -85,6 +86,54 @@ void Context::ensureSnapshots(u32 n) {
         snap_ssm[kk] = std::move(ssm);
         snap_sets += 1;
     }
+}
+
+// v0252-e1s8 (E1 in snapshot mode): the spare set of the select verifies, like one more snapshot set
+void Context::ensureSelectSpare() {
+    if (e1_conv.size() == cfg.n_layer) return;
+    std::vector<DevPtr> conv(cfg.n_layer, 0), ssm(cfg.n_layer, 0);
+    for (u32 i = 0; i < cfg.n_layer; ++i) {
+        if (ssm_state[i] == 0) continue;
+        conv[i] = allocZero(convBytes());
+        ssm[i] = allocZero(ssmBytes());
+    }
+    e1_conv = std::move(conv);
+    e1_ssm = std::move(ssm);
+}
+
+// v0252-e1s8: the host settle of a select verify. Its device rule is kernels/gdn_select.h (gdn_sel_pick / gdn_sel_out, what
+// the gfx1151 kernels and the server tests' mock run; that header's gdn_sel_settle is this renaming - written out here because
+// the forward.* modules do not include kernel headers; tests/iso/forward.gdn settle_select pins it to the rule). The select
+// verify of sequence s read candidate c = acc of P = [snapshot sets 0 .. m - 1, live] (m = Seq::sel_cm), wrote its snapshot r
+// into P[r < c ? r : r + 1] and its final state into the spare set: renamed, set r <- P[r < c ? r : r + 1], live <- spare,
+// spare <- P[c] - its outputs then sit where an in-place verify leaves them
+void Context::settleSelect(u32 s, u32 acc) {
+    if (s >= seqs.size()) throw ModelError("BadBatch");
+    Seq& sq = seqs[s];
+    if (sq.sel_cm < 0 || e1_conv.size() != sq.conv.size() || static_cast<u32>(sq.sel_cm) > snap_sets) throw ModelError("NothingToSettle");
+    const u32 m = static_cast<u32>(sq.sel_cm);
+    const u32 c = std::min(acc, m);
+    for (std::size_t i = 0; i < sq.conv.size(); ++i) {
+        if (sq.ssm[i] == 0) continue;
+        const auto cand = [&](u32 j, bool conv) -> DevPtr {
+            return j < m ? (conv ? snap_conv[j][i] : snap_ssm[j][i]) : (conv ? sq.conv[i] : sq.ssm[i]);
+        };
+        std::array<DevPtr, gdn_max_snap + 1> pc{}, ps{};
+        for (u32 j = 0; j <= m; ++j) {
+            pc[j] = cand(j, true);
+            ps[j] = cand(j, false);
+        }
+        for (u32 r = 0; r < m; ++r) {
+            snap_conv[r][i] = pc[r < c ? r : r + 1];
+            snap_ssm[r][i] = ps[r < c ? r : r + 1];
+        }
+        sq.conv[i] = e1_conv[i];
+        sq.ssm[i] = e1_ssm[i];
+        e1_conv[i] = pc[c];
+        e1_ssm[i] = ps[c];
+    }
+    sq.sel_cm = -1;
+    sq.held = true;
 }
 
 MatList Context::layerMats(const Layer& L) const {
