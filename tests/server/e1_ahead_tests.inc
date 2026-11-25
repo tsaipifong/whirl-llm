@@ -433,6 +433,20 @@ void testE1AheadDrain() {
             CHECK_EQ(srv.model().poison(), 0u);
             CHECK_EQ(srv.model().e1Counts().disagree, 0u);
             if (arm == 1) CHECK(srv.engine().stats().acc_ahead > 0);
+            if (arm == 1) {
+                // v0252-e1grp: every device-position verify segment carries row 0's interval, the device position lies in it,
+                // the widest is the 4 drafts in flight + 1, and both ends occur (all drafts kept / none kept)
+                const MockModel::E1Counts e = srv.model().e1Counts();
+                std::printf("  e1_ahead_drain e1grp interval: segs %llu, none %llu, out %llu, widest %llu, low end %llu, high end %llu\n",
+                            static_cast<unsigned long long>(e.verify_segs), static_cast<unsigned long long>(e.no_interval),
+                            static_cast<unsigned long long>(e.interval_out), static_cast<unsigned long long>(e.interval_max),
+                            static_cast<unsigned long long>(e.interval_lo_hits), static_cast<unsigned long long>(e.interval_hi_hits));
+                CHECK(e.verify_segs > 0);
+                CHECK_EQ(e.no_interval, 0u);
+                CHECK_EQ(e.interval_out, 0u);
+                CHECK(e.interval_max >= 2 && e.interval_max <= 5);
+                CHECK(e.interval_hi_hits > 0);
+            }
         }
         CHECK_EQ(text[0], text[1]);
         CHECK_EQ(fr[0], fr[1]);
@@ -664,8 +678,9 @@ void testE1AheadLen() {
     CHECK(dec.find("e1LenAllows(opt_.e1_ctx_max") != std::string::npos);
     CHECK(doc.find("below `65536` tokens of context") != std::string::npos);  // the default's boundary, in the env table
     CHECK(rel0.find("below 65536 tokens of context") != std::string::npos);   // and in the release A/B list
-    CHECK(rel0.find("the Radeon 8060S below 8192") != std::string::npos);     // v0252-e1s8 round 3: the 8060S default and its boundary
-    CHECK(doc.find("the Radeon 8060S below `8192`") != std::string::npos);
+    CHECK(rel0.find("the Radeon 8060S below 131329") != std::string::npos);   // v0252-e1grp: the 8060S default and its boundary
+    CHECK(doc.find("the Radeon 8060S below `131329`") != std::string::npos);
+    CHECK(rel0.find("8060S below 8192") == std::string::npos && doc.find("8060S below `8192`") == std::string::npos);  // the old boundary
 #else
     CHECK(false);  // whirl-server-tests is built with WHIRL_SOURCE_DIR (cmake/server.cmake): the source checks must run
 #endif

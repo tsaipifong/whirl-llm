@@ -6,6 +6,7 @@
 #include "whirl/ops/attention.h"
 #include "../test_check.h"
 #include "ops_fakes.h"
+#include "../../kernels/gfx1151/attn_ws4_index.h"  // v0252-e1grp: ws4::block_range (the reference group key)
 
 #include <algorithm>
 #include <array>
@@ -2089,6 +2090,257 @@ void testAttnDecodeWs4Split() {
                         }
     CHECK(swept > 1000 && bad == 0 && on > 0);
     std::printf("  testAttnDecodeWs4Split: %lld measured cells, %lld swept (%lld re-split), %lld bad\n", cells, swept, on, bad);
+}
+
+
+// v0252-e1grp (PLAN V1-93): an E1 verify of ONE slot keeps its attention group on the gfx1151 ws4 path. The host knows only an
+// interval [pos0_lo, pos0_hi] of row 0's position (the cycle in flight accepts 0..nd drafts); rows r and r + 1 share a group
+// iff their ws4 group keys are equal for EVERY row-0 position of the interval (ops::ws4E1Groups); otherwise one-row groups
+// (today's E1 plan). The split count of the step (ws4SplitForStep) and the precise 64 rule are unchanged; with E1 off (rows
+// known) nothing changes; the R9700 wsplit / ws4r path is unchanged.
+void testAttnDecodeE1Group() {
+    namespace dv = whirl::device;
+    const auto& p97 = dv::k_profile_gfx1201;
+    const auto& p8s = dv::k_profile_gfx1151;
+    const std::uint32_t A = ops::kAttnLsplitAuto;
+    static const kn::KernelTable k8 = attnTable(true, true, false, false);  // the gfx1151 table without the _sp entries
+    static const kn::KernelTable ks = [] {
+        kn::KernelTable k = attnTable(true, true, false, false);
+        for (int i = 0; i < 2; ++i) {
+            const std::uint32_t s = kn::kWs4SplitCounts[i];
+            k.attn_ws4_sp[i] = tag(kn::ws4SplitName(0, s));
+            for (int cg = 1; cg <= 3; ++cg) k.attn_ws4g_sp[i][cg - 1] = tag(kn::ws4SplitName(cg, s));
+        }
+        return k;
+    }();
+    const std::int32_t kDraftWin = (16384 / 64) | ((65536 / 1024) << 16);
+    // the reference key (the attn_ws4g / attn_ws4 split rule, kernels/gfx1151/attn_ws4_index.h)
+    auto refKey = [](std::int32_t pp, std::uint32_t ns, std::int32_t win) {
+        const int np = pp + 1, s = static_cast<int>(ns);
+        const ws4::Range r0 = ws4::block_range(np, 0, s, win);
+        return std::array<std::int32_t, 3>{r0.b1 == ws4::kSink ? r0.b0 - 1 : 0, ws4::block_range(np, 1, s, win).b0, ws4::block_range(np, 2, s, win).b0};
+    };
+    long long bad = 0, cases = 0;
+    // (1) the key function is the reference split rule
+    for (const std::uint32_t ns : {8u, 16u, 64u})
+        for (const std::int32_t win : {0, kDraftWin})
+            for (std::int32_t pp : {0, 1, 63, 64, 1023, 1024, 1025, 4095, 4096, 8191, 8192, 32767, 32768, 65535, 65536, 70001, 262143}) {
+                bad += ops::ws4GroupKey(pp, ns, win) != refKey(pp, ns, win);
+                ++cases;
+            }
+    CHECK(bad == 0);
+    // positions around every split-range boundary that matters for the swept counts, plus plain ones
+    std::vector<std::int32_t> around;
+    for (const std::int32_t b : {64, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 98304, 131072, 262144 - 64})
+        for (std::int32_t d = -12; d <= 4; ++d) around.push_back(b + d);
+    for (const std::int32_t x : {5, 300, 5000, 40000, 70001, 123457}) around.push_back(x);
+    // (2) a one-position interval is the known-rows grouping of chooseAttnDecode for the same rows; (3) never a group whose rows'
+    // keys differ at any position of the interval, and never two neighbouring groups that could have been one (maximal)
+    std::vector<std::int32_t> pos, base;
+    auto known = [&](std::int32_t p0, std::uint32_t n, std::uint32_t heads, std::uint32_t nkv, std::int32_t win, bool q8) {
+        pos.clear();
+        base.clear();
+        for (std::uint32_t r = 0; r < n; ++r) {
+            pos.push_back(p0 + static_cast<std::int32_t>(r));
+            base.push_back(0);
+        }
+        ops::AttnDecodeProblem q;
+        q.n = n;
+        q.n_head = heads;
+        q.n_head_kv = nkv;
+        q.max_ctx = 262144;
+        q.kv_q8 = q8;
+        q.o_on_gemv = true;
+        q.rows_known = true;
+        q.row_pos = std::span<const std::int32_t>(pos);
+        q.row_base = std::span<const std::int32_t>(base);
+        q.win = win;
+        return q;
+    };
+    auto e1 = [&](std::int32_t lo, std::int32_t hi, std::uint32_t n, std::uint32_t heads, std::uint32_t nkv, std::int32_t win, bool q8) {
+        ops::AttnDecodeProblem q;
+        q.n = n;
+        q.n_head = heads;
+        q.n_head_kv = nkv;
+        q.max_ctx = 262144;
+        q.kv_q8 = q8;
+        q.o_on_gemv = true;
+        q.rows_known = false;
+        q.rows_one_seq = true;
+        q.pos0_lo = lo;
+        q.pos0_hi = hi;
+        q.win = win;
+        return q;
+    };
+    long long bad2 = 0, bad3 = 0, bad_max = 0;
+    for (const std::uint32_t ns : {16u, 64u})
+        for (const std::int32_t win : {0, kDraftWin})
+            for (std::uint32_t n = 1; n <= 9; ++n)
+                for (const std::int32_t p0 : around) {
+                    if (p0 < 0) continue;
+                    kn::AwGroups g{}, gk{};
+                    std::uint32_t wd = 0;
+                    const std::uint32_t ng = ops::ws4E1Groups(n, p0, p0, ns, win, kn::kMaxVerifyRows, g, wd);
+                    // the known-rows reference: precise (flag 0) on the table without _sp = 64; balance auto on ks for 16
+                    const ops::AttnDecodeProblem qk = known(p0, n, 16, 2, win, true);
+                    ops::AttnDecodeFlags fl;
+                    fl.attn_lsplit = ns == 64 ? 0u : A;
+                    const auto pk = ops::chooseAttnDecode(qk, fl, ns == 64 ? k8 : ks, (ns == 64 ? k8 : ks).caps, p8s);
+                    if (pk.n_split != ns && pk.grid.y != ns) continue;  // (a step over the measured limit runs 64: not this ns)
+                    bad2 += ng != pk.grid.z;
+                    for (std::uint32_t i = 0; i < ng && i < pk.grid.z; ++i) bad2 += g.first[i] != pk.groups.first[i] || g.count[i] != pk.groups.count[i];
+                    ++cases;
+                }
+    for (const std::uint32_t ns : {16u, 64u})
+        for (const std::int32_t win : {0, kDraftWin})
+            for (const std::uint32_t n : {2u, 3u, 5u, 9u})
+                for (const std::int32_t span : {1, 2, 3, 4, 11})
+                    for (const std::int32_t lo : around) {
+                        const std::int32_t hi = lo + span - 1;
+                        if (lo < 0) continue;
+                        kn::AwGroups g{};
+                        std::uint32_t wd = 0;
+                        const std::uint32_t ng = ops::ws4E1Groups(n, lo, hi, ns, win, kn::kMaxVerifyRows, g, wd);
+                        std::uint32_t tot = 0, wmax = 0;
+                        for (std::uint32_t i = 0; i < ng; ++i) {
+                            bad3 += g.first[i] != static_cast<std::int32_t>(tot) || g.count[i] < 1;
+                            tot += static_cast<std::uint32_t>(g.count[i]);
+                            wmax = std::max<std::uint32_t>(wmax, static_cast<std::uint32_t>(g.count[i]));
+                            // every row of the group has the group head's key at EVERY row-0 position of the interval
+                            for (std::int32_t p0 = lo; p0 <= hi; ++p0)
+                                for (std::int32_t r = 1; r < g.count[i]; ++r)
+                                    bad3 += refKey(p0 + g.first[i] + r, ns, win) != refKey(p0 + g.first[i], ns, win);
+                            // maximal: the next group's head differs from this group's head at SOME position of the interval
+                            if (i + 1 < ng) {
+                                bool differs = false;
+                                for (std::int32_t p0 = lo; p0 <= hi; ++p0)
+                                    differs = differs || refKey(p0 + g.first[i + 1], ns, win) != refKey(p0 + g.first[i], ns, win);
+                                bad_max += !differs;
+                            }
+                        }
+                        bad3 += tot != n || wmax != wd;
+                        ++cases;
+                    }
+    CHECK(bad2 == 0);
+    CHECK(bad3 == 0);
+    CHECK(bad_max == 0);
+    // (4) the plan of an Ornith E1 verify (16 heads, 2 KV heads, 2 rows; S 16 in balance on q8, 64 in precise / f16)
+    {
+        ops::AttnDecodeFlags f0, fa;
+        fa.attn_lsplit = A;
+        // away from a boundary: one 2-row group on attn_ws4g (CG 1), the split count unchanged
+        const auto b = ops::chooseAttnDecode(e1(40000, 40001, 2, 16, 2, 0, true), fa, ks, ks.caps, p8s);
+        CHECK(b.kind == ops::AttnDecodeKind::ws4g && b.grid.z == 1 && b.groups.first[0] == 0 && b.groups.count[0] == 2 && b.grid.y == 16 &&
+              nameOf(b.f) == kn::ws4SplitName(1, 16) && b.grid.x == 2);
+        const auto t = ops::chooseAttnDecode(e1(40000, 40001, 2, 16, 2, 0, true), f0, ks, ks.caps, p8s);
+        CHECK(t.kind == ops::AttnDecodeKind::ws4g && t.grid.z == 1 && t.groups.count[0] == 2 && t.grid.y == 64 && nameOf(t.f) == "attn_ws4g1");
+        const auto tf = ops::chooseAttnDecode(e1(40000, 40001, 2, 16, 2, 0, false), fa, ks, ks.caps, p8s);  // f16 KV: 64
+        CHECK(tf.kind == ops::AttnDecodeKind::ws4g && tf.grid.z == 1 && tf.grid.y == 64 && nameOf(tf.f) == "attn_ws4g1");
+        // the same plan as the known rows at each position of the interval (bitwise-equal launches for the kernel)
+        for (const std::int32_t p0 : {40000, 40001}) {
+            const auto k1 = ops::chooseAttnDecode(known(p0, 2, 16, 2, 0, true), fa, ks, ks.caps, p8s);
+            CHECK(samePlan(b, k1));
+            const auto k0 = ops::chooseAttnDecode(known(p0, 2, 16, 2, 0, true), f0, ks, ks.caps, p8s);
+            CHECK(samePlan(t, k0));
+        }
+        // an interval whose second position crosses a range boundary (row 1 at n_pos 32769 = 32 x 1024 + 1 for S 16 and
+        // 8 x 4096 + 1 for 64): one-row groups, the plan of today's E1 verify
+        for (const ops::AttnDecodeFlags* fp : {&f0, &fa}) {
+            ops::AttnDecodeProblem qx = e1(32766, 32767, 2, 16, 2, 0, true);
+            const auto x = ops::chooseAttnDecode(qx, *fp, ks, ks.caps, p8s);
+            CHECK(x.kind == ops::AttnDecodeKind::ws4 && x.grid.z == 2 && x.groups.count[0] == 1 && x.groups.count[1] == 1);
+            qx.pos0_lo = qx.pos0_hi = -1;
+            CHECK(samePlan(x, ops::chooseAttnDecode(qx, *fp, ks, ks.caps, p8s)));
+            // the lower position alone would group (the rule must test the WHOLE interval)
+            CHECK(ops::chooseAttnDecode(e1(32766, 32766, 2, 16, 2, 0, true), *fp, ks, ks.caps, p8s).grid.z == 1);
+            CHECK(ops::chooseAttnDecode(e1(32767, 32767, 2, 16, 2, 0, true), *fp, ks, ks.caps, p8s).grid.z == 2);
+        }
+    }
+    // (4b) the E1 groups key on the step's split count: 1022..1023 crosses an S 16 range (row 1 at n_pos 1025 for row 0 at
+    // 1023) but no 64 range -> balance (S 16) one-row groups, precise (64) one 2-row group; as the known rows at 1023
+    {
+        ops::AttnDecodeFlags f0, fa;
+        fa.attn_lsplit = A;
+        const auto b16 = ops::chooseAttnDecode(e1(1022, 1023, 2, 16, 2, 0, true), fa, ks, ks.caps, p8s);
+        CHECK(b16.grid.y == 16 && b16.kind == ops::AttnDecodeKind::ws4 && b16.grid.z == 2);
+        CHECK(ops::chooseAttnDecode(known(1023, 2, 16, 2, 0, true), fa, ks, ks.caps, p8s).grid.z == 2);
+        const auto p64 = ops::chooseAttnDecode(e1(1022, 1023, 2, 16, 2, 0, true), f0, ks, ks.caps, p8s);
+        CHECK(p64.grid.y == 64 && p64.kind == ops::AttnDecodeKind::ws4g && p64.grid.z == 1 && p64.groups.count[0] == 2);
+    }
+    // (5) E1 off and the other unknown steps: unchanged
+    {
+        ops::AttnDecodeFlags fa;
+        fa.attn_lsplit = A;
+        // rows known (every non-E1 step): the interval fields change nothing
+        for (const std::int32_t p0 : {5, 32766, 32767, 40000})
+            for (const std::uint32_t n : {1u, 2u, 3u, 9u}) {
+                const ops::AttnDecodeProblem qk = known(p0, n, 16, 2, 0, true);
+                const auto before = ops::chooseAttnDecode(qk, fa, ks, ks.caps, p8s);
+                ops::AttnDecodeProblem q2 = known(p0, n, 16, 2, 0, true);
+                q2.rows_one_seq = true;
+                q2.pos0_lo = p0 - 7;
+                q2.pos0_hi = p0 + 3;
+                CHECK(samePlan(ops::chooseAttnDecode(q2, fa, ks, ks.caps, p8s), before));
+            }
+        // unknown rows without one sequence, without an interval, with an empty / negative / too wide interval, or with the
+        // one-query debug flag: one-row groups (today's)
+        auto oneRow = [&](const ops::AttnDecodeProblem& q, const ops::AttnDecodeFlags& f) {
+            const auto pl = ops::chooseAttnDecode(q, f, ks, ks.caps, p8s);
+            return pl.kind == ops::AttnDecodeKind::ws4 && pl.grid.z == q.n;
+        };
+        ops::AttnDecodeProblem q = e1(40000, 40001, 2, 16, 2, 0, true);
+        q.rows_one_seq = false;
+        CHECK(oneRow(q, fa));
+        CHECK(oneRow(e1(-1, -1, 2, 16, 2, 0, true), fa));
+        CHECK(oneRow(e1(40001, 40000, 2, 16, 2, 0, true), fa));
+        CHECK(oneRow(e1(-1, 40000, 2, 16, 2, 0, true), fa));
+        CHECK(oneRow(e1(40000, 40000 + ops::kE1GroupSpan, 2, 16, 2, 0, true), fa));
+        CHECK(!oneRow(e1(40000, 40000 + ops::kE1GroupSpan - 1, 2, 16, 2, 0, true), fa));
+        ops::AttnDecodeFlags fd = fa;
+        fd.dbg_flags = 4;
+        CHECK(oneRow(e1(40000, 40001, 2, 16, 2, 0, true), fd));
+        // the split count of an E1 step stays the step's (max_ctx against the rows-2 limit: over it 64)
+        ops::AttnDecodeProblem qo = e1(40000, 40001, 2, 16, 2, 0, true);
+        qo.max_ctx = 262208;
+        const auto po = ops::chooseAttnDecode(qo, fa, ks, ks.caps, p8s);
+        CHECK(po.grid.y == 64 && po.grid.z == 1 && nameOf(po.f) == "attn_ws4g1");
+    }
+    // (6) the R9700 (wsplit / ws4r path, rows_known only): the interval changes nothing there
+    {
+        static const kn::KernelTable kb = attnTable(false, false, true, true);
+        static const kn::KernelTable kq = ws4rTable(kb, true);
+        for (const std::uint32_t heads : {16u, 24u})
+            for (const std::int32_t lo : {5000, 32766})
+                for (const bool q8 : {false, true}) {
+                    ops::AttnDecodeProblem q = e1(lo, lo + 1, 2, heads, heads == 16 ? 2u : 4u, 0, q8);
+                    ops::AttnDecodeFlags fa;
+                    fa.attn_lsplit = A;
+                    const auto with = ops::chooseAttnDecode(q, fa, kq, kq.caps, p97);
+                    q.pos0_lo = q.pos0_hi = -1;
+                    CHECK(samePlan(with, ops::chooseAttnDecode(q, fa, kq, kq.caps, p97)));
+                    CHECK(with.grid.z == 2);
+                }
+    }
+    // (7) how often an Ornith E1 verify (2 rows, interval of 2 = one draft in flight) keeps its group, over every row-0 position
+    for (const std::uint32_t ns : {16u, 64u}) {
+        long long all = 0, grouped = 0;
+        long long near[3] = {0, 0, 0};
+        const std::int32_t marks[3] = {8192, 32768, 65536};
+        for (std::int32_t lo = 1; lo < 262144; ++lo) {
+            kn::AwGroups g{};
+            std::uint32_t wd = 0;
+            const bool one = ops::ws4E1Groups(2, lo, lo + 1, ns, 0, kn::kMaxVerifyRows, g, wd) == 1;
+            ++all;
+            grouped += one;
+            for (int m = 0; m < 3; ++m)
+                if (lo >= marks[m] - 2048 && lo < marks[m] + 2048 && !one) ++near[m];
+        }
+        std::printf("  testAttnDecodeE1Group: S %u: %lld of %lld row-0 intervals keep the 2-row group (%.3f %%); split %lld / %lld / %lld of 4096 "
+                    "positions around 8192 / 32768 / 65536\n",
+                    ns, grouped, all, 100.0 * static_cast<double>(grouped) / static_cast<double>(all), near[0], near[1], near[2]);
+        CHECK(all - grouped == 2 * (262144 / (static_cast<long long>(ns) * 64)) - 1 || all - grouped == 2 * (262144 / (static_cast<long long>(ns) * 64)));
+    }
+    std::printf("  testAttnDecodeE1Group: %lld cases\n", cases);
 }
 
 }  // namespace

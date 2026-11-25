@@ -267,8 +267,9 @@ void testProfiles() {
     CHECK(a.e1_dense == 0 && a.e1_moe == 2);
     CHECK(b.e1_dense == 0 && b.e1_moe == 2);  // v0252-e1s8 round 3: the 8060S runs the lookahead for MoE by default
     // v0252-e1s8 round 2 (B): the E1 default's context limit per code object (gfx1201 = the R9700 measurement 65536; gfx1151 =
-    // 8192, the largest length with a measured gain, screen e1s8-orn 20261125-0619; the main session sets the final value)
-    CHECK(a.e1_ctx_max == 65536 && b.e1_ctx_max == 8192);
+    // v0252-e1grp: 131329 = 131072 + 256 + 1, the largest measured length with a gain (screen e1grp-orn-long 20261125-1106:
+    // 131072 +4.66 % +-4.65) inside the default; 262144 OPEN stays synchronous)
+    CHECK(a.e1_ctx_max == 65536 && b.e1_ctx_max == 131329);
     // v0252-l2split (PLAN V1-88): the decode / verify split count by machine fill: R9700 64 blocks = 32 WGPs x 2 attn_ws4r
     // blocks (one machine wave); the 8060S 0 (its attn_ws4 path keeps the constant 64 splits)
     CHECK(a.attn_lsplit_blocks == 64);

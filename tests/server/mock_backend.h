@@ -280,6 +280,10 @@ public:
         // before it (VSeg::next == qwen35::tok_dev): the host's position is only an upper bound there - a device position
         // above it counts in disagree
         std::uint64_t ahead_segs = 0;
+        // v0252-e1grp: device-position verify segments without an interval of row 0's position (VSeg::pos_n 0), with the
+        // device position outside pos - pos_n + 1 .. pos, and the widest interval given; segments whose device position was
+        // the interval's lowest / highest value (the interval is tight: both ends occur)
+        std::uint64_t no_interval = 0, interval_out = 0, interval_max = 0, interval_lo_hits = 0, interval_hi_hits = 0;
     };
     E1Counts e1Counts() const;
     std::uint64_t verifyCalls() const { return verify_calls_.load(); }
@@ -287,6 +291,7 @@ public:
 private:
     std::atomic<std::uint64_t> e1_vsegs_{0}, e1_msegs_{0}, e1_padded_{0}, e1_npend_{0}, e1_pos_{0}, e1_disagree_{0}, verify_calls_{0};
     std::atomic<std::uint64_t> e1_ahead_{0}, spec_shorted_{0};  // v0252-e1p1c
+    std::atomic<std::uint64_t> e1_no_iv_{0}, e1_iv_out_{0}, e1_iv_max_{0}, e1_iv_lo_{0}, e1_iv_hi_{0};  // v0252-e1grp
     SpecNextTab spec_tab_{};  // the next-cycle rows of the last specAccept (engine thread)
     std::atomic<std::uint64_t> spec_accepts_{0}, spec_corrupted_{0}, readctl_calls_{0}, readctl_pinned_calls_{0};
     void prefillRows(std::size_t n);

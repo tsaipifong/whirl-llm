@@ -238,6 +238,7 @@ int main() {
     testAttnDecodeWs4r();  // v0252-ws4r97b (fails before phase 2: stub profile rows 0, chooseAttnDecode never swaps)
     testAttnDecodeLsplit();  // v0252-l2split (fails to build before the change: no lsplitCount / attn_lsplit)
     testAttnDecodeWs4Split();  // v0252-8sws (fails to build before the change: no ws4SplitCount / attn_ws4_split_blocks / attn_ws4_sp)
+    testAttnDecodeE1Group();  // v0252-e1grp (fails to build before the change: no ws4GroupKey / ws4E1Groups / pos0_lo)
     testDq4Partition();  // v0252-n2 (feat027-dq4r9700 764af36)
     testAttnDq4F8();  // v0252-8sq4 (fails to build before the change: no dq4_order / dq4_min_keys / attn_dq4o / dq4MinKeysSplits)
     testAttnDq4Table();  // v0252-8sq5 (fails to build before the change: no dq4_split_table / dq4_splits / dq4TableSplits / dq4GridOk)

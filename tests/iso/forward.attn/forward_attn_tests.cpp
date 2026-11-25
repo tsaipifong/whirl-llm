@@ -104,9 +104,75 @@ void testAttnPlainPrepLaunches() {
     if (store.size() == 1) ISO_CHECK(store[0].grid.x == 3 && store[0].block.x == 256);
 }
 
+// v0252-e1grp (PLAN V1-93): an E1 verify of one slot (Context::row_seq1 = n, positions only on the device) runs its attention as
+// ONE 2-row group when the interval of row 0's position (Context::row0_lo / row0_hi, from VSeg::pos_n) keeps the rows in one
+// split range at every position of it; one-row groups when a position of the interval crosses a range, when no interval is
+// given (row0_lo < 0), or when the rows are not one sequence; rows the host knows: their own grouping (unchanged)
+void testE1VerifyGroups() {
+    struct Got {
+        whirl::hip::Function f = nullptr;
+        unsigned z = 0;
+        std::size_t n = 0;
+    };
+    auto launch = [](std::int32_t lo, std::int32_t hi, std::uint32_t seq1, std::uint32_t known) {
+        auto c = std::make_unique<AttnProbe>();
+        c->cfg.head_dim = 256;
+        c->cfg.n_head = 16;
+        c->cfg.n_head_kv = 2;
+        c->cfg.n_rot = 64;
+        c->cfg.n_embd = 2048;
+        c->cfg.rope_base = 10000000.0f;
+        c->k.rope_neox = fn(0x10);
+        c->k.kv_store = fn(0x20);
+        c->k.attn_ws4 = fn(0x30);
+        for (int i = 0; i < 3; ++i) c->k.attn_ws4g[i] = fn(0x31 + static_cast<std::uintptr_t>(i));
+        c->k.attn_wsplit1 = fn(0x34);
+        c->k.attn_combine = fn(0x35);
+        c->max_ctx = 65536;
+        c->row_n = known;
+        c->row_seq1 = seq1;
+        c->row0_lo = lo;
+        c->row0_hi = hi;
+        for (std::uint32_t r = 0; r < 2; ++r) {
+            c->row_pos[r] = (lo < 0 ? 40000 : lo) + static_cast<std::int32_t>(r);
+            c->row_base[r] = 0;
+        }
+        fake::recordLaunches(true);
+        q::AttnW a;
+        try {
+            c->attnBlock(a, c->mtpKv(), 2);
+        } catch (const std::exception&) {
+            // what comes after the attention launch (combine, o-projection) may refuse; the launch is recorded
+        }
+        const auto l = fake::recordedLaunches();
+        fake::recordLaunches(false);
+        Got g;
+        for (const auto& x : l)
+            if (x.f == fn(0x30) || x.f == fn(0x31) || x.f == fn(0x32) || x.f == fn(0x33)) {
+                g.f = x.f;
+                g.z = x.grid.z;
+                g.n += 1;
+            }
+        return g;
+    };
+    const Got grp = launch(40000, 40001, 2, 0);  // away from a range boundary: one group of 2 rows (attn_ws4g, CG 1)
+    ISO_CHECK(grp.n == 1 && grp.f == fn(0x31) && grp.z == 1);
+    const Got crs = launch(32766, 32767, 2, 0);  // row 1 at n_pos 32769 for row 0 at 32767: one-row groups
+    ISO_CHECK(crs.n == 1 && crs.f == fn(0x30) && crs.z == 2);
+    const Got none = launch(-1, -1, 2, 0);  // no interval: today's E1 plan
+    ISO_CHECK(none.n == 1 && none.f == fn(0x30) && none.z == 2);
+    const Got two = launch(40000, 40001, 0, 0);  // unknown rows that are not one sequence: one-row groups
+    ISO_CHECK(two.n == 1 && two.f == fn(0x30) && two.z == 2);
+    const Got kn = launch(40000, 40001, 0, 2);  // rows the host knows (E1 off): their own grouping, as before
+    ISO_CHECK(kn.n == 1 && kn.f == fn(0x31) && kn.z == 1);
+    const Got knx = launch(32767, 32767, 0, 2);  // known rows across a boundary: two groups
+    ISO_CHECK(knx.n == 1 && knx.f == fn(0x30) && knx.z == 2);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    return iso::run("forward.attn", {{"draft_attn_window", testDraftAttnWindow}, {"attn_plain_prep_launches", testAttnPlainPrepLaunches}},
+    return iso::run("forward.attn", {{"draft_attn_window", testDraftAttnWindow}, {"attn_plain_prep_launches", testAttnPlainPrepLaunches},
+                     {"e1_verify_groups", testE1VerifyGroups}},
                     argc, argv);
 }

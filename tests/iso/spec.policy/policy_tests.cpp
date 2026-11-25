@@ -186,7 +186,9 @@ void testE1Default() {
     // the 8060S row its own measured value (screen e1s8-orn 20261125-0619: cycles/s +4.04 % at 2048, +2.32 % at 8192, -4.06 %
     // at 32768 -> 8192, the largest length with a measured gain)
     ISO_CHECK(e1CtxMax(hip::Arch::gfx1201) == e1_default_ctx_max);
-    ISO_CHECK(e1CtxMax(hip::Arch::gfx1151) == 8192u);
+    // v0252-e1grp: with the E1 verify's attention grouped (screens e1grp-orn 20261125-1048, e1grp-orn-long 20261125-1106,
+    // e1grp-orn-xl 20261125-1138) the 8060S gains up to 131072 -> 131329 (131072 + 256 generated + 1: the measured cell inside)
+    ISO_CHECK(e1CtxMax(hip::Arch::gfx1151) == 131329u);
     for (const hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151}) ISO_CHECK(e1CtxMax(a) == device::profile(a).e1_ctx_max);
     ISO_CHECK(e1CtxMax() == e1CtxMax(device::k_default_arch));
 }

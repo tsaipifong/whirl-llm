@@ -8,6 +8,7 @@
 #include "iso/iso_test.h"
 #include "model/qwen35/context.h"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -248,6 +249,29 @@ void testE1Inputs() {
     ms[0].seq = 1, ms[0].e1_rows = 3, ms[0].pend_pos = 11;
     c->mtp.emplace();
     ISO_CHECK(codeOf([&] { c->mtpBatchStepEx(ms, 0, true); }) == "BadBatch");  // no rmsnorm_q8_rows_dv
+    // v0252-e1grp: row 0's position interval of a device-position segment: pos - pos_n + 1 .. pos (the lookahead: pos is
+    // the bound, pos_n = the drafts of the cycle in flight + 1; a synchronous E1 cycle: 1, the exact position); none (-1)
+    // without pos_n, for host rows, or for a bound below pos_n
+    q::VSeg sv;
+    sv.dev = true;
+    sv.pos = 5001;
+    sv.pos_n = 2;
+    ISO_CHECK((q::e1Row0Interval(sv) == std::array<std::int32_t, 2>{5000, 5001}));
+    sv.pos_n = 1;
+    ISO_CHECK((q::e1Row0Interval(sv) == std::array<std::int32_t, 2>{5001, 5001}));
+    sv.pos_n = 5;
+    ISO_CHECK((q::e1Row0Interval(sv) == std::array<std::int32_t, 2>{4997, 5001}));
+    sv.pos_n = 0;
+    ISO_CHECK((q::e1Row0Interval(sv) == std::array<std::int32_t, 2>{-1, -1}));
+    sv.pos_n = 2;
+    sv.dev = false;
+    ISO_CHECK((q::e1Row0Interval(sv) == std::array<std::int32_t, 2>{-1, -1}));
+    sv.dev = true;
+    sv.pos = 1;
+    sv.pos_n = 3;
+    ISO_CHECK((q::e1Row0Interval(sv) == std::array<std::int32_t, 2>{-1, -1}));
+    // the fields start unset and a refused verify leaves them unset
+    ISO_CHECK(c->row0_lo == -1 && c->row0_hi == -1);
 }
 
 // v0252-f1arg3 (PLAN V1-63 / V1-64): the R9700 host switch of the multi-block verify argmax twins argmax_rows_to_mb /
