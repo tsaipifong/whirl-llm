@@ -45,3 +45,4 @@
 #include "moe_prefill_fx.hip"       // v0252-8sdet: COMB 6 order-independent fixed-point combine (gemm_moepdi_*, moe_fix_zero); opt-in (LAST: no existing kernel moves)
 #include "gdn_select.hip"           // v0252-e1s8: capability marker whirl_cap_gdn_select of the DeltaNet select mode (LAST: no existing kernel moves)
 #include "spec_accept_relax.hip"     // v0252-e1fast: spec_accept_relax_rows, the relaxacc accept decision on the device (LAST: no existing kernel moves)
+#include "gemm_w4a4p.hip"            // v0252-w4a4: W4A4 speed probe, bench-only w4a4p_* entries (no product path; LAST: no existing kernel moves)

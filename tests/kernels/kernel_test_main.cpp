@@ -32,6 +32,7 @@
 #include "cpu_ref.h"
 #include "kt_bench.h"
 #include "kt_ggemv_widths.h"
+#include "kt_w4a4p.h"  // v0252-w4a4: --list-bench-w4a4p
 #include "whirl/common.h"
 #include "whirl/leak_count.h"
 
@@ -59,6 +60,7 @@ int usage() {
         "          [--fdq-n ROWS,...] (default 1024,1280,2048,4096) [--fdq-v c2,t2] (gfx1151 code object)\n"
         "          [--bench-nt 5,6]: ggemv widths, a subset of the gemvk table (--list-bench-nt prints it and exits 0)\n"
         "          [--bench-v 7]: ggemv: only these gemvk variants (1..9) next to the production kernel\n"
+        "          w4a4p: W4A4 speed probe (gfx1151; env WHIRL_KT_W4A4P_*, bench_kernels.cpp; --list-bench-w4a4p prints its cells)\n"
         "  --device  index, gfx arch, name substring, r9700 or 8060s (default: WHIRL_DEVICE, else the\n"
         "            first R9700, else the first GPU this build has kernels for)\n"
         "  models default to WHIRL_TEST_Q4 (else WHIRL_TEST_GGUF) / WHIRL_TEST_MX / WHIRL_TEST_MOE /\n"
@@ -142,6 +144,19 @@ int main(int argc, char** argv) {
                 }
             } else if (a == "--list-bench-nt") {  // before any device call: the runners size their estimate from it
                 std::printf("ggemv bench widths: %s\n", kt::joinNts(kt::ggemvBenchNts()).c_str());
+                return 0;
+            } else if (a == "--list-bench-w4a4p") {  // v0252-w4a4: the W4A4 speed probe's cell table (CPU only, exits 0)
+                std::printf("w4a4p (W4A4 speed probe, gfx1151 bench-only entries; A = gemmfq_t2_mxfp4 in every gemm pair)\n");
+                std::printf("  reg   A %s vs B", kt::w4a4p::kRegA);
+                for (const char* b : kt::w4a4p::kRegB) std::printf(" %s", b);
+                std::printf(" (%d blocks x 256 threads x %d iters)\n", kt::w4a4p::kRegBlocks, kt::w4a4p::kRegIters);
+                for (const auto& s : kt::w4a4p::kSwift)
+                    std::printf("  gemm  %-9s %-24s %5d x %5d  launches/forward %3d\n", s.name, s.tensor, s.rows, s.k, s.n);
+                std::printf("  gemm  B variants:");
+                for (const auto& g : kt::w4a4p::kGemms) std::printf(" %s (%dx%d%s)", g.name, g.bm, g.bn, !g.fold ? "" : g.fg == 4 ? ", per-128 fold" : ", per-32 fold");
+                std::printf("\n  quant w4a4p_quant_x K");
+                for (const auto& p : kt::w4a4p::kProd) std::printf(" %d (x%d / forward)", p.k, p.n);
+                std::printf("\n  GEMM launches per forward: %d\n", kt::w4a4p::launchesPerForward());
                 return 0;
             } else return usage();
         } catch (const std::exception& e) {

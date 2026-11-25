@@ -35,6 +35,9 @@
 //   ws4s  in-object A/B of the gfx1151 balance / precise decode / verify attention split count (v0252-8sws): attn_ws4 /
 //         attn_ws4g<CG>[_q8] + attn_combine at 64 (today, ws4::kNs) vs the bench-only entries <name>_ns<S> (S 8 16 32 128);
 //         q8h and f16 KV, Ornith / Swift, keys 8k..128k, rows 1 / 2 / 3 / MTP draft row; tolerance check, ABBA, geometric mean
+//   w4a4p W4A4 SPEED PROBE (v0252-w4a4, gfx1151, bench-only entries w4a4p_*): register-rate A/B (f16 vs iu8 / iu4 +- fold),
+//         gemmfq_t2_mxfp4 vs the iu4 GEMMs per Swift dense shape (B checked vs its own CPU reference), the int4 activation
+//         producer, and the projected prefill gain (benchW4a4p, kt_w4a4p.h)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
 // without a model the cells use synthetic MXFP4 blocks of the same shapes (cell names start with "synthetic.").
 
@@ -54,8 +57,11 @@
 #include "kt_bench.h"
 #include "kt_dq4s.h"  // v0252-8sq5: family dq4s cell table, geometric-mean judge line
 #include "kt_ws4s.h"  // v0252-8sws: family ws4s cell table (attn_ws4 / attn_ws4g split count)
+#include "kt_w4a4p.h"  // v0252-w4a4: family w4a4p (W4A4 speed probe: int4 packing, references, shapes, projection)
 #include "kt_ggemv_widths.h"
 
+#include <chrono>
+#include <map>
 #include <random>
 
 namespace kt {
@@ -191,6 +197,9 @@ struct Cell {
     // (kt_dq4s.h geoCi) and its JSONL keys ratio_gmean / ratio_ci95_lo / ratio_ci95_hi on the ab_ratio row
     bool geo = false;
     std::vector<std::pair<std::string, std::string>> ab_extra;  // more JSONL keys on the ab_ratio row (value: JSON text)
+    AbStats* ab_out = nullptr;  // v0252-w4a4 (family w4a4p): the in-object A/B's stats, for the family's projection line
+    CellStats* cs_out = nullptr;  // v0252-w4a4: a single cell's stats (runCell without B)
+    std::function<void()> pre_time;  // v0252-w4a4: called right before the timing starts (the sustained-state heater)
 };
 
 // family fdq: A = k.fa through k.call, B = k.call_b of the same object; rows A / B (variant=A / B) and the paired ratio
@@ -211,10 +220,12 @@ void runCellInObject(Env& e, Cell& k) {
         return;
     }
     e.bench.beforeCell();
+    if (k.pre_time) k.pre_time();
     k.ci.started = wb::iso_now();
     const BlockFn ba = hipBlock(c, [&k, f = k.fa](std::uint64_t r) { k.call(f, r); });
     const BlockFn bb = hipBlock(c, [&k](std::uint64_t r) { k.call_b(r); });
     const AbStats ab = e.bench.runAB(ba, bb);
+    if (k.ab_out) *k.ab_out = ab;
     if (e.bench.anchorSwitchedOff()) std::printf("   anchor: %s\n", e.bench.anchorError().c_str());
     CellInfo ca = k.ci, cb = k.ci;
     ca.variant = "A";
@@ -310,10 +321,12 @@ void runCell(Env& e, Cell& k) {
         std::printf("   --ab %s: not in the candidate code object, A timed alone\n", k.kernel.c_str());
     }
     e.bench.beforeCell();
+    if (k.pre_time) k.pre_time();
     k.ci.started = wb::iso_now();
     const BlockFn ba = hipBlock(c, [&k, f = k.fa](std::uint64_t r) { k.call(f, r); });
     if (!fb) {
         const CellStats cs = e.bench.run(ba);
+        if (k.cs_out) *k.cs_out = cs;
         printCell(k.ci, cs);
         if (e.bench.anchorSwitchedOff() && !e.anchor_off_noted) {
             std::printf("   anchor: %s (later cells: no drift control)\n", e.bench.anchorError().c_str());
@@ -2462,9 +2475,435 @@ void benchWs4s(Env& e) {
         }
 }
 
+// ---------------------------------------------------------------- w4a4p (v0252-w4a4, PLAN V1-144 kill-screen K1, gfx1151)
+// SPEED PROBE of a W4A4 prefill GEMM (bench-only entries of kernels/gfx1151/gemm_w4a4p.hip; CPU side kt_w4a4p.h). Three parts,
+// all in one process so every ratio is same-run:
+//   reg   in-object A/B of register-only WMMA rate probes: A = w4a4p_reg_f16, B = iu8 / iu8 + per-32 fold / iu4 / iu4 + fold
+//         (P1a's probe set re-run; TOPS from flops = kt_w4a4p.h regOps())
+//   gemm  per Swift dense shape (kt_w4a4p.h kSwift, real blk.0 / blk.3 tensors with --mx, else synthetic MXFP4) and token count:
+//         A = the shipped gemmfq_t2_mxfp4 (f16 activations, MXFP4 decoded in the loop; checked vs the CPU f16 product), B = each
+//         w4a4p_gemm_* (int4 weights = the MXFP4 codes re-quantized by the LUT form, int4 activations per 32 from the same f16 X);
+//         B checked against its own CPU reference (i4: exact int dot; i4f / i4fb: within 8 f32 ulps of the exact fold), then
+//         ABBA pairs; the ab_ratio row carries the geometric mean and its 95 % interval
+//   quant the activation producer w4a4p_quant_x (f16 -> int4 + f32 scale per 32) at K 5120 / 6144 / 17408, codes and scales
+//         bitwise == the CPU quantizer
+// and, when WHIRL_KT_W4A4P_SHARE gives the measured GEMM share per token count, one projection line per GEMM variant
+// (kt_w4a4p.h project(): R = A-time-weighted B / A over the 7 shapes x launches per forward, producer share, saved fraction and
+// pp gain with the interval from the pairs' own noise; verdict GAIN / LOSS / OPEN from the interval alone, ADR-0019).
+// Env: WHIRL_KT_W4A4P_N (token counts, default 2048), _SHAPES (kSwift names), _GEMMS (kGemms names), _REG=0 / _QUANT=0 (skip a
+// part), _HEAT_S (seconds of untimed A launches right before each A/B: the sustained state; default 0 = burst), _SHARE
+// ("2048:0.864,8192:0.851"), _MUT=1 (the B check compares against the NEXT token's reference: every gemm cell must FAIL - the
+// check is not vacuous).
+std::vector<std::string> w4pEnvNames(const char* name) {
+    std::vector<std::string> v;
+    if (const char* s = std::getenv(name)) {
+        std::string cur;
+        for (const char* p = s;; ++p) {
+            if (*p == ',' || *p == '\0') {
+                if (!cur.empty()) v.push_back(cur);
+                cur.clear();
+                if (*p == '\0') break;
+            } else {
+                cur += *p;
+            }
+        }
+    }
+    return v;
+}
+bool w4pPick(const std::vector<std::string>& sel, const std::string& n) { return sel.empty() || std::find(sel.begin(), sel.end(), n) != sel.end(); }
+
+void benchW4a4p(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "w4a4p";
+    if (c.mod.arch() != hip::Arch::gfx1151 || !c.fnOpt("w4a4p_gemm_i4")) {
+        c.rep.skip("w4a4p", "bench w4a4p", "the W4A4 probe entries exist only in the gfx1151 code object");
+        return;
+    }
+    const std::vector<int> ns = ws4rEnvList("WHIRL_KT_W4A4P_N", {2048});
+    const std::vector<std::string> shapes = w4pEnvNames("WHIRL_KT_W4A4P_SHAPES"), gemms = w4pEnvNames("WHIRL_KT_W4A4P_GEMMS");
+    const char* heat_env = std::getenv("WHIRL_KT_W4A4P_HEAT_S");
+    const double heat_s = heat_env ? std::atof(heat_env) : 0.0;
+    const bool mut = std::getenv("WHIRL_KT_W4A4P_MUT") && std::string(std::getenv("WHIRL_KT_W4A4P_MUT")) == "1";
+    const bool do_reg = !(std::getenv("WHIRL_KT_W4A4P_REG") && std::string(std::getenv("WHIRL_KT_W4A4P_REG")) == "0");
+    const bool do_quant = !(std::getenv("WHIRL_KT_W4A4P_QUANT") && std::string(std::getenv("WHIRL_KT_W4A4P_QUANT")) == "0");
+    std::vector<std::pair<int, double>> shares;
+    for (const std::string& s : w4pEnvNames("WHIRL_KT_W4A4P_SHARE")) {
+        const std::size_t p = s.find(':');
+        if (p != std::string::npos) shares.push_back({std::atoi(s.substr(0, p).c_str()), std::atof(s.substr(p + 1).c_str())});
+    }
+    const std::string st = heat_s > 0 ? "sustained" : "burst";
+    std::printf("   w4a4p: SPEED PROBE (bench-only entries, no product path); state %s%s; tokens", st.c_str(),
+                heat_s > 0 ? (" (" + std::to_string(heat_s) + " s of A before each pair)").c_str() : "");
+    for (const int n : ns) std::printf(" %d", n);
+    std::printf("%s\n", mut ? "; WHIRL_KT_W4A4P_MUT: planted wrong B reference (every gemm cell must FAIL)" : "");
+    // sustained state: untimed A launches for heat_s seconds right before the timed pairs
+    auto heater = [&c, heat_s](std::function<void(std::uint64_t)> call) -> std::function<void()> {
+        if (heat_s <= 0) return {};
+        return [&c, heat_s, call]() {
+            const auto t0 = std::chrono::steady_clock::now();
+            std::uint64_t r = 0;
+            while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < heat_s) {
+                for (int i = 0; i < 8; ++i) call(r++);
+                c.sync();
+            }
+        };
+    };
+
+    // ---- part 1: register-rate probes
+    if (do_reg) {
+        const hip::Function fa = c.fnOpt(w4a4p::kRegA);
+        std::vector<std::uint16_t> hsrc(128 * 16);
+        {
+            const std::vector<float> r = c.randn(hsrc.size(), 0.5f);
+            for (std::size_t i = 0; i < hsrc.size(); ++i) hsrc[i] = f2h(r[i]);
+        }
+        std::vector<std::int32_t> isrc(128 * 4);
+        {
+            const std::vector<float> r = c.randn(isrc.size() * 4, 40.0f);
+            for (std::size_t i = 0; i < isrc.size(); ++i) {
+                std::uint32_t u = 0;
+                for (int b = 0; b < 4; ++b) u |= (static_cast<std::uint32_t>(static_cast<int>(std::fmax(-127.f, std::fmin(127.f, r[i * 4 + b])))) & 255u) << (8 * b);
+                isrc[i] = static_cast<std::int32_t>(u);
+            }
+        }
+        std::vector<float> scs(128);
+        for (std::size_t i = 0; i < scs.size(); ++i) scs[i] = 0.5f + static_cast<float>(i) / 128.f;
+        Buf srch(hsrc), srci(isrc), scb(scs), out(static_cast<std::size_t>(w4a4p::kRegBlocks) * 256 * 4);
+        const std::size_t nout = static_cast<std::size_t>(w4a4p::kRegBlocks) * 256;
+        auto finite = [](const std::vector<float>& y) {
+            std::size_t bad = 0;
+            for (const float v : y) bad += !std::isfinite(v);
+            return bad;
+        };
+        for (const char* bn : w4a4p::kRegB) {
+            const hip::Function fb = c.fnOpt(bn);
+            if (!fa || !fb) {
+                Result r;
+                r.name = std::string("bench w4a4p: ") + (!fa ? w4a4p::kRegA : bn) + " not in this code object";
+                r.pass = false;
+                c.rep.add(r);
+                continue;
+            }
+            Cell k;
+            k.ci = e.info("w4a4p", w4a4p::kRegA, std::string("reg.") + (bn + 10) + "." + st, "reg" + std::to_string(w4a4p::kRegBlocks) + "x256");
+            k.ci.settings = e.settings0 + ";reg_blocks=" + std::to_string(w4a4p::kRegBlocks) + ";reg_iters=" + std::to_string(w4a4p::kRegIters) +
+                            ";heat_s=" + std::to_string(heat_s);
+            k.ci.flops = w4a4p::regOps();
+            k.kernel = w4a4p::kRegA;
+            k.kernel_b = bn;
+            k.fa = fa;
+            k.call = [&c, &srch, &out](hip::Function f, std::uint64_t) {
+                hip::launch(f, {static_cast<unsigned>(w4a4p::kRegBlocks), 1, 1}, {256, 1, 1}, 0, c.s, srch.p(), out.p(), w4a4p::kRegIters);
+            };
+            k.call_b = [&c, &srci, &scb, &out, fb](std::uint64_t) {
+                hip::launch(fb, {static_cast<unsigned>(w4a4p::kRegBlocks), 1, 1}, {256, 1, 1}, 0, c.s, srci.p(), scb.p(), out.p(), w4a4p::kRegIters);
+            };
+            k.run = [&c, &k, &out, nout](hip::Function f) {
+                out.fill(0xff);
+                k.call(f, 0);
+                c.sync();
+                return out.down<float>(nout);
+            };
+            k.verify = [finite](const std::vector<float>& y) {
+                Result r;
+                r.kind = Kind::invariant;
+                r.n = y.size();
+                r.mismatches = finite(y);
+                r.pass = r.n > 0 && r.mismatches == 0;
+                r.name = "register rate probe: output finite (no reference: a rate probe)";
+                return r;
+            };
+            k.bitwise_b = [&c, &k, &out, nout, finite]() -> std::pair<std::size_t, std::size_t> {
+                out.fill(0xff);
+                k.call_b(0);
+                c.sync();
+                return {nout, finite(out.down<float>(nout))};
+            };
+            k.b_rule = "finite (rate probe)";
+            k.geo = true;
+            k.pre_time = heater([&k, fa](std::uint64_t r) { k.call(fa, r); });
+            runCell(e, k);
+        }
+    }
+
+    // ---- part 3 first in the data, timed last: producer medians per (K, n) for the projection
+    std::map<std::pair<int, int>, double> prod_us;
+    // ---- part 2: GEMM cells
+    std::map<std::pair<std::string, int>, std::vector<w4a4p::CellR>> proj;  // (variant, n) -> cells
+    const hip::Function fq = c.fnOpt("gemmfq_t2_mxfp4");
+    std::size_t t2 = 0;
+    for (std::size_t i = 0; i < wk::kGemmFqNames.size(); ++i)
+        if (std::string(wk::kGemmFqNames[i]) == "t2") t2 = i;
+    const wk::GemmCfg ga = wk::kGemmFqCfgs[t2];
+    if (!fq) {
+        Result r;
+        r.name = "bench w4a4p: gemmfq_t2_mxfp4 (the shipped f16 GEMM, side A) not in this code object";
+        r.pass = false;
+        c.rep.add(r);
+    }
+    const whirl::gguf::File* gf = c.open(c.models.mx);
+    for (const w4a4p::Shape& sh : w4a4p::kSwift) {
+        if (!fq || !w4pPick(shapes, sh.name)) continue;
+        HostMat m;
+        std::string label = "synthetic";
+        if (gf && gf->tensor(sh.tensor)) {
+            m = loadMat(*gf, sh.tensor);
+            label = "swift";
+            if (m.type != QType::mxfp4 || m.nrows != sh.rows || m.ncols != sh.k) {
+                std::printf("   w4a4p: %s is not MXFP4 %d x %d in this model: synthetic MXFP4 of the shape instead\n", sh.tensor, sh.rows, sh.k);
+                label = "synthetic";
+            }
+        }
+        if (label == "synthetic") m = randomMat(c, QType::mxfp4, sh.rows, sh.k);
+        const int rows = sh.rows, K = sh.k;
+        const std::size_t wq_bytes = static_cast<std::size_t>(rows) * K / 2, nsc = static_cast<std::size_t>(K) / 32;
+        std::vector<std::uint8_t> wcat(wq_bytes + static_cast<std::size_t>(rows) * nsc * 4);
+        std::vector<float> wsc(static_cast<std::size_t>(rows) * nsc);
+        for (int r = 0; r < rows; ++r)
+            w4a4p::mxRowToI4(m.data.data() + static_cast<std::size_t>(r) * m.row_bytes, K, wcat.data() + static_cast<std::size_t>(r) * (K / 2),
+                             wsc.data() + static_cast<std::size_t>(r) * nsc);
+        std::memcpy(wcat.data() + wq_bytes, wsc.data(), wsc.size() * 4);
+        const DevCopies wa = upload(e, m.data), wb4 = upload(e, wcat);
+        const std::uint64_t rb = m.row_bytes;
+        const int cr = 64, ct = 8;  // A check (as fdq)
+        for (const int n : ns) {
+            if (!w4a4p::shapeOk(rows, K, n)) {
+                c.rep.skip("w4a4p", std::string("bench w4a4p ") + sh.name + " n" + std::to_string(n), "shape does not divide the probe tile");
+                continue;
+            }
+            const std::vector<float> x = c.randn(static_cast<std::size_t>(n) * K);
+            std::vector<std::uint16_t> xh(x.size());
+            std::vector<float> xf(x.size());
+            for (std::size_t i = 0; i < x.size(); ++i) {
+                xh[i] = f2h(x[i]);
+                xf[i] = h2f(xh[i]);
+            }
+            std::vector<std::uint8_t> xq(static_cast<std::size_t>(n) * K / 2);
+            std::vector<float> xs(static_cast<std::size_t>(n) * nsc);
+            for (int t = 0; t < n; ++t)
+                w4a4p::quantRow(xf.data() + static_cast<std::size_t>(t) * K, K, xq.data() + static_cast<std::size_t>(t) * (K / 2),
+                                xs.data() + static_cast<std::size_t>(t) * nsc);
+            Buf x16(xh), xqd(xq), xsd(xs), y(static_cast<std::size_t>(n) * rows * 4);
+            // checked outputs of B: the first and the last 128 rows x the first and the last 16 tokens (first / last tiles, all of K)
+            std::vector<int> crow, ctok;
+            for (int r = 0; r < 128; ++r) crow.push_back(r);
+            for (int r = rows - 128; r < rows; ++r) crow.push_back(r);
+            for (int t = 0; t < 16; ++t) ctok.push_back(t);
+            for (int t = n - 16; t < n; ++t) ctok.push_back(t);
+            for (const w4a4p::Gemm& gv : w4a4p::kGemms) {
+                if (!w4pPick(gemms, gv.name)) continue;
+                const hip::Function fb = c.fnOpt(gv.name);
+                if (!fb) {
+                    Result r;
+                    r.name = std::string("bench w4a4p: ") + gv.name + " not in this code object";
+                    r.pass = false;
+                    c.rep.add(r);
+                    continue;
+                }
+                Cell k;
+                k.ci = e.info("w4a4p", "gemmfq_t2_mxfp4", label + "." + sh.name + ".n" + std::to_string(n) + "." + (gv.name + 6) + "." + st,
+                              shapeStr(rows, K));
+                k.ci.settings = e.settings(static_cast<std::uint64_t>(wa.n()) * m.data.size(), wa.n()) + ";b_rot_copies=" + std::to_string(wb4.n()) +
+                                ";heat_s=" + std::to_string(heat_s);
+                k.ci.flops = 2.0 * n * rows * K;
+                k.kernel = "gemmfq_t2_mxfp4";
+                k.kernel_b = gv.name;
+                k.fa = fq;
+                k.call = [&c, &wa, &x16, &y, ga, rb, K, rows, n](hip::Function f, std::uint64_t r) {
+                    hip::launch(f, {cdiv(n, ga.bn), cdiv(rows, ga.bm), 1}, {static_cast<unsigned>(ga.nth), 1, 1}, 0, c.s, wa.at(r), rb, x16.p(), y.p(), K,
+                                rows, n, 0);
+                };
+                const DevPtr wsoff = static_cast<DevPtr>(wq_bytes);
+                const unsigned gx = static_cast<unsigned>(n / gv.bn), gy = static_cast<unsigned>(rows / gv.bm);
+                k.call_b = [&c, &wb4, &xqd, &xsd, &y, fb, wsoff, gx, gy, K, rows, n](std::uint64_t r) {
+                    const DevPtr w = wb4.at(r);
+                    hip::launch(fb, {gx, gy, 1}, {256, 1, 1}, 0, c.s, w, static_cast<DevPtr>(w + wsoff), xqd.p(), xsd.p(), y.p(), K, rows, n);
+                };
+                k.run = [&c, &k, &y, n, rows, cr, ct](hip::Function f) {
+                    y.fill(0xff);
+                    k.call(f, 0);
+                    c.sync();
+                    const auto all = y.down<float>(static_cast<std::size_t>(n) * rows);
+                    std::vector<float> got;
+                    for (int t = 0; t < ct && t < n; ++t)
+                        got.insert(got.end(), all.begin() + static_cast<std::ptrdiff_t>(t) * rows, all.begin() + static_cast<std::ptrdiff_t>(t) * rows + cr);
+                    return got;
+                };
+                k.verify = [&m, &xh, cr, ct, K, n](const std::vector<float>& got) {
+                    const int tt = std::min(ct, n);
+                    std::vector<float> wf(static_cast<std::size_t>(cr) * K);
+                    std::vector<std::uint16_t> wh(static_cast<std::size_t>(K));
+                    for (int r = 0; r < cr; ++r) {
+                        ref::dequantRowF16(m.type, m.data.data() + static_cast<std::size_t>(r) * m.row_bytes, K, wh.data());
+                        for (int q = 0; q < K; ++q) wf[static_cast<std::size_t>(r) * K + q] = h2f(wh[static_cast<std::size_t>(q)]);
+                    }
+                    std::vector<float> xa(static_cast<std::size_t>(tt) * K);
+                    for (std::size_t i = 0; i < xa.size(); ++i) xa[i] = h2f(xh[i]);
+                    std::vector<double> ry, rs;
+                    ref::gemvF64(wf, cr, K, xa.data(), tt, K, ry, rs);
+                    return cmpTol("vs CPU (" + std::to_string(cr) + " rows x " + std::to_string(tt) + " tokens)", got, ry, rs, 1e-4, 1e-6);
+                };
+                const bool fold = gv.fold;
+                k.bitwise_b = [&c, &k, &y, &wcat, &wsc, &xq, &xs, &crow, &ctok, fold, mut, n, rows, K, nsc, gv]() -> std::pair<std::size_t, std::size_t> {
+                    y.fill(0x7f);
+                    k.call_b(0);
+                    c.sync();
+                    const std::vector<float> all = y.down<float>(static_cast<std::size_t>(n) * rows);
+                    std::size_t cnt = 0, bad = 0, notbits = 0;
+                    for (const int t0 : ctok) {
+                        const int t = mut ? (t0 + 1) % n : t0;  // planted: the next token's reference
+                        const std::uint8_t* xr = xq.data() + static_cast<std::size_t>(t) * (K / 2);
+                        const float* xsr = xs.data() + static_cast<std::size_t>(t) * nsc;
+                        for (const int r : crow) {
+                            const std::uint8_t* wr = wcat.data() + static_cast<std::size_t>(r) * (K / 2);
+                            const float* wsr = wsc.data() + static_cast<std::size_t>(r) * nsc;
+                            const float got = all[static_cast<std::size_t>(t0) * rows + r];
+                            ++cnt;
+                            if (!fold) {
+                                bad += !(got == static_cast<float>(w4a4p::refI4(wr, xr, K)));
+                            } else {
+                                double yd, sc;
+                                w4a4p::refFoldF64(wr, wsr, xr, xsr, K, yd, sc, gv.fg);
+                                bad += !(std::fabs(static_cast<double>(got) - yd) <= 8.0 * 1.1920929e-7 * sc + 1e-30);
+                                const float f32 = w4a4p::refFoldF32(wr, wsr, xr, xsr, K, gv.fg);
+                                notbits += std::memcmp(&f32, &got, 4) != 0;
+                            }
+                        }
+                    }
+                    if (fold) std::printf("   %s: %zu of %zu checked outputs differ in bits from the CPU f32 emulation of the fold (information)\n", gv.name, notbits, cnt);
+                    return {cnt, bad};
+                };
+                k.b_rule = fold ? (gv.fg == 4 ? "within 8 f32 ulps of the term scale of the exact per-128 fold (CPU, int4 W x int4 X)" : "within 8 f32 ulps of the term scale of the exact per-32 fold (CPU, int4 W x int4 X)") : "== the exact int4 x int4 dot (CPU)";
+                k.geo = true;
+                AbStats ab;
+                k.ab_out = &ab;
+                k.ab_extra.push_back({"probe", wb::json_string("w4a4p")});
+                k.ab_extra.push_back({"launches_per_forward", std::to_string(sh.n)});
+                k.ab_extra.push_back({"state", wb::json_string(st)});
+                k.pre_time = heater([&k, fq](std::uint64_t r) { k.call(fq, r); });
+                runCell(e, k);
+                if (ab.pairs > 0 && ab.ratio.ok()) {
+                    const dq4s::GeoCi g = dq4s::geoCi(ab.ratio.samples);
+                    proj[{gv.name, n}].push_back({ab.a.st.median, g.g, 0.5 * (g.hi - g.lo), sh.n});
+                }
+            }
+        }
+    }
+
+    // ---- part 3: the activation producer
+    if (do_quant) {
+        const hip::Function fp = c.fnOpt("w4a4p_quant_x");
+        for (const w4a4p::ProdShape& ps : w4a4p::kProd) {
+            for (const int n : ns) {
+                if (!fp) break;
+                const int K = ps.k;
+                const std::size_t nblk = static_cast<std::size_t>(n) * K / 32;
+                const std::vector<float> x = c.randn(static_cast<std::size_t>(n) * K);
+                std::vector<std::uint16_t> xh(x.size());
+                std::vector<float> xf(x.size());
+                for (std::size_t i = 0; i < x.size(); ++i) {
+                    xh[i] = f2h(x[i]);
+                    xf[i] = h2f(xh[i]);
+                }
+                std::vector<std::uint8_t> qref(nblk * 16);
+                std::vector<float> sref(nblk);
+                w4a4p::quantRow(xf.data(), static_cast<int>(static_cast<std::size_t>(n) * K), qref.data(), sref.data());  // rows are whole blocks
+                Buf x16(xh), xqd(nblk * 16), xsd(nblk * 4);
+                Cell k;
+                k.ci = e.info("w4a4p", "w4a4p_quant_x", "quant.k" + std::to_string(K) + ".n" + std::to_string(n) + "." + st, shapeStr(n, K));
+                k.ci.settings = e.settings0 + ";heat_s=" + std::to_string(heat_s);
+                k.ci.bytes = static_cast<double>(n) * K * 2 + static_cast<double>(nblk) * 20;
+                k.kernel = "w4a4p_quant_x";
+                k.fa = fp;
+                const int nb = static_cast<int>(nblk);
+                k.call = [&c, &x16, &xqd, &xsd, nb](hip::Function f, std::uint64_t) {
+                    hip::launch(f, {cdiv(nb, 256), 1, 1}, {256, 1, 1}, 0, c.s, x16.p(), xqd.p(), xsd.p(), nb);
+                };
+                k.run = [&c, &k, &xqd, &xsd, nblk](hip::Function f) {
+                    xqd.fill(0xee);
+                    xsd.fill(0xff);
+                    k.call(f, 0);
+                    c.sync();
+                    std::vector<float> o = xsd.down<float>(nblk);
+                    const std::vector<std::uint8_t> q = xqd.down<std::uint8_t>(nblk * 16);
+                    for (const std::uint8_t b : q) o.push_back(static_cast<float>(b));
+                    return o;
+                };
+                k.verify = [&qref, &sref, nblk](const std::vector<float>& o) {
+                    Result r;
+                    r.kind = Kind::exact;
+                    r.n = o.size();
+                    std::size_t bad = o.size() == nblk * 17 ? 0 : o.size() + 1;
+                    for (std::size_t i = 0; i < nblk && bad == 0; ++i) bad += std::memcmp(&o[i], &sref[i], 4) != 0;
+                    for (std::size_t i = 0; i < nblk * 16 && o.size() == nblk * 17; ++i) bad += o[nblk + i] != static_cast<float>(qref[i]);
+                    r.mismatches = bad;
+                    r.pass = bad == 0;
+                    r.name = "codes and scales bitwise == the CPU quantizer (amax / 7, rint, clamp -7..7)";
+                    return r;
+                };
+                CellStats cs;
+                k.cs_out = &cs;
+                runCell(e, k);
+                if (cs.ok()) prod_us[{K, n}] = cs.st.median;
+            }
+        }
+    }
+
+    // ---- projection (needs the measured GEMM share per token count)
+    for (const auto& [key, cells] : proj) {
+        const int n = key.second;
+        double f = 0;
+        for (const auto& s : shares)
+            if (s.first == n) f = s.second;
+        double pu = 0;
+        bool have_p = true;
+        for (const w4a4p::ProdShape& ps : w4a4p::kProd) {
+            const auto it = prod_us.find({ps.k, n});
+            if (it == prod_us.end()) have_p = false;
+            else pu += ps.n * it->second;
+        }
+        const int nshape = static_cast<int>(cells.size());
+        const int want = static_cast<int>(sizeof(w4a4p::kSwift) / sizeof(w4a4p::kSwift[0]));
+        if (f <= 0 || nshape != want) {
+            std::printf("   w4a4p projection %s n%d: not computed (%s)\n", key.first.c_str(), n,
+                        f <= 0 ? "no WHIRL_KT_W4A4P_SHARE for this token count" : (std::to_string(nshape) + " of 7 shapes timed").c_str());
+            continue;
+        }
+        const w4a4p::Projection p = w4a4p::project(cells, have_p ? pu : 0.0, f);
+        std::printf("   w4a4p projection %s n%d %s: R (B/A, A-time weighted, 7 shapes) %.4f +- %.4f; producer %s%.4f of GEMM time; GEMM share %.3f -> "
+                    "prefill time saved %+.2f %% [%+.2f, %+.2f], pp gain %+.2f %% [%+.2f, %+.2f] -> %s\n",
+                    key.first.c_str(), n, st.c_str(), p.R, p.R_half, have_p ? "" : "(not timed: 0) ", p.P, f, 100 * p.saved, 100 * p.saved_lo,
+                    100 * p.saved_hi, 100 * p.gain, 100 * p.gain_lo, 100 * p.gain_hi, w4a4p::verdict(p).c_str());
+        wb::Row r;
+        r.tool = "whirl-kernel-test";
+        r.tool_ver = e.o.tool_ver;
+        r.component = "K-w4a4p";
+        r.cell = "projection." + key.first + ".n" + std::to_string(n) + "." + st;
+        r.metric = "kern.w4a4p.projection_gain";
+        r.unit = "ratio";
+        r.value = p.gain;
+        r.code_hash = e.o.code_hash;
+        r.gpu_arch = e.o.gpu_arch;
+        r.gpu_pci = e.o.gpu_pci;
+        r.settings = e.settings0 + ";share=" + std::to_string(f);
+        char b[64];
+        auto num = [&b](double v) {
+            std::snprintf(b, sizeof(b), "%.6g", v);
+            return std::string(b);
+        };
+        for (const auto& kv : std::vector<std::pair<const char*, double>>{{"R", p.R}, {"R_half95", p.R_half}, {"producer_share_of_gemm", p.P}, {"gemm_share", f},
+                                                                         {"saved", p.saved}, {"saved_lo", p.saved_lo}, {"saved_hi", p.saved_hi},
+                                                                         {"gain_lo", p.gain_lo}, {"gain_hi", p.gain_hi}})
+            r.extra.push_back({kv.first, num(kv.second)});
+        r.extra.push_back({"verdict", wb::json_string(w4a4p::verdict(p))});
+        r.extra.push_back({"producer_timed", have_p ? "true" : "false"});
+        e.write(r);
+    }
+}
+
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax", "moepc", "dq4s", "ws4s"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax", "moepc", "dq4s", "ws4s", "w4a4p"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -2516,7 +2955,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
     };
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
                       {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"ws4r", benchWs4r}, {"silu", benchSilu}, {"lsplit", benchLsplit},
-                      {"argmax", benchArgmax}, {"moepc", benchMoepc}, {"dq4s", benchDq4s}, {"ws4s", benchWs4s}};
+                      {"argmax", benchArgmax}, {"moepc", benchMoepc}, {"dq4s", benchDq4s}, {"ws4s", benchWs4s}, {"w4a4p", benchW4a4p}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);
