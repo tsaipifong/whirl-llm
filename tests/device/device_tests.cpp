@@ -273,6 +273,8 @@ void testProfiles() {
     // v0252-e1fast: fast mode's own default - the 8060S MoE lookahead with relaxacc on the GPU below 131329 (screen e1fast-orn
     // 20261125-1545 KEEP); the R9700 object has no spec_accept_relax_rows: 0 / 0
     CHECK(a.e1_moe_fast == 0 && a.e1_ctx_max_fast == 0 && b.e1_moe_fast == 2 && b.e1_ctx_max_fast == 131329);
+    // v0252-swe1: the dense default's fast value and context limit (Swift; clamp instead of drain), 0 until a dense screen
+    CHECK(a.e1_dense_fast == 0 && a.e1_ctx_max_dense == 0 && b.e1_dense_fast == 0 && b.e1_ctx_max_dense == 0);
     // v0252-l2split (PLAN V1-88): the decode / verify split count by machine fill: R9700 64 blocks = 32 WGPs x 2 attn_ws4r
     // blocks (one machine wave); the 8060S 0 (its attn_ws4 path keeps the constant 64 splits)
     CHECK(a.attn_lsplit_blocks == 64);

@@ -8642,6 +8642,7 @@ void testTierBridgeRestore() {
 #include "e1_ahead_tests.inc"  // v0252-e1p1c (E1 one-cycle lookahead, WHIRL_E1=2); after the helpers it uses
 #include "e1_snap_tests.inc"   // v0252-e1s8 (the lookahead in DeltaNet snapshot mode, gfx1151); after e1_ahead_tests.inc
 #include "e1_fast_tests.inc"   // v0252-e1fast (the lookahead in fast mode: relaxacc decided on the device); after e1_snap_tests.inc
+#include "e1_swift_tests.inc"  // v0252-swe1 (the lookahead for dense models: clamp instead of drain); after e1_fast_tests.inc
 
 // arch024 S10 (M8): thread ownership. FakeLoop is a thread that owns an EngineThread the way runLoop does (enter at the
 // start, leave at the end) and runs the calls given to it.
@@ -9973,6 +9974,9 @@ int main(int argc, char** argv) {
         {"e1_fast_rule", testE1FastRule},  // v0252-e1fast (PLAN V1-93 P3)
         {"e1_fast_ahead", testE1FastAhead},
         {"e1_fast_gate", testE1FastGate},
+        {"e1_swift_rule", testE1SwiftRule},  // v0252-swe1 (PLAN V1-93 / V1-136)
+        {"e1_swift_ahead", testE1SwiftAhead},
+        {"e1_swift_log", testE1SwiftLog},
         {"fr_tool_truncated", testFrToolTruncated},
         {"fr_nonstream_disconnect", testFrNonStreamDisconnect},
         {"fr_pool_prefill", testFrPoolPrefill},

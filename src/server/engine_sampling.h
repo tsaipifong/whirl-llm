@@ -32,6 +32,8 @@ struct SpecAccStats {
     // v0252-e1p1c (WHIRL_E1=2, the lookahead): cycles read through the ring; of those, the ones submitted before the cycle
     // before them was read; submitted cycles dropped because the request ended at the cycle before them
     std::uint64_t ring = 0, ahead = 0, discard = 0;
+    // v0252-swe1: lookahead cycles clamped to the in-flight cycle's draft count; growth drains (spec::rules::aheadDrafts)
+    std::uint64_t clamp = 0, grow = 0;
 };
 
 // The members in their former Engine order (samp_dev_ .. ctl_host_): ~Engine destroys them at the same point and in

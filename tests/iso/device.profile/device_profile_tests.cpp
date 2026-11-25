@@ -114,6 +114,7 @@ void testProfiles() {
     CHECK(b.e1_dense == 0 && b.e1_moe == 2);  // v0252-e1s8 round 3
     CHECK(a.e1_ctx_max == 65536 && b.e1_ctx_max == 131329);  // v0252-e1s8 round 2 (B); v0252-e1grp: 8060S 131072 + 256 + 1
     CHECK(a.e1_moe_fast == 0 && a.e1_ctx_max_fast == 0 && b.e1_moe_fast == 2 && b.e1_ctx_max_fast == 131329);  // v0252-e1fast
+    CHECK(a.e1_dense_fast == 0 && a.e1_ctx_max_dense == 0 && b.e1_dense_fast == 0 && b.e1_ctx_max_dense == 0);  // v0252-swe1
     // v0252-l2split (PLAN V1-88): the decode / verify split count by machine fill: R9700 64 blocks = 32 WGPs x 2 attn_ws4r
     // blocks (one machine wave); the 8060S 0 (its attn_ws4 path keeps the constant 64 splits)
     CHECK(a.attn_lsplit_blocks == 64);
