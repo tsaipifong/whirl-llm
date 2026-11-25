@@ -8,6 +8,7 @@
 #include "../kt_bench.h"
 #include "../kt_dq4s.h"  // v0252-8sq5: the dq4s split-count bench table
 #include "../kt_ws4s.h"  // v0252-8sws: the ws4s split-count bench table
+#include "../kt_w4a4p.h"  // v0252-w4a4: the W4A4 speed probe's int4 packing, quantizer, references, shape table, projection
 #include "../../../kernels/gfx1151/attn_ws4_index.h"  // ws4::block_range / block_range_ns (host-includable)
 #include "whirl/device_profile.h"
 #include "whirl/kernels_abi.h"
@@ -1218,6 +1219,134 @@ static void test_ws4s_table_cells() {
           std::any_of(cs.begin(), cs.end(), [](const ws4s::Cell& c) { return c.name == "ornith.q8hkv.L32768.rows2.s16_vs_s64.table"; }));
 }
 
+// ---------------------------------------------------------------- w4a4p (v0252-w4a4, K1): int4 packing, quantizer, references
+static void test_w4a4p_pack() {
+    std::size_t bad = 0;
+    for (int lo = -8; lo <= 7; ++lo)
+        for (int hi = -8; hi <= 7; ++hi) {
+            const std::uint8_t b = w4a4p::packPair(lo, hi);
+            bad += w4a4p::nib(b, 0) != lo || w4a4p::nib(b, 1) != hi;
+        }
+    check("w4a4p: packPair / nib round trip over all 256 int4 pairs", bad == 0, num(static_cast<double>(bad)));
+    int q[64];
+    for (int i = 0; i < 64; ++i) q[i] = (i * 5) % 15 - 7;
+    std::uint8_t p[32];
+    w4a4p::packRow(q, 64, p);
+    bad = 0;
+    for (int i = 0; i < 64; ++i) bad += w4a4p::unpackAt(p, i) != q[i];
+    check("w4a4p: packRow / unpackAt keep K order (low nibble = even k)", bad == 0 && (p[0] & 15) == (q[0] & 15) && (p[0] >> 4) == (q[1] & 15));
+}
+
+static void test_w4a4p_quant() {
+    std::vector<float> x(64);
+    for (int i = 0; i < 32; ++i) x[static_cast<std::size_t>(i)] = (i - 16) * 0.21875f;  // amax 3.5 (i = 0): d 0.5
+    for (int i = 32; i < 64; ++i) x[static_cast<std::size_t>(i)] = 0.f;                // all-zero block
+    std::uint8_t q[32];
+    float s[2];
+    w4a4p::quantRow(x.data(), 64, q, s);
+    bool ok = s[0] == 3.5f / 7.f && s[1] == 0.f;
+    std::size_t bad = 0;
+    for (int i = 0; i < 32; ++i) {
+        const int c = w4a4p::unpackAt(q, i);
+        bad += c < -7 || c > 7 || std::fabs(x[static_cast<std::size_t>(i)] - c * s[0]) > 0.5f * s[0] * (1 + 1e-6f);
+    }
+    for (int i = 32; i < 64; ++i) bad += w4a4p::unpackAt(q, i) != 0;
+    check("w4a4p: quantRow amax / 7, |x - q d| <= d / 2, codes in -7..7, zero block -> scale 0 / codes 0", ok && bad == 0 && w4a4p::unpackAt(q, 0) == -7,
+          num(static_cast<double>(bad)));
+}
+
+static void test_w4a4p_mx() {
+    const int want[16] = {0, 1, 1, 2, 2, 4, 5, 7, 0, -1, -1, -2, -2, -4, -5, -7};
+    std::size_t bad = 0;
+    for (int n = 0; n < 16; ++n) bad += w4a4p::mxToI4(n) != want[n];
+    check("w4a4p: MXFP4 code -> int4 LUT {0,1,1,2,2,4,5,7} (+ sign; rint(kv*7/12), 3.5 -> 4)", bad == 0);
+    // one 256-value unit: E8M0 bytes 120 + ib, value j of sub-block ib = code (j + ib) % 16
+    std::vector<std::uint8_t> mx(136);
+    for (int ib = 0; ib < 8; ++ib) {
+        mx[static_cast<std::size_t>(ib)] = static_cast<std::uint8_t>(120 + ib);
+        for (int j = 0; j < 16; ++j)
+            mx[static_cast<std::size_t>(8 + 16 * ib + j)] = static_cast<std::uint8_t>(((j + ib) % 16) | (((j + 16 + ib) % 16) << 4));
+    }
+    std::uint8_t q[128];
+    float s[8];
+    w4a4p::mxRowToI4(mx.data(), 256, q, s);
+    bad = 0;
+    for (int ib = 0; ib < 8; ++ib) {
+        bad += s[ib] != static_cast<float>(std::ldexp(12.0 / 7.0, 120 + ib - 128));
+        for (int j = 0; j < 32; ++j) bad += w4a4p::unpackAt(q, ib * 32 + j) != want[(j + ib) % 16];
+        // the re-quantized value stays within half a step (6/7 of 2^(e-128)) of the MXFP4 value; kv +-6 is the tie (3.5 -> 4:
+        // exactly half a step), hence the relative slack for the f32 scale
+        for (int j = 0; j < 32; ++j) {
+            const double mxv = w4a4p::kMxKv[static_cast<std::size_t>((j + ib) % 16)] * std::ldexp(1.0, 120 + ib - 128);
+            const double qv = w4a4p::unpackAt(q, ib * 32 + j) * static_cast<double>(s[ib]);
+            bad += std::fabs(mxv - qv) > 0.5 * static_cast<double>(s[ib]) * (1 + 1e-6);
+        }
+    }
+    check("w4a4p: mxRowToI4 - qs low nibble = value j, high = j + 16; scale 2^(e-128) * 12/7; error <= half a step", bad == 0, num(static_cast<double>(bad)));
+}
+
+static void test_w4a4p_refs() {
+    const int k = 512;
+    std::vector<int> a(k), b(k);
+    std::int64_t want = 0;
+    for (int i = 0; i < k; ++i) {
+        a[static_cast<std::size_t>(i)] = (i * 7 + 3) % 15 - 7;
+        b[static_cast<std::size_t>(i)] = (i * 11 + 1) % 16 - 8;
+        want += a[static_cast<std::size_t>(i)] * b[static_cast<std::size_t>(i)];
+    }
+    std::vector<std::uint8_t> pa(k / 2), pb(k / 2);
+    w4a4p::packRow(a.data(), k, pa.data());
+    w4a4p::packRow(b.data(), k, pb.data());
+    check("w4a4p: refI4 == brute-force int dot", w4a4p::refI4(pa.data(), pb.data(), k) == want);
+    std::vector<float> sa(k / 32), sb(k / 32);
+    for (int j = 0; j < k / 32; ++j) {
+        sa[static_cast<std::size_t>(j)] = std::ldexp(1.f, -(j % 5)) * 1.5f;
+        sb[static_cast<std::size_t>(j)] = 0.01f * (j + 1);
+    }
+    const float f = w4a4p::refFoldF32(pa.data(), sa.data(), pb.data(), sb.data(), k);
+    double y, sc;
+    w4a4p::refFoldF64(pa.data(), sa.data(), pb.data(), sb.data(), k, y, sc);
+    check("w4a4p: refFoldF32 within 16 f32 ulps of the term scale of refFoldF64", sc > 0 && std::fabs(f - y) <= sc * 16 * 1.2e-7, num(f) + " vs " + num(y));
+    // fold with unit scales == the plain int sum
+    std::vector<float> one(k / 32, 1.f);
+    check("w4a4p: refFoldF32 with unit scales == refI4", static_cast<std::int64_t>(w4a4p::refFoldF32(pa.data(), one.data(), pb.data(), one.data(), k)) == want);
+    // per-128 fold (g 4): uses the scales of blocks 0, 4, 8, ... over 128-value dots
+    double y4 = 0, want4 = 0, sc4;
+    for (int g0 = 0; g0 < k / 32; g0 += 4) {
+        std::int64_t d = 0;
+        for (int i = g0 * 32; i < (g0 + 4) * 32; ++i) d += a[static_cast<std::size_t>(i)] * b[static_cast<std::size_t>(i)];
+        want4 += static_cast<double>(d) * (static_cast<double>(sa[static_cast<std::size_t>(g0)]) * sb[static_cast<std::size_t>(g0)]);
+    }
+    w4a4p::refFoldF64(pa.data(), sa.data(), pb.data(), sb.data(), k, y4, sc4, 4);
+    const float f4 = w4a4p::refFoldF32(pa.data(), sa.data(), pb.data(), sb.data(), k, 4);
+    check("w4a4p: per-128 fold (g 4) = sum over 128-value dots x the group's first-block scales", std::fabs(y4 - want4) <= 1e-9 * sc4 &&
+                                                                                                    std::fabs(f4 - want4) <= sc4 * 16 * 1.2e-7,
+          num(y4) + " / " + num(f4) + " vs " + num(want4));
+    check("w4a4p: blockDot over 4 blocks == the sum of the 4 single-block dots",
+          w4a4p::blockDot(pa.data(), pb.data(), 4, 4) == w4a4p::blockDot(pa.data(), pb.data(), 4) + w4a4p::blockDot(pa.data(), pb.data(), 5) +
+                                                              w4a4p::blockDot(pa.data(), pb.data(), 6) + w4a4p::blockDot(pa.data(), pb.data(), 7));
+}
+
+static void test_w4a4p_table_projection() {
+    check("w4a4p: Swift dense table = 400 GEMM launches per forward (P1a sec 3.3)", w4a4p::launchesPerForward() == 400);
+    std::size_t bad = 0;
+    for (const auto& s : w4a4p::kSwift) bad += !w4a4p::shapeOk(s.rows, s.k, 2048) || !w4a4p::shapeOk(s.rows, s.k, 8192);
+    check("w4a4p: every Swift shape divides the probe tile at 2048 / 8192 tokens", bad == 0);
+    check("w4a4p: shapeOk rejects a partial tile", !w4a4p::shapeOk(17408, 5120, 2000) && !w4a4p::shapeOk(100, 5120, 2048));
+    // two shapes, equal A time weight: R = mean; f 0.86, no producer: saved = 0.86 * (1 - R)
+    const std::vector<w4a4p::CellR> cells = {{100.0, 0.70, 0.02, 1}, {50.0, 0.90, 0.04, 2}};
+    const w4a4p::Projection p = w4a4p::project(cells, 0.0, 0.86);
+    const double R = 0.5 * 0.70 + 0.5 * 0.90, h = std::sqrt(0.5 * 0.02 * 0.5 * 0.02 + 0.5 * 0.04 * 0.5 * 0.04);
+    check("w4a4p: project R = A-time-weighted ratio, half-width in quadrature", std::fabs(p.R - R) < 1e-12 && std::fabs(p.R_half - h) < 1e-12);
+    check("w4a4p: project saved = f (1 - R), gain = 1 / (1 - saved) - 1, lo / hi from R -+ half",
+          std::fabs(p.saved - 0.86 * (1 - R)) < 1e-12 && std::fabs(p.gain - (1 / (1 - p.saved) - 1)) < 1e-12 && p.gain_lo < p.gain && p.gain < p.gain_hi);
+    const w4a4p::Projection q = w4a4p::project(cells, 40.0, 0.86);  // producer 40 us per 200 us of GEMM: P 0.2
+    check("w4a4p: producer share subtracts f * P", std::fabs(q.P - 0.2) < 1e-12 && std::fabs(q.saved - (p.saved - 0.86 * 0.2)) < 1e-12);
+    check("w4a4p: verdict GAIN / LOSS / OPEN from the interval alone",
+          w4a4p::verdict(p) == "GAIN" && w4a4p::verdict(w4a4p::project({{100.0, 1.10, 0.01, 1}}, 0.0, 0.86)) == "LOSS" &&
+              w4a4p::verdict(w4a4p::project({{100.0, 1.00, 0.05, 1}}, 0.0, 0.86)) == "OPEN" && w4a4p::verdict(w4a4p::project({}, 0.0, 0.86)) == "NONE");
+}
+
 int main(int argc, char** argv) {
     std::string emit;
     for (int i = 1; i < argc; ++i)
@@ -1259,6 +1388,11 @@ int main(int argc, char** argv) {
         test_ws4s_default_table();
         test_ws4s_env_filters();
         test_ws4s_table_cells();
+        test_w4a4p_pack();
+        test_w4a4p_quant();
+        test_w4a4p_mx();
+        test_w4a4p_refs();
+        test_w4a4p_table_projection();
     } catch (const std::exception& e) {
         check(std::string("exception: ") + e.what(), false);
     }
