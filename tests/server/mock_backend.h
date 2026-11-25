@@ -24,6 +24,7 @@
 #include "device/null_backend.h"
 #include "whirl/tokenizer.h"
 #include "../../kernels/spec_accept.h"  // v0252-e1p1: SpecAccArgs / SpecNextTab (MockModel::specAccept runs the header)
+#include "../../kernels/spec_accept_relax.h"  // v0252-e1fast: the relaxed accept rule (MockModel::specAccept runs the header)
 
 #include <atomic>
 #include <cstdint>
@@ -120,6 +121,13 @@ struct MockConfig {
     bool snap_select = false;
     // v0252-e1s8: snapshot sets allocated by the constructor (whirl-server's startup ensureSnapshots; 0 = none up front)
     std::uint32_t snap_sets = 0;
+    // v0252-e1fast (PLAN V1-93 P3): the model has spec_accept_relax_rows (ServerModel::specRelaxOk; also needs relax_rank and
+    // spec_acc_kernel): specAccept after setSpecRelax runs kernels/spec_accept_relax.h on the host, with the history rings and
+    // the rank words the engine gave it, as the kernel does on the GPU; false = a code object without it (gfx1201 today)
+    bool relax_dev = false;
+    // v0252-e1fast: with markov > 0, the runner-up (mtp_miss_runner_up) depends on the last token only too, so a relaxed keep
+    // repeats with the text's cycle and the relaxacc repetition guard refuses keeps (false: the runner-up of the whole history)
+    bool runner_up_markov = false;
 };
 
 class MockModel final : public server::ServerModel {
@@ -249,6 +257,15 @@ public:
     void readCtlPinned(std::span<std::int32_t> dst) override;
     bool specAcceptOk() const override { return mc_.spec_acc_kernel; }
     void specAccept(const SpecAccArgs& a, std::int32_t* host) override;
+    // v0252-e1fast
+    bool specRelaxOk() const override { return mc_.relax_dev && mc_.relax_rank && mc_.spec_acc_kernel; }
+    void setSpecRelax(const SpecRelaxArgs& r, server::DevPtr rank, std::int32_t* hist, std::int32_t* rhost) override;
+    // relaxed launches (specAccept after setSpecRelax), sequences decided by the relaxed rule, drafts it kept by the relaxed
+    // rule, relaxed keeps the repetition guard refused, setSpecRelax calls without a specAccept after them (never expected)
+    struct RelaxCounts {
+        std::uint64_t launches = 0, seqs = 0, relaxed = 0, guarded = 0, orphan = 0;
+    };
+    RelaxCounts relaxCounts() const;
     void readSpecTab(SpecNextTab& t) override;
     std::uint64_t specAccepts() const { return spec_accepts_.load(); }
     std::uint64_t specCorrupted() const { return spec_corrupted_.load(); }  // feat026-acc-r1 (MockConfig::spec_acc_corrupt)
@@ -293,6 +310,13 @@ private:
     std::atomic<std::uint64_t> e1_ahead_{0}, spec_shorted_{0};  // v0252-e1p1c
     std::atomic<std::uint64_t> e1_no_iv_{0}, e1_iv_out_{0}, e1_iv_max_{0}, e1_iv_lo_{0}, e1_iv_hi_{0};  // v0252-e1grp
     SpecNextTab spec_tab_{};  // the next-cycle rows of the last specAccept (engine thread)
+    // v0252-e1fast: the one-shot relaxed arguments (setSpecRelax) and the counters (engine thread writes, tests read after)
+    bool rx_on_ = false;
+    SpecRelaxArgs rx_{};
+    server::DevPtr rx_rank_ = 0;
+    std::int32_t* rx_hist_ = nullptr;
+    std::int32_t* rx_rhost_ = nullptr;
+    std::atomic<std::uint64_t> rx_launches_{0}, rx_seqs_{0}, rx_relaxed_{0}, rx_guarded_{0}, rx_orphan_{0};
     std::atomic<std::uint64_t> spec_accepts_{0}, spec_corrupted_{0}, readctl_calls_{0}, readctl_pinned_calls_{0};
     void prefillRows(std::size_t n);
     struct State {

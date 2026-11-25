@@ -161,7 +161,7 @@ int main(int argc, char** argv) {
     }
     const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "moefuse", "silu", "moeskip", "misc", "attnbench",
                                "gemvh", "gemvhg", "gemvhbench", "gemvhv", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk", "attnkgl", "ws4r",
-                               "specacc", "specaccz", "e1in"};  // = fams below
+                               "specacc", "specaccz", "e1in", "specaccx"};  // = fams below
     const bool bench = !bo.families.empty();
     if ((!bo.ggemv_nt.empty() || !bo.ggemv_v.empty()) && bo.families.count("ggemv") == 0) {
         std::printf("whirl-kernel-test: --bench-nt / --bench-v need --bench ggemv\n");
@@ -284,7 +284,8 @@ int main(int argc, char** argv) {
                         {"attnkgl", kt::testAttnKgLong},  // attnkgl: v0252-c1acc (on request)
                         {"ws4r", kt::testAttnWs4r},  // ws4r: v0252-ws4r97 (gfx1201 attn_ws4r* == attn_wsplit1 / 2)
                         {"specacc", kt::testSpecAcc}, {"specaccz", kt::testSpecAccZc},  // v0252-e1p1 (specaccz on request)
-                        {"e1in", kt::testE1Inputs}};  // v0252-e1p1b (E1 device inputs, test_e1_inputs.cpp)
+                        {"e1in", kt::testE1Inputs},  // v0252-e1p1b (E1 device inputs, test_e1_inputs.cpp)
+                        {"specaccx", kt::testSpecAccRelax}};  // v0252-e1fast (relaxacc on the device, gfx1151)
     if (bench) {
         const auto t0 = std::chrono::steady_clock::now();
         try {
