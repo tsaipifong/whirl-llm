@@ -197,7 +197,8 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
     const bool precise_rows = preciseRows(f.prec_dec, n, f.gv_max);
     // v0252-w4a4k2 (K2): the W4A4 fake-quant weight half - an MXFP4 matrix takes the dequant path through w4s_dq whatever the
     // tuned choice (GemmFlags::w4s_w); every kernel that decodes the original MXFP4 values is skipped below
-    const bool w4s = f.w4s_w && w.ty == GgmlType::mxfp4 && w.ncols % 256 == 0 && w.row_bytes % 8 == 0 && k.w4s_dq != nullptr;
+    const Function w4s_fn = f.w4s_w > 0 && f.w4s_w <= k.w4s_dq.size() ? k.w4s_dq[f.w4s_w - 1u] : nullptr;
+    const bool w4s = w4s_fn != nullptr && w.ty == GgmlType::mxfp4 && w.ncols % 256 == 0 && w.row_bytes % 8 == 0;
     if (precise_rows && n <= 32 && w.ncols % 256 == 0 && !f.out_h16 && !w4s) {
         // precise decode / verify: the decode-shaped f16 GEMM (bitwise == every choice below)
         const Function hv = n <= 16 ? k.gemvh[t] : k.gemvh2[t];
@@ -257,7 +258,7 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
     if (choice >= G && w.ty != GgmlType::f16) {
         const std::uint64_t groups = static_cast<std::uint64_t>(w.ncols / 8) * w.nrows;
         p.dequant = true;
-        p.dq = w4s ? k.w4s_dq : k.dequant_f16[t];  // v0252-w4a4k2: the re-quantized grid under the arm
+        p.dq = w4s ? w4s_fn : k.dequant_f16[t];  // v0252-w4a4k2: the re-quantized grid under the arm
         p.dq_grid = D(std::min<std::uint64_t>((groups + 255) / 256, 65535));
         wrb = static_cast<std::uint64_t>(w.ncols) * 2;
         wty = GgmlType::f16;
@@ -289,7 +290,7 @@ GemmPieces planGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
     out.p[0] = GemmPiece{0, n, p};
     out.n = 1;
     if (!f.gemm_tail || (p.kind != GemmKind::gemmh && p.kind != GemmKind::gemmhq)) return out;
-    if (p.dequant && p.dq != nullptr && p.dq == k.w4s_dq) return out;  // v0252-w4a4k2: the gemms tail would read the original MXFP4 bytes
+    if (p.dequant && p.dq != nullptr && std::find(k.w4s_dq.begin(), k.w4s_dq.end(), p.dq) != k.w4s_dq.end()) return out;  // v0252-w4a4k2: the gemms tail would read the original MXFP4 bytes
     const std::uint32_t r = n % gemmh_bn;
     if (r == 0 || n < gemmh_bn) return out;
     // the tail's slot: precChoice for r rows (raw quantized bytes; none for f16 / f32 weights or ncols % 256 != 0)

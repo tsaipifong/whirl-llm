@@ -249,7 +249,9 @@ void Context::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate)
                         I((sim & whirl::numerics::w4a4_sim_am) != 0 ? 1 : 0));
             xg = x16w;
         }
-        gemmF16(w, xg, y, n, acc, (sim & whirl::numerics::w4a4_sim_w) != 0);
+        // round 2: the weight grid (w4a4_sim bits 8..10) -> GemmFlags::w4s_w = grid + 1
+        const std::uint8_t wg = (sim & whirl::numerics::w4a4_sim_w) != 0 ? static_cast<std::uint8_t>(((sim >> whirl::numerics::w4a4_sim_grid_shift) & 7u) + 1u) : 0;
+        gemmF16(w, xg, y, n, acc, wg);
     }
     finish();
 }
@@ -258,7 +260,7 @@ void Context::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate)
 // the x16 cache). The kernel, the optional dequant into w16 and the grids come from ops::chooseGemmF16 (K-2); since
 // v0252-pp2k2 through ops::planGemmF16, which may split the rows into the 256-tile bulk and a gemms tail (same bits):
 // each piece launches on its rows of x16in and y (row-major per token), in order.
-void Context::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc, bool w4s_w) {
+void Context::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc, std::uint8_t w4s_w) {
     ops::GemmFlags gf = gemmFlags();
     gf.w4s_w = w4s_w;  // v0252-w4a4k2 (only Context::matmul passes true)
     const ops::GemmPieces pc = ops::planGemmF16(matShape(w), n, w.tune[tuneBucket(n)], gf, k);

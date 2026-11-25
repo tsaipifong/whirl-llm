@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <format>
 #include <stdexcept>
+#include <utility>
 
 namespace whirl::numerics {
 
@@ -316,11 +317,19 @@ std::string Plan::bitsKey() const {
 // v0252-w4a4k2: WHIRL_W4A4_SIM values (numerics.h)
 std::optional<std::uint32_t> parseW4a4Sim(std::string_view s) {
     if (s.empty() || s == "0") return 0u;
-    if (s == "w") return w4a4_sim_w;
-    if (s == "a") return w4a4_sim_a;
-    if (s == "am") return w4a4_sim_am;
-    if (s == "wa" || s == "1") return w4a4_sim_w | w4a4_sim_a;
-    if (s == "wam") return w4a4_sim_w | w4a4_sim_am;
+    if (s == "1") return w4a4_sim_w | w4a4_sim_a;
+    // round 2: the weight token (longest first), then the activation token
+    static constexpr std::pair<std::string_view, std::uint32_t> kW[] = {{"w1e", 2u}, {"w1d", 3u}, {"w1", 1u}, {"wb", 4u}, {"w", 0u}};
+    std::uint32_t v = 0;
+    for (const auto& [tok, grid] : kW)
+        if (s.substr(0, tok.size()) == tok) {
+            v = w4a4_sim_w | (grid << w4a4_sim_grid_shift);
+            s.remove_prefix(tok.size());
+            break;
+        }
+    if (s.empty()) return v != 0 ? std::optional<std::uint32_t>(v) : std::nullopt;
+    if (s == "a") return v | w4a4_sim_a;
+    if (s == "am") return v | w4a4_sim_am;
     return std::nullopt;
 }
 
@@ -749,7 +758,7 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     if (items)
         if (const Raw& v = e.w4a4_sim; v && !v->empty() && *v != "0") {
             if (!parseW4a4Sim(*v))
-                p.ignored.push_back(std::format("WHIRL_W4A4_SIM={} ignored: not w, a, am, wa, 1 or wam (the W4A4 fake-quant arm stays off)", *v));
+                p.ignored.push_back(std::format("WHIRL_W4A4_SIM={} ignored: not [w|w1|w1e|w1d|wb][a|am] or 1 (the W4A4 fake-quant arm stays off)", *v));
             else if (!w4a4SimTaken(r, t))
                 p.ignored.push_back(std::format("WHIRL_W4A4_SIM={} ignored: the W4A4 fake-quant arm is fast-only, 8060S dense MXFP4 models ({} never takes it here)",
                                                 *v, modeName(p.mode)));

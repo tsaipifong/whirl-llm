@@ -526,8 +526,8 @@ protected:
     // v0252-8sdec: the precise grouped gemvh of matmulGroup (false = not grouped, nothing launched)
     bool matmulGroupGemvh(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n);
     void matmul(const Mat& w, DevPtr xin, DevPtr y, std::uint32_t n, bool accumulate);
-    // w4s_w: v0252-w4a4k2, the W4A4 fake-quant weight half (ops::GemmFlags::w4s_w; Context::matmul sets it, nobody else)
-    void gemmF16(const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc, bool w4s_w = false);
+    // w4s_w: v0252-w4a4k2, the W4A4 fake-quant weight half, 0 off / grid + 1 (ops::GemmFlags::w4s_w; only Context::matmul sets it)
+    void gemmF16(const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc, std::uint8_t w4s_w = 0);
     void gemmPlanLaunch(const ops::GemmPlan& p, const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);
     bool gdnIn2(const GdnW& g, std::uint32_t n) const;
     // x16b: f16 sub-buffer of x16 past the fp8 rows (tiled fp8 pads to 16 rows), 256-aligned
