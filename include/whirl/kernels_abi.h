@@ -151,6 +151,10 @@
 //            feat026-acc ported by v0252-e1p1): after the verify's argmax, the accept decision of its greedy sequences
 //            into control words 50 .. 56, the next cycle's rows into tab (may be null), the verify's control areas
 //            into pinned host memory at host (may be null: WHIRL_SPEC_ACC=gpu-zc); one block of 64 threads
+//   spec_accept_relax_rows(int* ctl_all, SpecAccArgs a, int* host, SpecNextTab* tab, SpecRelaxArgs r, const int* rank,
+//            int* hist, int* rhost)   (optional, gfx1151 only; v0252-e1fast, kernels/spec_accept_relax.h): spec_accept_rows
+//            plus the relaxacc rule for the sequences with r.on (rank = the argmax_rank_rows_to words, hist = the per-slot
+//            history rings in pinned memory, rhost = a copy of the rank words for the host, may be null); 256 threads
 //   set_tokens(ids, pos, dev_src, Tok16 toks, n, n_host, pos0)
 //   set_rows(ids, pos, kvbase, dev_src, RowTab tab, n)
 //   set_rows_dp(ids, pos, kvbase, dev_src, RowTab tab, n, RowIdx pdev)   (optional; v0252-e1p1b E1, kernels/e1_inputs.hip)
@@ -866,7 +870,10 @@ struct MiscKernels {
     F spec_accept_rows{};     // optional (feat026-acc, ported by v0252-e1p1; null: the host makes the accept decision)
     // optional (v0252-e1p1b, E1 next-cycle inputs on the device, kernels/e1_inputs.hip; null: no E1 path)
     F set_rows_dp{}, rmsnorm_q8_rows_dv{};
-    F argmax_rows_to_mb{}, argmax_rank_rows_to_mb{};  // optional (v0252-f1arg multi-block twins, gfx1201 only)
+    F argmax_rows_to_mb{}, argmax_rank_rows_to_mb{};
+    // optional (v0252-e1fast, gfx1151 object only, kernels/gfx1151/spec_accept_relax.hip; null: relaxacc cycles keep the host decision
+    // and never run the E1 lookahead)
+    F spec_accept_relax_rows{};  // optional (v0252-f1arg multi-block twins, gfx1201 only)
 };
 
 struct KernelTable : MatmulKernels, AttnKernels, MoeKernels, DeltaNetKernels, MiscKernels {

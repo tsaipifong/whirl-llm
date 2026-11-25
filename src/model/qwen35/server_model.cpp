@@ -8,12 +8,16 @@
 #include "whirl/model.h"  // the qwen35::Model this backend forwards to (backend.h sees model_types.h only, arch025-M3)
 
 #include "../../../kernels/spec_accept.h"  // v0252-e1p1 (feat026-acc port): the device accept decision's ABI
+#include "../../../kernels/spec_accept_relax.h"  // v0252-e1fast: the relaxacc accept decision's ABI
 
 #include <cstdint>
 
 // SpecAccArgs is passed by value to spec_accept_rows: plain ints, no device address (whirl/hip.h launch log)
 template <>
 struct whirl::hip::LaunchArgPtrWords<SpecAccArgs> : whirl::hip::LaunchArgNoPtrWords {};
+// v0252-e1fast: SpecRelaxArgs likewise (a double and ints; the rank / ring pointers are separate arguments)
+template <>
+struct whirl::hip::LaunchArgPtrWords<SpecRelaxArgs> : whirl::hip::LaunchArgNoPtrWords {};
 // the control-area words the header names are the kernel ABI's (whirl/kernels_abi.h kCtl*); the result words 50 .. 56 lie
 // past every word the verify writes (kCtlStop) and inside the area; one verify's sequences / drafts / rows
 static_assert(WHIRL_SA_CTL_ROWS == whirl::kernels::kCtlRows && WHIRL_SA_CTL_DRAFTS == whirl::kernels::kCtlDrafts &&
@@ -134,6 +138,13 @@ public:
     void settleSelect(std::uint32_t s, std::uint32_t acc) override { m_.settleSelect(s, acc); }  // v0252-e1s8
     void specAccept(const SpecAccArgs& a, std::int32_t* host) override;
     void readSpecTab(SpecNextTab& t) override;
+    // v0252-e1fast: the kernel, and the one-pass rank words Context::setRelaxRank gives every greedy relaxacc verify
+    // (numerics::Target::k_relax_rank = argmax_rank_rows_to in the code object and device::Profile::relax_rank_check: the same
+    // test setRelaxRank makes, read through the model's own numericsTarget - no device-profile include in this module)
+    bool specRelaxOk() const override {
+        return m_.k.spec_accept_relax_rows != nullptr && m_.k.spec_accept_rows != nullptr && qwen35::numericsTarget(m_).k_relax_rank;
+    }
+    void setSpecRelax(const SpecRelaxArgs& r, DevPtr rank, std::int32_t* hist, std::int32_t* rhost) override;
     bool draftSampleOk() const override { return m_.draftSampleOk(); }
     void setDraftSample(std::uint32_t s, const spec::DraftSample& ds) override {
         if (s < m_.draft_samp.size()) m_.draft_samp[s] = ds;
@@ -204,6 +215,12 @@ private:
     hip::Function topk_ = nullptr;
     std::array<std::unique_ptr<qwen35::Profile>, qwen35::gdn_max_seg + 1> prof_mtp_, prof_ver_;
     DevPtr spec_tab_ = 0;  // v0252-e1p1: the device SpecNextTab of spec_accept_rows (model allocation ledger; first use)
+    // v0252-e1fast: the one-shot arguments of the next specAccept's relaxed launch (setSpecRelax; rx_on_ = set)
+    bool rx_on_ = false;
+    SpecRelaxArgs rx_{};
+    DevPtr rx_rank_ = 0;
+    std::int32_t* rx_hist_ = nullptr;
+    std::int32_t* rx_rhost_ = nullptr;
 };
 
 // v0252-e1p1 (feat026-acc port): spec_accept_rows right after the verify's argmax, on the model stream (kernels/spec_accept.hip):
@@ -220,7 +237,25 @@ void Qwen35Backend::specAccept(const SpecAccArgs& a, std::int32_t* host) {
     b.n_vocab = static_cast<std::int32_t>(m_.cfg.n_vocab);
     if (spec_tab_ == 0) spec_tab_ = m_.allocZero(sizeof(SpecNextTab));
     const DevPtr host_dev = static_cast<DevPtr>(reinterpret_cast<std::uintptr_t>(host));
+    // v0252-e1fast: a relaxed launch was asked for (setSpecRelax, one-shot): spec_accept_relax_rows, one block of 256 threads
+    if (rx_on_) {
+        rx_on_ = false;
+        if (m_.k.spec_accept_relax_rows == nullptr || rx_hist_ == nullptr) throw qwen35::ModelError("BadBatch");
+        const DevPtr hist_dev = static_cast<DevPtr>(reinterpret_cast<std::uintptr_t>(rx_hist_));
+        const DevPtr rhost_dev = static_cast<DevPtr>(reinterpret_cast<std::uintptr_t>(rx_rhost_));
+        hip::launch(m_.k.spec_accept_relax_rows, hip::Dim3{1, 1, 1}, hip::Dim3{256, 1, 1}, 0, m_.stream, m_.scratch().out_tok, b, host_dev,
+                    spec_tab_, rx_, rx_rank_, hist_dev, rhost_dev);
+        return;
+    }
     hip::launch(m_.k.spec_accept_rows, hip::Dim3{1, 1, 1}, hip::Dim3{64, 1, 1}, 0, m_.stream, m_.scratch().out_tok, b, host_dev, spec_tab_);
+}
+
+void Qwen35Backend::setSpecRelax(const SpecRelaxArgs& r, DevPtr rank, std::int32_t* hist, std::int32_t* rhost) {
+    rx_ = r;
+    rx_rank_ = rank;
+    rx_hist_ = hist;
+    rx_rhost_ = rhost;
+    rx_on_ = true;
 }
 
 void Qwen35Backend::readSpecTab(SpecNextTab& t) {

@@ -174,6 +174,16 @@ void testE1Default() {
     ISO_CHECK(e1Default(true, hip::Arch::gfx1151) == 2u);  // v0252-e1s8 round 3 (screens e1s8-orn / -r2 / -prec)
     ISO_CHECK(e1Default(false, hip::Arch::gfx1151) == 0u);
     ISO_CHECK(e1Default(true) == e1Default(true, device::k_default_arch) && e1Default(false) == 0u);
+    // v0252-e1fast: fast mode's own default - 0 on both cards until screen e1fast-orn (the gfx1201 object has no
+    // spec_accept_relax_rows), dense always 0; each value is its profile row's
+    for (const hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151}) {
+        ISO_CHECK(e1DefaultFast(true, a) == device::profile(a).e1_moe_fast && e1DefaultFast(false, a) == 0u);
+        ISO_CHECK(e1CtxMaxFast(a) == device::profile(a).e1_ctx_max_fast);
+    }
+    // screen e1fast-orn 20261125-1545 (KEEP): the 8060S MoE fast default is the lookahead below 131072 + 256 + 1; the R9700 0 / 0
+    ISO_CHECK(e1DefaultFast(true, hip::Arch::gfx1201) == 0u && e1DefaultFast(true, hip::Arch::gfx1151) == 2u);
+    ISO_CHECK(e1CtxMaxFast(hip::Arch::gfx1201) == 0u && e1CtxMaxFast(hip::Arch::gfx1151) == 131329u);
+    ISO_CHECK(e1DefaultFast(false, hip::Arch::gfx1151) == 0u);  // dense (Swift) fast stays 0
     for (const hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151})
         ISO_CHECK(e1Default(true, a) == device::profile(a).e1_moe && e1Default(false, a) == device::profile(a).e1_dense);
     // v0252-e1len (PLAN V1-93): the length boundary of that default - the smallest MEASURED length at which keeping it

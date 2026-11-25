@@ -62,6 +62,9 @@ inline constexpr std::uint32_t e1_default_ctx_max = 65536;
 // v0252-e1s8 round 2: the boundary of THIS code object (device::Profile::e1_ctx_max: the R9700 row = e1_default_ctx_max
 // above, the 8060S row its own measured value); whirl-server gives it to the default (server::e1DefaultCtxMax)
 std::uint32_t e1CtxMax(hip::Arch arch = device::k_default_arch);
+// v0252-e1fast (PLAN V1-93 P3): the same two for FAST mode (device::Profile::e1_moe_fast / e1_ctx_max_fast; MoE only, dense 0)
+std::uint32_t e1DefaultFast(bool moe, hip::Arch arch = device::k_default_arch);
+std::uint32_t e1CtxMaxFast(hip::Arch arch = device::k_default_arch);
 
 // ---- draft-head vocabulary subset (T5-1b): WHIRL_DRAFT_VOCAB = 48k | 64k | <file> | off | N
 // File for a WHIRL_DRAFT_VOCAB value: "48k" / "64k" / ... -> <dir>/subset_48k.bin, anything else

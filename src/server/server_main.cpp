@@ -1057,12 +1057,17 @@ void ServerRun::makeEngine() {
                                          .relax = eo.relax.on,
                                          .fast = nreq.mode == numerics::Mode::fast,
                                          .model_ok = backend->e1InputsOk(),
-                                         .spec_acc_env = spec_acc_env});
+                                         .spec_acc_env = spec_acc_env,
+                                         // v0252-e1fast: fast mode's own default, with the device's relaxed accept only
+                                         .fast_def = qwen35::e1DefaultFast(model.cfg.moe, model.arch),
+                                         .relax_dev = backend->specRelaxOk()});
     eo.e1 = e1c.e1;
     // v0252-e1len (PLAN V1-93): only the DEFAULT is length-aware - at or above this context length a decode cycle runs
     // the ordinary way (the boundary and the measurements it comes from: qwen35::e1_default_ctx_max). An explicitly set
     // WHIRL_E1 gets 0 = every length: the user's order, unchanged.
     eo.e1_ctx_max = e1DefaultCtxMax(e1c, qwen35::e1CtxMax(model.arch));  // v0252-e1s8 round 2: the card's own boundary
+    // v0252-e1fast: fast mode's own boundary (device::Profile::e1_ctx_max_fast) for fast's own default
+    if (nreq.mode == numerics::Mode::fast) eo.e1_ctx_max = e1DefaultCtxMax(e1c, qwen35::e1CtxMaxFast(model.arch));
     if (e1c.bad) logW("WHIRL_E1={} is not 0, 1 or 2; using 0", *e1_env);
     // v0252-b5 round 3 (C2): the explicit accept mode wins over the default lookahead (which would raise it to gpu-zc)
     if (e1c.yielded)

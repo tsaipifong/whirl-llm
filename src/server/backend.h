@@ -29,6 +29,7 @@
 // with the kernel spec_accept_rows); only names here - the engine's decode cycle and the backends include the header
 struct SpecAccArgs;
 struct SpecNextTab;
+struct SpecRelaxArgs;  // v0252-e1fast (kernels/spec_accept_relax.h)
 
 namespace whirl::server {
 
@@ -129,6 +130,14 @@ public:
     // snapshot mode. Default: nothing (no such model).
     virtual void settleSelect(std::uint32_t s, std::uint32_t acc) { (void)s, (void)acc; }
     virtual void specAccept(const SpecAccArgs& /*a*/, std::int32_t* /*host*/) {}
+    // ---- v0252-e1fast (PLAN V1-93 P3; kernels/spec_accept_relax.h): the relaxacc accept decision on the device, so a fast
+    // cycle can be submitted one cycle ahead. specRelaxOk: the model has the kernel (spec_accept_relax_rows) and every greedy
+    // relaxacc verify gets the one-pass rank words (setRelaxRank holds). setSpecRelax: one-shot arguments of the NEXT
+    // specAccept, which then decides the sequences with r.on by the relaxed rule: rank = the stats buffer given to setRelaxRank
+    // for that verify, hist = the per-slot history rings (pinned host memory, WHIRL_SR_HIST words per slot), rhost = pinned
+    // host memory for a copy of the rank words (may be null). Defaults: no such kernel (fast cycles keep the host decision).
+    virtual bool specRelaxOk() const { return false; }
+    virtual void setSpecRelax(const SpecRelaxArgs& /*r*/, DevPtr /*rank*/, std::int32_t* /*hist*/, std::int32_t* /*rhost*/) {}
     virtual void readSpecTab(SpecNextTab& /*t*/) {}
     // speculative sampling of MTP drafts (numerics item specsample): per sequence, set before the
     // draft steps of a cycle. Race coupling (whirl/spec_sample.h): the device draws draft r as

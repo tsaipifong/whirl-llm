@@ -5,6 +5,7 @@
 #include "../../kernels/gdn_select.h"  // v0252-e1s8: the select rule the gfx1151 kernels and the model use
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -286,7 +287,7 @@ void MockModel::writeLogits(std::uint32_t row, std::uint64_t h, std::uint64_t kv
     float* x = at<float>(logits_) + static_cast<std::uint64_t>(row) * V;
     std::fill(x, x + V, -10.0f);
     const std::uint32_t top = nextToken(h, kv);
-    const std::uint64_t seed = mix(h, kv, 99);
+    const std::uint64_t seed = mc_.runner_up_markov && mc_.markov > 0 ? mix(h, 0, 99) : mix(h, kv, 99);  // v0252-e1fast
     for (std::uint32_t j = 1; j < 16; ++j) {
         const std::uint32_t c = text_ids_[mix(seed, j, 5) % text_ids_.size()];
         if (c == top) continue;
@@ -298,7 +299,7 @@ void MockModel::writeLogits(std::uint32_t row, std::uint64_t h, std::uint64_t kv
 // the second-highest logit of writeLogits(h, kv): the first candidate j = 1, 2, ... that is not the top
 std::uint32_t MockModel::runnerUp(std::uint64_t h, std::uint64_t kv) const {
     const std::uint32_t top = nextToken(h, kv);
-    const std::uint64_t seed = mix(h, kv, 99);
+    const std::uint64_t seed = mc_.runner_up_markov && mc_.markov > 0 ? mix(h, 0, 99) : mix(h, kv, 99);  // v0252-e1fast
     for (std::uint32_t j = 1; j < 16; ++j) {
         const std::uint32_t c = text_ids_[mix(seed, j, 5) % text_ids_.size()];
         if (c != top) return c;
@@ -907,10 +908,35 @@ void MockModel::specAccept(const SpecAccArgs& a_in, std::int32_t* host) {
         std::int32_t* ctl = all.data() + static_cast<std::size_t>(a.seq[k]) * W;
         // v0252-e1p1b: a.pos[k] < 0 = the NPOS word (spec_pos, inside both); a host-decided sequence through spec_copy_one
         if (a.pos[k] < 0) e1_pos_ += 1;
+        // v0252-e1fast: a relaxed launch (setSpecRelax) decides its r.on sequences by kernels/spec_accept_relax.h, as
+        // spec_accept_relax_rows (the repetition guard on one thread instead of the block: the same rule)
+        if (rx_on_ && a.dev[k] && rx_.on[k]) {
+            if (rx_hist_ == nullptr) throw std::runtime_error("BadBatch");
+            std::int32_t* h = rx_hist_ + static_cast<std::size_t>(a.seq[k]) * WHIRL_SR_HIST;
+            const int pos = spec_pos(a, k, ctl), next = spec_relax_next(a, rx_, k, ctl);
+            const int win = rx_.win < WHIRL_SR_WIN ? rx_.win : WHIRL_SR_WIN;
+            SpecRelaxScalarGuard g{h, pos, pos < win ? pos : win, next, &a, k, ctl, rx_.ngram};
+            SpecRelaxOut ro{};
+            const int* rank = rx_rank_ != 0 ? at<const int>(rx_rank_) : nullptr;
+            const SpecAccResult r = spec_accept_relax_one(a, rx_, k, ctl, rank, g, ro);
+            spec_store(a, k, r, ctl);
+            spec_relax_store(ro, ctl);
+            spec_relax_append(h, pos, next, a, k, ctl, r.acc);
+            if (rx_rhost_ != nullptr && rank != nullptr)
+                for (int q = 0; q <= a.nd[k]; ++q)
+                    for (int w = 0; w < 3; ++w) rx_rhost_[w * rx_.stride + a.row0[k] + q] = rank[w * rx_.stride + a.row0[k] + q];
+            res[k] = r;
+            rx_seqs_ += 1;
+            rx_relaxed_ += static_cast<std::uint64_t>(std::popcount(ro.mask));
+            if (ro.guard > 0) rx_guarded_ += 1;
+            continue;
+        }
         const SpecAccResult r = a.dev[k] ? spec_accept_one(a, k, ctl) : spec_copy_one(a, k, ctl);
         spec_store(a, k, r, ctl);
         res[k] = r;
     }
+    if (rx_on_) rx_launches_ += 1;
+    rx_on_ = false;
     spec_next_rows(a, all.data(), res, &spec_tab_);
     if (mc_.spec_acc_corrupt > 0 && (spec_accepts_.load() + 1) % mc_.spec_acc_corrupt == 0) {
         for (int k = 0; k < a.n; ++k) {
@@ -945,6 +971,20 @@ void MockModel::specAccept(const SpecAccArgs& a_in, std::int32_t* host) {
 }
 
 void MockModel::readSpecTab(SpecNextTab& t) { t = spec_tab_; }
+
+// v0252-e1fast: one-shot arguments of the next specAccept (a second set before it counts as an orphan)
+void MockModel::setSpecRelax(const SpecRelaxArgs& r, server::DevPtr rank, std::int32_t* hist, std::int32_t* rhost) {
+    if (rx_on_) rx_orphan_ += 1;
+    rx_ = r;
+    rx_rank_ = rank;
+    rx_hist_ = hist;
+    rx_rhost_ = rhost;
+    rx_on_ = true;
+}
+
+MockModel::RelaxCounts MockModel::relaxCounts() const {
+    return {rx_launches_.load(), rx_seqs_.load(), rx_relaxed_.load(), rx_guarded_.load(), rx_orphan_.load()};
+}
 
 void MockModel::mtpEnqueue(server::DevPtr, std::span<const std::uint32_t>, std::uint32_t) { h_rows_.clear(); }
 

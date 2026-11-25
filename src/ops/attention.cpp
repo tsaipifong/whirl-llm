@@ -144,20 +144,38 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
     // GQA <= 8 make every row its own group (dq4_rows), so no caps.attn_group1 test is needed - gfx1201 has no such marker)
     // v0252-8sq4 (F8, fast only: q4 KV): with dq4_min_keys the split count comes from the longest row and the keys-per-split
     // target instead (another partition and combine order: output may change, which fast allows); same conditions
-    const bool dq4_rule = !ws4_path && p.kv_q4 && f.attn_dq4 && k.attn_dq4 != nullptr && grp_q <= 8 && p.rows_known && k.attn_wsplit1 != nullptr &&
-                          hd == 256 && (f.dbg_flags & 2) == 0;
+    const bool dq4_any = !ws4_path && p.kv_q4 && f.attn_dq4 && k.attn_dq4 != nullptr && grp_q <= 8 && k.attn_wsplit1 != nullptr && hd == 256 &&
+                         (f.dbg_flags & 2) == 0;
+    const bool dq4_rule = dq4_any && p.rows_known;
     // v0252-8sq5 (PLAN V1-109, fast only: q4 KV): the measured table (profile dq4_split_table, flag dq4_splits auto) or a forced
     // count, where dq4TableSplits decides (a valid grid for these rows); else today's rule. WHIRL_DQ4_MINKEYS, when set, wins
-    const u32 dq4_tab = dq4_rule && f.dq4_min_keys == 0
-                            ? dq4TableSplits(p.row_pos.first(n), p.row_base.size() >= n ? p.row_base.first(n) : std::span<const i32>{}, p.win, n_split,
-                                             f.dq4_splits, prof.dq4_split_table)
-                            : 0u;
-    if (dq4_rule && f.dq4_min_keys != 0)
-        n_split = dq4MinKeysSplits(p.row_pos.first(n), p.win, n_split, f.dq4_min_keys);
-    else if (dq4_tab != 0)
-        n_split = dq4_tab;
-    else if (dq4_rule && prof.attn_dq4_dynamic_splits && f.dq4_dyn)
-        n_split = dq4Splits(p.row_pos.first(n), p.win, n_split);
+    const u32 n_split0 = n_split;
+    const auto dq4Count = [&](std::span<const i32> rp, std::span<const i32> rb) {
+        const u32 tab = f.dq4_min_keys == 0 ? dq4TableSplits(rp, rb, p.win, n_split0, f.dq4_splits, prof.dq4_split_table) : 0u;
+        if (f.dq4_min_keys != 0) return dq4MinKeysSplits(rp, p.win, n_split0, f.dq4_min_keys);
+        if (tab != 0) return tab;
+        if (prof.attn_dq4_dynamic_splits && f.dq4_dyn) return dq4Splits(rp, p.win, n_split0);
+        return n_split0;
+    };
+    if (dq4_rule) {
+        n_split = dq4Count(p.row_pos.first(n), p.row_base.size() >= n ? p.row_base.first(n) : std::span<const i32>{});
+    } else if (dq4_any && p.rows_one_seq && n <= kernels::kMaxVerifyRows && p.pos0_lo >= 0 && p.pos0_lo <= p.pos0_hi &&
+               p.pos0_hi - p.pos0_lo < kE1GroupSpan) {
+        // v0252-e1fast (PLAN V1-93 P3): an E1 verify of one slot (rows on the device: one sequence at consecutive positions, row
+        // 0 at some position of [pos0_lo, pos0_hi]) takes the count the known rows would get when it is the SAME at every
+        // position of the interval - so the verify's partials (and fast's output) are the synchronous cycle's; else the fixed
+        // grid as before (one MTP draft in flight: two positions, they differ only at a table / rule breakpoint)
+        std::array<i32, kernels::kMaxVerifyRows> rp{}, rb{};
+        u32 c = 0;
+        bool same = true;
+        for (i32 p0 = p.pos0_lo; p0 <= p.pos0_hi && same; ++p0) {
+            for (u32 r = 0; r < n; ++r) rp[r] = p0 + static_cast<i32>(r);
+            const u32 s = dq4Count(std::span<const i32>(rp.data(), n), std::span<const i32>(rb.data(), n));
+            same = p0 == p.pos0_lo || s == c;
+            c = s;
+        }
+        if (same) n_split = c;
+    }
     // v0252-l2split (PLAN V1-88): f16 / q8 / q8h KV on the attn_wsplit / attn_ws4r branch below (the conditions of that
     // branch; never q4 / attn_dq4, never the gfx1151 attn_ws4 path, never attn_split): the split count by machine fill
     // (lsplitCount; flag 0 = today's count). Before the grouping, which keys on awPer(pos, n_split).

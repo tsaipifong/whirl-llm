@@ -23,6 +23,7 @@
 #include "kt.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -275,6 +276,241 @@ void testSpecAccZc(Ctx& c) {
     c.rep.add(cmpExact("spec_accept_rows gpu-zc pinned host copy (hand + " + std::to_string(rounds) + " cycles)", gz_all, wz_all));
     c.rep.add(cmpExact("spec_accept_rows gpu-zc control words", gc_all, wc_all));
     c.rep.add(cmpExact("spec_accept_rows gpu-zc next-cycle rows", gt_all, wt_all));
+}
+
+}  // namespace kt
+
+// ---------------------------------------------------------------------------------------------------------------------
+// whirl-kernel-test family "specaccx" (v0252-e1fast, PLAN V1-93 P3; gfx1151 object only): spec_accept_relax_rows
+// (kernels/gfx1151/spec_accept_relax.hip) against kernels/spec_accept_relax.h run on the CPU (the repetition guard on one thread),
+// BIT FOR BIT, launched as the engine launches it:
+//   chain   per sequence a chain of cycles, one relaxacc sequence per launch (an E1 cycle): the first on host inputs (the host
+//           wrote the window into the ring), the rest on device inputs (NPOS / CHOSEN words; the ring only as the kernel
+//           appended it); small vocabularies so the 6-gram guard fires; rank words with near-boundary alpha gaps; EOS and
+//           max_tokens cuts. Every cycle: all 64 control words, the sequence's history ring (pinned host memory, its host
+//           pointer as the device address - the engine's SampleBuffers::relaxHistAll), the rank-word copy (pinned) and the
+//           next-cycle rows.
+//   mixed   one launch with 1..6 sequences: relaxed ones, greedy exact ones (spec_accept_one) and host-decided ones (copy)
+//           at random control areas - the block loops over them with the header's result per sequence.
+#include "spec_accept_relax.h"  // kernels/ (v0252-e1fast)
+
+template <>
+struct whirl::hip::LaunchArgPtrWords<SpecRelaxArgs> : whirl::hip::LaunchArgNoPtrWords {};
+
+namespace kt {
+
+namespace {
+
+constexpr int kXS = 32;  // rank-word stride (max rows)
+
+struct XWant {
+    std::vector<int> ctl, hist, rcopy, tab;
+    int relaxed = 0, guarded = 0, cuts = 0;
+};
+
+// the CPU side of one launch (the header, as the mock and the engine's check mode run it)
+XWant xReference(const SpecAccArgs& a, const SpecRelaxArgs& r, const std::vector<int>& ctl_in, const std::vector<int>& rank,
+                 const std::vector<int>& hist_in, const std::vector<int>& rcopy_in) {
+    XWant w;
+    w.ctl = ctl_in;
+    w.hist = hist_in;
+    w.rcopy = rcopy_in;
+    SpecAccResult res[WHIRL_SA_MAX_SEG];
+    for (int k = 0; k < a.n; ++k) {
+        int* cw = w.ctl.data() + a.seq[k] * kW;
+        if (a.dev[k] && r.on[k]) {
+            int* h = w.hist.data() + a.seq[k] * WHIRL_SR_HIST;
+            const int pos = spec_pos(a, k, cw), next = spec_relax_next(a, r, k, cw);
+            const int win = r.win < WHIRL_SR_WIN ? r.win : WHIRL_SR_WIN;
+            SpecRelaxScalarGuard g{h, pos, pos < win ? pos : win, next, &a, k, cw, r.ngram};
+            SpecRelaxOut ro{};
+            const SpecAccResult o = spec_accept_relax_one(a, r, k, cw, rank.data(), g, ro);
+            spec_store(a, k, o, cw);
+            spec_relax_store(ro, cw);
+            spec_relax_append(h, pos, next, a, k, cw, o.acc);
+            for (int q = 0; q <= a.nd[k]; ++q)
+                for (int t = 0; t < 3; ++t) w.rcopy[t * kXS + a.row0[k] + q] = rank[t * kXS + a.row0[k] + q];
+            res[k] = o;
+            for (unsigned m = ro.mask; m; m &= m - 1) ++w.relaxed;
+            w.guarded += ro.guard > 0;
+            w.cuts += (o.flags & (WHIRL_SA_F_EOS | WHIRL_SA_F_BUDGET)) != 0;
+        } else {
+            res[k] = a.dev[k] ? spec_accept_one(a, k, cw) : spec_copy_one(a, k, cw);
+            spec_store(a, k, res[k], cw);
+        }
+    }
+    SpecNextTab t{};
+    spec_next_rows(a, w.ctl.data(), res, &t);
+    w.tab.resize(sizeof(SpecNextTab) / 4);
+    std::memcpy(w.tab.data(), &t, sizeof(SpecNextTab));
+    return w;
+}
+
+// one relaxacc cycle's rows / drafts / rank words for sequence k (area sq), draft count nd, first verify row row0
+void xRows(Ctx& c, SpecAccArgs& a, int k, int sq, int nd, int row0, std::uint32_t V, std::vector<int>& ctl, std::vector<int>& rank) {
+    auto rnd = [&](std::uint32_t n) { return static_cast<std::uint32_t>(c.rng() % n); };
+    int* cw = ctl.data() + sq * kW;
+    a.seq[k] = sq;
+    a.nd[k] = nd;
+    a.row0[k] = row0;
+    a.dev[k] = 1;
+    for (int q = 0; q <= nd; ++q) cw[q] = static_cast<int>(rnd(V));
+    for (int q = 0; q < nd; ++q) cw[16 + q] = rnd(2) ? cw[q] : static_cast<int>(rnd(V));
+    cw[48] = rnd(5) == 0 ? static_cast<int>(rnd(static_cast<std::uint32_t>(nd) + 1)) : nd;
+    for (int q = 0; q <= nd; ++q) {
+        const float m = 5.0f + static_cast<float>(rnd(1000)) / 37.0f;
+        float ld = m - static_cast<float>(rnd(400)) / 100.0f;
+        if (rnd(4) == 0) {  // at the alpha boundary (0.05: ln = -2.9957), a few float steps either way
+            ld = m + static_cast<float>(std::log(0.05));
+            for (int s = static_cast<int>(rnd(7)) - 3; s != 0; s += s > 0 ? -1 : 1) ld = std::nextafter(ld, s > 0 ? 1e30f : -1e30f);
+        }
+        rank[row0 + q] = static_cast<int>(rnd(9));
+        rank[kXS + row0 + q] = spec_relax_bits(m);
+        rank[2 * kXS + row0 + q] = spec_relax_bits(ld);
+    }
+}
+
+}  // namespace
+
+void testSpecAccRelax(Ctx& c) {
+    if (!c.k.spec_accept_relax_rows) {
+        c.rep.skip("specaccx", "spec_accept_relax_rows", "kernel not present (gfx1151 object only)");
+        return;
+    }
+    hip::Function f = c.k.spec_accept_relax_rows;
+    auto rnd = [&](std::uint32_t n) { return static_cast<std::uint32_t>(c.rng() % n); };
+    const std::size_t hist_words = static_cast<std::size_t>(kAreas) * WHIRL_SR_HIST;
+    auto* hist = static_cast<int*>(hip::hostMalloc(hist_words * sizeof(int)));
+    auto* rcopy = static_cast<int*>(hip::hostMalloc(3 * kXS * sizeof(int)));
+    SpecRelaxArgs r{};
+    r.dstar_bits = spec_relax_dbits(spec_relax_dstar(0.05));
+    r.topk = 6;
+    r.stride = kXS;
+    r.win = WHIRL_SR_WIN;
+    r.ngram = WHIRL_SR_NGRAM;
+    std::vector<int> g_ctl, w_ctl, g_hist, w_hist, g_rc, w_rc, g_tab, w_tab;
+    int relaxed = 0, guarded = 0, cuts = 0, cycles = 0;
+    const int seqs = c.quick ? 6 : 24, chain = c.quick ? 12 : 30;
+    // ---- chain: one relaxacc sequence per launch, cycles in a row
+    for (int sqi = 0; sqi < seqs; ++sqi) {
+        const std::uint32_t V = 3 + rnd(10);
+        const int sq = static_cast<int>(rnd(kAreas));
+        std::vector<int> ctl(static_cast<std::size_t>(kAreas) * kW, 0), hv(hist_words, 0);
+        for (int& v : ctl) v = static_cast<int>(rnd(V));
+        // the host's history (cache_tokens) and its window in the ring
+        std::vector<int> cache(rnd(9000));
+        for (int& t : cache) t = static_cast<int>(rnd(V));
+        for (std::size_t i = cache.size() > WHIRL_SR_WIN ? cache.size() - WHIRL_SR_WIN : 0; i < cache.size(); ++i)
+            hv[static_cast<std::size_t>(sq) * WHIRL_SR_HIST + (i & (WHIRL_SR_HIST - 1))] = cache[i];
+        std::memcpy(hist, hv.data(), hist_words * sizeof(int));
+        const int next = static_cast<int>(rnd(V));
+        for (int cyc = 0; cyc < chain; ++cyc) {
+            SpecAccArgs a{};
+            a.n = 1;
+            a.n_vocab = static_cast<int>(V);
+            a.stop0 = rnd(3) == 0 ? 1u : 0xffffffffu;
+            a.stop1 = 0xffffffffu;
+            a.eos[0] = a.stop0 != 0xffffffffu ? 1 : 0;
+            a.budget[0] = rnd(4) == 0 ? 1 + static_cast<int>(rnd(4)) : 1 << 30;
+            a.kvbase[0] = 64;
+            std::vector<int> rank(3 * kXS, 0);
+            xRows(c, a, 0, sq, 1 + static_cast<int>(rnd(4)), static_cast<int>(rnd(3)), V, ctl, rank);
+            SpecRelaxArgs rr = r;
+            rr.on[0] = 1;
+            a.pos[0] = cyc == 0 ? static_cast<int>(cache.size()) : -1;
+            rr.next[0] = cyc == 0 ? next : -12345;
+            for (int i = 0; i < 3 * kXS; ++i) rcopy[i] = -1;
+            const std::vector<int> rc_in(rcopy, rcopy + 3 * kXS), hist_in(hist, hist + hist_words);
+            const XWant w = xReference(a, rr, ctl, rank, hist_in, rc_in);
+            Buf dctl(ctl), drank(rank), dtab(sizeof(SpecNextTab));
+            dtab.zero();
+            hip::launch(f, {1, 1, 1}, {256, 1, 1}, 0, c.s, dctl.p(), a, DevPtr{0}, dtab.p(), rr, drank.p(), reinterpret_cast<DevPtr>(hist),
+                        reinterpret_cast<DevPtr>(rcopy));
+            hip::streamSync(c.s);
+            const std::vector<int> got = dctl.down<int>(ctl.size());
+            const std::vector<int> gh(hist, hist + hist_words), grc(rcopy, rcopy + 3 * kXS);
+            const std::vector<int> gt = dtab.down<int>(sizeof(SpecNextTab) / 4);
+            g_ctl.insert(g_ctl.end(), got.begin(), got.end());
+            w_ctl.insert(w_ctl.end(), w.ctl.begin(), w.ctl.end());
+            g_hist.insert(g_hist.end(), gh.begin() + sq * WHIRL_SR_HIST, gh.begin() + (sq + 1) * WHIRL_SR_HIST);
+            w_hist.insert(w_hist.end(), w.hist.begin() + sq * WHIRL_SR_HIST, w.hist.begin() + (sq + 1) * WHIRL_SR_HIST);
+            g_rc.insert(g_rc.end(), grc.begin(), grc.end());
+            w_rc.insert(w_rc.end(), w.rcopy.begin(), w.rcopy.end());
+            g_tab.insert(g_tab.end(), gt.begin(), gt.end());
+            w_tab.insert(w_tab.end(), w.tab.begin(), w.tab.end());
+            relaxed += w.relaxed;
+            guarded += w.guarded;
+            cuts += w.cuts;
+            ++cycles;
+            // the next cycle reads the words this one left (the CPU reference's, so one device miss does not cascade)
+            ctl = w.ctl;
+            std::memcpy(hist, w.hist.data(), hist_words * sizeof(int));
+        }
+    }
+    // ---- mixed: several sequences of one launch (relaxed / exact / host-decided)
+    std::vector<int> m_ctl, mw_ctl, m_hist, mw_hist;
+    const int mixes = c.quick ? 16 : 64;
+    for (int it = 0; it < mixes; ++it) {
+        const std::uint32_t V = 4 + rnd(8);
+        std::vector<int> ctl(static_cast<std::size_t>(kAreas) * kW, 0), rank(3 * kXS, 0);
+        for (int& v : ctl) v = static_cast<int>(rnd(V));
+        std::vector<int> hv(hist_words);
+        for (int& v : hv) v = static_cast<int>(rnd(V));
+        std::memcpy(hist, hv.data(), hist_words * sizeof(int));
+        SpecAccArgs a{};
+        SpecRelaxArgs rr = r;
+        const int A = 1 + static_cast<int>(rnd(6));
+        a.n = A;
+        a.n_vocab = static_cast<int>(V);
+        a.stop0 = 0xffffffffu;
+        a.stop1 = 0xffffffffu;
+        int ids[kAreas];
+        for (int i = 0; i < kAreas; ++i) ids[i] = i;
+        for (int i = kAreas - 1; i > 0; --i) std::swap(ids[i], ids[rnd(static_cast<std::uint32_t>(i) + 1)]);
+        int row = 0;
+        for (int k = 0; k < A; ++k) {
+            const int nd = 1 + static_cast<int>(rnd(3));
+            xRows(c, a, k, ids[k], nd, row, V, ctl, rank);
+            row += nd + 1;
+            a.budget[k] = 1 << 30;
+            a.pos[k] = static_cast<int>(rnd(12000));
+            const std::uint32_t kind = rnd(3);
+            rr.on[k] = kind == 0 ? 1 : 0;
+            a.dev[k] = kind == 2 ? 0 : 1;
+            rr.next[k] = static_cast<int>(rnd(V));
+        }
+        const std::vector<int> hist_in(hist, hist + hist_words), rc_in(3 * kXS, -1);
+        for (int i = 0; i < 3 * kXS; ++i) rcopy[i] = -1;
+        const XWant w = xReference(a, rr, ctl, rank, hist_in, rc_in);
+        Buf dctl(ctl), drank(rank), dtab(sizeof(SpecNextTab));
+        dtab.zero();
+        hip::launch(f, {1, 1, 1}, {256, 1, 1}, 0, c.s, dctl.p(), a, DevPtr{0}, dtab.p(), rr, drank.p(), reinterpret_cast<DevPtr>(hist),
+                    reinterpret_cast<DevPtr>(rcopy));
+        hip::streamSync(c.s);
+        const std::vector<int> got = dctl.down<int>(ctl.size());
+        m_ctl.insert(m_ctl.end(), got.begin(), got.end());
+        mw_ctl.insert(mw_ctl.end(), w.ctl.begin(), w.ctl.end());
+        m_hist.insert(m_hist.end(), hist, hist + hist_words);
+        mw_hist.insert(mw_hist.end(), w.hist.begin(), w.hist.end());
+        relaxed += w.relaxed;
+        guarded += w.guarded;
+    }
+    hip::hostFree(hist);
+    hip::hostFree(rcopy);
+    const std::string n = std::to_string(cycles);
+    c.rep.add(cmpExact("spec_accept_relax_rows chain control words (" + n + " cycles)", g_ctl, w_ctl));
+    c.rep.add(cmpExact("spec_accept_relax_rows chain history ring (pinned)", g_hist, w_hist));
+    c.rep.add(cmpExact("spec_accept_relax_rows chain rank-word copy (pinned)", g_rc, w_rc));
+    c.rep.add(cmpExact("spec_accept_relax_rows chain next-cycle rows", g_tab, w_tab));
+    c.rep.add(cmpExact("spec_accept_relax_rows mixed control words (" + std::to_string(mixes) + " launches)", m_ctl, mw_ctl));
+    c.rep.add(cmpExact("spec_accept_relax_rows mixed history rings", m_hist, mw_hist));
+    Result res;
+    res.family = "specaccx";
+    res.name = "spec_accept_relax_rows branches hit (relaxed keeps " + std::to_string(relaxed) + ", guard refusals " + std::to_string(guarded) +
+               ", EOS / budget cuts " + std::to_string(cuts) + ")";
+    res.pass = relaxed > 0 && guarded > 0 && cuts > 0;
+    res.n = static_cast<std::size_t>(cycles);
+    c.rep.add(res);
 }
 
 }  // namespace kt

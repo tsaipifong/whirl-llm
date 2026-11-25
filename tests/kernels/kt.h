@@ -264,6 +264,9 @@ void testDflash(Ctx& c);
 // into hip::hostMalloc memory through the host pointer
 void testSpecAcc(Ctx& c);
 void testSpecAccZc(Ctx& c);
+// v0252-e1fast (test_spec_accept.cpp): "specaccx" = spec_accept_relax_rows (gfx1151 object) bit for bit vs
+// kernels/spec_accept_relax.h: control words, history ring, rank-word copy, next-cycle rows (chains of cycles + mixed launches)
+void testSpecAccRelax(Ctx& c);
 // v0252-e1p1b (test_e1_inputs.cpp): "e1in" = the E1 next-cycle inputs on the device - set_rows_dp, rmsnorm_q8_rows_dv, the
 // gfx1201 GDN replay count from a device word, spec_accept_rows' device position - each device-value launch == the by-value one
 void testE1Inputs(Ctx& c);

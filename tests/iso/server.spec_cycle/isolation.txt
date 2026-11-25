@@ -134,6 +134,8 @@ hdr       src/tier/kv_tier.h
 hdr       src/tokenizer/unicode_tables.inc
 # v0252-e1p1 (feat026-acc port): engine_decode.cpp fills the device accept arguments (SpecAccArgs, plain C, no other include)
 hdr       kernels/spec_accept.h
+# v0252-e1fast: engine_decode.cpp fills the relaxed accept arguments (SpecRelaxArgs; plain C over spec_accept.h)
+hdr       kernels/spec_accept_relax.h
 # test program
 testsrc   tests/iso/server.spec_cycle/spec_cycle_tests.cpp
 testhdr   tests/iso/iso_test.h

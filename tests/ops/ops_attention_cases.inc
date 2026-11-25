@@ -2344,3 +2344,100 @@ void testAttnDecodeE1Group() {
 }
 
 }  // namespace
+
+// v0252-e1fast (PLAN V1-93 P3): an E1 verify in FAST mode (q4 KV through attn_dq4, rows unknown on the host: positions on the
+// device, AttnDecodeProblem::rows_one_seq with row 0's interval [pos0_lo, pos0_hi]) takes the split count the host would take
+// for known rows (the v0252-8sq5 table / WHIRL_DQ4_MINKEYS / the dynamic rule) when that count is the same at EVERY position
+// of the interval; else today's E1 grid (the fixed fd_splits). Before this item every E1 fast verify ran the fixed grid (256
+// splits at 32768 keys where the table's 2-row pick is 8). Checks: (1) a one-position interval = the known-rows plan for the
+// same rows (split count, kernel, grid); (2) a two-position interval takes the count only where both positions agree; (3) no
+// interval / too wide / not one sequence: the fixed grid as before; (4) f16 / q8 KV (balance / precise) never changes.
+void testAttnDq4E1() {
+    const auto& p8s = whirl::device::k_profile_gfx1151;
+    static const kn::KernelTable s8 = attnTable(true, true, true, false);
+    auto k8 = std::make_unique<kn::KernelTable>(s8);
+    k8->attn_dq4o = tag("attn_dq4o");
+    const std::vector<std::int32_t> zeros(16, 0);
+    ops::AttnDecodeProblem p;
+    p.head_dim = 256;
+    p.n_head = 16;
+    p.n_head_kv = 2;
+    p.max_ctx = 262144;
+    p.kv_q4 = true;
+    ops::AttnDecodeFlags f;
+    f.fd_splits = 256;
+    f.dq4_splits = ops::kDq4SplitsAuto;
+    f.dq4_order = true;
+    std::vector<std::int32_t> pos;
+    auto knownPlan = [&](std::int32_t p0, std::uint32_t n, const ops::AttnDecodeFlags& fl) {
+        pos.clear();
+        for (std::uint32_t r = 0; r < n; ++r) pos.push_back(p0 + static_cast<std::int32_t>(r));
+        ops::AttnDecodeProblem q = p;
+        q.n = n;
+        q.rows_known = true;
+        q.row_pos = std::span<const std::int32_t>(pos);
+        q.row_base = std::span<const std::int32_t>(zeros.data(), n);
+        return ops::chooseAttnDecode(q, fl, *k8, k8->caps, p8s);
+    };
+    auto e1Plan = [&](std::int32_t lo, std::int32_t hi, std::uint32_t n, bool one_seq, const ops::AttnDecodeFlags& fl) {
+        ops::AttnDecodeProblem q = p;
+        q.n = n;
+        q.rows_known = false;
+        q.rows_one_seq = one_seq;
+        q.pos0_lo = lo;
+        q.pos0_hi = hi;
+        return ops::chooseAttnDecode(q, fl, *k8, k8->caps, p8s);
+    };
+    ops::AttnDecodeProblem q0 = p;
+    q0.n = 2;
+    const std::uint32_t fixed = ops::chooseAttnDecode(q0, f, *k8, k8->caps, p8s).n_split;  // today's E1 grid (unknown rows)
+    CHECK_EQ(fixed, 256u);
+    long long one = 0, two_same = 0, two_diff = 0, bad = 0;
+    std::vector<std::int32_t> keys_list;
+    for (const std::int32_t b : {8192, 16384, 32768, 49152, 65536, 98304, 131072})
+        for (std::int32_t d = -3; d <= 3; ++d) keys_list.push_back(b + d);
+    for (const std::int32_t x : {3000, 20000, 40000, 70001, 120000, 200000}) keys_list.push_back(x);
+    for (const ops::AttnDecodeFlags& fl : {f, [&] {
+                                               ops::AttnDecodeFlags m = f;
+                                               m.dq4_min_keys = 1024;
+                                               return m;
+                                           }()})
+        for (const std::uint32_t n : {2u, 3u})
+            for (const std::int32_t keys : keys_list) {
+                const std::int32_t p0 = keys - static_cast<std::int32_t>(n);  // the last row at keys - 1
+                // (1) one position: the known-rows plan
+                const ops::AttnDecodePlan k1 = knownPlan(p0, n, fl), e = e1Plan(p0, p0, n, true, fl);
+                const bool ok1 = e.n_split == k1.n_split && e.f == k1.f && e.grid.y == k1.grid.y && e.kind == k1.kind;
+                bad += !ok1;
+                one += 1;
+                // (2) two positions (one MTP draft in flight): the known count where both agree, else the fixed grid
+                const ops::AttnDecodePlan ka = knownPlan(p0 - 1, n, fl), kb = knownPlan(p0, n, fl), e2 = e1Plan(p0 - 1, p0, n, true, fl);
+                const std::uint32_t want = ka.n_split == kb.n_split ? ka.n_split : fixed;
+                bad += e2.n_split != want;
+                (ka.n_split == kb.n_split ? two_same : two_diff) += 1;
+                // (3) not one sequence / no interval / too wide: the fixed grid
+                bad += e1Plan(p0, p0, n, false, fl).n_split != fixed;
+                bad += e1Plan(-1, -1, n, true, fl).n_split != fixed;
+                bad += e1Plan(p0 - ops::kE1GroupSpan, p0, n, true, fl).n_split != fixed;
+            }
+    // (4) f16 KV (balance / precise, the ws4 path): the interval never touches the dq4 rule
+    {
+        static const kn::KernelTable s8f = attnTable(true, true, false, false);
+        ops::AttnDecodeProblem q = p;
+        q.n = 2;
+        q.kv_q4 = false;
+        q.rows_one_seq = true;
+        q.pos0_lo = 32766;
+        q.pos0_hi = 32766;
+        ops::AttnDecodeFlags f64 = f;
+        f64.fd_splits = 64;
+        ops::AttnDecodeProblem qn = q;
+        qn.pos0_lo = -1;
+        qn.pos0_hi = -1;
+        CHECK_EQ(ops::chooseAttnDecode(q, f64, s8f, s8f.caps, p8s).n_split, ops::chooseAttnDecode(qn, f64, s8f, s8f.caps, p8s).n_split);
+    }
+    CHECK_EQ(bad, 0LL);
+    CHECK(one > 0 && two_same > 0 && two_diff > 0);
+    std::printf("  testAttnDq4E1: %lld one-position intervals, %lld two-position (%lld agree, %lld at a breakpoint), %lld bad\n", one,
+                two_same + two_diff, two_same, two_diff, bad);
+}

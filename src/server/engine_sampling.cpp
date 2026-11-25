@@ -147,6 +147,30 @@ const std::int32_t* SampleBuffers::aheadWait(std::uint32_t e) {
     return static_cast<const std::int32_t*>(ring_pin_.get()) + e * ring_words_;
 }
 
+// v0252-e1fast (engine_sampling.h)
+bool SampleBuffers::allocRelaxDev(std::uint32_t parallel, std::uint32_t hist_words, double dstar) {
+    if (acc_mode_ < 2 || parallel == 0 || hist_words == 0 || !m_.specRelaxOk()) return false;
+    const std::uint64_t hb = static_cast<std::uint64_t>(parallel) * hist_words * 4, rb = 2ull * max_rows * 3 * 4;
+    rx_hist_ = device::PinnedBuf::alloc(ops_, hb);
+    std::memset(rx_hist_.get(), 0, hb);
+    rx_rank_ = device::PinnedBuf::alloc(ops_, rb);
+    std::memset(rx_rank_.get(), 0, rb);
+    rx_slots_ = parallel;
+    rx_words_ = hist_words;
+    rx_dstar_ = dstar;
+    return true;
+}
+
+std::int32_t* SampleBuffers::relaxHist(std::uint32_t s) const {
+    if (!rx_hist_ || s >= rx_slots_) return nullptr;
+    return static_cast<std::int32_t*>(rx_hist_.get()) + static_cast<std::uint64_t>(s) * rx_words_;
+}
+
+std::int32_t* SampleBuffers::relaxRankCopy(std::uint32_t e) const {
+    if (!rx_rank_) return nullptr;
+    return static_cast<std::int32_t*>(rx_rank_.get()) + static_cast<std::uint64_t>(e & 1u) * max_rows * 3;
+}
+
 const std::int32_t* SampleBuffers::readCycleCtl(std::uint32_t mode, std::size_t words, const SpecAccArgs* aa) {
     if (mode == 0 || !ctl_pin_) {
         m_.readCtl(std::span<std::int32_t>(ctl_host_.data(), std::min(words, ctl_host_.size())));
