@@ -714,4 +714,8 @@ std::uint32_t e1Default(bool moe, hip::Arch arch) {
 // v0252-e1s8 round 2 (policy.h)
 std::uint32_t e1CtxMax(hip::Arch arch) { return device::profile(arch).e1_ctx_max; }
 
+// v0252-e1fast (policy.h)
+std::uint32_t e1DefaultFast(bool moe, hip::Arch arch) { return moe ? device::profile(arch).e1_moe_fast : 0u; }
+std::uint32_t e1CtxMaxFast(hip::Arch arch) { return device::profile(arch).e1_ctx_max_fast; }
+
 }  // namespace whirl::qwen35

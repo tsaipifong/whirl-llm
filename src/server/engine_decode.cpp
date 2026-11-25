@@ -14,8 +14,10 @@
 #include "spec/spec_rules.h"  // the speculative-decoding rules shared with the CLI (arch025-R12cli)
 
 #include "../../kernels/spec_accept.h"  // v0252-e1p1 (feat026-acc port): the device accept decision (WHIRL_SPEC_ACC)
+#include "../../kernels/spec_accept_relax.h"  // v0252-e1fast: the relaxacc accept decision on the device (E1 in fast mode)
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <ctime>
@@ -321,8 +323,11 @@ void SpecCycle::layoutBatch(Cycle& cy) {
     // takes them back to the host: acceptSlot)
     // (v0252-e1s8: the model's E1 path - replay mode, or snapshot mode with the select-mode kernels: ServerModel::e1InputsOk)
     const bool e1_site = opt_.e1 != 0 && opt_.use_mtp && cy.A == 1 && cy.n_mtp == 1 && !opt_.use_dflash && m_.e1InputsOk() &&
-                         !(cy.p && cy.p->events) && cy.act[0]->greedy && !relaxes(cy, 0) &&
+                         !(cy.p && cy.p->events) && cy.act[0]->greedy && (!relaxes(cy, 0) || (sb_.relaxDevOk() && spec_relax_pos_ok(cy.act[0]->pos, cy.act[0]->cache_tokens.size()))) &&
                          (cy.act[0]->job == nullptr || cy.act[0]->job->vis == nullptr);
+    // (v0252-e1fast: a relaxacc slot too when the device decides its relaxed accept: SampleBuffers::relaxDevOk = E1 on with
+    // relaxacc and the model's spec_accept_relax_rows; the slot's history index is its position - the rings are indexed
+    // by position, a slot where cache_tokens and the position differ keeps the host decision and the synchronous cycle)
     // v0252-e1len (PLAN V1-93): the length-aware DEFAULT. At or above opt_.e1_ctx_max this cycle runs the ordinary way:
     // what E1 removes is a fixed per-cycle boundary idle, a shrinking share of a cycle whose attention over the KV grows
     // with the length, while its own per-cycle cost grows with it - so the sign flips with length (the measurements and
@@ -493,6 +498,10 @@ void SpecCycle::sampleRows(Cycle& cy) {
     // only copied: the host decides them in every mode)
     cy.acc_dev = opt_.spec_acc >= 2;
     cy.acc_check = opt_.spec_acc == 4;
+    // v0252-e1fast: the relaxacc slots of an E1 cycle the device decides (spec_accept_relax_rows); every one needs the one-pass
+    // rank words of this verify (rank1p) or has no draft to rank
+    SpecRelaxArgs rx{};
+    bool any_rx = false, relax_host = false;
     if (cy.acc_dev) {
         SpecAccArgs& aa = cy.aa;
         aa.n = static_cast<int>(cy.A);
@@ -504,7 +513,9 @@ void SpecCycle::sampleRows(Cycle& cy) {
             aa.seq[k] = static_cast<int>(sl.id);
             aa.nd[k] = static_cast<int>(cy.nd_of[k]);
             aa.lit[k] = cy.ng_n[k] > 0 ? 1 : 0;
-            aa.dev[k] = sl.greedy && !relaxes(cy, k) ? 1 : 0;
+            const bool rx_k = cy.e1 && sl.greedy && relaxes(cy, k) && sb_.relaxDevOk() && spec_relax_pos_ok(sl.pos, sl.cache_tokens.size()) &&
+                              (cy.rank1p || cy.nd_of[k] == 0);
+            aa.dev[k] = sl.greedy && (!relaxes(cy, k) || rx_k) ? 1 : 0;
             aa.eos[k] = sl.ignore_eos ? 0 : 1;
             const std::uint32_t budget = sl.max_tokens > sl.n_gen ? sl.max_tokens - sl.n_gen : 0;
             aa.budget[k] = static_cast<int>(std::min<std::uint32_t>(budget, 1u << 30));
@@ -514,8 +525,18 @@ void SpecCycle::sampleRows(Cycle& cy) {
             for (std::uint32_t r = 0; r < cy.ng_n[k] && r < static_cast<std::uint32_t>(WHIRL_SA_MAX_ND); ++r)
                 aa.lit_d[k][r] = static_cast<int>(cy.ng_d[k][r]);
             cy.acc_all_dev = cy.acc_all_dev && aa.dev[k] != 0;
+            if (rx_k) {
+                if (!any_rx) rx = spec_relax_args(sb_.relaxDstar(), static_cast<int>(opt_.relax.topk()), static_cast<int>(max_rows));
+                any_rx = true;
+                rx.on[k] = 1;
+                rx.next[k] = static_cast<int>(sl.next);
+                if (aa.pos[k] >= 0) spec_relax_hist_write(sb_.relaxHist(sl.id), sl.cache_tokens.data(), sl.cache_tokens.size());  // host inputs
+            }
         }
     }
+    for (std::size_t k = 0; k < cy.A; ++k)
+        relax_host = relax_host || (cy.act[k]->greedy && relaxes(cy, k) && cy.nd_of[k] > 0 && !(cy.acc_dev && cy.aa.dev[k] != 0));
+    if (any_rx) m_.setSpecRelax(rx, sb_.relaxDev(), sb_.relaxHistAll(), nullptr);  // (the next specAccept: readCycleCtl below)
     const TimePoint t_enq = Clock::now();
     // the cycle's one read of the control words (feat026-acc's readCycleCtl seam; WHIRL_SPEC_ACC=host: readCtl as before)
     cy.ctl_all = sb_.readCycleCtl(opt_.spec_acc, slots_.size() * qwen35::ctl_words, cy.acc_dev ? &cy.aa : nullptr);
@@ -524,7 +545,8 @@ void SpecCycle::sampleRows(Cycle& cy) {
         cy.p->enq_ms[cy.pa] += std::chrono::duration<double, std::milli>(t_enq - cy.tc0).count();
     }
     if (any_sampling) ops_.download(sb_.sampHost().data(), sb_.sampDev(), SampleBuffers::sampBytes());
-    if (any_relax)
+    // (v0252-e1fast: not for slots the device decided, unless check mode compares them with the host rule)
+    if (any_relax && (relax_host || cy.acc_check))
         ops_.download(sb_.relaxHost().data(), sb_.relaxDev(), cy.rank1p ? static_cast<std::size_t>(max_rows) * 12 : sb_.relaxHost().size());
 }
 
@@ -609,7 +631,10 @@ void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& a
     const std::int32_t* ctl = cy.ctl_all + static_cast<std::size_t>(sl.id) * qwen35::ctl_words;
     // v0252-e1p1 (feat026-acc port): decided on the device (the host path runs only for WHIRL_SPEC_ACC=check, to compare)
     const bool dev_k = cy.acc_dev && cy.aa.dev[k] != 0;
-    bool dev_use = dev_k && !cy.acc_check;
+    // v0252-e1fast: a relaxacc slot the device decided (spec_accept_relax_rows) keeps the device decision in check mode too - check
+    // compares it with the host rule as a diagnostic (fast mode's output is the device's decision)
+    const bool relax_k = dev_k && relaxes(cy, k);
+    bool dev_use = dev_k && (!cy.acc_check || relax_k);
     // v0252-e1p1b (E1): the device result is one the host agrees with (gpu / gpu-zc: in range; check: equal) - only then
     // may the next cycle take its inputs from the control words
     bool dev_good = dev_k;
@@ -647,6 +672,14 @@ void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& a
         ac.acc = static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_ACC0]);
         ac.chosen = static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + ac.acc]);
         sb_.accStats().dev += 1;
+        if (relax_k) {
+            // v0252-e1fast: the relaxed rule's keeps and their gaps (m - l_d), as the host path counts them (relax_gap: the first
+            // WHIRL_SR_GAP_N relaxed drafts of a cycle)
+            const auto msk = static_cast<std::uint32_t>(ctl[WHIRL_SR_CTL_RMASK]);
+            const int nr = std::popcount(msk);
+            sl.relaxed += static_cast<std::uint32_t>(nr);
+            for (int q = 0; q < nr && q < WHIRL_SR_GAP_N; ++q) sl.relax_gap += static_cast<double>(spec_relax_f(ctl[WHIRL_SR_CTL_GAP + q]));
+        }
     } else {
         ac = sl.greedy ? acceptor.greedy(ctl + qwen35::ctl_rows, drafts, relaxes(cy, k), sampling::RelaxRows{sb_.relaxHost().data(), max_rows, cy.rk, cy.rank1p},
                                          repeats, sl.relaxed, sl.relax_gap)
@@ -697,6 +730,36 @@ void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& a
     if (cy.acc_check && dev_k) {
         SpecAccStats& as = sb_.accStats();
         as.checked += 1;
+        if (relax_k && (cy.ring ? sb_.relaxRankCopy(cy.ring_e) != nullptr : !sb_.relaxHost().empty())) {
+            // v0252-e1fast: the host rule on the same rank words (this cycle's: the downloaded rows, or the ring entry's copy) - a
+            // diagnostic only: the device decision stands (counted, said once, the lookahead goes on)
+            const auto* rr = cy.ring ? reinterpret_cast<const std::uint8_t*>(sb_.relaxRankCopy(cy.ring_e)) : sb_.relaxHost().data();
+            std::uint32_t h_rel = 0;
+            double h_gap = 0;
+            const sampling::Accepted h =
+                acceptor.greedy(ctl + qwen35::ctl_rows, drafts, true, sampling::RelaxRows{rr, max_rows, opt_.relax.topk(), true}, repeats, h_rel, h_gap);
+            std::uint32_t h_acc = h.acc, h_ch = h.chosen;
+            if (!sl.ignore_eos)
+                for (std::uint32_t r = 0; r < h_acc; ++r)
+                    if (dr[r] == ct_.im_end || dr[r] == ct_.endoftext) {
+                        h_ch = dr[r];
+                        h_acc = r;
+                        break;
+                    }
+            const std::uint32_t h_budget = sl.max_tokens > sl.n_gen ? sl.max_tokens - sl.n_gen : 0;
+            if (h_budget >= 1 && h_acc + 1 > h_budget) {
+                h_ch = dr[h_budget - 1];
+                h_acc = h_budget - 1;
+            }
+            if (h.acc != acc_pre || h_acc != acc || h_ch != chosen ||
+                h_rel != static_cast<std::uint32_t>(std::popcount(static_cast<std::uint32_t>(ctl[WHIRL_SR_CTL_RMASK])))) {
+                if (as.mismatch == 0)
+                    logW("spec-acc check | slot {} | relaxacc: device acc {}/{} chosen {} (relaxed mask {:#x}) vs host rule acc {}/{} chosen {} "
+                         "(relaxed {}); the device decision stands (a diagnostic)",
+                         sl.id, acc_pre, acc, chosen, static_cast<std::uint32_t>(ctl[WHIRL_SR_CTL_RMASK]), h.acc, h_acc, h_ch, h_rel);
+                as.mismatch += 1;
+            }
+        }
         const bool same = static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_ACC0]) == acc_pre && static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_ACC]) == acc &&
                           static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_CHOSEN]) == chosen &&
                           static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_NDDEV]) == nd_dev &&
@@ -856,7 +919,9 @@ void SpecCycle::finishCycle(Cycle& cy) {
 std::shared_ptr<SpecCycle::Cycle> SpecCycle::aheadBuild(Slot& sl, const Cycle* fly) {
     namespace sr = spec::rules;
     // ---- the drain rules: any "no" = this cycle is not submitted through the ring
-    if (!sb_.aheadOk() || !opt_.use_mtp || opt_.use_dflash || opt_.relax.on || !m_.e1InputsOk()) return nullptr;
+    if (!sb_.aheadOk() || !opt_.use_mtp || opt_.use_dflash || !m_.e1InputsOk()) return nullptr;
+    // v0252-e1fast: relaxacc only where the device decides it (spec_accept_relax_rows and the slot's history ring)
+    if (opt_.relax.on && !(sb_.relaxDevOk() && spec_relax_pos_ok(sl.pos, sl.cache_tokens.size()))) return nullptr;
     // v0252-e1len (PLAN V1-93): the length-aware DEFAULT, as a drain rule - at or above the boundary no cycle is
     // submitted through the ring (layoutBatch decides the same for cy.e1 below; this rule is what keeps the host
     // bookkeeping of a cycle that would be thrown away from running once per cycle at long context)
@@ -949,6 +1014,17 @@ std::shared_ptr<SpecCycle::Cycle> SpecCycle::aheadBuild(Slot& sl, const Cycle* f
     aa.row0[0] = static_cast<int>(cy.row_of[0]);
     cy.ring = true;
     cy.ring_e = fly != nullptr ? sr::aheadRingNext(fly->ring_e) : 0;
+    if (relaxes(cy, 0)) {
+        // v0252-e1fast: the relaxed rule on the device, on this verify's one-pass rank words (the model gives every greedy relaxacc
+        // verify those words: ServerModel::specRelaxOk), the history ring the accepts before it appended (device inputs: no host
+        // write), and in check mode a copy of the rank words in this ring entry for the host's comparison (the device rank
+        // buffer holds the next cycle's words by the time the host reads this one)
+        if (cy.nd_of[0] > 0 && !cy.rank1p) throw std::runtime_error("E1RelaxNoRank");
+        SpecRelaxArgs rx = spec_relax_args(sb_.relaxDstar(), static_cast<int>(opt_.relax.topk()), static_cast<int>(max_rows));
+        rx.on[0] = 1;
+        rx.next[0] = static_cast<int>(sl.next);
+        m_.setSpecRelax(rx, sb_.relaxDev(), sb_.relaxHistAll(), cy.acc_check ? sb_.relaxRankCopy(cy.ring_e) : nullptr);
+    }
     sb_.aheadSubmit(cy.ring_e, aa, sl.id, cy.row_of[0], cy.nd_of[0] + 1);
     // the next verify / commitSeq of the sequence replays by the NPEND word this cycle's accept writes
     m_.setPending(sl.id, qwen35::npend_dev);
@@ -1071,6 +1147,16 @@ void SpecCycle::specAccSetup() {
                      opt_.e1_ctx_max, opt_.e1_ctx_max);
             else
                 logI("decode: WHIRL_E1=1 (the next cycle's inputs from the device accept result; one cycle at a time)");
+        }
+        // v0252-e1fast (PLAN V1-93 P3): fast mode - relaxacc decided on the device, so its cycles take the E1 path too
+        if (opt_.e1 != 0 && opt_.relax.on) {
+            if (sb_.allocRelaxDev(opt_.parallel, WHIRL_SR_HIST, spec_relax_dstar(static_cast<double>(opt_.relax.alpha))))
+                logI("decode: E1 with relaxacc decided on the GPU (spec_accept_relax_rows: the relaxed rule top-{} / p >= {:.2f} p_max and its "
+                     "repetition guard over a token ring per request; a greedy request's fast cycles run the E1 path, sampled ones the "
+                     "ordinary way)",
+                     opt_.relax.topk(), opt_.relax.alpha);
+            else
+                logI("decode: E1: relaxacc cycles run the ordinary way (no spec_accept_relax_rows kernel)");
         }
         // v0252-e1s8: the proof line of the snapshot-mode path (gfx1151 / Radeon 8060S: kernels/gdn_select.h)
         if (opt_.e1 != 0 && !m_.gdnReplay())

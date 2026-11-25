@@ -62,6 +62,10 @@ struct E1Site {
     bool model_ok = false;  // Backend::e1InputsOk
     // v0252-b5 round 3 (E1 review item C2): WHIRL_SPEC_ACC as the user set it (the parsed mode; not set: nullopt)
     std::optional<std::uint32_t> spec_acc_env{};
+    // v0252-e1fast (PLAN V1-93 P3): fast mode's own default (qwen35::e1DefaultFast: device::Profile::e1_moe_fast) and whether
+    // the model decides relaxacc on the device (Backend::specRelaxOk) - fast's default applies only with both
+    std::uint32_t fast_def = 0;
+    bool relax_dev = false;
 };
 struct E1Choice {
     std::uint32_t e1 = 0;
@@ -81,7 +85,10 @@ inline E1Choice chooseE1(const std::optional<std::string>& env, std::uint32_t de
         const std::optional<std::uint32_t> m = parseE1(*env);
         return {m.value_or(0u), !m.has_value(), false, false};
     }
-    const bool usable = site.mtp && !site.dflash && !site.relax && !site.fast && site.model_ok;
+    // v0252-e1fast: fast mode takes its own default (site.fast_def), only where the device decides relaxacc (site.relax_dev)
+    if (site.fast) def = site.fast_def;
+    const bool usable = site.mtp && !site.dflash && site.model_ok &&
+                        (site.fast ? site.relax_dev && def != 0 : !site.relax);
     if (!usable) return {0u, false, true, false};
     if (site.spec_acc_env && !e1KeepsSpecAcc(def, *site.spec_acc_env)) return {0u, false, true, true};
     return {def, false, true, false};

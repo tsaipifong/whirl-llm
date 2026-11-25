@@ -113,6 +113,8 @@ hdr       include/whirl/vram_limit.h
 hdr       kernels/gfx1151/attn_ws4_index.h
 # v0252-e1p1 (feat026-acc port): server_model.cpp launches spec_accept_rows (its argument ABI, plain C, no other include)
 hdr       kernels/spec_accept.h
+# v0252-e1fast: server_model.cpp launches spec_accept_relax_rows (its argument ABI, plain C over spec_accept.h)
+hdr       kernels/spec_accept_relax.h
 hdr       kernels/argmax_key.h
 hdr       src/cache/cache_model.h
 hdr       src/config/env_get.h

@@ -108,6 +108,21 @@ public:
     // entry e's kept hidden rows (row r at + r * n_embd * 4)
     DevPtr aheadHid(std::uint32_t e) const;
 
+    // ---- v0252-e1fast (PLAN V1-93 P3; kernels/spec_accept_relax.h): relaxacc decided on the device ----
+    // allocRelaxDev (SpecCycle::specAccSetup, after allocAhead, E1 on with relaxacc and the model's spec_accept_relax_rows):
+    // the per-slot history rings (hist_words tokens each: WHIRL_SR_HIST) and two copies of the rank words (one per lookahead
+    // ring entry, max_rows * 3 words), all pinned host memory (zero copy: the kernel reads / appends the rings, the host writes
+    // them only before a cycle on host inputs), and d* (spec_relax_dstar of alpha, kept for the cycles). This module sees the
+    // kernel ABI only through these sizes (kernels/spec_accept_relax.h stays the engine's). false: nothing allocated.
+    bool allocRelaxDev(std::uint32_t parallel, std::uint32_t hist_words, double dstar);
+    bool relaxDevOk() const { return static_cast<bool>(rx_hist_); }
+    double relaxDstar() const { return rx_dstar_; }
+    // slot s's history ring (nullptr: none)
+    std::int32_t* relaxHist(std::uint32_t s) const;
+    std::int32_t* relaxHistAll() const { return static_cast<std::int32_t*>(rx_hist_.get()); }
+    // ring entry e's copy of the rank words (sampling::RelaxRows rank layout, stride max_rows)
+    std::int32_t* relaxRankCopy(std::uint32_t e) const;
+
 private:
     void loadRow(std::uint32_t gr);
 
@@ -132,6 +147,10 @@ private:
     std::array<device::EventH, 2> ring_ev_;
     std::uint64_t ring_words_ = 0, ring_hid_bytes_ = 0;
     std::uint32_t acc_mode_ = 0;
+    // v0252-e1fast (last, as above): the history rings, the two rank-word copies, d*
+    device::PinnedBuf rx_hist_, rx_rank_;
+    std::uint32_t rx_slots_ = 0, rx_words_ = 0;
+    double rx_dstar_ = 0;
 };
 
 }  // namespace whirl::server
