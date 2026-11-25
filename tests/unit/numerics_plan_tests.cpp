@@ -1994,11 +1994,16 @@ static void testW4a4SimFlag() {
         for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
         return nu::plan(r, t);
     };
-    NCHECK(nu::w4a4_sim_w == 1u && nu::w4a4_sim_a == 2u && nu::w4a4_sim_am == 4u, "w4a4_sim bits 1 / 2 / 4");
-    const std::pair<const char*, std::uint32_t> vals[] = {{"w", 1u}, {"a", 2u}, {"am", 4u}, {"wa", 3u}, {"1", 3u}, {"wam", 5u}};
+    NCHECK(nu::w4a4_sim_w == 1u && nu::w4a4_sim_a == 2u && nu::w4a4_sim_am == 4u && nu::w4a4_sim_grid_shift == 8u, "w4a4_sim bits 1 / 2 / 4, grid << 8");
+    // round 2: weight grids w (0) / w1 (1) / w1e (2) / w1d (3) / wb (4) in bits 8..10, combinable with a / am
+    const std::pair<const char*, std::uint32_t> vals[] = {{"w", 1u},         {"a", 2u},         {"am", 4u},       {"wa", 3u},
+                                                           {"1", 3u},         {"wam", 5u},       {"w1", 0x101u},   {"w1e", 0x201u},
+                                                           {"w1d", 0x301u},   {"wb", 0x401u},    {"w1a", 0x103u},  {"w1ea", 0x203u},
+                                                           {"w1dam", 0x305u}, {"wbam", 0x405u}};
     for (const auto& [s, b] : vals) NCHECK(nu::parseW4a4Sim(s) == std::optional<std::uint32_t>(b), "parseW4a4Sim({}) = {}", s, b);
     for (const char* s : {"0", ""}) NCHECK(nu::parseW4a4Sim(s) == std::optional<std::uint32_t>(0u), "parseW4a4Sim('{}') = 0", s);
-    for (const char* s : {"2", "x", "aw", "W", "m", "wm", " w", "wa "}) NCHECK(!nu::parseW4a4Sim(s), "parseW4a4Sim('{}') = invalid", s);
+    for (const char* s : {"2", "x", "aw", "W", "m", "wm", " w", "wa ", "w1x", "w1em", "w2", "wbw", "aw1", "1a"})
+        NCHECK(!nu::parseW4a4Sim(s), "parseW4a4Sim('{}') = invalid", s);
     std::size_t on_cells = 0;
     for (const char* mode : {"precise", "balance", "fast"})
         for (const CardFake& c : k_cards)
@@ -2030,7 +2035,7 @@ static void testW4a4SimFlag() {
                 for (const std::string& n : bad.ignored) bn += n.rfind("WHIRL_W4A4_SIM=bogus ignored", 0) == 0;
                 NCHECK(bad.flags == d.flags && bn == 1, "w4a4_sim {} {} {}: an invalid value = off + one note", c.name, model, mode);
             }
-    NCHECK(on_cells == 6, "w4a4_sim taken in {} value-cells (want 6: 8060S fast swift x 6 values)", on_cells);
+    NCHECK(on_cells == std::size(vals), "w4a4_sim taken in {} value-cells (want {}: 8060S fast swift x every value)", on_cells, std::size(vals));
     nu::Target tq = target(card("8060s"), "swift", false);
     tq.has_mxfp4 = false;
     NCHECK(pl(tq, "fast", {{"W4A4_SIM", "1"}}).flags.w4a4_sim == 0u, "w4a4_sim: a model without MXFP4 tensors -> off");

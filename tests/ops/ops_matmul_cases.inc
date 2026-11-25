@@ -801,7 +801,7 @@ void testOpsGemmW4s() {
     k.gemmfq[0] = tag("gemmfq_c2_mxfp4");
     k.gemmfq[1] = tag("gemmfq_t2_mxfp4");
     k.gemmhq[ti(GgmlType::mxfp4)] = tag("gemmhq_mxfp4");
-    k.w4s_dq = tag("w4s_dequant_f16_mxfp4");
+    for (std::size_t g = 0; g < k.w4s_dq.size(); ++g) k.w4s_dq[g] = tag(kn::kW4sDqNames[g]);
     const std::string mx = std::to_string(static_cast<int>(GgmlType::mxfp4)), f16 = std::to_string(static_cast<int>(GgmlType::f16));
     CHECK(ops::GemmFlags{}.w4s_w == false);
     ops::GemmFlags base;  // the gfx1151 dense plan: gemmfq slot t2, gemmhq off (device default)
@@ -845,7 +845,24 @@ void testOpsGemmW4s() {
         const ops::GemmPlan a = ops::chooseGemmF16(q4, 2048, deq2, base, k), b = ops::chooseGemmF16(q4, 2048, deq2, s1, k);
         CHECK(a.kind == b.kind && a.f == b.f && a.dq == b.dq && a.dequant == b.dequant && a.grid.x == b.grid.x && a.grid.y == b.grid.y);
     }
-    k.w4s_dq = nullptr;
+    // round 2: GemmFlags::w4s_w = grid + 1 picks MatmulKernels::w4s_dq[grid]; out of range (6) = off
+    for (std::uint8_t g = 1; g <= 5; ++g) {
+        ops::GemmFlags sg = s1;
+        sg.w4s_w = g;
+        const ops::GemmPlan p = ops::chooseGemmF16(gate, 2048, deq2, sg, k);
+        CHECK(p.dequant && nameOf(p.dq) == kn::kW4sDqNames[g - 1]);
+        ops::GemmFlags tg = sg;
+        tg.gemm_tail = true;
+        k.gemmh_f16 = tag("gemmh_f16");
+        CHECK(ops::planGemmF16(gate, 2058, deq2, tg, k).n == 1);  // no tail split for any grid
+        k.gemmh_f16 = nullptr;
+    }
+    {
+        ops::GemmFlags s6 = s1;
+        s6.w4s_w = 6;
+        CHECK(ops::chooseGemmF16(gate, 2048, deq2, s6, k).kind == ops::GemmKind::gemmfq);
+    }
+    k.w4s_dq = {};
     {
         const ops::GemmPlan a = ops::chooseGemmF16(gate, 2048, deq2, base, k), b = ops::chooseGemmF16(gate, 2048, deq2, s1, k);
         CHECK(a.kind == b.kind && a.f == b.f && a.dq == b.dq && a.dequant == b.dequant && a.grid.x == b.grid.x && a.grid.y == b.grid.y);

@@ -1508,6 +1508,98 @@ static void test_w4s_dot_vs_fold() {
           num(sim) + " vs " + num(y) + " scale " + num(scale));
 }
 
+// v0252-w4a4k2 round 2: the weight grids of the arm (WHIRL_W4A4_SIM w / w1 / w1e / w1d / wb; kernels
+// w4s_dequant_f16_mxfp4[_w1|_w1e|_w1d|_wb]). Spec (Sir Pifeng's brief, main session 2026-11-26): MXFP4 magnitudes (e2m1)
+// 0, .5, 1, 1.5, 2, 3, 4, 6 -> w (6/7 grid, unchanged) 0,1,1,2,2,4,5,7 x 6/7; w1 (step 1 e2m1) 0,1,1,2,2,3,4,6 (halves up);
+// w1e halves to even 0,0,1,2,2,3,4,6; w1d the two half codes up at an even K index of the block, down at an odd one; wb per
+// 32-block the grid (w or w1) with the smaller squared error against the MXFP4 values (ties -> w). Fails to build before the
+// change (no w4s_wlevel_g / w4s_wscale_g / w4s_wblock).
+static void test_w4s_grids() {
+    const int want[4][2][8] = {{{0, 1, 1, 2, 2, 4, 5, 7}, {0, 1, 1, 2, 2, 4, 5, 7}},   // w (k even, k odd)
+                               {{0, 1, 1, 2, 2, 3, 4, 6}, {0, 1, 1, 2, 2, 3, 4, 6}},   // w1
+                               {{0, 0, 1, 2, 2, 3, 4, 6}, {0, 0, 1, 2, 2, 3, 4, 6}},   // w1e
+                               {{0, 1, 1, 2, 2, 3, 4, 6}, {0, 0, 1, 1, 2, 3, 4, 6}}};  // w1d
+    std::size_t bad = 0;
+    for (int g = 0; g < 4; ++g)
+        for (int par = 0; par < 2; ++par)
+            for (int code = 0; code < 16; ++code) {
+                const int m = want[g][par][code & 7];
+                bad += w4s_wlevel_g(code, g, 2 + par) != ((code & 8) ? -m : m);
+            }
+    for (int code = 0; code < 16; ++code) bad += w4s_wlevel_g(code, 0, 5) != w4s_wlevel(code);
+    check("w4s grids: level tables w / w1 / w1e / w1d (+ sign, w1d by K parity), w == the round-1 table", bad == 0, num(static_cast<double>(bad)));
+    bad = 0;
+    for (std::uint32_t e = 2; e < 256; ++e)
+        for (int g = 1; g < 4; ++g) {
+            const float a = w4s_wscale_g(e, g), b = static_cast<float>(std::ldexp(1.0, static_cast<int>(e) - 127));
+            const float c = w4s_wscale_g(e, 0), d = w4a4p::mxI4Scale(static_cast<int>(e));
+            bad += std::memcmp(&a, &b, 4) != 0 || std::memcmp(&c, &d, 4) != 0;
+        }
+    check("w4s grids: scale 2^(e-127) (one e2m1 unit) for w1 / w1e / w1d, 2^(e-128) x 12/7 for w (e 2..255)", bad == 0, num(static_cast<double>(bad)));
+    // w1: the MXFP4 value itself for 6 of the 8 magnitudes (all but 0.5 / 1.5); w1d: zero mean over a parity pair
+    const double e2m1[8] = {0, .5, 1, 1.5, 2, 3, 4, 6};
+    bad = 0;
+    for (int m = 0; m < 8; ++m) {
+        const bool exact = w4s_wlevel_g(m, 1, 0) == e2m1[m];
+        bad += exact != (m != 1 && m != 3);
+        bad += m == 1 || m == 3 ? (w4s_wlevel_g(m, 3, 0) + w4s_wlevel_g(m, 3, 1)) != 2 * e2m1[m] : 0;
+    }
+    check("w4s grids: w1 exact on 6 of 8 magnitudes; w1d's two half codes average to the MXFP4 value", bad == 0);
+    // w4s_wblock: grids 0..3 = level x scale per value (value j = low nibble of byte j, j + 16 = high nibble); wb = per block the
+    // grid of the smaller squared error against the MXFP4 values (exact double), ties -> w
+    std::uint32_t s = 4242;
+    auto rnd = [&]() { return s = s * 1664525u + 1013904223u, s >> 8; };
+    std::size_t badb = 0, nw1 = 0, nw = 0;
+    for (int blk = 0; blk < 400; ++blk) {
+        std::uint8_t qs[16];
+        for (int j = 0; j < 16; ++j) qs[j] = static_cast<std::uint8_t>(blk < 200 ? rnd() : (rnd() & 0x77) & (blk % 3 ? 0x55 : 0x33));
+        const std::uint32_t e = 110 + static_cast<std::uint32_t>(blk % 20);
+        double err[2] = {0, 0};
+        for (int g = 0; g < 5; ++g) {
+            float v[32];
+            w4s_wblock(qs, e, g, v);
+            for (int k = 0; k < 32; ++k) {
+                const int code = k < 16 ? (qs[k] & 15) : (qs[k - 16] >> 4);
+                const double mx = w4a4p::kMxKv[static_cast<std::size_t>(code)] * std::ldexp(1.0, static_cast<int>(e) - 128);
+                if (g < 4) {
+                    const float want_v = static_cast<float>(w4s_wlevel_g(code, g, k)) * w4s_wscale_g(e, g);
+                    badb += std::memcmp(&v[k], &want_v, 4) != 0;
+                }
+                if (g == 0 || g == 1) err[g] += (v[k] - mx) * (v[k] - mx);
+            }
+            if (g == 4) {
+                float v0[32], v1[32];
+                w4s_wblock(qs, e, 0, v0);
+                w4s_wblock(qs, e, 1, v1);
+                const bool one = err[1] < err[0] * (1 - 1e-12);
+                const bool tie = std::fabs(err[1] - err[0]) <= 1e-12 * (err[0] + err[1]);
+                if (!tie) badb += std::memcmp(v, one ? v1 : v0, sizeof v) != 0;
+                (one ? nw1 : nw) += 1;
+            }
+        }
+    }
+    check("w4s grids: w4s_wblock == level x scale (w / w1 / w1e / w1d); wb = per block the grid with the smaller error", badb == 0,
+          num(static_cast<double>(badb)));
+    check("w4s grids: wb picks both grids on mixed blocks", nw1 > 0 && nw > 0, num(static_cast<double>(nw1)) + " w1 / " + num(static_cast<double>(nw)) + " w");
+    // the host row reference per grid == w4s_wblock per sub-block, rounded once to f16
+    std::vector<std::uint8_t> mx(2 * 136);
+    for (int u = 0; u < 2; ++u) {
+        for (int ib = 0; ib < 8; ++ib) mx[static_cast<std::size_t>(u * 136 + ib)] = static_cast<std::uint8_t>(100 + rnd() % 30);
+        for (int j = 0; j < 128; ++j) mx[static_cast<std::size_t>(u * 136 + 8 + j)] = static_cast<std::uint8_t>(rnd());
+    }
+    bad = 0;
+    for (int g = 0; g < 5; ++g) {
+        std::vector<std::uint16_t> h(512);
+        w4s_dequant_row_host(mx.data(), 512, h.data(), g);
+        for (int b = 0; b < 16; ++b) {
+            float v[32];
+            w4s_wblock(mx.data() + (b / 8) * 136 + 8 + 16 * (b % 8), mx[static_cast<std::size_t>((b / 8) * 136 + b % 8)], g, v);
+            for (int k = 0; k < 32; ++k) bad += h[static_cast<std::size_t>(b * 32 + k)] != w4s_f2h(v[k]);
+        }
+    }
+    check("w4s grids: host row reference (5 grids) == w4s_wblock per sub-block, one f16 rounding", bad == 0, num(static_cast<double>(bad)));
+}
+
 int main(int argc, char** argv) {
     std::string emit;
     for (int i = 1; i < argc; ++i)
@@ -1559,6 +1651,7 @@ int main(int argc, char** argv) {
         test_w4s_acts_absmax();
         test_w4s_acts_mse();
         test_w4s_dot_vs_fold();
+        test_w4s_grids();  // v0252-w4a4k2 round 2
     } catch (const std::exception& e) {
         check(std::string("exception: ") + e.what(), false);
     }
