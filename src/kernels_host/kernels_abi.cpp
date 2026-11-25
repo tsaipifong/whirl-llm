@@ -166,6 +166,7 @@ Caps Caps::probe(const hip::Module& m) {
     c.mrope = L.opt("attn_prep_m") != nullptr;
     c.xd_sum = L.opt("whirl_cap_xd_sum") != nullptr;
     c.attn_group1 = L.opt("whirl_cap_attn_group1") != nullptr;
+    c.gdn_select = L.opt("whirl_cap_gdn_select") != nullptr;  // v0252-e1s8
     c.draft_window = L.opt("whirl_cap_no_draft_window") == nullptr;
     return c;
 }
@@ -578,6 +579,7 @@ void loadDeltaNet(DeltaNetKernels& k, const Loader& L) {
         const std::string s = sfx(t);
         k.gdn_ab[ti(t)] = L.req("gdn_ab_" + s);
         k.gdn_abconv[ti(t)] = L.opt("gdn_abconv_" + s);
+        k.gdn_abconv_sel[ti(t)] = L.opt("gdn_abconv_sel_" + s);  // v0252-e1s8 round 2
     }
     static constexpr Named optional[] = {
         {&KernelTable::gdn_wprep, "gdn_wprep"},
@@ -585,12 +587,15 @@ void loadDeltaNet(DeltaNetKernels& k, const Loader& L) {
         {&KernelTable::gdn_sx_prep, "gdn_sx_prep"},
         {&KernelTable::gdn_sx_scan, "gdn_sx_scan"},
         {&KernelTable::gdn_gates_ba, "gdn_gates_ba"},
+        {&KernelTable::gdn_conv_l2_sel, "gdn_conv_l2_sel"},      // v0252-e1s8 round 2 (gfx1151)
+        {&KernelTable::gdn_step_norm_sel, "gdn_step_norm_sel"},  // v0252-e1s8 round 2 (gfx1151)
     };
     for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
     {
         const int i = ti(QType::mxfp4);
         k.gdn_ab[i] = L.opt("gdn_ab_mxfp4");
         k.gdn_abconv[i] = L.opt("gdn_abconv_mxfp4");
+        k.gdn_abconv_sel[i] = L.opt("gdn_abconv_sel_mxfp4");  // v0252-e1s8 round 2
         static constexpr Named mx[] = {
             {&KernelTable::gdn_conv_l2n, "gdn_conv_l2n"},
             {&KernelTable::gdn_conv_l2n_h, "gdn_conv_l2n_h"},

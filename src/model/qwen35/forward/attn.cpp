@@ -98,6 +98,7 @@ void Context::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
             ap.row_base = std::span<const i32>(row_base.data(), n);
         }
         ap.win = kva.win;
+        ap.rows_one_seq = !ap.rows_known && row_seq1 == n;  // v0252-e1s8 round 2: an E1 verify of one slot (context.h row_seq1)
         ap.o_on_gemv = fused(n) && k.gemvq[ti(a.o.ty)] != nullptr && n <= gvMax();
         ops::AttnDecodeFlags af;
         af.attn_ws4 = nf().attn_ws4;

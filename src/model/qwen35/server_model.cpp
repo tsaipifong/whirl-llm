@@ -125,10 +125,13 @@ public:
         hip::streamSync(m_.stream);
     }
     bool specAcceptOk() const override { return m_.k.spec_accept_rows != nullptr; }
-    // v0252-e1p1b (E1): the device-input kernels and the accept kernel, DeltaNet replay mode (gfx1151: snapshot mode, no)
+    // v0252-e1p1b (E1): the device-input kernels and the accept kernel, DeltaNet replay mode - v0252-e1s8: or snapshot mode
+    // with the select-mode kernels (gfx1151: Caps::gdn_select, Context::selectOk)
     bool e1InputsOk() const override {
-        return m_.k.set_rows_dp != nullptr && m_.k.rmsnorm_q8_rows_dv != nullptr && m_.k.spec_accept_rows != nullptr && m_.gdn_replay;
+        return m_.k.set_rows_dp != nullptr && m_.k.rmsnorm_q8_rows_dv != nullptr && m_.k.spec_accept_rows != nullptr &&
+               (m_.gdn_replay || m_.selectOk());
     }
+    void settleSelect(std::uint32_t s, std::uint32_t acc) override { m_.settleSelect(s, acc); }  // v0252-e1s8
     void specAccept(const SpecAccArgs& a, std::int32_t* host) override;
     void readSpecTab(SpecNextTab& t) override;
     bool draftSampleOk() const override { return m_.draftSampleOk(); }

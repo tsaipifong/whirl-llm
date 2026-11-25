@@ -300,8 +300,13 @@ std::uint32_t ws4SplitForStep(const AttnDecodeProblem& p, std::uint32_t s, const
     std::uint32_t cls = 0;
     if (n == 1) {
         cls = p.win != 0 ? 0u : 1u;
+    } else if (!known) {
+        // v0252-e1s8 round 2: an E1 verify of one slot (AttnDecodeProblem::rows_one_seq): one sequence, consecutive positions;
+        // the keys below are max_ctx (every n_pos <= it). Any other unknown multi-row step: 64 as before
+        if (!p.rows_one_seq || n > 9) return full;
+        cls = n;
     } else {
-        if (!known || n > 9 || p.row_base.size() < n) return full;
+        if (n > 9 || p.row_base.size() < n) return full;
         for (std::uint32_t r = 1; r < n; ++r)
             if (p.row_base[r] != p.row_base[0] || p.row_pos[r] != p.row_pos[0] + static_cast<std::int32_t>(r)) return full;
         cls = n;

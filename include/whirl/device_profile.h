@@ -191,6 +191,11 @@ struct Profile {
     // WHIRL_E1 = 0 / 1 / 2 always wins). 0 = the host-input cycle, 2 = the E1 one-cycle lookahead (EngineOptions::e1).
     // The lookahead changes when a cycle is submitted, never what it computes: the reply is the same in the same mode
     std::uint8_t e1_dense, e1_moe;
+    // v0252-e1s8 round 2 (B): the context length (a slot's prompt + generated so far) at or ABOVE which that DEFAULT does not run
+    // (EngineOptions::e1_ctx_max through qwen35::e1CtxMax and server::e1DefaultCtxMax; an explicitly set WHIRL_E1 runs at every
+    // length). Per code object because the boundary is the length where the lookahead's per-cycle saving stops paying for
+    // its per-cycle cost, and both differ by card
+    std::uint32_t e1_ctx_max;
     // v0252-pp2k2 (PLAN V1-139, F1): ops::GemmFlags::gemm_tail default - a gemmh / gemmhq f16 GEMM whose rows are just past a
     // 256 multiple runs its tail rows on the narrowest gemms tile (ops::planGemmF16; same bits). WHIRL_GEMM_TAIL=0 / 1
     // overrides it. gfx1201 only: the gfx1151 prefill GEMMs are gemmfq with other grids (physical-isolation rule)
@@ -292,6 +297,7 @@ inline constexpr Profile k_profile_gfx1201{
     // lookahead; its relaxed acceptance never looks ahead)
     .e1_dense = 0,
     .e1_moe = 2,
+    .e1_ctx_max = 65536,  // v0252-e1len: = qwen35::e1_default_ctx_max (src/spec/policy.h cites the R9700 measurements)
     // v0252-pp2k2: the 2k cell's 2058-row forward ran a 9th 256-token tile for 10 rows (+10.4 % time for +0.8 % rows,
     // KB v0252-pp2k:r97-precise-pp2k-tile-tail); screen progress/pp2k-gemmtail.json decides it
     .gemm_tail = true,
@@ -398,9 +404,18 @@ inline constexpr Profile k_profile_gfx1151{
     // on this card (gdnwmma is a balance item), which the capture splits as on the R9700; balance / fast run the GDN-8S
     // strix chunks, which Context::stateCaptureOk refuses, so they keep the forward end (the 0.2.5.1 schedule).
     // WHIRL_TAIL_CK_IN_FWD=0 turns it off (A/B arm)
-    // v0252-e1def: the 8060S verifies with DeltaNet snapshot sets (no E1 path: ServerModel::e1InputsOk), nothing measured
+    // v0252-e1s8 (PLAN V1-93 P2a): the 8060S verifies with DeltaNet snapshot sets; the lookahead runs there in the select mode
+    // (kernels/gdn_select.h, own gfx1151 entries). Ornith (MoE), WHIRL_E1=2 against the default 0, server decode cycles per
+    // second, paired rounds: screen e1s8-orn 20261125-0619 (balance, round-1 exe, E1 verify still at 64 splits): 2048 +4.04 %
+    // +-0.76 GAIN, 8192 +2.32 % +-1.56 GAIN, 32768 -4.06 % +-0.80 LOSS; screen e1s8-orn-r2 20261125-0721 (balance, round-2 exe,
+    // outputs same 12/12): 8192 +3.73 % +-1.01 GAIN, 32768 -1.63 % +-0.94 LOSS, 65536 -8.18 % +-1.63 LOSS; screen
+    // e1s8-orn-prec 20261125-0757 (precise, 2 rounds, bits SAME): 2048 +6.73 % +-5.00 GAIN, 8192 +5.25 % +-3.39 GAIN (tg8192
+    // +5.94 % +-1.72). Dense (Swift) not measured: 0; fast keeps 0 through server::chooseE1. The limit: a cycle runs E1 while
+    // the slot's position (prompt + generated so far) is < e1_ctx_max (server::e1LenAllows); the qa8192 cells (8151 prompt
+    // tokens + 256 generated) were measured with WHIRL_E1=2 and no limit, i.e. up to position about 8407 (HANDOFF round 3)
     .e1_dense = 0,
-    .e1_moe = 0,
+    .e1_moe = 2,  // v0252-e1s8 round 3: screens e1s8-orn 20261125-0619, e1s8-orn-r2 20261125-0721, e1s8-orn-prec 20261125-0757
+    .e1_ctx_max = 8192,  // v0252-e1s8: the largest measured length with a gain (8192 +3.73 % +-1.01; 32768 -1.63 % +-0.94 LOSS)
     .gemm_tail = false,  // v0252-pp2k2: the 8060S keeps the 0.2.5.1 GEMM plans (object compare only)
     // v0252-8smoe (A): COMB 5 for Ornith fast (moeskip on). Shipped exe ef5652c, WHIRL_MOEP_COMB=5 against the shipped fast
     // default (KB v0252-retest:comb5-8s-ship, 4 rounds): pp 8192 +1.08 % +-1.07, pp 32768 +1.31 % +-0.83; the long band

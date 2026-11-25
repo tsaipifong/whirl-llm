@@ -319,7 +319,8 @@ void SpecCycle::layoutBatch(Cycle& cy) {
     // image), DeltaNet replay mode, no profiling events. Engine::allocState kept opt_.e1 only with the model's E1 path and a
     // device accept mode. Any other cycle: host inputs as before (a slot's device inputs are then not used, and its accept
     // takes them back to the host: acceptSlot)
-    const bool e1_site = opt_.e1 != 0 && opt_.use_mtp && cy.A == 1 && cy.n_mtp == 1 && !opt_.use_dflash && m_.gdnReplay() &&
+    // (v0252-e1s8: the model's E1 path - replay mode, or snapshot mode with the select-mode kernels: ServerModel::e1InputsOk)
+    const bool e1_site = opt_.e1 != 0 && opt_.use_mtp && cy.A == 1 && cy.n_mtp == 1 && !opt_.use_dflash && m_.e1InputsOk() &&
                          !(cy.p && cy.p->events) && cy.act[0]->greedy && !relaxes(cy, 0) &&
                          (cy.act[0]->job == nullptr || cy.act[0]->job->vis == nullptr);
     // v0252-e1len (PLAN V1-93): the length-aware DEFAULT. At or above opt_.e1_ctx_max this cycle runs the ordinary way:
@@ -710,7 +711,7 @@ void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& a
     }
     // v0252-e1p1b (E1): an E1 cycle with a good device result leaves the next cycle's inputs on the device - the replay
     // count is the NPEND word (qwen35::npend_dev), the hidden rows of all nd + 1 verify rows are kept below, e1_rows says so
-    bool e1_next = cy.e1 && dev_good && m_.gdnReplay();
+    bool e1_next = cy.e1 && dev_good && m_.e1InputsOk();
     // the verify ran nd + 1 rows of this slot: keep acc + 1 of them
     if (cy.ring) {
         // v0252-e1p1c (lookahead): the cycle's inputs for the next one were left when it was submitted (replay count = the
@@ -727,13 +728,26 @@ void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& a
             throw std::runtime_error("E1Diverged");
         }
         e1_next = e1_next && agree;
-        if (!e1_next) {
-            spec_.e1_sync = true;                         // the slot's next unsubmitted cycle runs synchronously
-            if (!cy.succ) m_.setPending(sl.id, acc + 1);  // nothing consumed the words: the host's count
+        if (!m_.gdnReplay()) {
+            // v0252-e1s8 (snapshot mode, kernels/gdn_select.h): the cycle submitted behind this one selected its DeltaNet input
+            // on the device from these words - rename the state buffers now that the host knows acc; with none behind it the
+            // host restores as in a synchronous cycle (and drops the select mark aheadBuild left for it)
+            if (cy.succ) {
+                m_.settleSelect(sl.id, acc);
+            } else {
+                m_.setPending(sl.id, 0);
+                if (acc < nd_k) m_.restoreSeqSnapshot(sl.id, cy.snap_of[k] + acc);
+            }
         }
+        if (!e1_next) {
+            spec_.e1_sync = true;                                             // the slot's next unsubmitted cycle runs synchronously
+            if (!cy.succ && m_.gdnReplay()) m_.setPending(sl.id, acc + 1);  // nothing consumed the words: the host's count
+        }
+    } else if (!m_.gdnReplay()) {
+        // snapshot mode (v0252-e1s8: also a synchronous E1 cycle - the host knows acc before the next verify)
+        if (acc < nd_k) m_.restoreSeqSnapshot(sl.id, cy.snap_of[k] + acc);
     } else if (e1_next) m_.setPending(sl.id, qwen35::npend_dev);
-    else if (m_.gdnReplay()) m_.setPending(sl.id, acc + 1);
-    else if (acc < nd_k) m_.restoreSeqSnapshot(sl.id, cy.snap_of[k] + acc);
+    else m_.setPending(sl.id, acc + 1);
     // DFlash2 context: the kept rows' features (whatever drafted them; rejected rows never enter)
     dc_.dflIngest(sl, cy.rows, row0, acc + 1, sl.pos);
     // trunk now holds next, dr[0..acc) at pos .. pos + acc
@@ -840,7 +854,7 @@ void SpecCycle::finishCycle(Cycle& cy) {
 std::shared_ptr<SpecCycle::Cycle> SpecCycle::aheadBuild(Slot& sl, const Cycle* fly) {
     namespace sr = spec::rules;
     // ---- the drain rules: any "no" = this cycle is not submitted through the ring
-    if (!sb_.aheadOk() || !opt_.use_mtp || opt_.use_dflash || opt_.relax.on || !m_.gdnReplay()) return nullptr;
+    if (!sb_.aheadOk() || !opt_.use_mtp || opt_.use_dflash || opt_.relax.on || !m_.e1InputsOk()) return nullptr;
     // v0252-e1len (PLAN V1-93): the length-aware DEFAULT, as a drain rule - at or above the boundary no cycle is
     // submitted through the ring (layoutBatch decides the same for cy.e1 below; this rule is what keeps the host
     // bookkeeping of a cycle that would be thrown away from running once per cycle at long context)
@@ -900,6 +914,9 @@ std::shared_ptr<SpecCycle::Cycle> SpecCycle::aheadBuild(Slot& sl, const Cycle* f
     mtpDrafts(cy);
     layoutBatch(cy);
     if (!cy.e1 || (fly == nullptr && sl.e1_rows == 0)) return nullptr;  // (layoutBatch's rule = the checks above)
+    // v0252-e1s8 (snapshot mode): a select verify takes at most as many drafts as the cycle in flight it selects from
+    // (kernels/gdn_select.h; Ornith's draft count is fixed, so only an auto draft count that grows drains here)
+    if (fly != nullptr && !m_.gdnReplay() && cy.nd_of[0] > fly->nd_of[0]) return nullptr;
     if (fly != nullptr) {
         // behind a cycle in flight the host knows neither the slot's next token nor its position: the MTP step 0 runs
         // that cycle's nd + 1 verify rows (padded) at the positions after its row 0, the verify takes row 0 and the
@@ -1051,6 +1068,10 @@ void SpecCycle::specAccSetup() {
             else
                 logI("decode: WHIRL_E1=1 (the next cycle's inputs from the device accept result; one cycle at a time)");
         }
+        // v0252-e1s8: the proof line of the snapshot-mode path (gfx1151 / Radeon 8060S: kernels/gdn_select.h)
+        if (opt_.e1 != 0 && !m_.gdnReplay())
+            logI("decode: E1 in DeltaNet snapshot mode: a cycle submitted ahead selects its DeltaNet input state on the GPU from the accept "
+                 "result (select mode; one spare recurrent-state set per request)");
     }
 }
 

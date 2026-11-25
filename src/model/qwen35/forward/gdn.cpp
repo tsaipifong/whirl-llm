@@ -73,6 +73,19 @@ GdnSegs Context::gdnSegsBatch(const BatchPlan& bp, std::size_t i, bool conv) con
             row += static_cast<i32>(sg.nd + 1);
             continue;
         }
+        if (sq.npend == npend_dev) {
+            // v0252-e1s8 (E1 in snapshot mode, kernels/gdn_select.h; verifyBatchEnqueue checked one sequence, nd <= sel_m and
+            // the spare set): a SELECT segment - candidates = the last verify's snapshot sets 0 .. m - 1 then the live state,
+            // the input picked on the device from the sequence's NPEND word, the final state into the spare set
+            const u32 m = std::min(sq.sel_m, gdn_max_snap - 1);
+            segs.s[kk].state = conv ? e1_conv[i] : e1_ssm[i];
+            for (u32 j = 0; j < m; ++j) segs.s[kk].snap[j] = conv ? snap_conv[j][i] : snap_ssm[j][i];
+            segs.s[kk].snap[m] = conv ? sq.conv[i] : sq.ssm[i];
+            segs.s[kk].pend = ctlWord(sg.seq, ctl_npend);
+            segs.s[kk].npend = static_cast<i32>(m);
+            row += static_cast<i32>(sg.nd + 1);
+            continue;
+        }
         for (u32 r = 0; r < sg.nd; ++r) {
             const u32 set = bp.snap_base[kk] + r;
             segs.s[kk].snap[r] = conv ? snap_conv[set][i] : snap_ssm[set][i];
@@ -80,6 +93,22 @@ GdnSegs Context::gdnSegsBatch(const BatchPlan& bp, std::size_t i, bool conv) con
         row += static_cast<i32>(sg.nd + 1);
     }
     return segs;
+}
+
+// v0252-e1s8 round 2 (A): context.h
+bool Context::isSelect(const GdnSegs& segs) const {
+    if (gdn_replay) return false;
+    for (const GdnSeg& g : segs.s)
+        if (g.pend != 0) return true;
+    return false;
+}
+
+Context::GdnDecodeFns Context::gdnDecodeFns(const ops::GdnDecodePlan& dp, GgmlType beta_ty, bool select) const {
+    GdnDecodeFns f;
+    if (dp.gates == ops::GdnDecodeGates::abconv) f.conv = select ? k.gdn_abconv_sel[ti(beta_ty)] : dp.f;
+    else f.conv = select ? k.gdn_conv_l2_sel : k.gdn_conv_l2;
+    f.step = select ? k.gdn_step_norm_sel : k.gdn_step_norm;
+    return f;
 }
 
 GdnSegs Context::gdnSegsSingle(std::size_t i, bool conv, u32 n) const {
@@ -201,6 +230,9 @@ void Context::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
         const u32 n_seg = bplan ? static_cast<u32>(bplan->segs.size()) : 1;
         const GdnSegs segs_c = bplan ? gdnSegsBatch(*bplan, i, true) : gdnSegsSingle(i, true, n);
         const ops::GdnDecodePlan dp = ops::chooseGdnDecode(g.beta.ty, n, small_max, nf().prec_dec, nf().dbg_flags, bap, k);
+        // v0252-e1s8 round 2 (A): a select verify launches the select twins (verifyBatchEnqueue checked selectOk)
+        const GdnDecodeFns lf = gdnDecodeFns(dp, g.beta.ty, isSelect(segs_c));
+        if (lf.conv == nullptr || lf.step == nullptr) throw ModelError("BadBatch");
         if (dp.gates == ops::GdnDecodeGates::precise_ba || dp.gates == ops::GdnDecodeGates::precise_split) {
             // precise decode: [beta; alpha] on the f16 GEMM from h (f32, written by
             // rmsnormQ8), the gates, then the same conv step as below
@@ -213,24 +245,24 @@ void Context::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
                 matmul(g.alpha, h, alpha, n, false);
                 hip::launch(k.gdn_gates, D((nhr + 63) / 64), D(64), 0, stream, beta, alpha, g.dt, g.a, I(nhr), I(nh));
             }
-            hip::launch(k.gdn_conv_l2, D(ch / 128, n_seg), D(128), 0, stream, qkv, g.conv, conv_out, I(ch), I(2 * cfg.n_k_heads), cfg.eps,
+            hip::launch(lf.conv, D(ch / 128, n_seg), D(128), 0, stream, qkv, g.conv, conv_out, I(ch), I(2 * cfg.n_k_heads), cfg.eps,
                         segs_c);
         } else if (dp.gates == ops::GdnDecodeGates::abconv) {
             // beta/alpha projections and the conv step share one launch
             const u32 ab_blocks = (2 * nh + 7) / 8;
-            hip::launch(dp.f, D(ab_blocks * n + (ch / 128) * n_seg), D(256), 0, stream, g.beta.ptr, g.alpha.ptr, g.beta.row_bytes, xq, xd,
+            hip::launch(lf.conv, D(ab_blocks * n + (ch / 128) * n_seg), D(256), 0, stream, g.beta.ptr, g.alpha.ptr, g.beta.row_bytes, xq, xd,
                         beta, alpha, g.dt, g.a, I(g.beta.ncols), I(nh), I(n), qkv, g.conv, conv_out, I(ch), I(2 * cfg.n_k_heads), cfg.eps,
                         segs_c);
         } else {
             hip::launch(dp.f, D((2 * nh + 7) / 8, n), D(256), 0, stream, g.beta.ptr, g.alpha.ptr, g.beta.row_bytes, xq,
                         xd, beta, alpha, g.dt, g.a, I(g.beta.ncols), I(nh));
-            hip::launch(k.gdn_conv_l2, D(ch / 128, n_seg), D(128), 0, stream, qkv, g.conv, conv_out, I(ch), I(2 * cfg.n_k_heads), cfg.eps,
+            hip::launch(lf.conv, D(ch / 128, n_seg), D(128), 0, stream, qkv, g.conv, conv_out, I(ch), I(2 * cfg.n_k_heads), cfg.eps,
                         segs_c);
         }
         mark(OpClass::gdn_prep);
         const float scale_g = 1.0f / std::sqrt(static_cast<float>(cfg.d_state));
         const GdnSegs segs_s = bplan ? gdnSegsBatch(*bplan, i, false) : gdnSegsSingle(i, false, n);
-        hip::launch(k.gdn_step_norm, D(nh, n_seg), D(512), 0, stream, conv_out, alpha, beta, z, g.norm, gdn_out, xq, xd, I(cfg.n_k_heads),
+        hip::launch(lf.step, D(nh, n_seg), D(512), 0, stream, conv_out, alpha, beta, z, g.norm, gdn_out, xq, xd, I(cfg.n_k_heads),
                     scale_g, cfg.eps, I(cfg.n_v_heads), I(ch), segs_s);
         xq_src = gdn_out;
         xq_n = n;

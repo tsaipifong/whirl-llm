@@ -669,6 +669,8 @@ struct Caps {
     bool mrope = false;        // multi-section RoPE attention prep (image prompts: attn_prep_m)
     bool xd_sum = false;       // marker whirl_cap_xd_sum: int8 scale words carry the block sum
     bool attn_group1 = false;  // marker whirl_cap_attn_group1: attn_wsplit1 groups of one query
+    bool gdn_select = false;   // marker whirl_cap_gdn_select (v0252-e1s8, gfx1151 set): the fused DeltaNet kernels read
+                               // GdnSeg::pend != 0 as the select mode of kernels/gdn_select.h (E1 in snapshot mode)
     bool draft_window = false; // attn_wsplit* honour KvArgs::win (MTP draft window); off when the
                                // module has the marker whirl_cap_no_draft_window (no shipped module
                                // has it since gfx1151 implements the window)
@@ -833,6 +835,10 @@ struct DeltaNetKernels {
     F gdn_chunk_prep{}, gdn_chunk_scan{}, gdn_wprep{}, gdn_wscan8{}, gdn_sx_prep{}, gdn_sx_scan{};
     F gdn_conv_par{}, gdn_conv_state{}, gdn_ab_q8_0{}, gdn_conv_l2{}, gdn_step_norm{};
     F gdn_conv_l2n{}, gdn_conv_l2n_h{}, gdn_conv_state_h{};
+    // v0252-e1s8 round 2: the select-mode twins of gdn_conv_l2 / gdn_abconv_<T> / gdn_step_norm (gfx1151 object only,
+    // kernels/gfx1151/gdn_select.hip; Caps::gdn_select): launched only for a select verify (Context::gdnDecodeFns)
+    PerType<F> gdn_abconv_sel{};
+    F gdn_conv_l2_sel{}, gdn_step_norm_sel{};
 };
 
 // norms, activations (also the fused activation outputs of the FFN), embedding rows, sampling / drafting,

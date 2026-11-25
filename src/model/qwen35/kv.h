@@ -87,6 +87,13 @@ struct Seq {
     std::uint32_t kv_base = 0;    // offset of this sequence's page table
     DevPtr pend = 0;              // DeltaNet replay inputs (gdn_replay)
     std::uint32_t npend = 0;
+    // v0252-e1s8 (E1 in snapshot mode, kernels/gdn_select.h; Context::settleSelect): drafts of the sequence's last verify
+    // (its snapshot sets 0 .. sel_m - 1 and the live state are the next select verify's candidates), the candidate count of
+    // the last verify if it selected (-1: nothing to settle), and whether the spare set holds the state of the cycle the host
+    // read last (settleSelect until the next verify: dropPending gives it back)
+    std::uint32_t sel_m = 0;
+    std::int32_t sel_cm = -1;
+    bool held = false;
 };
 
 struct SeqTable {

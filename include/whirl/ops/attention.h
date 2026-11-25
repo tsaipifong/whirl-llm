@@ -45,6 +45,10 @@ struct AttnDecodeProblem {
     // per-row positions / sequence bases (known only for host-planned rows: row_n == n), the draft window
     bool rows_known = false;
     std::span<const std::int32_t> row_pos, row_base;
+    // v0252-e1s8 round 2 (C): rows the host does not know, but ONE sequence at consecutive positions (an E1 verify of one slot:
+    // set_rows_dp writes pos = the NPOS word + r, one kv base). Context sets it only there (Context::row_seq1); ws4SplitForStep
+    // then takes the rows class from n and max_ctx as the bound of every n_pos. Ignored when rows_known
+    bool rows_one_seq = false;
     std::int32_t win = 0;
     // the o-projection input can come out of the combine (int8, fused decode on the int8 GEMV path)
     bool o_on_gemv = false;
