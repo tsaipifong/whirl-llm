@@ -217,6 +217,11 @@ bool SlotStart::startJob(Slot& sl, Job& job) {
     sl.accepted = 0;
     sl.relaxed = 0;
     sl.relax_gap = 0;
+    sl.cyc_nd = {};  // v0252-swe1
+    sl.ms_nd = {};
+    sl.e1_clamped = 0;
+    sl.e1_grown = 0;
+    sl.e1_debt = 0;
     sl.n_batch = 0;
     sl.acc_ema = static_cast<float>(opt_.n_draft);
     sl.dacc = qwen35::DraftAccept{};
