@@ -214,6 +214,12 @@ u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
     // the grouped launch, src/ops/attention.cpp chooseAttnDecode rows_known)
     row_n = any_dev ? 0 : n;
     row_seq1 = any_dev && segs.size() == 1 ? n : 0;  // v0252-e1s8 round 2 (C): one sequence, device positions pos + r
+    {
+        // v0252-e1grp (PLAN V1-93): row 0's position interval of that one sequence (VSeg::pos_n): the attention groups by it
+        const std::array<i32, 2> iv = row_seq1 != 0 ? e1Row0Interval(segs[0]) : std::array<i32, 2>{-1, -1};
+        row0_lo = iv[0];
+        row0_hi = iv[1];
+    }
     for (u32 ri = 0; ri < n; ++ri) {
         row_pos[ri] = tab.pos[ri];
         row_base[ri] = tab.base[ri];
@@ -248,6 +254,7 @@ u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
             m.all_logits = false;
             m.bplan = nullptr;
             m.row_seq1 = 0;
+            m.row0_lo = m.row0_hi = -1;  // v0252-e1grp
             m.small_max = max_small_batch;
         }
     } reset_flags{*this};

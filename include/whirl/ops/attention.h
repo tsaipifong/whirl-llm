@@ -16,6 +16,7 @@
 #include "whirl/hip.h"
 #include "whirl/kernels_abi.h"
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -49,6 +50,11 @@ struct AttnDecodeProblem {
     // set_rows_dp writes pos = the NPOS word + r, one kv base). Context sets it only there (Context::row_seq1); ws4SplitForStep
     // then takes the rows class from n and max_ctx as the bound of every n_pos. Ignored when rows_known
     bool rows_one_seq = false;
+    // v0252-e1grp (PLAN V1-93): with rows_one_seq, the interval [pos0_lo, pos0_hi] of row 0's possible positions (the E1
+    // lookahead: the cycle in flight accepts 0..nd drafts, so pos0_hi - pos0_lo = nd; a synchronous E1 cycle: one position).
+    // The ws4 grouping then keeps rows together that share their split ranges at EVERY position of it (ws4E1Groups).
+    // -1 = not given (one-row groups). Ignored when rows_known
+    std::int32_t pos0_lo = -1, pos0_hi = -1;
     std::int32_t win = 0;
     // the o-projection input can come out of the combine (int8, fused decode on the int8 GEMV path)
     bool o_on_gemv = false;
@@ -113,6 +119,19 @@ std::uint32_t ws4SplitCount(std::uint32_t n_head_kv, bool kv_q8, std::uint32_t f
 // the rows (rows_known and row_pos holds n entries), else max_ctx for one row (an upper bound), else (several unknown rows) 64.
 // Deterministic: a function of the step's rows only (same input -> same row counts -> same split).
 std::uint32_t ws4SplitForStep(const AttnDecodeProblem& p, std::uint32_t s, const device::Ws4SplitLimits& lim);
+// v0252-e1grp: the ws4 group key of a row at position pp (n_pos = pp + 1) under ns splits and draft window win: the sink
+// split's end (window on) and the starts of splits 1 / 2 - ws4::block_range. Rows with equal keys have equal key ranges in
+// every split, so an attn_ws4g group of them gives each row the partials of its one-row attn_ws4 launch (kt ws4g, bitwise).
+std::array<std::int32_t, 3> ws4GroupKey(std::int32_t pp, std::uint32_t ns, std::int32_t win);
+// v0252-e1grp: the widest row-0 interval ws4E1Groups groups for (more positions: one-row groups)
+inline constexpr std::int32_t kE1GroupSpan = 16;
+// v0252-e1grp (PLAN V1-93): the ws4 groups of n rows of ONE sequence at consecutive positions p0 + r when the host knows
+// only p0 in [lo, hi] (an E1 verify): row r + 1 joins row r's group iff its key equals the group head's key at EVERY p0 of
+// the interval (the known-rows rule of chooseAttnDecode, for all possible positions at once); groups of at most max_rows.
+// lo < 0, lo > hi or hi - lo + 1 > kE1GroupSpan: every row its own group (today's E1 plan). Writes g (n_groups entries),
+// widest = the largest group; returns the group count.
+std::uint32_t ws4E1Groups(std::uint32_t n, std::int32_t lo, std::int32_t hi, std::uint32_t ns, std::int32_t win, std::uint32_t max_rows,
+                          kernels::AwGroups& g, std::uint32_t& widest);
 // split rule helpers (kept in step with the kernels)
 std::int32_t awPer(std::int32_t n_pos, std::uint32_t n_split);
 std::uint32_t dq4Splits(std::span<const std::int32_t> row_pos, std::int32_t win, std::uint32_t full);

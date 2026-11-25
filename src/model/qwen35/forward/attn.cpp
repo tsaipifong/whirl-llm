@@ -99,6 +99,10 @@ void Context::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         }
         ap.win = kva.win;
         ap.rows_one_seq = !ap.rows_known && row_seq1 == n;  // v0252-e1s8 round 2: an E1 verify of one slot (context.h row_seq1)
+        if (ap.rows_one_seq) {
+            ap.pos0_lo = row0_lo;  // v0252-e1grp: row 0's position interval (context.h row0_lo / row0_hi)
+            ap.pos0_hi = row0_hi;
+        }
         ap.o_on_gemv = fused(n) && k.gemvq[ti(a.o.ty)] != nullptr && n <= gvMax();
         ops::AttnDecodeFlags af;
         af.attn_ws4 = nf().attn_ws4;

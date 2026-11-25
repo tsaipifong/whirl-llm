@@ -154,6 +154,13 @@ inline std::int32_t draftWindowArg(std::uint32_t w, std::uint32_t min_ctx) {
 // (src/model/qwen35/kv.h, arch025-M2), and from Scratch and TuneTable (src/model/qwen35/scratch.h / tune_table.h,
 // arch025-M3: scratch() / tuneTable(); protected so Model's members reach them, as before when they were Model's
 // private bases). The launch internals are protected for the same reason (tune.cpp / dflash.cpp are Model members).
+// v0252-e1grp (PLAN V1-93): the interval {lo, hi} of row 0's position of a device-position verify segment (VSeg::pos_n);
+// {-1, -1} when it gives none (host rows, pos_n 0, a bound below pos_n)
+inline std::array<std::int32_t, 2> e1Row0Interval(const VSeg& sg) {
+    if (!sg.dev || sg.pos_n == 0 || sg.pos + 1 < sg.pos_n) return {-1, -1};
+    return {static_cast<std::int32_t>(sg.pos + 1 - sg.pos_n), static_cast<std::int32_t>(sg.pos)};
+}
+
 class Context : public Weights, public KvPool, public SeqTable, protected Scratch, protected TuneTable {
 public:
     Context() = default;
@@ -265,6 +272,9 @@ public:
     // knows (an E1 verify of one slot: consecutive positions from its NPOS word); 0 otherwise (verifyBatchEnqueue sets and
     // clears it around its forward; attn.cpp gives it to ops::AttnDecodeProblem::rows_one_seq)
     std::uint32_t row_seq1 = 0;
+    // v0252-e1grp (PLAN V1-93): with row_seq1, the interval of row 0's position (e1Row0Interval of the segment; -1 = none);
+    // attn.cpp gives it to ops::AttnDecodeProblem::pos0_lo / pos0_hi
+    std::int32_t row0_lo = -1, row0_hi = -1;
     DevPtr gate = 0;
     bool gdn_replay = false;
     std::vector<std::uint32_t> gdn_ord;

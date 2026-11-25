@@ -150,6 +150,10 @@ struct VSeg {
     // spec_accept_rows of the sequence); `next` is not read (tok_dev when the host does not know it: the E1 lookahead),
     // `pos` only bounds the context check (the lookahead passes an upper bound). MTP drafts only, no image.
     bool dev = false;
+    // v0252-e1grp (PLAN V1-93): with dev, row 0 is at one of the pos_n positions pos - pos_n + 1 .. pos (the lookahead: the
+    // drafts of the cycle in flight + 1; a synchronous E1 cycle: 1, pos exact); the attention groups the verify rows by it.
+    // 0 = not given (one-row attention groups, as before)
+    std::uint32_t pos_n = 0;
 };
 // One sequence's prefill chunk in a segmented prefill.
 struct PSeg {

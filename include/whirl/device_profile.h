@@ -412,10 +412,14 @@ inline constexpr Profile k_profile_gfx1151{
     // e1s8-orn-prec 20261125-0757 (precise, 2 rounds, bits SAME): 2048 +6.73 % +-5.00 GAIN, 8192 +5.25 % +-3.39 GAIN (tg8192
     // +5.94 % +-1.72). Dense (Swift) not measured: 0; fast keeps 0 through server::chooseE1. The limit: a cycle runs E1 while
     // the slot's position (prompt + generated so far) is < e1_ctx_max (server::e1LenAllows); the qa8192 cells (8151 prompt
-    // tokens + 256 generated) were measured with WHIRL_E1=2 and no limit, i.e. up to position about 8407 (HANDOFF round 3)
+    // tokens + 256 generated) were measured with WHIRL_E1=2 and no limit, i.e. up to position about 8407 (HANDOFF round 3).
+    // v0252-e1grp: the E1 verify keeps its 2-row attention group (ops::ws4E1Groups); WHIRL_E1=2 against the default, Ornith
+    // balance server cycles/s: screen e1grp-orn 20261125-1048 8192 +5.01 % +-1.33, 32768 +6.64 % +-2.80, 65536 +4.89 % +-2.90
+    // GAIN; e1grp-orn-long 20261125-1106 131072 +4.66 % +-4.65 GAIN; e1grp-orn-xl 20261125-1138 262144 -0.49 % +-3.70 OPEN ->
+    // 131329 = 131072 + 256 generated + 1 (the largest length with a gain stays inside); 196608 / 262144 synchronous (re-test)
     .e1_dense = 0,
     .e1_moe = 2,  // v0252-e1s8 round 3: screens e1s8-orn 20261125-0619, e1s8-orn-r2 20261125-0721, e1s8-orn-prec 20261125-0757
-    .e1_ctx_max = 8192,  // v0252-e1s8: the largest measured length with a gain (8192 +3.73 % +-1.01; 32768 -1.63 % +-0.94 LOSS)
+    .e1_ctx_max = 131329,  // v0252-e1grp: 131072 + 256 + 1 (e1grp-orn-long 131072 +4.66 % +-4.65 GAIN; e1grp-orn-xl 262144 -0.49 % +-3.70 OPEN)
     .gemm_tail = false,  // v0252-pp2k2: the 8060S keeps the 0.2.5.1 GEMM plans (object compare only)
     // v0252-8smoe (A): COMB 5 for Ornith fast (moeskip on). Shipped exe ef5652c, WHIRL_MOEP_COMB=5 against the shipped fast
     // default (KB v0252-retest:comb5-8s-ship, 4 rounds): pp 8192 +1.08 % +-1.07, pp 32768 +1.31 % +-0.83; the long band
