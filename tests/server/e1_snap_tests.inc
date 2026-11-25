@@ -147,9 +147,10 @@ void testE1SnapGate() {
     // WHIRL_E1=2 prints plus the boundary; dense (Swift) and fast print none of them
     {
         const std::uint32_t lim = qwen35::e1CtxMax(hip::Arch::gfx1151);
-        CHECK_EQ(lim, 8192u);
-        // the limit is per cycle on the slot's position (prompt + generated so far): E1 while pos < 8192
-        CHECK(e1LenAllows(lim, 8191) && !e1LenAllows(lim, 8192) && e1LenAllows(0, 1u << 30));
+        CHECK_EQ(lim, 131329u);  // v0252-e1grp: 131072 + 256 + 1
+        // the limit is per cycle on the slot's position (prompt + generated so far): E1 while pos < 131329 (a 131072-token
+        // prompt with 256 generated stays inside: its last cycle starts at position <= 131327)
+        CHECK(e1LenAllows(lim, 131328) && !e1LenAllows(lim, 131329) && e1LenAllows(lim, 131072 + 255) && e1LenAllows(0, 1u << 30));
         struct Arm {
             bool moe, fast;
         };
@@ -169,11 +170,17 @@ void testE1SnapGate() {
                         su.eo.e1_ctx_max, static_cast<unsigned long long>(srv.engine().stats().acc_ring));
             if (arm.moe && !arm.fast) {
                 CHECK(c.e1 == 2u && c.by_default);
-                CHECK_EQ(su.eo.e1_ctx_max, 8192u);
-                CHECK_EQ(g_log.count("decode: WHIRL_E1=2 by default below 8192 tokens of context"), 1u);
+                CHECK_EQ(su.eo.e1_ctx_max, 131329u);
+                CHECK_EQ(g_log.count("decode: WHIRL_E1=2 by default below 131329 tokens of context"), 1u);
                 CHECK_EQ(g_log.count("decode: WHIRL_SPEC_ACC=3 (gpu-zc)"), 1u);
                 CHECK_EQ(g_log.count("decode: E1 in DeltaNet snapshot mode"), 1u);
                 CHECK(srv.engine().stats().acc_ring > 0);
+                // v0252-e1grp: the lookahead's segments carry row 0's interval (one draft in flight: 2 positions)
+                const MockModel::E1Counts e = srv.model().e1Counts();
+                CHECK(e.verify_segs > 0 && e.ahead_segs > 0);
+                CHECK_EQ(e.no_interval, 0u);
+                CHECK_EQ(e.interval_out, 0u);
+                CHECK_EQ(e.interval_max, 2u);
             } else {
                 CHECK_EQ(c.e1, 0u);
                 CHECK_EQ(g_log.count("decode: WHIRL_E1="), 0u);

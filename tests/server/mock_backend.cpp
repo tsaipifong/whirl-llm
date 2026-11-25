@@ -393,6 +393,11 @@ MockModel::E1Counts MockModel::e1Counts() const {
     c.pos_dev = e1_pos_.load();
     c.disagree = e1_disagree_.load();
     c.ahead_segs = e1_ahead_.load();  // v0252-e1p1c
+    c.no_interval = e1_no_iv_.load();  // v0252-e1grp
+    c.interval_out = e1_iv_out_.load();
+    c.interval_max = e1_iv_max_.load();
+    c.interval_lo_hits = e1_iv_lo_.load();
+    c.interval_hi_hits = e1_iv_hi_.load();
     return c;
 }
 
@@ -764,6 +769,15 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
                 e1_disagree_ += 1;
             }
             e1_vsegs_ += 1;
+            // v0252-e1grp: the interval the attention groups by (Context::verifyBatchEnqueue -> e1Row0Interval)
+            if (sg.pos_n == 0) {
+                e1_no_iv_ += 1;
+            } else {
+                if (pos > sg.pos || static_cast<std::uint64_t>(pos) + sg.pos_n <= sg.pos) e1_iv_out_ += 1;
+                if (static_cast<std::uint64_t>(pos) + sg.pos_n == static_cast<std::uint64_t>(sg.pos) + 1) e1_iv_lo_ += 1;
+                if (pos == sg.pos) e1_iv_hi_ += 1;
+            }
+            for (std::uint64_t cur = e1_iv_max_.load(); sg.pos_n > cur && !e1_iv_max_.compare_exchange_weak(cur, sg.pos_n);) {}
         }
         commitSeq(sg.seq);  // the kept rows of the previous verify reach the state
         std::vector<std::uint32_t> toks{next};

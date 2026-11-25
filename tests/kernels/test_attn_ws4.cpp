@@ -21,6 +21,7 @@
 
 #include "gfx1151/attn_ws4_index.h"
 #include "kt.h"
+#include "whirl/ops/attention.h"  // v0252-e1grp: ops::ws4E1Groups (the product rule of an E1 verify)
 
 namespace kt {
 namespace {
@@ -603,6 +604,58 @@ Partials runG(Ctx& c, hip::Function fn, int cg, const Pool& p, const Buf& dq, co
     return {ml.down<float>(static_cast<std::size_t>(n) * ns * kH * 2), acc.down<float>(static_cast<std::size_t>(n) * ns * kH * kD)};
 }
 
+// v0252-e1grp (PLAN V1-93): an E1 verify's launch. The host knows only row 0's position interval [lo, hi] (the cycle in flight
+// keeps 0..nd drafts) and groups by ops::ws4E1Groups; the device then holds ANY p0 of the interval in pos_buf (set_rows_dp:
+// NPOS + r, one kv base). For every p0 the grouped launch of those groups must give every row the partials of its one-row
+// launch, bitwise. Intervals of 2 (Ornith: one draft) and 4 positions (three drafts) at and around every range boundary of the
+// count (S 8 / 16: 512 / 1024 keys a step; 64: 4096) up to 65613 and at random positions; rows = interval + 0 / 1 (nd + 1).
+// Returns {mismatches, compared, cases, grouped cases}.
+std::array<std::size_t, 4> e1LayoutRows(Ctx& c, hip::Function solo, const hip::Function* fg, const Pool& p, const Buf& dq, int ns, int maxpos,
+                                        std::string& first_bad) {
+    std::array<std::size_t, 4> res{0, 0, 0, 0};
+    std::vector<int> los;
+    for (int b = ns * 64; b <= std::min(65613, maxpos - 8); b += (b < 8192 ? ns * 64 : 8192))
+        for (int d = -5; d <= 2; ++d) los.push_back(b + d);
+    for (int i = 0; i < 6; ++i) los.push_back(1 + static_cast<int>(c.rng() % static_cast<std::uint64_t>(maxpos - 8)));
+    for (const int lo : los)
+        for (const int span : {2, 4}) {
+            const int rows = span;  // nd + 1 rows for an interval of nd + 1 positions
+            const int hi = lo + span - 1;
+            wk::AwGroups g{};
+            std::uint32_t wd = 0;
+            const std::uint32_t ng = whirl::ops::ws4E1Groups(static_cast<std::uint32_t>(rows), lo, hi, static_cast<std::uint32_t>(ns), 0,
+                                                             static_cast<std::uint32_t>(wk::kMaxVerifyRows), g, wd);
+            std::vector<std::pair<int, int>> grps;
+            for (std::uint32_t i = 0; i < ng; ++i) grps.push_back({g.first[i], g.count[i]});
+            res[2] += 1;
+            if (wd < 2) continue;  // one-row groups: today's E1 launch (attn_ws4 rows, covered elsewhere)
+            res[3] += 1;
+            const int cg = ws4gCg(static_cast<int>(wd));
+            for (int p0 = lo; p0 <= hi; ++p0) {
+                std::vector<int> pos;
+                for (int r = 0; r < rows; ++r) pos.push_back(p0 + r);
+                const std::vector<int> tbs(pos.size(), 0);
+                const auto r1 = cmpParts(runG(c, fg[cg], cg, p, dq, pos, tbs, grps, ns, 0), ns, run(c, solo, p, dq, pos, tbs, ns, 0), ns, rows);
+                res[0] += r1.first;
+                res[1] += r1.second;
+                if ((r1.first || r1.second == 0) && first_bad.empty())
+                    first_bad = "S " + std::to_string(ns) + " interval " + std::to_string(lo) + ".." + std::to_string(hi) + " p0 " + std::to_string(p0);
+            }
+        }
+    return res;
+}
+
+void e1LayoutReport(Ctx& c, const std::string& what, const std::array<std::size_t, 4>& r, const std::string& first_bad, const std::string& tag) {
+    Result res;
+    res.name = "e1grp: " + what + " grouped by ops::ws4E1Groups == single-row at every row-0 position of the interval, " + std::to_string(r[2]) +
+               " intervals (" + std::to_string(r[3]) + " grouped)" + tag + (first_bad.empty() ? "" : "; first bad: " + first_bad);
+    res.kind = Kind::invariant;
+    res.n = r[1];
+    res.mismatches = r[0];
+    res.pass = r[0] == 0 && r[1] > 0 && r[3] > 0;
+    c.rep.add(res);
+}
+
 }  // namespace
 
 static void ws4SplitPass(Ctx& c);
@@ -765,6 +818,12 @@ static void ws4SplitPass(Ctx& c) {
             res.pass = bad == 0 && cnt > 0;
             c.rep.add(res);
         }
+        // (d) v0252-e1grp: the E1 verify layout (row-0 interval, ops::ws4E1Groups) at S
+        {
+            std::string fb;
+            const auto r = e1LayoutRows(c, fs[0], fs, p, dq, S, maxpos, fb);
+            e1LayoutReport(c, nm + " / g<cg>", r, fb, tag);
+        }
     }
 }
 
@@ -893,6 +952,12 @@ static void ws4gPass(Ctx& c) {
         res.mismatches = bad_o;
         res.pass = bad_o == 0 && cnt > 0;
         c.rep.add(res);
+        // (7) v0252-e1grp: the E1 verify layout (row-0 interval, ops::ws4E1Groups) at 64
+        {
+            std::string fb;
+            const auto r = e1LayoutRows(c, fsolo, fg, p, dq, kNs, maxpos, fb);
+            e1LayoutReport(c, std::string("attn_ws4") + fsuf(f) + " / attn_ws4g<cg>" + fsuf(f), r, fb, tag);
+        }
         // (6) 100 repeated launches with changing groupings: each == its first run
         {
             std::vector<std::vector<int>> sets;

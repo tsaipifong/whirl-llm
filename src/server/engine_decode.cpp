@@ -392,6 +392,8 @@ void SpecCycle::layoutBatch(Cycle& cy) {
             // v0252-e1p1b (E1): row 0 and the positions from the slot's control words (sl.next / sl.pos stay the host's copy:
             // the model reads neither, pos bounds its context check)
             cy.vsegs[k].dev = cy.e1 && sl.e1_rows > 0;
+            // v0252-e1grp: synchronous: the host has accepted the last cycle, so sl.pos is row 0's position (one position)
+            cy.vsegs[k].pos_n = cy.vsegs[k].dev ? 1u : 0u;
             cy.row_of[k] = row;
             cy.snap_of[k] = snap;
             row += cy.nd_of[k] + 1;
@@ -924,6 +926,8 @@ std::shared_ptr<SpecCycle::Cycle> SpecCycle::aheadBuild(Slot& sl, const Cycle* f
         cy.msegs[0] = MSeg{sl.id, {}, sl.pos + 1, pos_b, fly_nd + 1};
         cy.vsegs[0] = VSeg{sl.id, qwen35::tok_dev, cy.nd_of[0], pos_b, std::span<const std::uint32_t>()};
         cy.vsegs[0].dev = true;
+        // v0252-e1grp: row 0 at sl.pos + 1 + acc, acc = 0..fly_nd drafts kept: the fly_nd + 1 positions up to pos_b
+        cy.vsegs[0].pos_n = fly_nd + 1;
     }
     draftSampling(cy);
     enqueueVerify(cy);

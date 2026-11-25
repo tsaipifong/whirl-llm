@@ -168,14 +168,16 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
         // groups: consecutive rows of one sequence at consecutive positions whose split ranges
         // (per and draft-window ranges, ws4::block_range of their n_pos) are the same
         const i32 win = p.win;
-        auto key = [&](i32 pp) {
-            const i32 np = pp + 1;
-            const int ns = static_cast<int>(ws4_ns);
-            const ws4::Range r0 = ws4::block_range(np, 0, ns, win);
-            return std::array<i32, 3>{r0.b1 == ws4::kSink ? r0.b0 - 1 : 0, ws4::block_range(np, 1, ns, win).b0, ws4::block_range(np, 2, ns, win).b0};
-        };
+        auto key = [&](i32 pp) { return ws4GroupKey(pp, ws4_ns, win); };
         const bool known = p.rows_known && n > 1 && (f.dbg_flags & 4) == 0;
+        // v0252-e1grp (PLAN V1-93): an E1 verify of one slot - rows the host does not know, one sequence at consecutive
+        // positions from row 0's, which lies in [pos0_lo, pos0_hi]: the groups that hold at every position of it
+        const bool e1g = !p.rows_known && p.rows_one_seq && n > 1 && p.pos0_lo >= 0 && (f.dbg_flags & 4) == 0;
         u32 ng = 0, r = 0, widest = 1;
+        if (e1g) {
+            ng = ws4E1Groups(n, p.pos0_lo, p.pos0_hi, ws4_ns, win, static_cast<u32>(kernels::kMaxVerifyRows), pl.groups, widest);
+            r = n;
+        }
         while (r < n) {
             u32 c = 1;
             if (known) {
@@ -319,6 +321,41 @@ std::uint32_t ws4SplitForStep(const AttnDecodeProblem& p, std::uint32_t s, const
     }
     const std::uint32_t lm = lim.max_keys[si][cls];
     return lm != 0 && keys <= lm ? s : full;
+}
+
+// v0252-e1grp: attention.h
+std::array<std::int32_t, 3> ws4GroupKey(std::int32_t pp, std::uint32_t ns, std::int32_t win) {
+    const int np = pp + 1;
+    const int s = static_cast<int>(ns);
+    const ws4::Range r0 = ws4::block_range(np, 0, s, win);
+    return std::array<std::int32_t, 3>{r0.b1 == ws4::kSink ? r0.b0 - 1 : 0, ws4::block_range(np, 1, s, win).b0, ws4::block_range(np, 2, s, win).b0};
+}
+
+// v0252-e1grp: attention.h
+std::uint32_t ws4E1Groups(std::uint32_t n, std::int32_t lo, std::int32_t hi, std::uint32_t ns, std::int32_t win, std::uint32_t max_rows,
+                          kernels::AwGroups& g, std::uint32_t& widest) {
+    const bool iv = lo >= 0 && lo <= hi && hi - lo < kE1GroupSpan && max_rows > 1;
+    std::uint32_t ng = 0, r = 0;
+    widest = 1;
+    while (r < n) {
+        std::uint32_t c = 1;
+        if (iv) {
+            // row r + c joins while its key is the group head's at every row-0 position the device can hold
+            auto joins = [&](std::uint32_t c1) {
+                for (std::int32_t p0 = lo; p0 <= hi; ++p0)
+                    if (ws4GroupKey(p0 + static_cast<std::int32_t>(r + c1), ns, win) != ws4GroupKey(p0 + static_cast<std::int32_t>(r), ns, win))
+                        return false;
+                return true;
+            };
+            while (r + c < n && c < max_rows && joins(c)) c += 1;
+        }
+        g.first[ng] = static_cast<std::int32_t>(r);
+        g.count[ng] = static_cast<std::int32_t>(c);
+        widest = std::max(widest, c);
+        ng += 1;
+        r += c;
+    }
+    return ng;
 }
 
 // v0252-ws4r97b: attention.h. 1 / 2 index the table's [plain, b] pair of the CG the wsplit choice took.
