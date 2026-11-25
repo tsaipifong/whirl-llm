@@ -85,6 +85,7 @@ constexpr std::array<S::Entry, S::n_names> k_names{{
     {"ARGMAX_MB", &S::argmax_mb},  // v0252-f1arg3
     {"ATTN_SX", &S::attn_sx},  // v0252-strixc2
     {"ATTN_I4QK", &S::attn_i4qk},  // v0252-8sfp
+    {"W4A4_SIM", &S::w4a4_sim},  // v0252-w4a4k2
     {"ATTN_I4PF", &S::attn_i4pf},  // v0252-8sattn3
     {"DQ_FULL", &S::dq_full},  // v0252-kvlong2 (WHIRL_DQ_FULL)
     {"GEMM_TAIL", &S::gemm_tail},  // v0252-pp2k2

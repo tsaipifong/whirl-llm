@@ -147,6 +147,11 @@ struct GemmFlags {
     // v0252-pp2k2 (F1): the token-tail split of planGemmF16. Context::gemmFlags: device::Profile::gemm_tail unless
     // WHIRL_GEMM_TAIL sets it (config::gemmTailEnv at the load: "0" off, other values on)
     bool gemm_tail = false;
+    // v0252-w4a4k2 (PLAN V1-144 K2): the W4A4 fake-quant arm's weight half. An MXFP4 matrix (whole superblocks) then always runs
+    // as MatmulKernels::w4s_dq (per-32 int4 re-quantized grid) into the f16 weight scratch + the tuned slot's f16 GEMM, never a
+    // kernel that decodes the original MXFP4 values, and without the token-tail split. Off unless Context::matmul sets it
+    // (numerics flag w4a4_sim, fast, gfx1151 dense); no effect where the table has no w4s_dq.
+    bool w4s_w = false;
 };
 enum class GemmKind : std::uint8_t { gemvh, gemms, gemmhq, gemmh, gemmc, gemmfq };
 struct GemmPlan {

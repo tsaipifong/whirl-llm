@@ -46,3 +46,4 @@
 #include "gdn_select.hip"           // v0252-e1s8: capability marker whirl_cap_gdn_select of the DeltaNet select mode (LAST: no existing kernel moves)
 #include "spec_accept_relax.hip"     // v0252-e1fast: spec_accept_relax_rows, the relaxacc accept decision on the device (LAST: no existing kernel moves)
 #include "gemm_w4a4p.hip"            // v0252-w4a4: W4A4 speed probe, bench-only w4a4p_* entries (no product path; LAST: no existing kernel moves)
+#include "gemm_w4a4s.hip"            // v0252-w4a4k2: W4A4 fake-quant arm w4s_* (fast research switch WHIRL_W4A4_SIM, default off; LAST: no existing kernel moves)

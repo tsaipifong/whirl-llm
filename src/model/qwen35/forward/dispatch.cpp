@@ -236,7 +236,20 @@ void Context::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate)
             x16_count = count;
             x16_fp8 = false;
         }
-        gemmF16(w, x16, y, n, acc);
+        // v0252-w4a4k2 (PLAN V1-144, kill-screen K2): the W4A4 fake-quant research arm (numerics flag w4a4_sim: fast, gfx1151,
+        // dense MXFP4 models; WHIRL_W4A4_SIM, default off) on the MXFP4 GEMMs of the trunk (not the output head): the
+        // activations round-trip per 32 through int4 into x16w (w4s_quant_x16; the x16 cache keeps the unquantized values for
+        // every other consumer), the weights take the re-quantized grid (GemmFlags::w4s_w -> w4s_dequant_f16_mxfp4)
+        const std::uint32_t sim = w.ty == GgmlType::mxfp4 && !head_phase && w.ncols % 256 == 0 ? nf().w4a4_sim : 0u;
+        DevPtr xg = x16;
+        if ((sim & (whirl::numerics::w4a4_sim_a | whirl::numerics::w4a4_sim_am)) != 0 && k.w4s_qx != nullptr) {
+            if (x16w == 0) x16w = alloc(x16_bytes);
+            const u64 nblk = static_cast<u64>(count) / 32;
+            hip::launch(k.w4s_qx, D(static_cast<u32>(std::min<u64>((nblk + 255) / 256, 65535))), D(256), 0, stream, x16, x16w, nblk,
+                        I((sim & whirl::numerics::w4a4_sim_am) != 0 ? 1 : 0));
+            xg = x16w;
+        }
+        gemmF16(w, xg, y, n, acc, (sim & whirl::numerics::w4a4_sim_w) != 0);
     }
     finish();
 }
@@ -245,8 +258,10 @@ void Context::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate)
 // the x16 cache). The kernel, the optional dequant into w16 and the grids come from ops::chooseGemmF16 (K-2); since
 // v0252-pp2k2 through ops::planGemmF16, which may split the rows into the 256-tile bulk and a gemms tail (same bits):
 // each piece launches on its rows of x16in and y (row-major per token), in order.
-void Context::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
-    const ops::GemmPieces pc = ops::planGemmF16(matShape(w), n, w.tune[tuneBucket(n)], gemmFlags(), k);
+void Context::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc, bool w4s_w) {
+    ops::GemmFlags gf = gemmFlags();
+    gf.w4s_w = w4s_w;  // v0252-w4a4k2 (only Context::matmul passes true)
+    const ops::GemmPieces pc = ops::planGemmF16(matShape(w), n, w.tune[tuneBucket(n)], gf, k);
     for (std::size_t i = 0; i < pc.n; ++i) {
         const ops::GemmPiece& g = pc.p[i];
         if (pc.n == 1) {

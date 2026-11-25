@@ -730,6 +730,10 @@ struct MatmulKernels {
     std::array<F, kGemmFqCfgs.size()> gemmfq{};  // gemmfq_<kGemmFqNames[i]>_mxfp4 (gfx1151 code object; null elsewhere)
     std::array<F, kGemmFqCfgs.size()> gemmfq_grp{};  // v0252-8sbadopt: the slot's g8 twin (gemmFqNames; null: none / WHIRL_FQ_RASTER set)
     F gemmh_f16{}, gemmhh_f16{};
+    // v0252-w4a4k2 (PLAN V1-144 K2; gfx1151 code object only, kernels/gfx1151/gemm_w4a4s.hip): the W4A4 fake-quant research
+    // arm (numerics flag w4a4_sim, fast only): w4s_dequant_f16_mxfp4 (dequant_f16 ABI, re-quantized int4 grid per 32) and
+    // w4s_quant_x16(X, Xq, u64 nblk, i32 mse) (per-32 int4 round trip of f16 activations); null elsewhere
+    F w4s_dq{}, w4s_qx{};
     // activation converters of the GEMV / GEMM inputs
     F f32_to_f16{}, quantize_q8{}, qact_fp8{}, qact_fp8t{};
 

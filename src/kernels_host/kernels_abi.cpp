@@ -276,6 +276,9 @@ void loadMatmul(MatmulKernels& k, const Loader& L) {
             }
         }
         for (int ci = 0; ci < static_cast<int>(kGemmCfgs.size()); ++ci) k.gemmc[ci][i] = L.opt(gemmcName(t, ci));
+        // v0252-w4a4k2: the W4A4 fake-quant arm (gfx1151 object only; null elsewhere: the numerics flag is gfx1151-only too)
+        k.w4s_dq = L.opt("w4s_dequant_f16_mxfp4");
+        k.w4s_qx = L.opt("w4s_quant_x16");
         k.gemvq[i] = L.opt("gemvq_mxfp4");
         for (int nt = 2; nt <= kMaxSmallBatch; ++nt) {
             k.gemvq_nt[nt - 2][i] = L.opt(gemvqNtName(t, nt, false));

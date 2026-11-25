@@ -238,6 +238,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"DQ4_ORDER", &S::dq4_order},  // v0252-8sq4 (F8 order)
         {"DQ4_MINKEYS", &S::dq4_min_keys},  // v0252-8sq4 (F8 split)
         {"DQ4_SPLITS", &S::dq4_splits},  // v0252-8sq5 (measured split table)
+        {"W4A4_SIM", &S::w4a4_sim},  // v0252-w4a4k2 (W4A4 fake-quant research arm)
     }};
     return t;
 }
@@ -312,7 +313,21 @@ std::string Plan::bitsKey() const {
     return k;
 }
 
+// v0252-w4a4k2: WHIRL_W4A4_SIM values (numerics.h)
+std::optional<std::uint32_t> parseW4a4Sim(std::string_view s) {
+    if (s.empty() || s == "0") return 0u;
+    if (s == "w") return w4a4_sim_w;
+    if (s == "a") return w4a4_sim_a;
+    if (s == "am") return w4a4_sim_am;
+    if (s == "wa" || s == "1") return w4a4_sim_w | w4a4_sim_a;
+    if (s == "wam") return w4a4_sim_w | w4a4_sim_am;
+    return std::nullopt;
+}
+
 namespace {
+
+// v0252-w4a4k2: where the W4A4 fake-quant arm may run: fast, the gfx1151 object (its kernels), a dense model with MXFP4 tensors
+bool w4a4SimTaken(const Request& r, const Target& t) { return r.mode == Mode::fast && t.gfx1151 && !t.moe && t.has_mxfp4; }
 
 // "if (v) x = *v != "0"" (tune.cpp:853, :876-885, :896)
 void setNe0(bool& x, const Raw& v) {
@@ -561,6 +576,12 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     // balance and the R9700 never take it. The card's row (device::Profile::attn_i4_qlds_pf, opt-in), then WHIRL_ATTN_I4PF
     // ("0" / "" off, any other value on: the WHIRL_DQ4_ORDER rule). ops::chooseAttnPrefill still needs both i4p kernels.
     if (F.attn_i4qk) F.attn_i4pf = e.attn_i4pf ? !e.attn_i4pf->empty() && *e.attn_i4pf != "0" : t.attn_i4pf_profile;
+    // v0252-w4a4k2 (PLAN V1-144, kill-screen K2): the W4A4 fake-quant research arm of the dense prefill GEMM (WHIRL_W4A4_SIM,
+    // parseW4a4Sim): changes the output at 4-bit level, so fast only; only the gfx1151 object has its kernels (8060S) and only
+    // the dense MXFP4 path is simulated (no MoE expert path): precise / balance / the R9700 / MoE models never take it
+    // (loadOverrides notes it). Default off everywhere.
+    if (w4a4SimTaken(r, t) && e.w4a4_sim)
+        if (const std::optional<std::uint32_t> v = parseW4a4Sim(*e.w4a4_sim)) F.w4a4_sim = *v;
 }
 
 // tune.cpp:939-982 on the item table (the per-item overrides, WHIRL_Q8DEC, relaxacc, noteSwitches) and the flags
@@ -723,6 +744,16 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
         if (const Raw& v = e.attn_i4qk; v && *v != "0" && p.mode != Mode::fast)
             p.ignored.push_back(std::format("WHIRL_ATTN_I4QK={} ignored: the int4 Q.K^T prefill attention is fast-only ({} never takes it)", *v,
                                             modeName(p.mode)));
+    // v0252-w4a4k2: WHIRL_W4A4_SIM other than "0" / "" where it is not taken (not fast, not the 8060S, a MoE model, no MXFP4
+    // tensors) or with an invalid value is noted once (the flag stays 0)
+    if (items)
+        if (const Raw& v = e.w4a4_sim; v && !v->empty() && *v != "0") {
+            if (!parseW4a4Sim(*v))
+                p.ignored.push_back(std::format("WHIRL_W4A4_SIM={} ignored: not w, a, am, wa, 1 or wam (the W4A4 fake-quant arm stays off)", *v));
+            else if (!w4a4SimTaken(r, t))
+                p.ignored.push_back(std::format("WHIRL_W4A4_SIM={} ignored: the W4A4 fake-quant arm is fast-only, 8060S dense MXFP4 models ({} never takes it here)",
+                                                *v, modeName(p.mode)));
+        }
     // v0252-8sattn3: WHIRL_ATTN_I4PF other than "0" in precise / balance is noted once (it rides on the fast-only int4 form)
     if (items)
         if (const Raw& v = e.attn_i4pf; v && *v != "0" && p.mode != Mode::fast)

@@ -57,6 +57,9 @@ struct Scratch {
     DevPtr gc_w = 0, gc_u = 0, gc_m = 0, gc_g = 0;
     std::uint64_t gc_w_bytes = 0, gc_u_bytes = 0, gc_m_bytes = 0;  // (GDN-8S scratch bound checks)
     std::uint64_t x16_bytes = 0;  // x16 allocation size (x16b sub-buffer bound check)
+    // v0252-w4a4k2 (PLAN V1-144 K2): the W4A4 fake-quant arm's activation copy (x16_bytes, allocated by Context::matmul at its
+    // first use; 0 = never: the arm is a fast-only research switch, numerics flag w4a4_sim, default off)
+    DevPtr x16w = 0;
     DevPtr dq_ptab = 0;
     std::uint32_t dq_rows = 0;  // rows ffn_g / ffn_u hold
     // FC-1c: attn_kgs softmax state (m, l per query row and head) between key ranges of a prefill

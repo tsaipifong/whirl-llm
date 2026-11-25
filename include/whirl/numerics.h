@@ -156,6 +156,9 @@ struct EnvValues {
     // v0252-8sq5 (PLAN V1-109; fast only): dq4_splits (WHIRL_DQ4_SPLITS: the q4 decode / verify split count; "auto" = the
     // device profile's measured table, "0" / "" = today's rule, 1..256 = that count; class F: another partition)
     Raw dq4_splits;
+    // v0252-w4a4k2 (PLAN V1-144 K2): w4a4_sim (WHIRL_W4A4_SIM, the W4A4 fake-quant research arm of the fast gfx1151 dense prefill
+    // GEMM; parseW4a4Sim; fast only, gfx1151, dense MXFP4 models; default off; Plan::ignored notes it where it is not taken)
+    Raw w4a4_sim;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -163,7 +166,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 50;  // v0252-8sq5: + dq4_splits (49 -> 50)  // v0252-8sattn3: + attn_i4pf (48 -> 49)  // v0252-8sq4: + dq4_order, dq4_min_keys (46 -> 48)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
+    static constexpr std::size_t n_fields = 51;  // v0252-w4a4k2: + w4a4_sim (50 -> 51)  // v0252-8sq5: + dq4_splits (49 -> 50)  // v0252-8sattn3: + attn_i4pf (48 -> 49)  // v0252-8sq4: + dq4_order, dq4_min_keys (46 -> 48)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -453,7 +456,14 @@ struct ItemState {
     X(B, attn_i4qk, false, "")                                   \
     X(B, attn_i4pf, false, "")                                   \
     X(U, moep_guw, 0, "")                                            X(B, moep_dhs, false, "")                                        X(U, moep_dna, 0, "")                                            X(B, moep_fq, false, "")                                         X(B, dq4_order, false, "")                                       X(U, dq4_min_keys, 0, "")                                    \
-    X(U, dq4_splits, 0, "")
+    X(U, dq4_splits, 0, "")                                          X(U, w4a4_sim, 0, "")
+
+// v0252-w4a4k2 (PLAN V1-144 K2): Flags::w4a4_sim bits (WHIRL_W4A4_SIM): w = the weights re-quantized per 32 to the int4 grid
+// (MatmulKernels::w4s_dq), a = the activations round-tripped per 32 through int4 with step amax / 7, am = the same with the
+// MSE-best step (w4s_quant_x16 mse 1). kernels/shared/gemm_w4a4_sim.h has the math.
+inline constexpr std::uint32_t w4a4_sim_w = 1, w4a4_sim_a = 2, w4a4_sim_am = 4;
+// "w" -> w, "a" -> a, "am" -> am, "wa" / "1" -> w | a, "wam" -> w | am, "0" / "" -> 0 (off); anything else -> nullopt (invalid)
+std::optional<std::uint32_t> parseW4a4Sim(std::string_view s);
 
 struct Flags {
 #define WHIRL_NF_B bool
