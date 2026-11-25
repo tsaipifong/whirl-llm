@@ -878,6 +878,7 @@ void testFastOnlyOverrides() {
         {"MOESKIP", 'F'},     // v0252-f5: moeskip, fast-only (applyFastOnlyOverride; drops routed experts)
         {"ATTN_SX", 'L'},  // v0252-strixc2: attn_sx<NP> (strix fattn-rdna35), not bitwise: balance only (testAttnSxFlag)
         {"ATTN_I4QK", 'F'},  // v0252-8sfp: int4 Q.K^T prefill attention, not bitwise: fast only (testAttnI4qkFlag)
+        {"W4A4_SIM", 'F'},  // v0252-w4a4k2: W4A4 fake-quant prefill GEMM arm (research), output changes: fast only (testW4a4SimFlag)
         // v0252-8sq4 (F8): q4 KV decode attention switches, fast only (q4 KV exists only there; testDq4F8Flags). ORDER keeps the
         // partials (attn_dq4o), MINKEYS changes the partition (another combine order)
         {"DQ4_ORDER", 'F'}, {"DQ4_MINKEYS", 'F'},
@@ -1978,6 +1979,63 @@ static void testAttnI4qkFlag() {
     }
 }
 
+// v0252-w4a4k2 (PLAN V1-144, kill-screen K2): WHIRL_W4A4_SIM, the W4A4 fake-quant research arm of the fast gfx1151 dense
+// prefill GEMM (numerics flag w4a4_sim, bits nu::w4a4_sim_w / _a / _am). OFF by default in every plan. Honoured only in fast,
+// on the 8060S card (gfx1151 object: the only one with the w4s kernels), on a DENSE model with MXFP4 tensors (Swift; the
+// MoE expert path is not simulated); precise / balance never take it (one Plan::ignored note each, plan and bitsKey
+// untouched), nor the R9700, nor a MoE model (one note). Values: "w" weights, "a" activations (absmax / 7), "am" activations
+// (MSE-best step), "wa" / "1" both, "wam" both with the MSE step; "0" / "" off without a note; anything else off with one
+// note. A value that turns it on changes exactly w4a4_sim (bitsKey differs, every other flag equal). Fails to build before the
+// change (no EnvValues::w4a4_sim / Flags::w4a4_sim / parseW4a4Sim).
+static void testW4a4SimFlag() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    NCHECK(nu::w4a4_sim_w == 1u && nu::w4a4_sim_a == 2u && nu::w4a4_sim_am == 4u, "w4a4_sim bits 1 / 2 / 4");
+    const std::pair<const char*, std::uint32_t> vals[] = {{"w", 1u}, {"a", 2u}, {"am", 4u}, {"wa", 3u}, {"1", 3u}, {"wam", 5u}};
+    for (const auto& [s, b] : vals) NCHECK(nu::parseW4a4Sim(s) == std::optional<std::uint32_t>(b), "parseW4a4Sim({}) = {}", s, b);
+    for (const char* s : {"0", ""}) NCHECK(nu::parseW4a4Sim(s) == std::optional<std::uint32_t>(0u), "parseW4a4Sim('{}') = 0", s);
+    for (const char* s : {"2", "x", "aw", "W", "m", "wm", " w", "wa "}) NCHECK(!nu::parseW4a4Sim(s), "parseW4a4Sim('{}') = invalid", s);
+    std::size_t on_cells = 0;
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const nu::Plan d = pl(t, mode, {});
+                NCHECK(d.flags.w4a4_sim == 0u, "w4a4_sim {} {} {}: off by default ({})", c.name, model, mode, d.flags.w4a4_sim);
+                const bool can = std::string_view(mode) == "fast" && c.prof.numerics_8060s && std::string_view(model) == "swift";
+                for (const auto& [s, b] : vals) {
+                    const nu::Plan o = pl(t, mode, {{"W4A4_SIM", s}});
+                    nu::Flags a = o.flags;
+                    a.w4a4_sim = 0;
+                    NCHECK(o.flags.w4a4_sim == (can ? b : 0u) && a == d.flags && o.lossy_override == d.lossy_override && o.overrides == d.overrides,
+                           "w4a4_sim {} {} {}: '{}' -> {} (want {}), nothing else moves", c.name, model, mode, s, o.flags.w4a4_sim, can ? b : 0u);
+                    NCHECK((o.bitsKey() != d.bitsKey()) == can, "w4a4_sim {} {} {}: '{}' changes bitsKey exactly where it is taken", c.name, model, mode, s);
+                    std::size_t notes = 0;
+                    for (const std::string& n : o.ignored) notes += n.rfind(std::string("WHIRL_W4A4_SIM=") + s + " ignored", 0) == 0;
+                    NCHECK(notes == (can ? 0u : 1u) && o.ignored.size() == d.ignored.size() + notes, "w4a4_sim {} {} {}: '{}': {} notes (want {})", c.name,
+                           model, mode, s, notes, can ? 0 : 1);
+                    on_cells += o.flags.w4a4_sim == b && can;
+                }
+                for (const char* s : {"0", ""}) {
+                    const nu::Plan z = pl(t, mode, {{"W4A4_SIM", s}});
+                    NCHECK(z.flags == d.flags && z.bitsKey() == d.bitsKey() && z.ignored == d.ignored, "w4a4_sim {} {} {}: '{}' = off, no note", c.name,
+                           model, mode, s);
+                }
+                const nu::Plan bad = pl(t, mode, {{"W4A4_SIM", "bogus"}});
+                std::size_t bn = 0;
+                for (const std::string& n : bad.ignored) bn += n.rfind("WHIRL_W4A4_SIM=bogus ignored", 0) == 0;
+                NCHECK(bad.flags == d.flags && bn == 1, "w4a4_sim {} {} {}: an invalid value = off + one note", c.name, model, mode);
+            }
+    NCHECK(on_cells == 6, "w4a4_sim taken in {} value-cells (want 6: 8060S fast swift x 6 values)", on_cells);
+    nu::Target tq = target(card("8060s"), "swift", false);
+    tq.has_mxfp4 = false;
+    NCHECK(pl(tq, "fast", {{"W4A4_SIM", "1"}}).flags.w4a4_sim == 0u, "w4a4_sim: a model without MXFP4 tensors -> off");
+}
+
 // v0252-8sattn3 (PLAN V1-148): the plan flag attn_i4pf picks the second int4 form of the fast gfx1151 prefill attention
 // (attn_prefill_wmma_i4p / _s_i4p: int4 Q codes in LDS + K / V register prefetch, bit-identical to attn_prefill_wmma_i4 /
 // _s_i4). It can only be on where attn_i4qk is on (fast, 8060S, MXFP4). Round 3 (default flip): device::Profile::
@@ -2588,6 +2646,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testLsplitFlag();  // v0252-l2split (fails to build before the change: no attn_lsplit / parseLsplit)
     testAttnSxFlag();  // v0252-strixc2 (fails before the port: loadFlags never sets attn_sx)
     testAttnI4qkFlag();  // v0252-8sfp (fails before the port: loadFlags never sets attn_i4qk)
+    testW4a4SimFlag();  // v0252-w4a4k2 (fails to build before the change: no Flags::w4a4_sim / parseW4a4Sim)
     testAttnI4pfFlag();  // v0252-8sattn3 (port: fails without the flag; round 3: fails while the gfx1151 row is off)
     testMoepGuwFlag();  // v0252-8smoe (B; fails to build before the change: no Flags::moep_guw / EnvValues::moep_guw)
     testDq4F8Flags();  // v0252-8sq4 (fails to build before the change: no Flags::dq4_order / dq4_min_keys, parseDq4MinKeys)

@@ -782,4 +782,74 @@ void testOpsGemmTail() {
     }
 }
 
+// v0252-w4a4k2 (PLAN V1-144, kill-screen K2): GemmFlags::w4s_w = the W4A4 fake-quant arm's weight half (fast, gfx1151 dense
+// prefill; the numerics flag w4a4_sim, WHIRL_W4A4_SIM). An MXFP4 matrix with whole superblocks then ALWAYS runs as
+// w4s_dequant_f16_mxfp4 (the per-32 int4 re-quantized grid, MatmulKernels::w4s_dq) into the f16 weight scratch + the f16 GEMM
+// of the tuned slot: never gemmfq / gemmhq / a fused gemm_c / gemms / gemvh (they decode the original MXFP4 values), and no
+// token-tail split (its gemms tail would read the original bytes). Off (the default), another type or a table without the
+// kernel (gfx1201): the plan is exactly the one without the flag. Fails to build before the change (no GemmFlags::w4s_w /
+// MatmulKernels::w4s_dq).
+void testOpsGemmW4s() {
+    const std::uint32_t G = static_cast<std::uint32_t>(kn::kGemmCfgs.size());
+    auto gate = mat(GgmlType::mxfp4, 17408, 5120);
+    gate.row_bytes = 5120 / 256 * 136;
+    auto q4 = mat(GgmlType::q4_k, 5120, 5120);
+    q4.row_bytes = 5120 / 256 * 144;
+    static const kn::KernelTable kb = gemmTable(true, true, false);  // gfx1151-like
+    const auto kp = std::make_unique<kn::KernelTable>(kb);
+    kn::KernelTable& k = *kp;
+    k.gemmfq[0] = tag("gemmfq_c2_mxfp4");
+    k.gemmfq[1] = tag("gemmfq_t2_mxfp4");
+    k.gemmhq[ti(GgmlType::mxfp4)] = tag("gemmhq_mxfp4");
+    k.w4s_dq = tag("w4s_dequant_f16_mxfp4");
+    const std::string mx = std::to_string(static_cast<int>(GgmlType::mxfp4)), f16 = std::to_string(static_cast<int>(GgmlType::f16));
+    CHECK(ops::GemmFlags{}.w4s_w == false);
+    ops::GemmFlags base;  // the gfx1151 dense plan: gemmfq slot t2, gemmhq off (device default)
+    base.fdq = 2;
+    ops::GemmFlags sim = base;
+    sim.w4s_w = true;
+    sim.gemmhq_on = true;  // the arm must skip gemmhq too (it decodes the original MXFP4 values)
+    const std::uint8_t deq2 = static_cast<std::uint8_t>(G + 2);
+    // every tuned choice (fused gemm_c 0..G-1, dequant G..2G-1, gemms 2G..) and row count -> dequant through w4s_dq + f16 GEMM
+    for (std::uint32_t n : {17u, 300u, 1024u, 2048u, 2058u, 4096u})
+        for (std::uint32_t tuned : {0u, 2u, G + 1, G + 2, 2 * G + 1}) {
+            const ops::GemmPlan p = ops::chooseGemmF16(gate, n, static_cast<std::uint8_t>(tuned), sim, k);
+            const std::size_t gc = tuned < 2 * G ? tuned % G : 0;
+            CHECK(p.dequant && nameOf(p.dq) == "w4s_dequant_f16_mxfp4" && p.kind == ops::GemmKind::gemmc && nameOf(p.f) == "gemm_c" + std::to_string(gc) + "_" + f16);
+        }
+    // precise rows with the flag (never set by the plan there): still the re-quantized weights (no gemvh / gemms on raw bytes)
+    ops::GemmFlags sp = sim;
+    sp.prec_dec = true;
+    CHECK(ops::chooseGemmF16(gate, 8, deq2, sp, k).dequant && nameOf(ops::chooseGemmF16(gate, 8, deq2, sp, k).dq) == "w4s_dequant_f16_mxfp4");
+    // no token-tail split under the arm (the tail would read the original MXFP4 bytes)
+    ops::GemmFlags tail = sim;
+    tail.gemm_tail = true;
+    k.gemmh_f16 = tag("gemmh_f16");
+    const ops::GemmPieces pc = ops::planGemmF16(gate, 2058, deq2, tail, k);
+    CHECK(pc.n == 1 && pc.p[0].rows == 2058 && nameOf(pc.p[0].plan.dq) == "w4s_dequant_f16_mxfp4" && nameOf(pc.p[0].plan.f) == "gemmh_f16");
+    ops::GemmFlags tail0 = base;
+    tail0.gemm_tail = true;
+    CHECK(ops::planGemmF16(gate, 2058, deq2, tail0, k).n == 1);  // the gfx1151 gemmfq plan: no split there either (unchanged)
+    k.gemmh_f16 = nullptr;
+    // off: the plans without the flag (gemmfq at 2048 rows, gemmhq below 1025, fused gemm_c for a fused choice)
+    for (std::uint32_t n : {300u, 2048u})
+        for (std::uint32_t tuned : {2u, G + 2}) {
+            const ops::GemmPlan a = ops::chooseGemmF16(gate, n, static_cast<std::uint8_t>(tuned), base, k);
+            CHECK(a.dq == nullptr || nameOf(a.dq) != "w4s_dequant_f16_mxfp4");
+        }
+    CHECK(ops::chooseGemmF16(gate, 2048, deq2, base, k).kind == ops::GemmKind::gemmfq);
+    // another weight type, or a table without the kernel (gfx1201): the flag changes nothing (same flags but w4s_w)
+    ops::GemmFlags s1 = base;
+    s1.w4s_w = true;
+    {
+        const ops::GemmPlan a = ops::chooseGemmF16(q4, 2048, deq2, base, k), b = ops::chooseGemmF16(q4, 2048, deq2, s1, k);
+        CHECK(a.kind == b.kind && a.f == b.f && a.dq == b.dq && a.dequant == b.dequant && a.grid.x == b.grid.x && a.grid.y == b.grid.y);
+    }
+    k.w4s_dq = nullptr;
+    {
+        const ops::GemmPlan a = ops::chooseGemmF16(gate, 2048, deq2, base, k), b = ops::chooseGemmF16(gate, 2048, deq2, s1, k);
+        CHECK(a.kind == b.kind && a.f == b.f && a.dq == b.dq && a.dequant == b.dequant && a.grid.x == b.grid.x && a.grid.y == b.grid.y);
+    }
+}
+
 }  // namespace

@@ -212,6 +212,9 @@ void testQuant(Ctx& c);
 void testGemv(Ctx& c);
 void testGemvk(Ctx& c);   // "gemvk": gfx1151 K-balanced MXFP4 multi-token GEMV bitwise == 1-token (feat026-ggemv)
 void testGemm(Ctx& c);
+// v0252-w4a4k2 "w4s" (test_gemm.cpp): the gfx1151 W4A4 fake-quant arm w4s_* == its host reference (bitwise), the sim GEMM vs
+// the CPU / the probe's per-32 fold / w4a4p_gemm_i4fb; presence rows per arch
+void testW4s(Ctx& c);
 void testAttn(Ctx& c);
 void testAttnDq4(Ctx& c);  // "attndq4": attn_dq4 at 256 splits / contexts up to 256k / random draft windows
 // v0252-c1acc (AO-2): "attnkgl" (on request): attn_kg / kgf / kgv / kgk <np> == attn_prefill_wmma[_q8] bit for bit at

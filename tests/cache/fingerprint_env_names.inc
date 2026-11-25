@@ -14,6 +14,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_ATTN_DQF",  // src/common/numerics.cpp
     "WHIRL_ATTN_I4PF",  // src/common/numerics.cpp (v0252-8sattn3: other kernels, same bits as the int4 form; hashed as DQ4_ORDER)
     "WHIRL_ATTN_I4QK",  // src/common/numerics.cpp (v0252-8sfp: fast int4 Q.K^T prefill attention off when "0")
+    "WHIRL_W4A4_SIM",  // src/common/numerics.cpp (v0252-w4a4k2: fast W4A4 fake-quant prefill GEMM arm, other bits)
     "WHIRL_ATTN_KG",  // src/common/numerics.cpp
     "WHIRL_ATTN_KGVAR",  // src/common/numerics.cpp (feat026-attnkg97, v0252-c1port)
     "WHIRL_ATTN_KX",  // src/common/numerics.cpp

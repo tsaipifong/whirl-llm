@@ -11,6 +11,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "cpu_ref.h"
+#include "kt_w4a4p.h"                             // v0252-w4a4k2: the W4A4 probe's CPU definitions (codes, scales, exact fold)
+#include "../../kernels/shared/gemm_w4a4_sim.h"  // v0252-w4a4k2: the fake-quant arm's math (host references)
 
 #include <functional>
 
@@ -707,6 +709,131 @@ void testGemm(Ctx& c) {
             c.rep.add(r);
         }
     }
+}
+
+// v0252-w4a4k2 (PLAN V1-144, kill-screen K2) family "w4s": the W4A4 fake-quant arm of the fast gfx1151 dense prefill GEMM
+// (kernels/gfx1151/gemm_w4a4s.hip; numerics flag w4a4_sim, WHIRL_W4A4_SIM). Rows:
+//  - presence: both w4s_* entries in the gfx1151 object and loaded into MatmulKernels (w4s_dq / w4s_qx); absent from any other
+//    object and from its host table (the R9700 can never select the arm);
+//  - w4s_dequant_f16_mxfp4 == its host reference (gemm_w4a4_sim.h w4s_dequant_row_host = the probe's mxRowToI4 codes x scales,
+//    pinned by whirl-kt-bench-tests) BITWISE, random blocks and an exponent sweep 96..150 (f16 subnormal ... inf);
+//  - w4s_quant_x16 (absmax / 7 and MSE-best) == w4s_quant_row_host BITWISE (Gaussian rows, zero and outlier blocks);
+//  - the sim GEMM (those two + the shipped dequant-path gemm_c2_f16) vs the CPU f64 product of the same f16 values: the
+//    f16-path tolerance of this file (1e-4 x sum |terms| + 1e-6, the "dequant_f16_mxfp4 + gemm_c2_f16 vs CPU" row);
+//  - the proof that the simulation IS the W4A4 kernel's numerics: the sim GEMM vs the CPU exact per-32 fold of the probe
+//    (kt_w4a4p.h refFoldF64) and vs the probe kernel w4a4p_gemm_i4fb on the same inputs. Bound: each dequantized f16 value
+//    carries one rounding (relative <= 2^-11), so a term moves by <= 2^-10 of its size; plus the f32 sums of both sides
+//    (<= 2^-12 here, K 1024): 2^-10 + 2^-12 of sum |terms| (derived, not a hand-set band).
+void testW4s(Ctx& c) {
+    const bool g1151 = c.mod.arch() == hip::Arch::gfx1151;
+    const hip::Function fdq = c.fnOpt("w4s_dequant_f16_mxfp4"), fqx = c.fnOpt("w4s_quant_x16");
+    {
+        Result r;
+        r.kind = Kind::invariant;
+        r.n = 1;
+        r.name = g1151 ? "w4s_dequant_f16_mxfp4 / w4s_quant_x16 in the gfx1151 code object and loaded into the host table"
+                       : "w4s_* absent from this non-gfx1151 code object and from the host table";
+        r.pass = g1151 ? (fdq != nullptr && fqx != nullptr && c.k.w4s_dq == fdq && c.k.w4s_qx == fqx)
+                       : (fdq == nullptr && fqx == nullptr && c.k.w4s_dq == nullptr && c.k.w4s_qx == nullptr);
+        r.mismatches = r.pass ? 0 : 1;
+        c.rep.add(r);
+    }
+    if (fdq == nullptr || fqx == nullptr) return;
+    const hip::Function c2f16 = c.k.gemmc[2][static_cast<int>(QType::f16)];
+    const hip::Function i4fb = c.fnOpt("w4a4p_gemm_i4fb");
+    const int nr = 256, nc = 1024, nt = 256;  // the probe's shapeOk (rows % 128, tokens % 256, K % 256)
+    // weights: random blocks (variant 0) and an exponent sweep 96..150 (variant 1)
+    std::vector<std::uint16_t> wsim_h;
+    HostMat hm0;
+    for (int variant = 0; variant < 2; ++variant) {
+        HostMat hm = randomMat(c, QType::mxfp4, nr, nc);
+        if (variant == 1)
+            for (std::size_t b = 0; b < hm.data.size(); b += 136)
+                for (int i = 0; i < 8; ++i) hm.data[b + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(96 + (b / 136 * 8 + static_cast<std::size_t>(i)) % 55);
+        Buf w(hm.data), w16(static_cast<std::size_t>(nr) * nc * 2);
+        const std::uint64_t groups = static_cast<std::uint64_t>(nc / 8) * nr;
+        hip::launch(fdq, {static_cast<unsigned>(std::min<std::uint64_t>(cdiv(groups, 256), 65535)), 1, 1}, {256, 1, 1}, 0, c.s, w.p(), hm.row_bytes, w16.p(),
+                    nc, nr);
+        c.sync();
+        std::vector<std::uint16_t> want(static_cast<std::size_t>(nr) * nc);
+        for (int r = 0; r < nr; ++r)
+            w4s_dequant_row_host(hm.data.data() + static_cast<std::size_t>(r) * hm.row_bytes, nc, want.data() + static_cast<std::size_t>(r) * nc);
+        c.rep.add(cmpExact(std::string("w4s_dequant_f16_mxfp4 == host reference (") + (variant ? "e 96..150" : "random") + ", 256 x 1024)",
+                           w16.down<std::uint16_t>(want.size()), want));
+        if (variant == 0) {
+            wsim_h = want;
+            hm0 = hm;
+        }
+    }
+    // activations: Gaussian f16 rows (sigma 1), a zero block and an outlier per row
+    std::vector<float> x = c.randn(static_cast<std::size_t>(nt) * nc);
+    for (int t = 0; t < nt; ++t) {
+        for (int i = 64; i < 96; ++i) x[static_cast<std::size_t>(t) * nc + static_cast<std::size_t>(i)] = 0.f;
+        x[static_cast<std::size_t>(t) * nc + 200 + static_cast<std::size_t>(t % 32)] = 30.f;
+    }
+    const std::vector<std::uint16_t> xh = toHalf(x);
+    Buf dx(xh), dq(xh.size() * 2);
+    const std::uint64_t nblk = xh.size() / 32;
+    std::vector<std::uint16_t> xsim_h[2];
+    for (int mse = 0; mse < 2; ++mse) {
+        hip::launch(fqx, {static_cast<unsigned>(std::min<std::uint64_t>(cdiv(nblk, 256), 65535)), 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), dq.p(), nblk, mse);
+        c.sync();
+        xsim_h[mse].resize(xh.size());
+        w4s_quant_row_host(xh.data(), static_cast<int>(xh.size()), mse, xsim_h[mse].data());
+        c.rep.add(cmpExact(std::string("w4s_quant_x16 == host reference (") + (mse ? "MSE-best step" : "absmax / 7") + ", 256 x 1024)",
+                           dq.down<std::uint16_t>(xh.size()), xsim_h[mse]));
+    }
+    if (!c2f16) {
+        c.rep.skip("w4s", "sim GEMM rows", "no gemm_c2_f16 in this code object");
+        return;
+    }
+    // the sim GEMM: re-quantized f16 weights x fake-quantized f16 activations through gemm_c2_f16 (the dequant-path GEMM)
+    Buf wq16(wsim_h), xq16(xsim_h[0]), y(static_cast<std::size_t>(nt) * nr * 4);
+    const auto& c2 = wk::kGemmCfgs[2];
+    y.fill(0xff);
+    hip::launch(c2f16, {cdiv(nt, c2.bn), cdiv(nr, c2.bm), 1}, {static_cast<unsigned>(c2.nth), 1, 1}, 0, c.s, wq16.p(), static_cast<std::uint64_t>(nc) * 2,
+                xq16.p(), y.p(), nc, nr, nt, 0);
+    c.sync();
+    const std::vector<float> ysim = y.down<float>(static_cast<std::size_t>(nt) * nr);
+    {
+        std::vector<float> wf(wsim_h.size()), xf(xsim_h[0].size());
+        for (std::size_t i = 0; i < wf.size(); ++i) wf[i] = h2f(wsim_h[i]);
+        for (std::size_t i = 0; i < xf.size(); ++i) xf[i] = h2f(xsim_h[0][i]);
+        std::vector<double> ry, rs;
+        ref::gemvF64(wf, nr, nc, xf.data(), nt, nc, ry, rs);
+        c.rep.add(cmpTol("w4s sim GEMM (w4s_dq + w4s_qx + gemm_c2_f16) vs CPU f64 of the same f16 values, 256 x 1024 x 256", ysim, ry, rs, 1e-4, 1e-6));
+    }
+    // the probe's numbers on the same inputs: packed int4 + f32 scales (kt_w4a4p.h), CPU exact fold and the i4fb kernel
+    std::vector<std::uint8_t> wq(static_cast<std::size_t>(nr) * nc / 2), xq(static_cast<std::size_t>(nt) * nc / 2);
+    std::vector<float> wsc(static_cast<std::size_t>(nr) * nc / 32), xsc(static_cast<std::size_t>(nt) * nc / 32);
+    for (int r = 0; r < nr; ++r)
+        w4a4p::mxRowToI4(hm0.data.data() + static_cast<std::size_t>(r) * hm0.row_bytes, nc, wq.data() + static_cast<std::size_t>(r) * nc / 2,
+                         wsc.data() + static_cast<std::size_t>(r) * nc / 32);
+    std::vector<float> xw(static_cast<std::size_t>(nc));
+    for (int t = 0; t < nt; ++t) {
+        for (int i = 0; i < nc; ++i) xw[static_cast<std::size_t>(i)] = h2f(xh[static_cast<std::size_t>(t) * nc + static_cast<std::size_t>(i)]);
+        w4a4p::quantRow(xw.data(), nc, xq.data() + static_cast<std::size_t>(t) * nc / 2, xsc.data() + static_cast<std::size_t>(t) * nc / 32);
+    }
+    std::vector<double> fy(static_cast<std::size_t>(nt) * nr), fs(fy.size());
+    for (int t = 0; t < nt; ++t)
+        for (int r = 0; r < nr; ++r)
+            w4a4p::refFoldF64(wq.data() + static_cast<std::size_t>(r) * nc / 2, wsc.data() + static_cast<std::size_t>(r) * nc / 32,
+                              xq.data() + static_cast<std::size_t>(t) * nc / 2, xsc.data() + static_cast<std::size_t>(t) * nc / 32, nc,
+                              fy[static_cast<std::size_t>(t) * nr + static_cast<std::size_t>(r)], fs[static_cast<std::size_t>(t) * nr + static_cast<std::size_t>(r)]);
+    const double rtol = std::ldexp(1.0, -10) + std::ldexp(1.0, -12);
+    c.rep.add(cmpTol("w4s sim GEMM == the W4A4 per-32 fold (CPU exact, kt_w4a4p refFoldF64) within 2^-10 + 2^-12 of sum |terms|", ysim, fy, fs, rtol, 1e-6));
+    if (i4fb == nullptr) {
+        c.rep.skip("w4s", "w4s sim GEMM == w4a4p_gemm_i4fb", "no w4a4p_gemm_i4fb in this code object");
+        return;
+    }
+    Buf dwq(wq), dws(wsc), dxq(xq), dxs(xsc), yp(static_cast<std::size_t>(nt) * nr * 4);
+    yp.fill(0xff);
+    hip::launch(i4fb, {cdiv(nt, 128), cdiv(nr, 128), 1}, {256, 1, 1}, 0, c.s, dwq.p(), dws.p(), dxq.p(), dxs.p(), yp.p(), nc, nr, nt);
+    c.sync();
+    const std::vector<float> yprobe = yp.down<float>(static_cast<std::size_t>(nt) * nr);
+    c.rep.add(cmpTol("w4a4p_gemm_i4fb (the probe kernel) == the CPU exact fold, 1e-5 x sum |terms|", yprobe, fy, fs, 1e-5, 1e-6));
+    const std::vector<double> ysd(ysim.begin(), ysim.end());
+    c.rep.add(cmpTol("w4s sim GEMM == w4a4p_gemm_i4fb on the same inputs within 2^-10 + 2^-12 of sum |terms|", yprobe, ysd, fs, rtol, 1e-6));
 }
 
 }  // namespace kt

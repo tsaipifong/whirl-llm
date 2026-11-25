@@ -2584,6 +2584,7 @@ void testEnvSnapshot() {
                                      "ARGMAX_MB",  // v0252-f1arg3: Model::load -> Context::argmaxMbMode (iso forward.mtp_verify argmax_mb)
                                      "ATTN_SX",  // v0252-strixc2: numerics loadFlags, not in the exec dump (unit testAttnSxFlag)
                                      "ATTN_I4QK",  // v0252-8sfp: numerics loadFlags, not in the exec dump (unit testAttnI4qkFlag)
+                                     "W4A4_SIM",  // v0252-w4a4k2: numerics loadFlags, not in the exec dump (unit testW4a4SimFlag)
                                      "ATTN_I4PF",  // v0252-8sattn3: numerics loadFlags, not in the exec dump (unit testAttnI4pfFlag)
                                      "MOEP_GUW",  // v0252-8smoe: numerics loadFlags, not in the exec dump (unit testMoepGuwFlag)
                                      "MOEP_DHS", "MOEP_DNA", "MOEP_FQ",  // v0252-8smoe2: numerics loadFlags (unit testMoep2Flags)

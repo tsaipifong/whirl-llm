@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
     }
     const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "moefuse", "silu", "moeskip", "misc", "attnbench",
                                "gemvh", "gemvhg", "gemvhbench", "gemvhv", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk", "attnkgl", "ws4r",
-                               "specacc", "specaccz", "e1in", "specaccx"};  // = fams below
+                               "specacc", "specaccz", "e1in", "specaccx", "w4s"};  // = fams below
     const bool bench = !bo.families.empty();
     if ((!bo.ggemv_nt.empty() || !bo.ggemv_v.empty()) && bo.families.count("ggemv") == 0) {
         std::printf("whirl-kernel-test: --bench-nt / --bench-v need --bench ggemv\n");
@@ -287,7 +287,7 @@ int main(int argc, char** argv) {
         const char* name;
         void (*run)(kt::Ctx&);
     };
-    const Fam fams[] = {{"quant", kt::testQuant}, {"gemv", kt::testGemv}, {"gemm", kt::testGemm},
+    const Fam fams[] = {{"quant", kt::testQuant}, {"gemv", kt::testGemv}, {"gemm", kt::testGemm}, {"w4s", kt::testW4s},
                         {"attn", kt::testAttn},   {"attndq4", kt::testAttnDq4},   {"gdn", kt::testGdn},   {"moe", kt::testMoe},
                         {"moemx", kt::testMoeMx}, {"moef", kt::testMoeF}, {"moefuse", kt::testMoeFused}, {"silu", kt::testSiluW},
                         {"moeskip", kt::testMoeSkip},  // moeskip: v0252-f5

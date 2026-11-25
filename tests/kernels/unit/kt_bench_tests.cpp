@@ -9,6 +9,7 @@
 #include "../kt_dq4s.h"  // v0252-8sq5: the dq4s split-count bench table
 #include "../kt_ws4s.h"  // v0252-8sws: the ws4s split-count bench table
 #include "../kt_w4a4p.h"  // v0252-w4a4: the W4A4 speed probe's int4 packing, quantizer, references, shape table, projection
+#include "../../../kernels/shared/gemm_w4a4_sim.h"  // v0252-w4a4k2: the W4A4 fake-quant arm's math (host half)
 #include "../../../kernels/gfx1151/attn_ws4_index.h"  // ws4::block_range / block_range_ns (host-includable)
 #include "whirl/device_profile.h"
 #include "whirl/kernels_abi.h"
@@ -1347,6 +1348,166 @@ static void test_w4a4p_table_projection() {
               w4a4p::verdict(w4a4p::project({{100.0, 1.00, 0.05, 1}}, 0.0, 0.86)) == "OPEN" && w4a4p::verdict(w4a4p::project({}, 0.0, 0.86)) == "NONE");
 }
 
+// ---------------------------------------------------------------- w4s (v0252-w4a4k2, PLAN V1-144 kill-screen K2)
+// The W4A4 fake-quant arm (kernels/shared/gemm_w4a4_sim.h, kernels w4s_dequant_f16_mxfp4 / w4s_quant_x16) must compute the
+// probe's numbers: the int4 codes and f32 scales of kt_w4a4p.h (mxToI4 / mxI4Scale / quantRow), each dequantized value
+// rounded once to f16. These cases pin sim == reference on the CPU (the GPU kernels are pinned to the same host functions by
+// whirl-kernel-test --only w4s). Fail to build before the change (no gemm_w4a4_sim.h).
+static void test_w4s_f2h() {
+    struct C {
+        float f;
+        std::uint16_t h;
+    };
+    const C cs[] = {{1.f, 0x3C00}, {-2.f, 0xC000}, {65504.f, 0x7BFF}, {65520.f, 0x7C00}, {std::ldexp(1.f, -24), 0x0001}, {std::ldexp(1.f, -25), 0x0000},
+                    {std::ldexp(3.f, -25), 0x0002}, {1.f + std::ldexp(1.f, -11), 0x3C00}, {1.f + 3 * std::ldexp(1.f, -11), 0x3C02}, {0.f, 0x0000},
+                    {-0.f, 0x8000}, {std::ldexp(1.f, -14), 0x0400}, {INFINITY, 0x7C00}, {1e-30f, 0x0000}};
+    std::size_t bad = 0;
+    for (const C& c : cs) bad += w4s_f2h(c.f) != c.h;
+    for (std::uint32_t h = 0; h < 0x7C00; ++h) bad += w4s_f2h(w4s_h2f(static_cast<std::uint16_t>(h))) != h;  // every finite half round-trips
+    check("w4s: host f32 -> f16 rounds to nearest even (subnormals, overflow, ties) and inverts h2f on every finite half", bad == 0,
+          num(static_cast<double>(bad)));
+}
+
+static void test_w4s_weights() {
+    std::size_t bad = 0;
+    for (int n = 0; n < 16; ++n) bad += w4s_wlevel(n) != w4a4p::mxToI4(n);
+    check("w4s: weight level of every MXFP4 code == kt_w4a4p mxToI4 (0,1,1,2,2,4,5,7 + sign)", bad == 0);
+    bad = 0;
+    for (std::uint32_t e = 2; e < 256; ++e) {
+        const float a = w4s_wscale(e), b = w4a4p::mxI4Scale(static_cast<int>(e));
+        bad += std::memcmp(&a, &b, 4) != 0;
+    }
+    check("w4s: weight scale 2^(e-128) x 12/7 == kt_w4a4p mxI4Scale bitwise (e 2..255, normal f32)", bad == 0, num(static_cast<double>(bad)));
+    bad = 0;
+    for (std::uint32_t e = 0; e < 256; ++e)
+        for (int n = 0; n < 16; ++n)
+            bad += w4s_f2h(w4s_wval(n, e)) != w4s_f2h(static_cast<float>(w4a4p::mxToI4(n)) * w4a4p::mxI4Scale(static_cast<int>(e)));
+    check("w4s: dequantized f16 weight == f16(level x scale) of kt_w4a4p for every code and E8M0 byte", bad == 0, num(static_cast<double>(bad)));
+    // a 512-value row (2 units): the host row decode == mxRowToI4's codes x scales, value order j / j + 16 per sub-block
+    std::vector<std::uint8_t> mx(2 * 136);
+    std::uint32_t s = 12345;
+    auto rnd = [&]() { return s = s * 1664525u + 1013904223u, s >> 8; };
+    for (int u = 0; u < 2; ++u) {
+        for (int ib = 0; ib < 8; ++ib) mx[static_cast<std::size_t>(u * 136 + ib)] = static_cast<std::uint8_t>(100 + rnd() % 30);
+        for (int j = 0; j < 128; ++j) mx[static_cast<std::size_t>(u * 136 + 8 + j)] = static_cast<std::uint8_t>(rnd());
+    }
+    std::vector<std::uint16_t> h(512);
+    w4s_dequant_row_host(mx.data(), 512, h.data());
+    std::vector<std::uint8_t> q(256);
+    std::vector<float> sc(16);
+    w4a4p::mxRowToI4(mx.data(), 512, q.data(), sc.data());
+    bad = 0;
+    for (int i = 0; i < 512; ++i) bad += h[static_cast<std::size_t>(i)] != w4s_f2h(static_cast<float>(w4a4p::unpackAt(q.data(), i)) * sc[static_cast<std::size_t>(i / 32)]);
+    check("w4s: host row dequant (the kernel's reference) == kt_w4a4p mxRowToI4 codes x scales, 512 values", bad == 0, num(static_cast<double>(bad)));
+}
+
+// rows of f16-representable values: normal * sigma, one all-zero block, one block with exact half-step ties, one outlier block
+static std::vector<float> w4sActRows(int k, std::uint32_t seed) {
+    std::vector<float> x(static_cast<std::size_t>(k));
+    std::uint32_t s = seed;
+    for (int i = 0; i < k; i += 2) {
+        s = s * 1664525u + 1013904223u;
+        const double u1 = (s >> 8) / 16777216.0 + 1e-9;
+        s = s * 1664525u + 1013904223u;
+        const double u2 = (s >> 8) / 16777216.0;
+        const double r = std::sqrt(-2 * std::log(u1));
+        x[static_cast<std::size_t>(i)] = static_cast<float>(r * std::cos(6.283185307179586 * u2));
+        x[static_cast<std::size_t>(i + 1)] = static_cast<float>(r * std::sin(6.283185307179586 * u2));
+    }
+    for (int i = 32; i < 64; ++i) x[static_cast<std::size_t>(i)] = 0.f;
+    for (int i = 64; i < 96; ++i) x[static_cast<std::size_t>(i)] = (i - 80) * 0.25f;  // amax 4: d 4/7, x * 7/4 half steps on 2 / 6 / ...
+    x[100] = 40.f;                                                                       // outlier block
+    for (float& v : x) v = w4s_h2f(w4s_f2h(v));
+    return x;
+}
+
+static void test_w4s_acts_absmax() {
+    const int k = 1024;
+    std::size_t bad = 0, badd = 0;
+    for (std::uint32_t seed : {1u, 2u, 3u}) {
+        const std::vector<float> x = w4sActRows(k, seed);
+        std::vector<std::uint8_t> q(k / 2);
+        std::vector<float> s(k / 32);
+        w4a4p::quantRow(x.data(), k, q.data(), s.data());
+        for (int b = 0; b < k / 32; ++b) {
+            int c[32];
+            float d = -1.f;
+            w4s_qblock(x.data() + b * 32, 0, c, &d);
+            badd += std::memcmp(&d, &s[static_cast<std::size_t>(b)], 4) != 0;
+            for (int i = 0; i < 32; ++i) bad += c[i] != w4a4p::unpackAt(q.data(), b * 32 + i);
+        }
+    }
+    check("w4s: activation codes / step (absmax / 7) == kt_w4a4p quantRow bitwise (3 x 1024 values: zero, tie and outlier blocks)", bad == 0 && badd == 0,
+          num(static_cast<double>(bad + badd)));
+}
+
+static void test_w4s_acts_mse() {
+    const int k = 1024;
+    std::size_t bad = 0, better = 0, blocks = 0;
+    for (std::uint32_t seed : {4u, 5u}) {
+        const std::vector<float> x = w4sActRows(k, seed);
+        for (int b = 0; b < k / 32; ++b) {
+            const float* xb = x.data() + b * 32;
+            int c[32], ca[32];
+            float d = -1.f, da = -1.f;
+            w4s_qblock(xb, 1, c, &d);
+            w4s_qblock(xb, 0, ca, &da);
+            float amax = 0.f;
+            for (int i = 0; i < 32; ++i) amax = std::fmax(amax, std::fabs(xb[i]));
+            // the step is one of hipfire's 8 candidates (amax / 7) x 0.5 x (1 + j / 7) (0 for a zero block)
+            bool cand = amax == 0.f && d == 0.f;
+            for (int j = 0; j < 8 && !cand; ++j) cand = d == (amax / 7.0f) * 0.5f * (1.0f + static_cast<float>(j) / 7.0f);
+            double e = 0, ea = 0;
+            for (int i = 0; i < 32; ++i) {
+                bad += c[i] < -7 || c[i] > 7 || (amax == 0.f && c[i] != 0);
+                e += (xb[i] - c[i] * static_cast<double>(d)) * (xb[i] - c[i] * static_cast<double>(d));
+                ea += (xb[i] - ca[i] * static_cast<double>(da)) * (xb[i] - ca[i] * static_cast<double>(da));
+            }
+            bad += !cand;
+            bad += e > ea * (1 + 1e-5) + 1e-30;  // never worse than absmax / 7 (the j = 7 candidate)
+            better += e < ea * (1 - 1e-6);
+            ++blocks;
+        }
+    }
+    check("w4s: MSE-best activation step is a candidate of the grid, codes in -7..7, block error <= absmax / 7's", bad == 0,
+          num(static_cast<double>(bad)));
+    check("w4s: the MSE-best step lowers the error on most Gaussian blocks", better * 2 > blocks, num(static_cast<double>(better)) + "/" + num(static_cast<double>(blocks)));
+}
+
+static void test_w4s_dot_vs_fold() {
+    // one weight row x one token row, K 2048: the f16 fake-quant dot (exact double sum of the dequantized f16 values) against
+    // the probe's exact per-32 fold refFoldF64 of the same codes and scales. Each dequantized value carries one f16 rounding
+    // (relative <= 2^-11), so a term differs by <= (2^-11 + 2^-11 + 2^-22) of its size: bound 2^-10 x sum |terms| + 2^-10 x the
+    // f16 subnormal floor (none here: e >= 100).
+    const int k = 2048;
+    std::vector<std::uint8_t> mx(k / 256 * 136);
+    std::uint32_t s = 777;
+    auto rnd = [&]() { return s = s * 1664525u + 1013904223u, s >> 8; };
+    for (int u = 0; u < k / 256; ++u) {
+        for (int ib = 0; ib < 8; ++ib) mx[static_cast<std::size_t>(u * 136 + ib)] = static_cast<std::uint8_t>(118 + rnd() % 8);
+        for (int j = 0; j < 128; ++j) mx[static_cast<std::size_t>(u * 136 + 8 + j)] = static_cast<std::uint8_t>(rnd());
+    }
+    const std::vector<float> x = w4sActRows(k, 9);
+    std::vector<std::uint16_t> wh(k), xh(k);
+    w4s_dequant_row_host(mx.data(), k, wh.data());
+    for (int b = 0; b < k / 32; ++b) {
+        int c[32];
+        float d;
+        w4s_qblock(x.data() + b * 32, 0, c, &d);
+        for (int i = 0; i < 32; ++i) xh[static_cast<std::size_t>(b * 32 + i)] = w4s_f2h(static_cast<float>(c[i]) * d);
+    }
+    double sim = 0;
+    for (int i = 0; i < k; ++i) sim += static_cast<double>(w4s_h2f(wh[static_cast<std::size_t>(i)])) * w4s_h2f(xh[static_cast<std::size_t>(i)]);
+    std::vector<std::uint8_t> wq(k / 2), xq(k / 2);
+    std::vector<float> ws(k / 32), xs(k / 32);
+    w4a4p::mxRowToI4(mx.data(), k, wq.data(), ws.data());
+    w4a4p::quantRow(x.data(), k, xq.data(), xs.data());
+    double y = 0, scale = 0;
+    w4a4p::refFoldF64(wq.data(), ws.data(), xq.data(), xs.data(), k, y, scale);
+    check("w4s: f16 fake-quant dot == the probe's exact per-32 fold within 2^-10 x sum |terms|", std::fabs(sim - y) <= std::ldexp(1.0, -10) * scale && scale > 0,
+          num(sim) + " vs " + num(y) + " scale " + num(scale));
+}
+
 int main(int argc, char** argv) {
     std::string emit;
     for (int i = 1; i < argc; ++i)
@@ -1393,6 +1554,11 @@ int main(int argc, char** argv) {
         test_w4a4p_mx();
         test_w4a4p_refs();
         test_w4a4p_table_projection();
+        test_w4s_f2h();
+        test_w4s_weights();
+        test_w4s_acts_absmax();
+        test_w4s_acts_mse();
+        test_w4s_dot_vs_fold();
     } catch (const std::exception& e) {
         check(std::string("exception: ") + e.what(), false);
     }
