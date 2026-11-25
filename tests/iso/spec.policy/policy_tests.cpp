@@ -171,7 +171,7 @@ void testMtpDefaults() {
 void testE1Default() {
     ISO_CHECK(e1Default(true, hip::Arch::gfx1201) == 2u);
     ISO_CHECK(e1Default(false, hip::Arch::gfx1201) == 0u);
-    ISO_CHECK(e1Default(true, hip::Arch::gfx1151) == 0u);
+    ISO_CHECK(e1Default(true, hip::Arch::gfx1151) == 2u);  // v0252-e1s8 round 3 (screens e1s8-orn / -r2 / -prec)
     ISO_CHECK(e1Default(false, hip::Arch::gfx1151) == 0u);
     ISO_CHECK(e1Default(true) == e1Default(true, device::k_default_arch) && e1Default(false) == 0u);
     for (const hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151})
@@ -182,6 +182,13 @@ void testE1Default() {
     // it off). The measurements are cited at the constant (src/spec/policy.h); whirl-server-tests pins that citation.
     ISO_CHECK(e1_default_ctx_max == 65536u);
     ISO_CHECK(e1_default_ctx_max > 32768u);  // never widened to the OPEN cell
+    // v0252-e1s8 round 2 (B): the boundary per code object comes from the device profile; the R9700 row keeps that constant,
+    // the 8060S row its own measured value (screen e1s8-orn 20261125-0619: cycles/s +4.04 % at 2048, +2.32 % at 8192, -4.06 %
+    // at 32768 -> 8192, the largest length with a measured gain)
+    ISO_CHECK(e1CtxMax(hip::Arch::gfx1201) == e1_default_ctx_max);
+    ISO_CHECK(e1CtxMax(hip::Arch::gfx1151) == 8192u);
+    for (const hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151}) ISO_CHECK(e1CtxMax(a) == device::profile(a).e1_ctx_max);
+    ISO_CHECK(e1CtxMax() == e1CtxMax(device::k_default_arch));
 }
 
 void testNgram() {

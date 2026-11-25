@@ -111,6 +111,15 @@ struct MockConfig {
     // host's. gpu / gpu-zc follow it (an exact prefix is still exact: same text); check mode reports it - and a lookahead
     // cycle that already consumed those words cannot be taken back (the engine fails the request)
     std::uint32_t spec_acc_short = 0;
+    // v0252-e1s8 (E1 in snapshot mode, the gfx1151 select mode; kernels/gdn_select.h): with replay = false, true = the model
+    // keeps its snapshot sets and a spare set as real buffers (pointer tables, like Context) and a verify of a sequence marked
+    // by setPending(s, qwen35::npend_dev) selects its input on the "device" from the NPEND word: candidates = the snapshot
+    // sets of the sequence's last verify + its live state, own snapshots into the candidates it did not take, final state
+    // into the spare set. settleSelect renames the tables, dropPending gives the state back (end inside the window). false =
+    // the value snapshots of FR-SRV P2-5 and no E1 path in snapshot mode (as before)
+    bool snap_select = false;
+    // v0252-e1s8: snapshot sets allocated by the constructor (whirl-server's startup ensureSnapshots; 0 = none up front)
+    std::uint32_t snap_sets = 0;
 };
 
 class MockModel final : public server::ServerModel {
@@ -146,9 +155,13 @@ public:
 
     void selectSeq(std::uint32_t s) override { cur_ = s; }
     void commitSeq(std::uint32_t s) override;
-    void dropPending(std::uint32_t s) override { seqs_[s].npend = 0; }
-    void setPending(std::uint32_t s, std::uint32_t rows) override { seqs_[s].npend = rows; }
+    void dropPending(std::uint32_t s) override;
+    void setPending(std::uint32_t s, std::uint32_t rows) override {
+        seqs_[s].npend = rows;
+        seqs_[s].held = false;
+    }
     void restoreSeqSnapshot(std::uint32_t, std::uint32_t) override;
+    void settleSelect(std::uint32_t s, std::uint32_t acc) override;  // v0252-e1s8 (snap_select)
     void mapPages(std::uint32_t s, std::uint32_t first, std::span<const std::int32_t> phys) override;
     void reset() override;
 
@@ -248,7 +261,14 @@ public:
     // them: a host copy that differs counts in disagree - in the synchronous P1b cycle they must agree); MSeg::e1_rows -> step
     // 0's rows = the last verify's argmax words at pend_pos + j, the chain continues from row ACC (pend must be empty);
     // setPending(s, qwen35::npend_dev) -> the replay count is the NPEND word; SpecAccArgs::pos < 0 -> the NPOS word.
-    bool e1InputsOk() const override { return mc_.e1_inputs && mc_.replay && mc_.spec_acc_kernel; }
+    // (v0252-e1s8: or snapshot mode with the select mode, MockConfig::snap_select)
+    bool e1InputsOk() const override { return mc_.e1_inputs && (mc_.replay || mc_.snap_select) && mc_.spec_acc_kernel; }
+    // v0252-e1s8: select verifies run, settles, given-back states (dropPending in the window), settles that found no select
+    // verify to settle (a bookkeeping error: also poison)
+    struct SelCounts {
+        std::uint64_t selects = 0, settles = 0, given_back = 0, bad_settles = 0;
+    };
+    SelCounts selCounts() const;
     struct E1Counts {
         std::uint64_t verify_segs = 0;   // verify segments with dev
         std::uint64_t mtp_segs = 0;      // MTP step-0 segments with e1_rows
@@ -287,7 +307,20 @@ private:
         std::array<std::int32_t, qwen35::ctl_words> ctl{};
         State chain{};              // MTP draft chain
         std::uint32_t chain_pos = 0;
+        // v0252-e1s8 (snap_select): drafts of the last verify (the next select verify's candidates m), the candidate count of
+        // the last verify if it selected (else -1: nothing to settle), the spare holds the state of the cycle before
+        std::uint32_t sel_m = 0;
+        std::int32_t sel_cm = -1;
+        bool held = false;
     };
+    // v0252-e1s8 (snap_select): the snapshot sets and the spare set as pointer tables (per layer, 0 for attention layers)
+    std::vector<std::vector<server::DevPtr>> pconv_, pssm_;
+    std::vector<std::uint32_t> powner_;  // the sequence whose verify wrote the set last
+    std::vector<server::DevPtr> spconv_, spssm_;
+    std::atomic<std::uint64_t> sel_selects_{0}, sel_settles_{0}, sel_given_{0}, sel_bad_{0};
+    bool physical() const { return !mc_.replay && mc_.snap_select; }
+    std::vector<server::DevPtr> allocStateTable();
+    std::uint64_t readHAt(std::span<const server::DevPtr> conv, std::span<const server::DevPtr> ssm) const;
     static std::uint64_t mix(std::uint64_t h, std::uint64_t a, std::uint64_t b);
     std::uint64_t readH(const Seq& s) const;
     void writeH(Seq& s, std::uint64_t h);
