@@ -58,6 +58,7 @@ struct DispatchProbe : q::Context {
     using q::Context::x16_src;  // Scratch (a protected base of Context)
     using q::Context::xq_n;
     using q::Context::xq_src;
+    using q::Context::w4s_gains;  // v0252-w4a4k2 round 4
 };
 
 whirl::hip::Function fn(std::uintptr_t i) { return reinterpret_cast<whirl::hip::Function>(i); }
@@ -226,6 +227,48 @@ void testGemmTailLaunches() {
     }
 }
 
+
+// v0252-w4a4k2 round 4 (the round-3 NaN): a W4A4 sim plan whose dequant is a GAIN twin (GemmPlan::dq_gain) must run the f16
+// GEMM on the dequantized weights in w16 (row stride ncols x 2), exactly as the plain sim dequant does - round 3 left the GEMM
+// on the raw MXFP4 bytes (weight pointer w.ptr, stride row_bytes): every gain arm gave NaN logits on the 8060S while kt (which
+// launches the kernels itself) passed. Also: the gain launch gets this matrix's cached gain array. Fails before the fix.
+void testW4sGainLaunch() {
+    namespace kn = whirl::kernels;
+    auto c = std::make_unique<DispatchProbe>();
+    const std::size_t mx = static_cast<std::size_t>(GgmlType::mxfp4);
+    const std::uint32_t G = static_cast<std::uint32_t>(kn::kGemmCfgs.size());
+    c->k.gemmh_f16 = fn(0x60);
+    c->k.dequant_f16[mx] = fn(0x61);
+    c->k.w4s_dq[0] = fn(0x80);
+    c->k.w4s_dqg[0] = fn(0x81);
+    c->gemm_tail = 0;
+    q::Mat w;
+    w.ty = GgmlType::mxfp4;
+    w.nrows = 17408;
+    w.ncols = 5120;
+    w.row_bytes = 5120 / 256 * 136;
+    w.ptr = 0x10000000;
+    w.tune.fill(static_cast<std::uint8_t>(G + 2));
+    c->w16 = 0x20000000;
+    const whirl::hip::DevPtr gains = 0x50000000;
+    c->w4s_gains.push_back({w.ptr, 0, 1, gains});  // cached: no device call (this program has no GPU)
+    const whirl::hip::DevPtr x16in = 0x30000000, y = 0x40000000;
+    for (const std::uint8_t gain : {std::uint8_t{0}, std::uint8_t{1}}) {
+        fake::recordLaunches(true);
+        fake::recordArgWord(fn(0x60), 0);  // gemmh_f16(W, X, Y, ...): the weight pointer
+        fake::recordArgWord(gain ? fn(0x81) : fn(0x80), gain ? 5 : 2);  // gain twin: arg 5 = gains; plain: arg 2 = out
+        c->gemmF16(w, x16in, y, 2048, 0, 1, gain);
+        const auto l = fake::recordedLaunches();
+        const auto ctx = fake::recordedLaunchCtx();
+        fake::recordLaunches(false);
+        ISO_CHECK(l.size() == 2 && ctx.size() == 2);
+        if (l.size() == 2 && ctx.size() == 2) {
+            ISO_CHECK(l[0].f == (gain ? fn(0x81) : fn(0x80)));
+            ISO_CHECK(ctx[0].word == (gain ? gains : c->w16));
+            ISO_CHECK(l[1].f == fn(0x60) && ctx[1].word == c->w16);  // the GEMM reads the dequantized weights
+        }
+    }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -237,6 +280,7 @@ int main(int argc, char** argv) {
                      {"prec_missing", testPrecMissing},
                      {"has_tiled_fp8", testHasTiledFp8},
                      {"norm_and_elementwise_launches", testNormAndElementwiseLaunches},
-                     {"gemm_tail_launches", testGemmTailLaunches}},  // v0252-pp2k2
+                     {"gemm_tail_launches", testGemmTailLaunches},  // v0252-pp2k2
+                     {"w4s_gain_launch", testW4sGainLaunch}},  // v0252-w4a4k2 round 4
                     argc, argv);
 }
