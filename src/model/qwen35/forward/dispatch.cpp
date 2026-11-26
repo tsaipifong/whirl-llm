@@ -6,6 +6,8 @@
 
 #include "../forward_internal.h"
 
+#include <cstdio>  // v0252-w4a4k2 round 4: the w4s gain diagnostic line (stderr)
+
 namespace whirl::qwen35 {
 
 void Context::mark(OpClass cls) {
@@ -300,6 +302,20 @@ DevPtr Context::w4sGainsOf(const Mat& w, int grid, std::uint8_t mode) {
     hip::download(nd.data(), w4s_terms, rows * 16);
     std::vector<float> g(static_cast<std::size_t>(rows));
     ops::w4sGains(nd.data(), nd.data() + rows, static_cast<u32>(rows), mode, g.data());
+    // round 4: one diagnostic line per (matrix, grid, mode) at its first use - only reachable with a gain modifier in
+    // WHIRL_W4A4_SIM (a fast-only research switch): rows, min / max gain, non-finite terms
+    {
+        float gmin = g.empty() ? 1.0f : g[0], gmax = gmin;
+        u32 bad = 0;
+        for (std::size_t r = 0; r < g.size(); ++r) {
+            gmin = std::min(gmin, g[r]);
+            gmax = std::max(gmax, g[r]);
+            bad += !std::isfinite(nd[r]) || !std::isfinite(nd[rows + r]);
+        }
+        std::fprintf(stderr, "w4s gain: matrix 0x%llx %ux%u grid %d mode %s rows %llu gain min %.6g max %.6g non-finite terms %u\n",
+                     static_cast<unsigned long long>(w.ptr), static_cast<unsigned>(w.nrows), static_cast<unsigned>(w.ncols), grid,
+                     mode == 1 ? "g" : "r", static_cast<unsigned long long>(rows), gmin, gmax, bad);
+    }
     const DevPtr buf = alloc(rows * 4);
     hip::upload(buf, g.data(), rows * 4);
     w4s_gains.push_back(W4sGain{w.ptr, grid, mode, buf});
@@ -328,11 +344,15 @@ void Context::gemmPlanLaunch(const ops::GemmPlan& p, const Mat& w, DevPtr x16in,
     }
     DevPtr wptr = w.ptr;
     u64 wrb = w.row_bytes;
-    if (p.dequant && p.dq_gain) {  // v0252-w4a4k2 round 3: the gain twin takes the gain array of this matrix
-        if (w4s_gain_cur == 0) throw std::runtime_error("W4A4 sim: a gain dequant plan without gains");
-        hip::launch(p.dq, p.dq_grid, D(256), 0, stream, w.ptr, w.row_bytes, w16, ncols, nrows, w4s_gain_cur);
-    } else if (p.dequant) {
-        hip::launch(p.dq, p.dq_grid, D(256), 0, stream, w.ptr, w.row_bytes, w16, ncols, nrows);
+    if (p.dequant) {
+        if (p.dq_gain) {  // v0252-w4a4k2 round 3: the gain twin takes the gain array of this matrix
+            if (w4s_gain_cur == 0) throw std::runtime_error("W4A4 sim: a gain dequant plan without gains");
+            hip::launch(p.dq, p.dq_grid, D(256), 0, stream, w.ptr, w.row_bytes, w16, ncols, nrows, w4s_gain_cur);
+        } else {
+            hip::launch(p.dq, p.dq_grid, D(256), 0, stream, w.ptr, w.row_bytes, w16, ncols, nrows);
+        }
+        // round 4: BOTH dequant forms leave the f16 weights in w16 (round 3 set this only for the plain one, so a gain arm's
+        // GEMM read the raw MXFP4 bytes as f16: NaN logits; iso forward.dispatch w4s_gain_launch)
         wptr = w16;
         wrb = static_cast<u64>(w.ncols) * 2;
     }
