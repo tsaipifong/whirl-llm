@@ -527,7 +527,19 @@ protected:
     bool matmulGroupGemvh(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n);
     void matmul(const Mat& w, DevPtr xin, DevPtr y, std::uint32_t n, bool accumulate);
     // w4s_w: v0252-w4a4k2, the W4A4 fake-quant weight half, 0 off / grid + 1 (ops::GemmFlags::w4s_w; only Context::matmul sets it)
-    void gemmF16(const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc, std::uint8_t w4s_w = 0);
+    void gemmF16(const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc, std::uint8_t w4s_w = 0, std::uint8_t w4s_gain = 0);
+    // v0252-w4a4k2 round 3: the gain cache of the W4A4 fake-quant arm (dispatch.cpp w4sGainsOf); w4s_gain_cur = the gains of the
+    // matrix gemmF16 is launching (0 = none)
+    struct W4sGain {
+        DevPtr w = 0;
+        int grid = 0;
+        std::uint8_t mode = 0;
+        DevPtr gains = 0;
+    };
+    std::vector<W4sGain> w4s_gains;
+    DevPtr w4s_gain_cur = 0, w4s_terms = 0;
+    std::uint64_t w4s_terms_rows = 0;
+    DevPtr w4sGainsOf(const Mat& w, int grid, std::uint8_t mode);
     void gemmPlanLaunch(const ops::GemmPlan& p, const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);
     bool gdnIn2(const GdnW& g, std::uint32_t n) const;
     // x16b: f16 sub-buffer of x16 past the fp8 rows (tiled fp8 pads to 16 rows), 256-aligned

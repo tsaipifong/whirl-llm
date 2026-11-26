@@ -251,7 +251,9 @@ void Context::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate)
         }
         // round 2: the weight grid (w4a4_sim bits 8..10) -> GemmFlags::w4s_w = grid + 1
         const std::uint8_t wg = (sim & whirl::numerics::w4a4_sim_w) != 0 ? static_cast<std::uint8_t>(((sim >> whirl::numerics::w4a4_sim_grid_shift) & 7u) + 1u) : 0;
-        gemmF16(w, xg, y, n, acc, wg);
+        // round 3: the gain modifier (w4a4_sim bit g / r) -> GemmFlags::w4s_gain 1 (tensor) / 2 (row)
+        const std::uint8_t wgain = wg == 0 ? 0 : (sim & whirl::numerics::w4a4_sim_g) != 0 ? 1 : (sim & whirl::numerics::w4a4_sim_r) != 0 ? 2 : 0;
+        gemmF16(w, xg, y, n, acc, wg, wgain);
     }
     finish();
 }
@@ -260,9 +262,11 @@ void Context::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate)
 // the x16 cache). The kernel, the optional dequant into w16 and the grids come from ops::chooseGemmF16 (K-2); since
 // v0252-pp2k2 through ops::planGemmF16, which may split the rows into the 256-tile bulk and a gemms tail (same bits):
 // each piece launches on its rows of x16in and y (row-major per token), in order.
-void Context::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc, std::uint8_t w4s_w) {
+void Context::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc, std::uint8_t w4s_w, std::uint8_t w4s_gain) {
     ops::GemmFlags gf = gemmFlags();
     gf.w4s_w = w4s_w;  // v0252-w4a4k2 (only Context::matmul passes true)
+    gf.w4s_gain = w4s_gain;  // round 3
+    w4s_gain_cur = w4s_w != 0 && w4s_gain != 0 ? w4sGainsOf(w, static_cast<int>(w4s_w) - 1, w4s_gain) : 0;
     const ops::GemmPieces pc = ops::planGemmF16(matShape(w), n, w.tune[tuneBucket(n)], gf, k);
     for (std::size_t i = 0; i < pc.n; ++i) {
         const ops::GemmPiece& g = pc.p[i];
@@ -273,6 +277,33 @@ void Context::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc, std:
             gemmPlanLaunch(g.plan, w, x16in + static_cast<u64>(g.row0) * w.ncols * 2, y + static_cast<u64>(g.row0) * w.nrows * y_el, g.rows, acc);
         }
     }
+}
+
+// v0252-w4a4k2 round 3: the least-squares gains of matrix w on weight grid `grid` (mode 1 = one per tensor, 2 = one per row),
+// computed once per (matrix, grid, mode) at its first use: w4s_gain_terms on the device (num / den per row, double, the
+// bits of gemm_w4a4_sim.h w4s_gain_terms_row), download, ops::w4sGains on the host, upload nrows f32 gains. Cache: the
+// Context's w4s_gains list (key = weight pointer + grid + mode), buffers from alloc() (kept for the Context's life; the
+// switch is a fast-only research arm, so the memory is nrows x 4 bytes per matrix, ~0.5 MB for Swift).
+DevPtr Context::w4sGainsOf(const Mat& w, int grid, std::uint8_t mode) {
+    for (const W4sGain& e : w4s_gains)
+        if (e.w == w.ptr && e.grid == grid && e.mode == mode) return e.gains;
+    if (k.w4s_gterms == nullptr) throw std::runtime_error("W4A4 sim: no w4s_gain_terms kernel in this code object");
+    const u64 rows = w.nrows;
+    if (w4s_terms_rows < rows) {
+        w4s_terms = alloc(rows * 16);
+        w4s_terms_rows = rows;
+    }
+    hip::launch(k.w4s_gterms, D(static_cast<u32>((rows + 63) / 64)), D(64), 0, stream, w.ptr, w.row_bytes, I(w.ncols), I(w.nrows), grid, w4s_terms,
+                w4s_terms + rows * 8);
+    hip::streamSync(stream);
+    std::vector<double> nd(static_cast<std::size_t>(rows) * 2);
+    hip::download(nd.data(), w4s_terms, rows * 16);
+    std::vector<float> g(static_cast<std::size_t>(rows));
+    ops::w4sGains(nd.data(), nd.data() + rows, static_cast<u32>(rows), mode, g.data());
+    const DevPtr buf = alloc(rows * 4);
+    hip::upload(buf, g.data(), rows * 4);
+    w4s_gains.push_back(W4sGain{w.ptr, grid, mode, buf});
+    return buf;
 }
 
 // one launch of an f16 GEMM plan over n rows (the body of gemmF16 before v0252-pp2k2, unchanged)
@@ -297,7 +328,10 @@ void Context::gemmPlanLaunch(const ops::GemmPlan& p, const Mat& w, DevPtr x16in,
     }
     DevPtr wptr = w.ptr;
     u64 wrb = w.row_bytes;
-    if (p.dequant) {
+    if (p.dequant && p.dq_gain) {  // v0252-w4a4k2 round 3: the gain twin takes the gain array of this matrix
+        if (w4s_gain_cur == 0) throw std::runtime_error("W4A4 sim: a gain dequant plan without gains");
+        hip::launch(p.dq, p.dq_grid, D(256), 0, stream, w.ptr, w.row_bytes, w16, ncols, nrows, w4s_gain_cur);
+    } else if (p.dequant) {
         hip::launch(p.dq, p.dq_grid, D(256), 0, stream, w.ptr, w.row_bytes, w16, ncols, nrows);
         wptr = w16;
         wrb = static_cast<u64>(w.ncols) * 2;

@@ -153,6 +153,9 @@ struct GemmFlags {
     // (numerics flag w4a4_sim, fast, gfx1151 dense); no effect where the table has no w4s_dq.
     // round 2: 0 = off, g + 1 = weight grid g (MatmulKernels::w4s_dq[g]: 0 w, 1 w1, 2 w1e, 3 w1d, 4 wb)
     std::uint8_t w4s_w = 0;
+    // round 3: 0 = no gain, 1 = one gain per tensor (g), 2 = one per row (r): the dequant becomes MatmulKernels::w4s_dqg[grid]
+    // (GemmPlan::dq_gain; the caller passes the gain array); without that entry the arm is off
+    std::uint8_t w4s_gain = 0;
 };
 enum class GemmKind : std::uint8_t { gemvh, gemms, gemmhq, gemmh, gemmc, gemmfq };
 struct GemmPlan {
@@ -166,7 +169,13 @@ struct GemmPlan {
     // v0252-pp2k2: the kernel writes f16 outputs (an h16 twin: gemmhh_f16 / gemm_ch / gemmhqh / gemmsh); set for the
     // gemmh / gemmhq / gemms plans (the kinds planGemmF16 splits or launches as a tail), false otherwise
     bool y_h16 = false;
+    // v0252-w4a4k2 round 3: dq is a w4s gain entry: the dequant launch takes one more argument (const float* gain per row)
+    bool dq_gain = false;
 };
+// v0252-w4a4k2 round 3: the least-squares gains of the W4A4 fake-quant weight grids from the per-row terms num_r = <w_r, w_hat_r>,
+// den_r = <w_hat_r, w_hat_r> (the w4s_gain_terms kernel): mode 1 (tensor) = every row gets sum num / sum den (rows in order),
+// mode 2 (row) = num_r / den_r; den 0 or a non-finite ratio -> 1. out: nrows f32 gains.
+void w4sGains(const double* num, const double* den, std::uint32_t nrows, int mode, float* out);
 // the tuned choice code for n rows: [0, G) fused gemm_c on the quantized bytes, [G, 2G) dequant + f16 gemm_c,
 // [2G, 2G + S) gemms slot (G = kGemmCfgs.size(), S = kGemmsCfgs.size())
 std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k);

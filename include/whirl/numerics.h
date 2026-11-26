@@ -466,6 +466,9 @@ inline constexpr std::uint32_t w4a4_sim_w = 1, w4a4_sim_a = 2, w4a4_sim_am = 4;
 // 1 = w1 (step one e2m1 unit, halves up), 2 = w1e (halves to even), 3 = w1d (halves dithered by K parity), 4 = wb (per block
 // the better of w and w1); kernels/shared/gemm_w4a4_sim.h, MatmulKernels::w4s_dq[grid]
 inline constexpr std::uint32_t w4a4_sim_grid_shift = 8;
+// round 3 (2026-11-27): least-squares gain of the w half: g = one gain per weight tensor (bit 11), r = one per output row
+// (bit 12); written right after the weight token (wg, w1dr, wbra, ...); at most one; never without a weight token
+inline constexpr std::uint32_t w4a4_sim_g = 0x800, w4a4_sim_r = 0x1000;
 // value = [weight token][activation token] or "1" (= "wa"); weight token w | w1 | w1e | w1d | wb (with w set and the grid
 // above), activation token a | am; e.g. "w1", "w1ea", "wbam", "a", "am"; "0" / "" -> 0 (off); anything else -> nullopt (invalid)
 std::optional<std::uint32_t> parseW4a4Sim(std::string_view s);

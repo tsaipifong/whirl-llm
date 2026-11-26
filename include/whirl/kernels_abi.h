@@ -698,6 +698,10 @@ using Nt = std::array<PerType<Function>, kMaxSmallBatch - 1>;  // [nt - 2][type]
 // v0252-w4a4k2 round 2: the W4A4 fake-quant arm's weight-grid entries (kernels/gfx1151/gemm_w4a4s.hip), index = grid
 inline constexpr const char* kW4sDqNames[5] = {"w4s_dequant_f16_mxfp4", "w4s_dequant_f16_mxfp4_w1", "w4s_dequant_f16_mxfp4_w1e",
                                                "w4s_dequant_f16_mxfp4_w1d", "w4s_dequant_f16_mxfp4_wb"};
+// round 3: the gain twins (extra arg const float* gain: one per row) and the gain-terms kernel w4s_gain_terms(W, rb, ncols,
+// nrows, grid, double* num, double* den)
+inline constexpr const char* kW4sDqgNames[5] = {"w4s_dequant_f16_mxfp4_gn", "w4s_dequant_f16_mxfp4_w1_gn", "w4s_dequant_f16_mxfp4_w1e_gn",
+                                                "w4s_dequant_f16_mxfp4_w1d_gn", "w4s_dequant_f16_mxfp4_wb_gn"};
 struct MatmulKernels {
     using F = Function;
     bool gv_grp = false;  // gemvq_<T> / ggemv* take GvArgs (gemv_grouped_abi present)
@@ -738,6 +742,8 @@ struct MatmulKernels {
     // w4s_quant_x16(X, Xq, u64 nblk, i32 mse) (per-32 int4 round trip of f16 activations); null elsewhere
     // round 2: w4s_dq[g] = the weight grid g (kW4sDqNames; 0 = w, 1 = w1, 2 = w1e, 3 = w1d, 4 = wb)
     std::array<F, 5> w4s_dq{};
+    std::array<F, 5> w4s_dqg{};  // round 3: kW4sDqgNames (gain per row)
+    F w4s_gterms{};               // round 3: w4s_gain_terms
     F w4s_qx{};
     // activation converters of the GEMV / GEMM inputs
     F f32_to_f16{}, quantize_q8{}, qact_fp8{}, qact_fp8t{};

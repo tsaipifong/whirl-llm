@@ -21,10 +21,12 @@
 #define W4S_RINT rintf
 #define W4S_FMA fmaf
 #define W4S_LDEXP ldexpf
+#define W4S_LDEXPD ldexp
 #else
 #define W4S_RINT __builtin_rintf
 #define W4S_FMA __builtin_fmaf
 #define W4S_LDEXP __builtin_ldexpf
+#define W4S_LDEXPD __builtin_ldexp
 #endif
 
 #if defined(__HIP__) || defined(__HIPCC__)
@@ -137,6 +139,32 @@ W4S_HD inline void w4s_qblock(const float* x, int mse, int* q, float* d) {
     *d = best_d;
 }
 
+// round 3 (2026-11-27): the least-squares gain terms of one weight row on grid g: num = sum_k w_k x w_hat_k, den = sum_k
+// w_hat_k^2, w = the MXFP4 value kv x 2^(e-128) (exact in double), w_hat = the grid value of w4s_wblock (f32, before the f16
+// rounding). Each product of two f32 values is exact in double, the sums run in K order (blocks ascending, k 0..31), so the
+// device kernel w4s_gain_terms and this function give the same bits. The gain itself (tensor: sum num / sum den over the rows
+// in order; row: num / den; den 0 or a non-finite ratio -> 1) is ops::w4sGains on the host.
+W4S_HD inline void w4s_gain_terms_row(const uint8_t* mxrow, int ncols, int g, double* num, double* den) {
+    double n = 0.0, d = 0.0;
+    for (int b = 0; b < ncols / 32; ++b) {
+        const uint8_t* blk = mxrow + static_cast<size_t>(b / 8) * 136;
+        const int ib = b % 8;
+        const uint8_t* qs = blk + 8 + 16 * ib;
+        float v[32];
+        w4s_wblock(qs, blk[ib], g, v);
+        const double sc = W4S_LDEXPD(1.0, static_cast<int>(blk[ib]) - 128);
+        for (int k = 0; k < 32; ++k) {
+            const int code = k < 16 ? (qs[k] & 15) : (qs[k - 16] >> 4);
+            const double w = static_cast<double>(w4s_kv(code)) * sc;
+            const double h = static_cast<double>(v[k]);
+            n = n + w * h;  // w x h and h x h are exact in double: a contraction cannot change the bits
+            d = d + h * h;
+        }
+    }
+    *num = n;
+    *den = d;
+}
+
 #if !defined(__HIP_DEVICE_COMPILE__)
 // host f32 -> f16 bits, round to nearest even (= the device's (_Float16) conversion; subnormals kept, overflow -> inf)
 inline uint16_t w4s_f2h(float f) {
@@ -185,6 +213,17 @@ inline void w4s_dequant_row_host(const uint8_t* mx, int k, uint16_t* out, int g 
         float v[32];
         w4s_wblock(blk + 8 + 16 * ib, blk[ib], g, v);
         for (int i = 0; i < 32; ++i) out[b * 32 + i] = w4s_f2h(v[i]);
+    }
+}
+// round 3: the same with this row's gain (ops::w4sGains): f16 of the f32 product w_hat x gain - the reference of the gain
+// entries w4s_dequant_f16_mxfp4*_gn
+inline void w4s_dequant_row_host(const uint8_t* mx, int k, uint16_t* out, int g, float gain) {
+    for (int b = 0; b < k / 32; ++b) {
+        const uint8_t* blk = mx + static_cast<size_t>(b / 8) * 136;
+        const int ib = b % 8;
+        float v[32];
+        w4s_wblock(blk + 8 + 16 * ib, blk[ib], g, v);
+        for (int i = 0; i < 32; ++i) out[b * 32 + i] = w4s_f2h(v[i] * gain);
     }
 }
 // one f16 activation row of k values (k % 32 == 0) -> its fake-quantized f16 bits: the reference of w4s_quant_x16

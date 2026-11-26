@@ -327,6 +327,11 @@ std::optional<std::uint32_t> parseW4a4Sim(std::string_view s) {
             s.remove_prefix(tok.size());
             break;
         }
+    // round 3: the gain modifier (only after a weight token): g = per tensor, r = per output row
+    if (v != 0 && !s.empty() && (s.front() == 'g' || s.front() == 'r')) {
+        v |= s.front() == 'g' ? w4a4_sim_g : w4a4_sim_r;
+        s.remove_prefix(1);
+    }
     if (s.empty()) return v != 0 ? std::optional<std::uint32_t>(v) : std::nullopt;
     if (s == "a") return v | w4a4_sim_a;
     if (s == "am") return v | w4a4_sim_am;
@@ -758,7 +763,7 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     if (items)
         if (const Raw& v = e.w4a4_sim; v && !v->empty() && *v != "0") {
             if (!parseW4a4Sim(*v))
-                p.ignored.push_back(std::format("WHIRL_W4A4_SIM={} ignored: not [w|w1|w1e|w1d|wb][a|am] or 1 (the W4A4 fake-quant arm stays off)", *v));
+                p.ignored.push_back(std::format("WHIRL_W4A4_SIM={} ignored: not [w|w1|w1e|w1d|wb][g|r][a|am], a, am or 1 (the W4A4 fake-quant arm stays off)", *v));
             else if (!w4a4SimTaken(r, t))
                 p.ignored.push_back(std::format("WHIRL_W4A4_SIM={} ignored: the W4A4 fake-quant arm is fast-only, 8060S dense MXFP4 models ({} never takes it here)",
                                                 *v, modeName(p.mode)));

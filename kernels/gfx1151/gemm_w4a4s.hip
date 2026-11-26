@@ -42,6 +42,45 @@ extern "C" __global__ void __launch_bounds__(256) w4s_dequant_f16_mxfp4_w1e(cons
 extern "C" __global__ void __launch_bounds__(256) w4s_dequant_f16_mxfp4_w1d(const uint8_t *W, uint64_t row_bytes, _Float16 *out, int ncols, int nrows) { w4s_dequant_impl<3>(W, row_bytes, out, ncols, nrows); }
 extern "C" __global__ void __launch_bounds__(256) w4s_dequant_f16_mxfp4_wb(const uint8_t *W, uint64_t row_bytes, _Float16 *out, int ncols, int nrows) { w4s_dequant_impl<4>(W, row_bytes, out, ncols, nrows); }
 
+// round 3: the least-squares gain of the weight grids. w4s_gain_terms: one thread per row, num / den of the row on grid g
+// (gemm_w4a4_sim.h w4s_gain_terms_row, double; the host turns them into gains, ops::w4sGains). The _gn entries = the plain
+// ones with the row's gain multiplied into the f32 value before the f16 store (gain[r]; a tensor gain = the same value in
+// every row). Launch: (nrows + 63) / 64 x 64 threads for the terms, the dequant grid for the _gn entries.
+extern "C" __global__ void __launch_bounds__(64) w4s_gain_terms(const uint8_t *W, uint64_t row_bytes, int ncols, int nrows, int grid, double *num,
+                                                              double *den) {
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= nrows) return;
+    double n, d;
+    w4s_gain_terms_row(W + static_cast<size_t>(r) * row_bytes, ncols, grid, &n, &d);
+    num[r] = n;
+    den[r] = d;
+}
+template <int G>
+__device__ void w4s_dequant_gain_impl(const uint8_t *W, uint64_t row_bytes, _Float16 *out, int ncols, int nrows, const float *gain) {
+    const size_t spr = static_cast<size_t>(ncols) / 32;
+    const size_t total = spr * static_cast<size_t>(nrows);
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (size_t)gridDim.x * blockDim.x) {
+        const size_t r = i / spr, b = i % spr;
+        const uint8_t *blk = W + r * row_bytes + (b / 8) * 136;
+        const int ib = static_cast<int>(b % 8);
+        float v[32];
+        w4s_wblock(blk + 8 + 16 * ib, blk[ib], G, v);
+        const float gr = gain[r];
+        _Float16 *o = out + r * static_cast<size_t>(ncols) + b * 32;
+#pragma unroll
+        for (int k = 0; k < 32; ++k) {
+            float p = v[k] * gr;
+            W4S_F32(p);  // f32 product, then f16 (the round-2 rule)
+            o[k] = (_Float16)p;
+        }
+    }
+}
+extern "C" __global__ void __launch_bounds__(256) w4s_dequant_f16_mxfp4_gn(const uint8_t *W, uint64_t row_bytes, _Float16 *out, int ncols, int nrows, const float *gain) { w4s_dequant_gain_impl<0>(W, row_bytes, out, ncols, nrows, gain); }
+extern "C" __global__ void __launch_bounds__(256) w4s_dequant_f16_mxfp4_w1_gn(const uint8_t *W, uint64_t row_bytes, _Float16 *out, int ncols, int nrows, const float *gain) { w4s_dequant_gain_impl<1>(W, row_bytes, out, ncols, nrows, gain); }
+extern "C" __global__ void __launch_bounds__(256) w4s_dequant_f16_mxfp4_w1e_gn(const uint8_t *W, uint64_t row_bytes, _Float16 *out, int ncols, int nrows, const float *gain) { w4s_dequant_gain_impl<2>(W, row_bytes, out, ncols, nrows, gain); }
+extern "C" __global__ void __launch_bounds__(256) w4s_dequant_f16_mxfp4_w1d_gn(const uint8_t *W, uint64_t row_bytes, _Float16 *out, int ncols, int nrows, const float *gain) { w4s_dequant_gain_impl<3>(W, row_bytes, out, ncols, nrows, gain); }
+extern "C" __global__ void __launch_bounds__(256) w4s_dequant_f16_mxfp4_wb_gn(const uint8_t *W, uint64_t row_bytes, _Float16 *out, int ncols, int nrows, const float *gain) { w4s_dequant_gain_impl<4>(W, row_bytes, out, ncols, nrows, gain); }
+
 extern "C" __global__ void __launch_bounds__(256) w4s_quant_x16(const _Float16 *X, _Float16 *Xq, uint64_t nblk, int mse) {
     for (uint64_t g = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x; g < nblk; g += (uint64_t)gridDim.x * blockDim.x) {
         float x[32];
