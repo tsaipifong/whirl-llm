@@ -1600,6 +1600,78 @@ static void test_w4s_grids() {
     check("w4s grids: host row reference (5 grids) == w4s_wblock per sub-block, one f16 rounding", bad == 0, num(static_cast<double>(bad)));
 }
 
+// v0252-w4a4k2 round 3: the gain terms of a row (w4s_gain_terms_row: num = sum w x w_hat, den = sum w_hat^2 in double, w = the
+// MXFP4 value, w_hat = the grid value before the f16 rounding) and the gained host reference (f16 of the f32 product
+// w_hat x gain). Known-scale rows: on w1 a row of exact codes (no 0.5 / 1.5) gives num == den (gain 1 exactly); a row whose
+// every code is 1.5 on w1 (w_hat 2 = 4/3 w) gives num / den = 3/4; a zero row 0 / 0. Fails to build before the change.
+static void test_w4s_gain_terms() {
+    auto row = [](int code) {
+        std::vector<std::uint8_t> mx(2 * 136);
+        for (int u = 0; u < 2; ++u) {
+            for (int ib = 0; ib < 8; ++ib) mx[static_cast<std::size_t>(u * 136 + ib)] = static_cast<std::uint8_t>(118 + ib);
+            for (int j = 0; j < 128; ++j) mx[static_cast<std::size_t>(u * 136 + 8 + j)] = static_cast<std::uint8_t>((code & 15) | ((code & 15) << 4));
+        }
+        return mx;
+    };
+    double tn = -1, td = -1;
+    std::size_t bad = 0;
+    for (int code : {2, 4, 5, 6, 7, 10, 15}) {  // exact on w1 (1, 2, 3, 4, 6 and signs)
+        const std::vector<std::uint8_t> mx = row(code);
+        w4s_gain_terms_row(mx.data(), 512, 1, &tn, &td);
+        bad += !(tn == td && td > 0);
+    }
+    check("w4s gain: exact codes on w1 -> tn == td (gain 1)", bad == 0, num(static_cast<double>(bad)));
+    const std::vector<std::uint8_t> m15 = row(3);  // 1.5 -> level 2 on w1: w_hat = 4/3 w
+    w4s_gain_terms_row(m15.data(), 512, 1, &tn, &td);
+    check("w4s gain: every code 1.5 on w1 -> tn / td = 3/4 exactly", td > 0 && tn / td == 0.75, num(tn / td));
+    const std::vector<std::uint8_t> m0 = row(0);
+    for (int g = 0; g < 5; ++g) {
+        w4s_gain_terms_row(m0.data(), 512, g, &tn, &td);
+        bad += !(tn == 0.0 && td == 0.0);
+    }
+    check("w4s gain: a zero row -> tn 0, td 0 on every grid", bad == 0);
+    // terms == the brute sum of the documented definition, random row, every grid
+    std::vector<std::uint8_t> mx(4 * 136);
+    std::uint32_t s = 99;
+    auto rnd = [&]() { return s = s * 1664525u + 1013904223u, s >> 8; };
+    for (int u = 0; u < 4; ++u) {
+        for (int ib = 0; ib < 8; ++ib) mx[static_cast<std::size_t>(u * 136 + ib)] = static_cast<std::uint8_t>(105 + rnd() % 25);
+        for (int j = 0; j < 128; ++j) mx[static_cast<std::size_t>(u * 136 + 8 + j)] = static_cast<std::uint8_t>(rnd());
+    }
+    bad = 0;
+    for (int g = 0; g < 5; ++g) {
+        double n2 = 0, d2 = 0;
+        for (int b = 0; b < 32; ++b) {
+            const std::uint8_t* blk = mx.data() + (b / 8) * 136;
+            float v[32];
+            w4s_wblock(blk + 8 + 16 * (b % 8), blk[b % 8], g, v);
+            for (int k = 0; k < 32; ++k) {
+                const int code = k < 16 ? (blk[8 + 16 * (b % 8) + k] & 15) : (blk[8 + 16 * (b % 8) + k - 16] >> 4);
+                const double w = static_cast<double>(w4s_kv(code)) * std::ldexp(1.0, static_cast<int>(blk[b % 8]) - 128);
+                n2 += w * static_cast<double>(v[k]);
+                d2 += static_cast<double>(v[k]) * static_cast<double>(v[k]);
+            }
+        }
+        w4s_gain_terms_row(mx.data(), 1024, g, &tn, &td);
+        bad += tn != n2 || td != d2;
+        // gained host reference: f16(f32(w_hat) x gain)
+        std::vector<std::uint16_t> h(1024), h0(1024);
+        const float gain = 0.9375f;
+        w4s_dequant_row_host(mx.data(), 1024, h.data(), g, gain);
+        for (int b = 0; b < 32; ++b) {
+            const std::uint8_t* blk = mx.data() + (b / 8) * 136;
+            float v[32];
+            w4s_wblock(blk + 8 + 16 * (b % 8), blk[b % 8], g, v);
+            for (int k = 0; k < 32; ++k) bad += h[static_cast<std::size_t>(b * 32 + k)] != w4s_f2h(v[k] * gain);
+        }
+        w4s_dequant_row_host(mx.data(), 1024, h.data(), g, 1.0f);
+        w4s_dequant_row_host(mx.data(), 1024, h0.data(), g);
+        bad += h != h0;  // gain 1 == the ungained reference
+    }
+    check("w4s gain: terms == sum w x w_hat / w_hat^2 (row order, double); gained reference = f16(w_hat x gain); gain 1 == none", bad == 0,
+          num(static_cast<double>(bad)));
+}
+
 int main(int argc, char** argv) {
     std::string emit;
     for (int i = 1; i < argc; ++i)
@@ -1652,6 +1724,7 @@ int main(int argc, char** argv) {
         test_w4s_acts_mse();
         test_w4s_dot_vs_fold();
         test_w4s_grids();  // v0252-w4a4k2 round 2
+        test_w4s_gain_terms();  // v0252-w4a4k2 round 3
     } catch (const std::exception& e) {
         check(std::string("exception: ") + e.what(), false);
     }

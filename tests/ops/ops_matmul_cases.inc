@@ -869,4 +869,63 @@ void testOpsGemmW4s() {
     }
 }
 
+// v0252-w4a4k2 round 3: the least-squares gain of the W4A4 fake-quant weight grids. ops::w4sGains turns the per-row terms
+// num_r = <w_r, w_hat_r>, den_r = <w_hat_r, w_hat_r> (double, computed by the w4s_gain_terms kernel / its host reference) into
+// one f32 gain per row: mode 1 (g) = sum num / sum den (rows in order) for every row, mode 2 (r) = num_r / den_r. A row (or
+// tensor) with den 0 or a non-finite ratio gets 1. GemmFlags::w4s_gain (1 / 2) makes the plan's dequant the gain entry
+// MatmulKernels::w4s_dqg[grid] (GemmPlan::dq_gain: the launch adds the gain array); without the entry the arm stays off.
+// Fails to build before the change (no ops::w4sGains / GemmFlags::w4s_gain / MatmulKernels::w4s_dqg / GemmPlan::dq_gain).
+void testOpsW4sGains() {
+    // known scale errors: w_hat = 2 w (row 0), w_hat = w / 4 (row 1), a zero row (row 2), a NaN term (row 3)
+    const double num[4] = {2.0 * 10.0, 0.25 * 10.0, 0.0, std::nan("")};
+    const double den[4] = {4.0 * 10.0, 0.0625 * 10.0, 0.0, 1.0};
+    float g[4] = {-1, -1, -1, -1};
+    ops::w4sGains(num, den, 4, 2, g);
+    CHECK(g[0] == 0.5f && g[1] == 4.0f && g[2] == 1.0f && g[3] == 1.0f);
+    ops::w4sGains(num, den, 3, 1, g);  // tensor over rows 0..2: (20 + 2.5 + 0) / (40 + 0.625 + 0)
+    const float t = static_cast<float>((20.0 + 2.5 + 0.0) / (40.0 + 0.625 + 0.0));
+    CHECK(g[0] == t && g[1] == t && g[2] == t);
+    ops::w4sGains(num, den, 4, 1, g);  // a NaN anywhere in the tensor -> 1 everywhere
+    CHECK(g[0] == 1.0f && g[3] == 1.0f);
+    const double z[2] = {0.0, 0.0};
+    ops::w4sGains(z, z, 2, 1, g);
+    CHECK(g[0] == 1.0f && g[1] == 1.0f);
+    for (int m = 1; m <= 2; ++m) {
+        const double hn[1] = {1e300}, hd[1] = {1e-300};  // ratio overflows to inf -> 1
+        float o[1] = {0};
+        ops::w4sGains(hn, hd, 1, m, o);
+        CHECK(o[0] == 1.0f);
+    }
+    // plan: the gain entry of the grid, dq_gain set; no gain entry -> the arm stays off (the original plan)
+    const std::uint32_t G = static_cast<std::uint32_t>(kn::kGemmCfgs.size());
+    auto gate = mat(GgmlType::mxfp4, 17408, 5120);
+    gate.row_bytes = 5120 / 256 * 136;
+    static const kn::KernelTable kb = gemmTable(true, true, false);
+    const auto kp = std::make_unique<kn::KernelTable>(kb);
+    kn::KernelTable& k = *kp;
+    k.gemmfq[1] = tag("gemmfq_t2_mxfp4");
+    for (std::size_t i = 0; i < k.w4s_dq.size(); ++i) {
+        k.w4s_dq[i] = tag(kn::kW4sDqNames[i]);
+        k.w4s_dqg[i] = tag(kn::kW4sDqgNames[i]);
+    }
+    const std::uint8_t deq2 = static_cast<std::uint8_t>(G + 2);
+    ops::GemmFlags f;
+    f.fdq = 2;
+    f.w4s_w = 4;  // grid w1d
+    for (std::uint8_t m : {1, 2}) {
+        f.w4s_gain = m;
+        const ops::GemmPlan p = ops::chooseGemmF16(gate, 2048, deq2, f, k);
+        CHECK(p.dequant && p.dq_gain && nameOf(p.dq) == kn::kW4sDqgNames[3]);
+    }
+    f.w4s_gain = 0;
+    {
+        const ops::GemmPlan p = ops::chooseGemmF16(gate, 2048, deq2, f, k);
+        CHECK(p.dequant && !p.dq_gain && nameOf(p.dq) == kn::kW4sDqNames[3]);
+    }
+    CHECK(!ops::GemmPlan{}.dq_gain && ops::GemmFlags{}.w4s_gain == 0);
+    f.w4s_gain = 2;
+    k.w4s_dqg[3] = nullptr;
+    CHECK(ops::chooseGemmF16(gate, 2048, deq2, f, k).kind == ops::GemmKind::gemmfq);
+}
+
 }  // namespace

@@ -1995,14 +1995,20 @@ static void testW4a4SimFlag() {
         return nu::plan(r, t);
     };
     NCHECK(nu::w4a4_sim_w == 1u && nu::w4a4_sim_a == 2u && nu::w4a4_sim_am == 4u && nu::w4a4_sim_grid_shift == 8u, "w4a4_sim bits 1 / 2 / 4, grid << 8");
+    NCHECK(nu::w4a4_sim_g == 0x800u && nu::w4a4_sim_r == 0x1000u, "w4a4_sim gain bits g 0x800 / r 0x1000 (round 3)");
     // round 2: weight grids w (0) / w1 (1) / w1e (2) / w1d (3) / wb (4) in bits 8..10, combinable with a / am
     const std::pair<const char*, std::uint32_t> vals[] = {{"w", 1u},         {"a", 2u},         {"am", 4u},       {"wa", 3u},
                                                            {"1", 3u},         {"wam", 5u},       {"w1", 0x101u},   {"w1e", 0x201u},
                                                            {"w1d", 0x301u},   {"wb", 0x401u},    {"w1a", 0x103u},  {"w1ea", 0x203u},
-                                                           {"w1dam", 0x305u}, {"wbam", 0x405u}};
+                                                           {"w1dam", 0x305u}, {"wbam", 0x405u},
+                                                           // round 3: gain modifier g (tensor, bit 11) / r (row, bit 12) after the weight token
+                                                           {"wg", 0x801u},    {"wr", 0x1001u},   {"w1dg", 0xB01u}, {"w1dr", 0x1301u},
+                                                           {"wbr", 0x1401u},  {"w1eg", 0xA01u},  {"wra", 0x1003u}, {"w1dra", 0x1303u},
+                                                           {"wgam", 0x805u},  {"w1g", 0x901u}};
     for (const auto& [s, b] : vals) NCHECK(nu::parseW4a4Sim(s) == std::optional<std::uint32_t>(b), "parseW4a4Sim({}) = {}", s, b);
     for (const char* s : {"0", ""}) NCHECK(nu::parseW4a4Sim(s) == std::optional<std::uint32_t>(0u), "parseW4a4Sim('{}') = 0", s);
-    for (const char* s : {"2", "x", "aw", "W", "m", "wm", " w", "wa ", "w1x", "w1em", "w2", "wbw", "aw1", "1a"})
+    for (const char* s : {"2", "x", "aw", "W", "m", "wm", " w", "wa ", "w1x", "w1em", "w2", "wbw", "aw1", "1a", "wgr", "wrg", "ag", "gw", "w1dgr",
+                          "rw", "1g", "wgg", "g", "r", "amg", "wag"})
         NCHECK(!nu::parseW4a4Sim(s), "parseW4a4Sim('{}') = invalid", s);
     std::size_t on_cells = 0;
     for (const char* mode : {"precise", "balance", "fast"})

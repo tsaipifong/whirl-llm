@@ -13,6 +13,7 @@
 #include "cpu_ref.h"
 #include "kt_w4a4p.h"                             // v0252-w4a4k2: the W4A4 probe's CPU definitions (codes, scales, exact fold)
 #include "../../kernels/shared/gemm_w4a4_sim.h"  // v0252-w4a4k2: the fake-quant arm's math (host references)
+#include "whirl/ops/matmul.h"                   // v0252-w4a4k2 round 3: ops::w4sGains (the host gain rule)
 
 #include <functional>
 
@@ -773,6 +774,54 @@ void testW4s(Ctx& c) {
             if (variant == 0 && g == 0) {
                 wsim_h = want;
                 hm0 = hm;
+            }
+        }
+    }
+    // round 3: the least-squares gains. w4s_gain_terms (one thread per row) == w4s_gain_terms_row bitwise (num / den, double),
+    // grids w and w1d; then the gain entries w4s_dequant_f16_mxfp4*_gn with the gains ops::w4sGains makes from the host terms ==
+    // w4s_dequant_row_host(..., gain) bitwise for w + g (tensor), w + r (row), w1d + r. Presence: the gain kernels exist where
+    // the plain ones do and are loaded into MatmulKernels::w4s_gterms / w4s_dqg.
+    {
+        const hip::Function gt = c.fnOpt("w4s_gain_terms");
+        bool loaded = gt != nullptr && c.k.w4s_gterms == gt;
+        for (std::size_t g = 0; g < 5; ++g) loaded = loaded && c.fnOpt(wk::kW4sDqgNames[g]) != nullptr && c.k.w4s_dqg[g] == c.fnOpt(wk::kW4sDqgNames[g]);
+        Result r;
+        r.kind = Kind::invariant;
+        r.n = 1;
+        r.name = "w4s_gain_terms / w4s_dequant_f16_mxfp4*_gn in the gfx1151 code object and loaded into the host table";
+        r.pass = loaded;
+        r.mismatches = r.pass ? 0 : 1;
+        c.rep.add(r);
+        if (loaded) {
+            Buf w(hm0.data), dn(static_cast<std::size_t>(nr) * 8), dd(static_cast<std::size_t>(nr) * 8), w16(static_cast<std::size_t>(nr) * nc * 2);
+            const struct {
+                int grid, mode;
+                const char* name;
+            } cases[] = {{0, 1, "w + g (tensor gain)"}, {0, 2, "w + r (row gains)"}, {3, 2, "w1d + r (row gains)"}};
+            for (const auto& cs : cases) {
+                hip::launch(gt, {cdiv(nr, 64), 1, 1}, {64, 1, 1}, 0, c.s, w.p(), hm0.row_bytes, nc, nr, cs.grid, dn.p(), dd.p());
+                c.sync();
+                std::vector<double> hn(static_cast<std::size_t>(nr)), hd(static_cast<std::size_t>(nr));
+                for (int r = 0; r < nr; ++r)
+                    w4s_gain_terms_row(hm0.data.data() + static_cast<std::size_t>(r) * hm0.row_bytes, nc, cs.grid, &hn[static_cast<std::size_t>(r)],
+                                       &hd[static_cast<std::size_t>(r)]);
+                if (cs.mode == 1 || cs.grid == 3) {  // once per grid
+                    c.rep.add(cmpExact(std::string("w4s_gain_terms num == host (grid ") + std::to_string(cs.grid) + ", 256 rows)", dn.down<double>(hn.size()), hn));
+                    c.rep.add(cmpExact(std::string("w4s_gain_terms den == host (grid ") + std::to_string(cs.grid) + ", 256 rows)", dd.down<double>(hd.size()), hd));
+                }
+                std::vector<float> gains(static_cast<std::size_t>(nr));
+                whirl::ops::w4sGains(hn.data(), hd.data(), static_cast<std::uint32_t>(nr), cs.mode, gains.data());
+                Buf dg(gains);
+                const std::uint64_t groups = static_cast<std::uint64_t>(nc / 8) * nr;
+                hip::launch(c.k.w4s_dqg[static_cast<std::size_t>(cs.grid)], {static_cast<unsigned>(std::min<std::uint64_t>(cdiv(groups, 256), 65535)), 1, 1},
+                            {256, 1, 1}, 0, c.s, w.p(), hm0.row_bytes, w16.p(), nc, nr, dg.p());
+                c.sync();
+                std::vector<std::uint16_t> want(static_cast<std::size_t>(nr) * nc);
+                for (int r = 0; r < nr; ++r)
+                    w4s_dequant_row_host(hm0.data.data() + static_cast<std::size_t>(r) * hm0.row_bytes, nc, want.data() + static_cast<std::size_t>(r) * nc,
+                                         cs.grid, gains[static_cast<std::size_t>(r)]);
+                c.rep.add(cmpExact(std::string(wk::kW4sDqgNames[cs.grid]) + " " + cs.name + " == host reference (256 x 1024)", w16.down<std::uint16_t>(want.size()),
+                                   want));
             }
         }
     }

@@ -19,6 +19,7 @@ int main(int argc, char** argv) {
                      {"gemmfq", testOpsGemmFq},
                      {"gemvhf32", testGemvhF32},  // v0252-c3port
                      {"gemm_tail", testOpsGemmTail},  // v0252-pp2k2 (F1 GEMM tail split)
-                     {"gemm_w4s", testOpsGemmW4s}},  // v0252-w4a4k2 (W4A4 fake-quant weight half)
+                     {"gemm_w4s", testOpsGemmW4s},  // v0252-w4a4k2 (W4A4 fake-quant weight half)
+                     {"w4s_gains", testOpsW4sGains}},  // v0252-w4a4k2 round 3 (least-squares gains)
                     argc, argv);
 }
