@@ -627,6 +627,36 @@ whirl::bench::Row abRow(const CellInfo& ci, const AbStats& ab, const std::string
     return r;
 }
 
+std::vector<int> moeRouteLayer(const std::vector<std::int32_t>& all, int n, int K, int L, int layer, int R, std::string* err) {
+    auto fail = [err](const std::string& m) {
+        if (err) *err = m;
+        return std::vector<int>{};
+    };
+    if (n < 1 || K < 1 || L < 1 || R < 1) return fail("n, K, L, R must be >= 1");
+    if (all.size() != static_cast<std::size_t>(L) * n * K)
+        return fail("routing file holds " + std::to_string(all.size()) + " ids, not L * n * K = " + std::to_string(static_cast<std::size_t>(L) * n * K));
+    if (layer < 0 || layer >= L) return fail("layer " + std::to_string(layer) + " outside [0, " + std::to_string(L) + ")");
+    std::vector<int> ids(all.begin() + static_cast<std::ptrdiff_t>(layer) * n * K, all.begin() + static_cast<std::ptrdiff_t>(layer + 1) * n * K);
+    for (int t = 0; t < n; ++t)
+        for (int a = 0; a < K; ++a) {
+            const int e = ids[static_cast<std::size_t>(t) * K + a];
+            if (e < 0 || e >= R) return fail("token " + std::to_string(t) + " slot " + std::to_string(a) + ": expert id " + std::to_string(e) + " outside [0, R)");
+            for (int b = 0; b < a; ++b)
+                if (ids[static_cast<std::size_t>(t) * K + b] == e) return fail("token " + std::to_string(t) + " repeats expert " + std::to_string(e));
+        }
+    if (err) err->clear();
+    return ids;
+}
+
+int moeRouteTiles(const std::vector<int>& ids, int R, int bn) {
+    std::vector<int> cnt(static_cast<std::size_t>(R), 0);
+    for (const int e : ids)
+        if (e >= 0 && e < R) ++cnt[static_cast<std::size_t>(e)];
+    int tiles = 0;
+    for (const int c : cnt) tiles += (c + bn - 1) / bn;
+    return tiles;
+}
+
 void markAblationRow(whirl::bench::Row& r) {
     namespace wb = whirl::bench;
     const std::string kv = "ablation=output_not_compared";

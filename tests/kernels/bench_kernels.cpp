@@ -42,6 +42,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -2003,6 +2004,74 @@ std::vector<int> moepcZipf(std::mt19937_64& rng, int n, int K, int R) {
         }
     return ids;
 }
+
+// v0252-gemmlat round 10: the routings of the expert-GEMM benches moepgu / moepdhs. With WHIRL_KT_MOE_ROUTE=<file> (the raw int32
+// ids of ONE prefill forward, layer-major [L][n][K], as `whirl chat` WHIRL_DUMP_MOE writes it; WHIRL_KT_MOE_ROUTE_N = n tokens,
+// WHIRL_KT_MOE_ROUTE_L = MoE layers, default 40, WHIRL_KT_MOE_ROUTE_LAYERS = the layers to time, default 0,<L/2>,<L-1>,
+// WHIRL_KT_MOE_ROUTE_TAG = a name for the cells, default "real") only those real layers; else Zipf(1.0) n 2048 and uniform n 64.
+// A bad file is a FAIL (Result), never a silent fallback.
+struct MoeRouting {
+    std::string name;
+    int n;
+    std::vector<int> ids;
+};
+std::vector<MoeRouting> moeBenchRoutings(Ctx& c, int K, int R) {
+    std::vector<MoeRouting> out;
+    const char* path = std::getenv("WHIRL_KT_MOE_ROUTE");
+    if (path != nullptr && *path != 0) {
+        auto envInt = [](const char* k, int d) {
+            const char* v = std::getenv(k);
+            return v != nullptr && *v != 0 ? std::atoi(v) : d;
+        };
+        const int n = envInt("WHIRL_KT_MOE_ROUTE_N", 0), L = envInt("WHIRL_KT_MOE_ROUTE_L", 40);
+        const char* tg = std::getenv("WHIRL_KT_MOE_ROUTE_TAG");
+        const std::string tag = tg != nullptr && *tg != 0 ? tg : "real";
+        std::vector<std::int32_t> all;
+        {
+            std::ifstream in(path, std::ios::binary);
+            in.seekg(0, std::ios::end);
+            const std::streamoff bytes = in ? static_cast<std::streamoff>(in.tellg()) : 0;
+            in.seekg(0);
+            all.resize(static_cast<std::size_t>(bytes / 4));
+            if (bytes > 0) in.read(reinterpret_cast<char*>(all.data()), static_cast<std::streamsize>(all.size() * 4));
+        }
+        std::vector<int> layers;
+        if (const char* ls = std::getenv("WHIRL_KT_MOE_ROUTE_LAYERS"); ls != nullptr && *ls != 0) {
+            for (const char* q = ls; *q;) {
+                layers.push_back(std::atoi(q));
+                while (*q && *q != ',') ++q;
+                if (*q == ',') ++q;
+            }
+        } else {
+            layers = {0, L / 2, L - 1};
+        }
+        for (const int l : layers) {
+            std::string err;
+            std::vector<int> ids = moeRouteLayer(all, n, K, L, l, R, &err);
+            if (ids.empty()) {
+                Result r;
+                r.name = std::string("bench moe routing file ") + path + " layer " + std::to_string(l) + ": " + err;
+                r.pass = false;
+                c.rep.add(r);
+                continue;
+            }
+            out.push_back({tag + "L" + std::to_string(l), n, std::move(ids)});
+        }
+        return out;
+    }
+    out.push_back({"zipf", 2048, moepcZipf(c.rng, 2048, K, R)});
+    {  // uniform top-K: K distinct experts per token
+        const int n = 64;
+        std::vector<int> ids(static_cast<std::size_t>(n) * K), all(static_cast<std::size_t>(R));
+        std::iota(all.begin(), all.end(), 0);
+        for (int t = 0; t < n; ++t) {
+            std::shuffle(all.begin(), all.end(), c.rng);
+            std::copy(all.begin(), all.begin() + K, ids.begin() + static_cast<std::ptrdiff_t>(t) * K);
+        }
+        out.push_back({"uniform", n, std::move(ids)});
+    }
+    return out;
+}
 }  // namespace
 
 void benchMoepc(Env& e) {
@@ -2199,24 +2268,9 @@ void benchMoepGu(Env& e) {
     auto dgate = std::make_shared<Buf>(gate.data), dup = std::make_shared<Buf>(up.data);
     const std::uint64_t grb = gate.row_bytes;
     const wk::MoepGuVariant& vg = wk::kMoepGu[gv];
-    struct Routing {
-        const char* name;
-        int n;
-    };
-    for (const Routing rt : {Routing{"zipf", 2048}, Routing{"uniform", 64}}) {
+    for (const MoeRouting& rt : moeBenchRoutings(c, K, R)) {  // v0252-gemmlat round 10: + WHIRL_KT_MOE_ROUTE (real routing)
         const int n = rt.n, pairs = n * K;
-        std::vector<int> ids;
-        if (std::string(rt.name) == "zipf") {
-            ids = moepcZipf(c.rng, n, K, R);
-        } else {  // uniform top-K: K distinct experts per token
-            ids.resize(static_cast<std::size_t>(pairs));
-            std::vector<int> all(static_cast<std::size_t>(R));
-            std::iota(all.begin(), all.end(), 0);
-            for (int t = 0; t < n; ++t) {
-                std::shuffle(all.begin(), all.end(), c.rng);
-                std::copy(all.begin(), all.begin() + K, ids.begin() + static_cast<std::ptrdiff_t>(t) * K);
-            }
-        }
+        const std::vector<int>& ids = rt.ids;
         std::vector<std::uint16_t> xg(static_cast<std::size_t>(pairs) * E);
         {
             const std::vector<float> a = c.randn(xg.size(), 0.5f);
@@ -2283,6 +2337,102 @@ void benchMoepGu(Env& e) {
                     return {cnt, bad};
                 };
             }
+            runCell(e, k);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- moepdhs (v0252-gemmlat round 10, PLAN V1-53, gfx1151)
+// Measurement-only ablations of the 8060S MoE prefill DOWN expert kernel of the balance / fast plan, gemm_moepfqdhs_<v>_mxfp4
+// (v = kMoepDefault.dn, f16 outputs through the staged epilogue): in-object ABBA of A = the shipped kernel vs B = each kt.h
+// kMoepDhsAblation kernel present in the object (kt-only object, -DWHIRL_FQ_ABL_PROTOS=1). Ornith layer 0 down experts
+// (--moemx), the routings of moeBenchRoutings (WHIRL_KT_MOE_ROUTE = a real routing, else Zipf n 2048 + uniform n 64), random f16
+// SwiGLU activations [pairs][F], tiles from moe_tiles with the variant's token tile. B is never compared (rows marked by
+// markAblationRow); A is checked finite.
+void benchMoepDhs(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "moepdhs";
+    const int dv = wk::kMoepDefault.dn;
+    const hip::Function fa = c.k.moep_fq_dhs[dv];
+    if (!fa || !c.k.moe_tiles) {
+        c.rep.skip("moepdhs", "bench gemm_moepfqdhs", "kernel not in this code object");
+        return;
+    }
+    std::vector<std::pair<std::string, hip::Function>> bs;
+    for (const char* an : kMoepDhsAblation)
+        if (const hip::Function fb = c.fnOpt(std::string("gemm_moepfqdhs_") + an + "_mxfp4")) bs.push_back({an, fb});
+    if (bs.empty()) {
+        c.rep.skip("moepdhs", "bench gemm_moepfqdhs ablations", "no kt.h kMoepDhsAblation kernel in this code object (kt-only object: -DWHIRL_FQ_ABL_PROTOS=1)");
+        return;
+    }
+    const whirl::gguf::File* f = c.open(c.models.moemx);
+    const int layer = 0;
+    const std::string tn = "blk.0.ffn_down_exps.weight";
+    if (!f || !f->tensor(tn) || f->tensor(tn)->type != whirl::gguf::GgmlType::mxfp4) {
+        c.rep.skip("moepdhs", "bench gemm_moepfqdhs", "needs --moemx (Ornith MXFP4) with " + tn);
+        return;
+    }
+    const HostMat down = loadMat(*f, tn);
+    const int R = static_cast<int>(f->getUintOr("qwen35moe.expert_count", 256));
+    const int K = static_cast<int>(f->getUintOr("qwen35moe.expert_used_count", 8));
+    const int F = down.ncols, E = down.nrows / R;
+    if (E % 256 != 0 || F % 256 != 0) {
+        c.rep.skip("moepdhs", "bench gemm_moepfqdhs", "shape not fq-able (E / F % 256)");
+        return;
+    }
+    auto ddown = std::make_shared<Buf>(down.data);
+    const std::uint64_t drb = down.row_bytes;
+    const wk::MoepDnVariant& vd = wk::kMoepDn[dv];
+    for (const MoeRouting& rt : moeBenchRoutings(c, K, R)) {
+        const int n = rt.n, pairs = n * K;
+        std::vector<std::uint16_t> act(static_cast<std::size_t>(pairs) * F);
+        {
+            const std::vector<float> a = c.randn(act.size(), 0.5f);
+            for (std::size_t i = 0; i < act.size(); ++i) act[i] = f2h(a[i]);
+        }
+        auto dids = std::make_shared<Buf>(rt.ids), dact = std::make_shared<Buf>(act);
+        auto yout = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * E * 2);
+        const int mt = (pairs + vd.bn - 1) / vd.bn + R;
+        auto tiles = std::make_shared<Buf>(static_cast<std::size_t>(mt) * 16), ntl = std::make_shared<Buf>(16);
+        hip::launch(c.k.moe_tiles, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dids->p(), pairs, R, vd.bn, tiles->p(), ntl->p());
+        c.sync();
+        const unsigned grid = static_cast<unsigned>(mt) * cdiv(static_cast<std::uint64_t>(E), static_cast<std::uint64_t>(vd.bm));
+        auto launch = [&c, ddown, dact, yout, tiles, ntl, drb, grid, E, F](hip::Function fn) {
+            hip::launch(fn, {grid, 1, 1}, {256, 1, 1}, 0, c.s, ddown->p(), drb, E, dact->p(), yout->p(), F, tiles->p(), ntl->p());
+        };
+        const std::string an = std::string("gemm_moepfqdhs_") + vd.name + "_mxfp4";
+        for (const auto& [suffix, fb] : bs) {
+            Cell k;
+            k.ci = e.info("moepdhs", an, "ornith.l" + std::to_string(layer) + ".n" + std::to_string(n) + "." + rt.name + "." + suffix,
+                          "E" + std::to_string(E) + "_F" + std::to_string(F) + "_R" + std::to_string(R) + "_K" + std::to_string(K));
+            k.ci.settings = e.settings(static_cast<std::uint64_t>(down.data.size()), 1) + ";routing=" + rt.name + ";layer=0;dn=" + vd.name;
+            k.ci.flops = 2.0 * pairs * static_cast<double>(E) * F;
+            k.kernel = an;
+            k.fa = fa;
+            k.call = [launch](hip::Function fn, std::uint64_t) { launch(fn); };
+            k.run = [&c, launch, yout, pairs, E](hip::Function fn) {
+                yout->fill(0x00);
+                launch(fn);
+                c.sync();
+                const auto h = yout->down<std::uint16_t>(static_cast<std::size_t>(pairs) * E);
+                std::vector<float> got(h.size());
+                for (std::size_t i = 0; i < h.size(); ++i) got[i] = h2f(h[i]);
+                return got;
+            };
+            k.verify = [](const std::vector<float>& got) {
+                Result r;
+                r.kind = Kind::invariant;
+                r.n = got.size();
+                r.mismatches = static_cast<std::size_t>(std::count_if(got.begin(), got.end(), [](float v) { return !std::isfinite(v); }));
+                r.pass = r.mismatches == 0;
+                r.name = "A output finite (kt moemx checks A's bits)";
+                return r;
+            };
+            k.kernel_b = std::string("gemm_moepfqdhs_") + suffix + "_mxfp4";
+            const hip::Function fbb = fb;
+            k.call_b = [launch, fbb](std::uint64_t) { launch(fbb); };
+            k.ablation = true;
+            k.b_rule = kAblationRule;
             runCell(e, k);
         }
     }
@@ -2642,7 +2792,7 @@ void benchWs4s(Env& e) {
 
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax", "moepc", "dq4s", "ws4s", "moepgu"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax", "moepc", "dq4s", "ws4s", "moepgu", "moepdhs"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -2695,7 +2845,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
                       {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"ws4r", benchWs4r}, {"silu", benchSilu}, {"lsplit", benchLsplit},
                       {"argmax", benchArgmax}, {"moepc", benchMoepc}, {"dq4s", benchDq4s}, {"ws4s", benchWs4s},
-                      {"moepgu", benchMoepGu}};
+                      {"moepgu", benchMoepGu}, {"moepdhs", benchMoepDhs}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

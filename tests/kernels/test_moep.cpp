@@ -89,8 +89,8 @@ void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& d
     // v0252-gemmlat round 6: the measurement-only gate + up ablations (kt.h kMoepGuAblation) exist only in the kt-only object
     // (-DWHIRL_FQ_ABL_PROTOS=1); the shipped object (no WHIRL_KT_CODE_OBJECT) must not carry them
     if (const char* ext = std::getenv("WHIRL_KT_CODE_OBJECT"); ext == nullptr || *ext == 0)
-        for (const char* an : kMoepGuAblation) {
-            const std::string kn = std::string("gemm_moepfqgu_") + an + "_mxfp4";
+        for (const std::string kn : {std::string("gemm_moepfqgu_") + kMoepGuAblation[0] + "_mxfp4", std::string("gemm_moepfqgu_") + kMoepGuAblation[1] + "_mxfp4",
+                                     std::string("gemm_moepfqdhs_") + kMoepDhsAblation[0] + "_mxfp4", std::string("gemm_moepfqdhs_") + kMoepDhsAblation[1] + "_mxfp4"}) {
             Result r;
             r.kind = Kind::invariant;
             r.n = 1;

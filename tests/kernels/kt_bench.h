@@ -195,6 +195,14 @@ whirl::bench::Row abRow(const CellInfo& ci, const AbStats& ab, const std::string
 // keys "ablation": true, "b_bitwise": false, "b_rule": kAblationRule, "verdict_use": "none"; idempotent. No product verdict
 // may use such a row (judges take only b_bitwise true rows of product kernels).
 inline constexpr const char* kAblationRule = "ablation, output not compared";
+// v0252-gemmlat round 10 (PLAN V1-53): a REAL MoE routing for the expert-GEMM benches (moepgu / moepdhs). A routing file is the
+// raw int32 expert ids of one prefill forward as `whirl chat` WHIRL_DUMP_MOE writes it for one forward: layer-major
+// [L][n][K] (every MoE layer appends its n x K ids in forward order). moeRouteLayer returns layer `layer`'s n * K ids, or an
+// empty vector with *err set when the file does not hold exactly L * n * K ids, an id is outside [0, R), or a token repeats an
+// expert (the router's top-K picks distinct experts). moeRouteTiles = the moe_tiles list length for token tile bn (sum over
+// experts of ceil(rows / bn)) - the per-tile fixed cost of the expert kernels scales with it.
+std::vector<int> moeRouteLayer(const std::vector<std::int32_t>& all, int n, int K, int L, int layer, int R, std::string* err);
+int moeRouteTiles(const std::vector<int>& ids, int R, int bn);
 void markAblationRow(whirl::bench::Row& r);
 
 // ---------------------------------------------------------------- whirl-kernel-test --bench (bench_kernels.cpp)
@@ -216,7 +224,7 @@ struct BenchOpts {
     std::vector<std::string> fdq_v;
     std::string tool_ver, code_hash, code_hash_b, gpu_arch, gpu_pci;
 };
-extern const char* const kBenchFamilies[16];  // v0252-8sdet: + moepc; v0252-8sq5: + dq4s; v0252-8sws: + ws4s; v0252-gemmlat: + moepgu
+extern const char* const kBenchFamilies[17];  // v0252-8sdet: + moepc; v0252-8sq5: + dq4s; v0252-8sws: + ws4s; v0252-gemmlat: + moepgu, moepdhs
 bool benchFamilyKnown(const std::string& f);
 struct Ctx;
 void runBench(Ctx& c, const BenchOpts& o);

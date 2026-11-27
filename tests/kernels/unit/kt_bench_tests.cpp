@@ -831,7 +831,8 @@ static void test_moep_kt_only_entries() {
         }
         return open.empty() ? std::string() : open.back();
     };
-    for (const char* n : {"MOEPFQGU_ABL_ENTRY(g64n64k64a1,", "MOEPFQGU_ABL_ENTRY(g64n64k64a5,"}) {
+    for (const char* n : {"MOEPFQGU_ABL_ENTRY(g64n64k64a1,", "MOEPFQGU_ABL_ENTRY(g64n64k64a5,", "MOEPFQDHS_ABL_ENTRY(m128w4n128k64a1,",
+                          "MOEPFQDHS_ABL_ENTRY(m128w4n128k64a5,"}) {
         const std::size_t p = src.find(n);
         const std::string g = p == std::string::npos ? std::string("(not found)") : guard(p);
         check(std::string("moe_prefill_fq.hip: ") + n + " only under #ifdef WHIRL_FQ_ABL_PROTOS", g == "#ifdef WHIRL_FQ_ABL_PROTOS", g);
@@ -860,6 +861,27 @@ static void test_moep_kt_only_entries() {
 #else
     check("moe_prefill_fq.hip kt-only entries (WHIRL_KT_SRC_DIR not set: not checked)", false);
 #endif
+}
+
+// v0252-gemmlat round 10: the real-routing loader of the expert-GEMM benches (layer-major [L][n][K] int32, WHIRL_DUMP_MOE)
+static void test_moe_route_file() {
+    const int n = 3, K = 2, L = 2, R = 8;
+    const std::vector<std::int32_t> all = {0, 1, 2, 3, 0, 4, /* layer 1 */ 7, 6, 5, 4, 7, 0};
+    std::string err;
+    const std::vector<int> l1 = moeRouteLayer(all, n, K, L, 1, R, &err);
+    check("moe route: layer 1 = ids [6, 12)", l1 == std::vector<int>{7, 6, 5, 4, 7, 0} && err.empty(), err);
+    check("moe route: wrong size refused", moeRouteLayer(all, n, K, 3, 0, R, &err).empty() && err.find("L * n * K") != std::string::npos, err);
+    check("moe route: layer outside [0, L) refused", moeRouteLayer(all, n, K, L, 2, R, &err).empty() && !err.empty(), err);
+    std::vector<std::int32_t> bad = all;
+    bad[3] = 8;  // id == R
+    check("moe route: id outside [0, R) refused", moeRouteLayer(bad, n, K, L, 0, R, &err).empty() && err.find("outside") != std::string::npos, err);
+    bad = all;
+    bad[1] = 0;  // token 0 picks expert 0 twice
+    check("moe route: repeated expert of one token refused", moeRouteLayer(bad, n, K, L, 0, R, &err).empty() && err.find("repeats") != std::string::npos, err);
+    // tiles: layer 0 rows per expert {0: 2, 1: 1, 2: 1, 3: 1, 4: 1} -> bn 1: 6 tiles, bn 2: 5 tiles, bn 64: 5 tiles
+    const std::vector<int> l0 = moeRouteLayer(all, n, K, L, 0, R, &err);
+    check("moe route: tiles = sum ceil(rows / bn)", moeRouteTiles(l0, R, 1) == 6 && moeRouteTiles(l0, R, 2) == 5 && moeRouteTiles(l0, R, 64) == 5,
+          std::to_string(moeRouteTiles(l0, R, 1)) + " " + std::to_string(moeRouteTiles(l0, R, 2)));
 }
 
 static void test_jsonl_file(const std::string& emit) {
@@ -1410,6 +1432,7 @@ int main(int argc, char** argv) {
         test_ablation_rows();
         test_fq_kt_only_entries();
         test_moep_kt_only_entries();
+        test_moe_route_file();
         test_jsonl_file(emit);
         test_dq4s_mirror_is_ops_rule();
         test_dq4s_grid_ok();

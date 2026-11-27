@@ -310,6 +310,9 @@ struct FqGeomProto {
 // fragment read per kk + no global loads for k0 >= 64 (skeleton). Timed only by bench moepgu (outputs wrong by design);
 // kt moemx checks they are absent from the shipped object.
 inline constexpr const char* kMoepGuAblation[] = {"g64n64k64a1", "g64n64k64a5"};
+// v0252-gemmlat round 10: the same two ablations of the down kernel gemm_moepfqdhs_m128w4n128k64 (moepfq_dn_impl ABL 1 / 5;
+// kt-only object), timed only by bench moepdhs; kt moemx checks they are absent from the shipped object.
+inline constexpr const char* kMoepDhsAblation[] = {"m128w4n128k64a1", "m128w4n128k64a5"};
 // v0252-gemmlat round 7 (kernel SOP step 4, bench-only, -DWHIRL_FQ_GU128_PROTO=1): gate + up prototypes with their own
 // geometry; same grid rule as the slots ((maxTiles(pairs, bn) * ceil(F / gr), 256 threads); same bits as gemm_moegu (kt moemx
 // checks every one present; on the shipped object it must be absent); bench moepgu times them against the shipped kernel.
