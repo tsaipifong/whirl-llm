@@ -627,4 +627,22 @@ whirl::bench::Row abRow(const CellInfo& ci, const AbStats& ab, const std::string
     return r;
 }
 
+void markAblationRow(whirl::bench::Row& r) {
+    namespace wb = whirl::bench;
+    const std::string kv = "ablation=output_not_compared";
+    if (r.settings.find(kv) == std::string::npos) r.settings = withKv(r.settings, kv);
+    static const char* const kKeys[] = {"ablation", "b_bitwise", "b_rule", "verdict_use"};
+    r.extra.erase(std::remove_if(r.extra.begin(), r.extra.end(),
+                                 [](const auto& e) {
+                                     for (const char* k : kKeys)
+                                         if (e.first == k) return true;
+                                     return false;
+                                 }),
+                  r.extra.end());
+    r.extra.push_back({"ablation", "true"});
+    r.extra.push_back({"b_bitwise", "false"});
+    r.extra.push_back({"b_rule", wb::json_string(kAblationRule)});
+    r.extra.push_back({"verdict_use", wb::json_string("none")});
+}
+
 }  // namespace kt

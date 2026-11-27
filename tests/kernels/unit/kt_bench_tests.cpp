@@ -702,6 +702,53 @@ static void test_rows() {
           ja);
 }
 
+// v0252-gemmlat (PLAN V1-53): the rows of a measurement-only ablation B (family fdq, kt.h kFqAblation) are marked so that
+// no product verdict can use them: settings ablation=output_not_compared (a different settings key = a different cell
+// for db_lookup), "ablation": true, "b_bitwise": false (never true), b_rule, "verdict_use": "none"; marking is idempotent.
+static void test_ablation_rows() {
+    CellStats cs;
+    cs.samples = {100, 101, 99};
+    cs.st = whirl::bench::summarize(cs.samples);
+    cs.stop_reason = "rel<=1%";
+    CellInfo ci;
+    ci.family = "fdq";
+    ci.kernel = "gemmfq_t2g8a1_mxfp4";
+    ci.cell = "swift.ffn_gate.n2048.t2g8a1";
+    ci.settings = "state=burst";
+    ci.variant = "B";
+    whirl::bench::Row r = cellRow(ci, cs, "v");
+    markAblationRow(r);
+    markAblationRow(r);  // twice: still one of each key
+    const std::string j = whirl::bench::to_json(r);
+    auto count = [&j](const std::string& s) {
+        std::size_t n = 0;
+        for (std::size_t p = j.find(s); p != std::string::npos; p = j.find(s, p + 1)) ++n;
+        return n;
+    };
+    check("ablation row: settings carry ablation=output_not_compared once", count("ablation=output_not_compared") == 1, j);
+    check("ablation row: \"ablation\": true, \"b_bitwise\": false, never \"b_bitwise\": true",
+          count("\"ablation\": true") == 1 && count("\"b_bitwise\": false") == 1 && count("\"b_bitwise\": true") == 0, j);
+    check("ablation row: b_rule names the rule, verdict_use none",
+          count(std::string("\"b_rule\": \"") + kAblationRule + "\"") == 1 && count("\"verdict_use\": \"none\"") == 1, j);
+    check("ablation rule text", std::string(kAblationRule) == "ablation, output not compared");
+    // the B/A ratio row too
+    AbStats ab;
+    ab.ratio.samples = {0.9, 0.91, 0.9};
+    ab.ratio.st = whirl::bench::summarize(ab.ratio.samples);
+    ab.ratio.stop_reason = "rel<=1%";
+    ab.pairs = 3;
+    whirl::bench::Row rr = abRow(ci, ab, "v", "h");
+    markAblationRow(rr);
+    const std::string ja = whirl::bench::to_json(rr);
+    check("ablation ab row: metric .ab_ratio, marked, not bitwise",
+          ja.find("kern.fdq.gemmfq_t2g8a1_mxfp4.ab_ratio") != std::string::npos && ja.find("ablation=output_not_compared") != std::string::npos &&
+              ja.find("\"b_bitwise\": true") == std::string::npos && ja.find("\"verdict_use\": \"none\"") != std::string::npos,
+          ja);
+    // an unmarked row has none of the keys (the other rows do not change)
+    const std::string jp = whirl::bench::to_json(cellRow(ci, cs, "v"));
+    check("plain row: no ablation keys", jp.find("ablation") == std::string::npos && jp.find("verdict_use") == std::string::npos, jp);
+}
+
 static void test_jsonl_file(const std::string& emit) {
     namespace fs = std::filesystem;
     const fs::path p = emit.empty() ? fs::temp_directory_path() / "kt_bench_tests.jsonl" : fs::path(emit);
@@ -1247,6 +1294,7 @@ int main(int argc, char** argv) {
         test_sha256();
         test_roof();
         test_rows();
+        test_ablation_rows();
         test_jsonl_file(emit);
         test_dq4s_mirror_is_ops_rule();
         test_dq4s_grid_ok();

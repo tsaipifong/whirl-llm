@@ -285,6 +285,11 @@ struct FqProto {
     int base;
 };
 inline constexpr FqProto kFqProto[] = {{"t2g4", 1}, {"t2g8", 1}, {"t2g16", 1}, {"c2g4", 0}, {"c2g8", 0}};
+// v0252-gemmlat (PLAN V1-53, kernel SOP step 5): measurement-only ablations of t2g8 (gemm_fq.hip ABL 1 / 2), only in the
+// kt-only object built with -DWHIRL_FQ_ABL_PROTOS=1 (WHIRL_KT_CODE_OBJECT). NOT in kFqProto (kt gemm checks kFqProto
+// bitwise; these outputs are wrong by design): bench fdq times them only (rows marked kt_bench.h markAblationRow), and
+// kt gemm checks they are absent from the product object.
+inline constexpr FqProto kFqAblation[] = {{"t2g8a1", 1}, {"t2g8a2", 1}};
 // v0252-valuout (PLAN V1-53): the seven v0252-8sbvalu VALU-lever prototypes (d185546; all REVERT on the 8060S, q7 951b-955,
 // KB v0252-8sbvalu:gemmfq-valu-levers) are NOT in the shipped gfx1151 object: unused kernels move the object layout
 // (KB v0252-8sbal:e2e-raster-g8). Their source stays in git history (d185546) and research\b8s. kt gemm checks absence.

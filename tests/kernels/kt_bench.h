@@ -190,6 +190,12 @@ struct CellInfo {
 whirl::bench::Row cellRow(const CellInfo& ci, const CellStats& cs, const std::string& tool_ver);
 // the paired ratio row of an A/B (metric kern.<family>.<kernel>.ab_ratio, unit ratio)
 whirl::bench::Row abRow(const CellInfo& ci, const AbStats& ab, const std::string& tool_ver, const std::string& code_hash_b);
+// v0252-gemmlat (PLAN V1-53): a row of a MEASUREMENT-ONLY ablation B (family fdq, kt.h kFqAblation; its output is wrong by
+// design and never compared). Adds settings key ablation=output_not_compared (a different cell for db_lookup) and the extra
+// keys "ablation": true, "b_bitwise": false, "b_rule": kAblationRule, "verdict_use": "none"; idempotent. No product verdict
+// may use such a row (judges take only b_bitwise true rows of product kernels).
+inline constexpr const char* kAblationRule = "ablation, output not compared";
+void markAblationRow(whirl::bench::Row& r);
 
 // ---------------------------------------------------------------- whirl-kernel-test --bench (bench_kernels.cpp)
 struct BenchOpts {

@@ -607,6 +607,20 @@ void testGemm(Ctx& c) {
                             r.mismatches = r.pass ? 0 : 1;
                             c.rep.add(r);
                         }
+                    // v0252-gemmlat: the measurement-only ablations (kt.h kFqAblation) exist only in the kt-only object
+                    // (-DWHIRL_FQ_ABL_PROTOS=1); the shipped object must not carry them (an extra kernel moves the layout)
+                    if (variant == 0 && nt == ns.front())
+                        for (const FqProto& pv : kFqAblation) {
+                            const std::string kn = std::string("gemmfq_") + pv.name + "_mxfp4";
+                            Result r;
+                            r.kind = Kind::invariant;
+                            r.n = 1;
+                            r.name = kn + " (v0252-gemmlat ablation, kt-only object) absent from the gfx1151 code object";
+                            r.pass = c.fnOpt(kn) == nullptr;
+                            if (!r.pass) r.note = "in the code object (built with WHIRL_FQ_ABL_PROTOS?)";
+                            r.mismatches = r.pass ? 0 : 1;
+                            c.rep.add(r);
+                        }
                 }
             }
         }

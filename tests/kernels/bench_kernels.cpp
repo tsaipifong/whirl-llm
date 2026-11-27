@@ -191,6 +191,9 @@ struct Cell {
     // (kt_dq4s.h geoCi) and its JSONL keys ratio_gmean / ratio_ci95_lo / ratio_ci95_hi on the ab_ratio row
     bool geo = false;
     std::vector<std::pair<std::string, std::string>> ab_extra;  // more JSONL keys on the ab_ratio row (value: JSON text)
+    // v0252-gemmlat (family fdq, kt.h kFqAblation): B is a measurement-only ablation; its output is wrong by design, so
+    // bitwise_b is not run (no check row), B is timed only, and every row of the cell is marked (markAblationRow)
+    bool ablation = false;
 };
 
 // family fdq: A = k.fa through k.call, B = k.call_b of the same object; rows A / B (variant=A / B) and the paired ratio
@@ -198,17 +201,23 @@ struct Cell {
 void runCellInObject(Env& e, Cell& k) {
     Ctx& c = e.c;
     if (e.have_b) std::printf("   %s: in-object A/B, --ab ignored for this cell\n", k.ci.cell.c_str());
-    const auto [nb, mb] = k.bitwise_b();
-    Result rb;
-    rb.kind = Kind::invariant;
-    rb.n = nb;
-    rb.mismatches = mb;
-    rb.pass = nb > 0 && mb == 0;
-    rb.name = "bench " + k.kernel_b + " " + k.ci.cell + ": " + k.b_rule + " " + k.kernel + " (full output)";
-    c.rep.add(rb);
-    if (!rb.pass) {
-        std::printf("   %s %s: B is not %s A (%zu of %zu values differ), no timing row\n", k.kernel_b.c_str(), k.ci.cell.c_str(), k.b_rule.c_str(), mb, nb);
-        return;
+    if (k.ablation) {
+        std::printf("   %s %s: %s (measurement-only ablation: timed only, no product verdict may use these rows)\n", k.kernel_b.c_str(),
+                    k.ci.cell.c_str(), kAblationRule);
+    } else {
+        const auto [nb, mb] = k.bitwise_b();
+        Result rb;
+        rb.kind = Kind::invariant;
+        rb.n = nb;
+        rb.mismatches = mb;
+        rb.pass = nb > 0 && mb == 0;
+        rb.name = "bench " + k.kernel_b + " " + k.ci.cell + ": " + k.b_rule + " " + k.kernel + " (full output)";
+        c.rep.add(rb);
+        if (!rb.pass) {
+            std::printf("   %s %s: B is not %s A (%zu of %zu values differ), no timing row\n", k.kernel_b.c_str(), k.ci.cell.c_str(), k.b_rule.c_str(),
+                        mb, nb);
+            return;
+        }
     }
     e.bench.beforeCell();
     k.ci.started = wb::iso_now();
@@ -247,14 +256,22 @@ void runCellInObject(Env& e, Cell& k) {
     }
     ca.settings += ";ab=abba_in_object";
     cb.settings += ";ab=abba_in_object";
-    e.write(cellRow(ca, sa, e.o.tool_ver));
+    wb::Row raw = cellRow(ca, sa, e.o.tool_ver);
+    if (k.ablation) markAblationRow(raw);
+    e.write(raw);
     wb::Row rbw = cellRow(cb, sb, e.o.tool_ver);
-    rbw.extra.push_back({"b_bitwise", "true"});
+    if (k.ablation)
+        markAblationRow(rbw);
+    else
+        rbw.extra.push_back({"b_bitwise", "true"});
     e.write(rbw);
     CellInfo cr = k.ci;
     cr.kernel = k.kernel_b;
     wb::Row rr = abRow(cr, ab, e.o.tool_ver, e.o.code_hash);
-    rr.extra.push_back({"b_bitwise", "true"});
+    if (k.ablation)
+        markAblationRow(rr);
+    else
+        rr.extra.push_back({"b_bitwise", "true"});
     rr.extra.push_back({"a_kernel", wb::json_string(k.kernel)});
     rr.extra.push_back({"in_object", "true"});
     if (k.geo) {
@@ -1296,14 +1313,19 @@ void benchFdq(Env& e) {
     const hip::Function dq = c.k.dequant_f16[ti];
     // B kernels: the product slots (kGemmFqNames), plus the v0252-8sbal grouped-raster prototypes (kt.h kFqProto) when
     // --fdq-v names them (never by default: the default rows stay the shipped slots)
+    // v0252-gemmlat: plus the measurement-only ablations (kt.h kFqAblation, only in the -DWHIRL_FQ_ABL_PROTOS=1 kt object),
+    // likewise only when --fdq-v names them; they are timed only (Cell::ablation)
     struct FqB {
         std::string name;
         wk::GemmCfg g;
+        bool ablation = false;
     };
     std::vector<FqB> cand;
     for (std::size_t fi = 0; fi < wk::kGemmFqCfgs.size(); ++fi) cand.push_back({wk::kGemmFqNames[fi], wk::kGemmFqCfgs[fi]});
-    if (!e.o.fdq_v.empty())
+    if (!e.o.fdq_v.empty()) {
         for (const FqProto& pv : kFqProto) cand.push_back({pv.name, wk::kGemmFqCfgs[static_cast<std::size_t>(pv.base)]});
+        for (const FqProto& pv : kFqAblation) cand.push_back({pv.name, wk::kGemmFqCfgs[static_cast<std::size_t>(pv.base)], true});
+    }
     std::vector<FqB> slots;
     for (const FqB& cb : cand) {
         const std::string& v = cb.name;
@@ -1323,7 +1345,7 @@ void benchFdq(Env& e) {
         for (const FqB& cb : cand) known = known || cb.name == v;
         if (!known) {
             Result r;
-            r.name = "bench fdq: --fdq-v " + v + " is neither a gemmfq slot nor a kt.h kFqProto prototype";
+            r.name = "bench fdq: --fdq-v " + v + " is neither a gemmfq slot nor a kt.h kFqProto prototype nor a kFqAblation ablation";
             r.pass = false;
             c.rep.add(r);
             std::printf("   fdq: unknown --fdq-v %s (FAIL)\n", v.c_str());
@@ -1393,6 +1415,10 @@ void benchFdq(Env& e) {
                 k.ci.flops = 2.0 * n * nrows * ncols;
                 k.kernel = a_name;
                 k.kernel_b = std::string("gemmfq_") + sb.name + "_mxfp4";
+                if (sb.ablation) {
+                    k.ablation = true;
+                    k.b_rule = kAblationRule;
+                }
                 k.fa = ga;
                 k.call = [&c, &wc, &x16, &y, w16, dq, ac, groups, rb, ncols, nrows, n](hip::Function f, std::uint64_t r) {
                     hip::launch(dq, {static_cast<unsigned>(std::min<std::uint64_t>((groups + 255) / 256, 65535)), 1, 1}, {256, 1, 1}, 0, c.s, wc.at(r),
