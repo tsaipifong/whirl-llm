@@ -289,7 +289,9 @@ inline constexpr FqProto kFqProto[] = {{"t2g4", 1}, {"t2g8", 1}, {"t2g16", 1}, {
 // kt-only object built with -DWHIRL_FQ_ABL_PROTOS=1 (WHIRL_KT_CODE_OBJECT). NOT in kFqProto (kt gemm checks kFqProto
 // bitwise; these outputs are wrong by design): bench fdq times them only (rows marked kt_bench.h markAblationRow), and
 // kt gemm checks they are absent from the product object.
-inline constexpr FqProto kFqAblation[] = {{"t2g8a1", 1}, {"t2g8a2", 1}};
+// t2g8a3 (v0252-gemmlat round 3): ABL 3 = one A fragment read per kk, the other three WMMA rows reuse it (prices the A-side
+// LDS round trips: 24 of the 64 ds_load_b128 per K chunk and their lgkmcnt waits); output wrong by design.
+inline constexpr FqProto kFqAblation[] = {{"t2g8a1", 1}, {"t2g8a2", 1}, {"t2g8a3", 1}};
 // v0252-gemmlat round 2 (PLAN V1-53, kernel SOP step 4): bench-only prototypes with their OWN geometry (not a kGemmFqCfgs
 // slot), only in a kt-only object (t2w4g8: -DWHIRL_FQ_W4_PROTO=1, kernels/gfx1151/gemm_fq.hip). Same ABI and grid rule as
 // the slots (x = token blocks of g.bn, y = row blocks of g.bm, g.nth threads). Same bits as gemmfq_t2g8_mxfp4: kt gemm

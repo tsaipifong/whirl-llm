@@ -777,6 +777,7 @@ static void test_fq_kt_only_entries() {
         const char* macro;
     } kt_only[] = {{"GEMMFQ_ABL_PROTO(t2g8a1,", "WHIRL_FQ_ABL_PROTOS"},
                    {"GEMMFQ_ABL_PROTO(t2g8a2,", "WHIRL_FQ_ABL_PROTOS"},
+                   {"GEMMFQ_ABL_PROTO(t2g8a3,", "WHIRL_FQ_ABL_PROTOS"},
                    {"void __launch_bounds__(128) gemmfq_t2w4g8_mxfp4(", "WHIRL_FQ_W4_PROTO"}};
     for (const auto& k : kt_only) {
         const std::size_t p = src.find(k.needle);
