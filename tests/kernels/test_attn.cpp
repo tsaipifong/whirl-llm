@@ -582,8 +582,13 @@ static void testPfxF16r(Ctx& c) {
         r.mismatches = r.pass ? 0 : 1;
         if (!r.pass) r.note = g1151 ? "missing from the code object" : "present outside gfx1151";
         c.rep.add(r);
+        // v0252-attnlat round 2: always printed (passing rows are printed only with -v; the 2026-11-28 00:37 queue job ran
+        // without -v and its parser saw no row at all - a pass that leaves no line is indistinguishable from a skip)
+        std::printf("   PFXINV attn_pfx_f16r == attn_prefill_wmma: 0 of 0 rows run (%s)\n",
+                    g1151 ? "FAIL: attn_pfx_f16r missing from the gfx1151 code object" : "not gfx1151: the bench entry must be absent");
         return;
     }
+    std::size_t rows_run = 0, rows_ok = 0;
     const int L = 4111, hd = 256, qstride = 2 * hd;
     const float scale = 1.0f / 16.0f;
     const int max_kv = 4;
@@ -617,12 +622,17 @@ static void testPfxF16r(Ctx& c) {
                     hip::launch(f, {cdiv(n, 128), static_cast<unsigned>(nh), 1}, {256, 1, 1}, 0, c.s, dq.p(), a, o->p(), nh, nkv, qstride,
                                 dpos.p(), n, scale, 0);
                 c.sync();
-                c.rep.add(cmpExact("attn_pfx_f16r == attn_prefill_wmma (" + std::to_string(nh) + " / " + std::to_string(nkv) + " heads, n " +
-                                       std::to_string(n) + ", pos " + std::to_string(p0) + ", L " + std::to_string(L) + ") [kv f16]",
-                                   orr.down<float>(cnt), oa.down<float>(cnt), Kind::invariant));
+                Result r = cmpExact("attn_pfx_f16r == attn_prefill_wmma (" + std::to_string(nh) + " / " + std::to_string(nkv) + " heads, n " +
+                                        std::to_string(n) + ", pos " + std::to_string(p0) + ", L " + std::to_string(L) + ") [kv f16]",
+                                    orr.down<float>(cnt), oa.down<float>(cnt), Kind::invariant);
+                ++rows_run;
+                rows_ok += r.pass ? 1 : 0;
+                c.rep.add(r);
             }
         }
     }
+    std::printf("   PFXINV attn_pfx_f16r == attn_prefill_wmma: %zu of %zu rows bitwise equal\n", rows_ok, rows_run);
+    std::fflush(stdout);
 }
 
 void testAttn(Ctx& c) {
