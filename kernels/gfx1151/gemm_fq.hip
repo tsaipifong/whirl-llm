@@ -82,7 +82,9 @@ __device__ __forceinline__ void fq_decode_sb(uint2 qa, uint2 qb, uint32_t e, hal
 //       fragment ds_loads inside the loop; the WMMAs read chunk 0's tile, which stays in LDS);
 //   2 = everything as ABL 0, but each WMMA replaced by an empty asm that reads its operands and "writes" acc;
 //   3 = everything as ABL 0, but only the first A fragment of each kk is read from LDS; the WMMAs of row tiles 1-3 reuse it
-//       (round 3: prices the A-side LDS round trips - 24 of 64 ds_load_b128 per K chunk - and their lgkmcnt waits).
+//       (round 3: prices the A-side LDS round trips - 24 of 64 ds_load_b128 per K chunk - and their lgkmcnt waits);
+//   4 = 1 + only the first B fragment of each kk is read; the other WMMA columns reuse it (round 4: skeleton ceiling);
+//   5 = 1 + 3 + 4 + no global loads for k0 >= 64: the kernel skeleton with nothing but WMMA, 16 fragment reads and the loop.
 // Only the kt-only object compiled with -DWHIRL_FQ_ABL_PROTOS=1 instantiates ABL 1 / 2 (entries at the end of this file).
 template <int BM, int BN, int WAVES_M, int GRP = 0, int ABL = 0>
 __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
@@ -147,8 +149,13 @@ __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, c
         _Pragma("unroll") for (int e = 0; e < B_PER; ++e) rb[e] = *(const half8 *)(brow[e] + (k0_)); \
     } while (0)
 
+    // measurement-only ablation switches (ABL above; all false for ABL 0 = the product code)
+    constexpr bool kNoStage = ABL == 1 || ABL == 4 || ABL == 5;  // no decode / barrier / LDS store for k0 >= 64
+    constexpr bool kAReuse = ABL == 3 || ABL == 5;               // one A fragment read per kk
+    constexpr bool kBReuse = ABL == 4 || ABL == 5;               // one B fragment read per kk
+    constexpr bool kNoFetch = ABL == 5;                          // no global loads for k0 >= 64
     GEMMFQ_FETCH(0);
-    if constexpr (ABL == 1) {  // chunk 0 staged once, exactly as ABL 0 does it; the loop below never touches LDS again
+    if constexpr (kNoStage) {  // chunk 0 staged once, exactly as ABL 0 does it; the loop below never touches LDS again
         half8 ra[A_SB][4];
 #pragma unroll
         for (int e = 0; e < A_SB; ++e) fq_decode_sb(qa[e], qb[e], qe[e], ra[e]);
@@ -166,14 +173,16 @@ __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, c
         __syncthreads();
     }
     for (int k0 = 0; k0 < ncols; k0 += BK) {
-        if constexpr (ABL == 1) {
+        if constexpr (kNoStage) {
             asm volatile("" ::: "memory");
+            if constexpr (!kNoFetch) {
 #pragma unroll
-            for (int e = 0; e < A_SB; ++e) asm volatile("" ::"v"(qa[e].x), "v"(qa[e].y), "v"(qb[e].x), "v"(qb[e].y), "v"(qe[e]));
+                for (int e = 0; e < A_SB; ++e) asm volatile("" ::"v"(qa[e].x), "v"(qa[e].y), "v"(qb[e].x), "v"(qb[e].y), "v"(qe[e]));
 #pragma unroll
-            for (int e = 0; e < B_PER; ++e) {
-                const uint4 u = __builtin_bit_cast(uint4, rb[e]);
-                asm volatile("" ::"v"(u.x), "v"(u.y), "v"(u.z), "v"(u.w));
+                for (int e = 0; e < B_PER; ++e) {
+                    const uint4 u = __builtin_bit_cast(uint4, rb[e]);
+                    asm volatile("" ::"v"(u.x), "v"(u.y), "v"(u.z), "v"(u.w));
+                }
             }
         } else {
             half8 ra[A_SB][4];
@@ -193,20 +202,26 @@ __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, c
             }
             __syncthreads();
         }
-        if (k0 + BK < ncols) GEMMFQ_FETCH(k0 + BK);
+        if constexpr (!kNoFetch) {
+            if (k0 + BK < ncols) GEMMFQ_FETCH(k0 + BK);
+        }
 #pragma unroll
         for (int kk = 0; kk < BK; kk += 16) {
             half16 a[TM], b[TN];
 #pragma unroll
             for (int i = 0; i < TM; ++i)
-                if constexpr (ABL == 3) {  // one A fragment read per kk; rows i > 0 reuse it (measurement only)
+                if constexpr (kAReuse) {  // one A fragment read per kk; rows i > 0 reuse it (measurement only)
                     a[i] = i == 0 ? ld_frag16(&As[(wm * TM) * 16 + lane % 16][kk]) : a[0];
                 } else {
                     a[i] = ld_frag16(&As[(wm * TM + i) * 16 + lane % 16][kk]);
                 }
 #pragma unroll
             for (int j = 0; j < TN; ++j)
-                b[j] = ld_frag16(&Bs[(wn * TN + j) * 16 + lane % 16][kk]);
+                if constexpr (kBReuse) {  // one B fragment read per kk; columns j > 0 reuse it (measurement only)
+                    b[j] = j == 0 ? ld_frag16(&Bs[(wn * TN) * 16 + lane % 16][kk]) : b[0];
+                } else {
+                    b[j] = ld_frag16(&Bs[(wn * TN + j) * 16 + lane % 16][kk]);
+                }
 #pragma unroll
             for (int i = 0; i < TM; ++i)
 #pragma unroll
@@ -270,6 +285,8 @@ GEMMFQ_PROTO(c2g8, 256, 128, 4, 8)
 GEMMFQ_ABL_PROTO(t2g8a1, 128, 256, 2, 8, 1)
 GEMMFQ_ABL_PROTO(t2g8a2, 128, 256, 2, 8, 2)
 GEMMFQ_ABL_PROTO(t2g8a3, 128, 256, 2, 8, 3)
+GEMMFQ_ABL_PROTO(t2g8a4, 128, 256, 2, 8, 4)
+GEMMFQ_ABL_PROTO(t2g8a5, 128, 256, 2, 8, 5)
 #undef GEMMFQ_ABL_PROTO
 #endif
 
