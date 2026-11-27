@@ -420,3 +420,146 @@ __device__ void gemmfq_k16_impl(const uint8_t *__restrict__ W, uint64_t row_byte
 extern "C" __global__ void __launch_bounds__(128) gemmfq_t2w4g8_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemmfq_k16_impl<128, 128, 2, 8>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
 #endif
 
+// v0252-gemmlat round 5 (PLAN V1-53, kernel SOP step 4, form (ii); bench-only kt prototype, NOT in kernels::kGemmFqNames, no
+// product path): gemmfq_t2g8db_mxfp4 = t2g8 (128 x 256, 256 threads, WAVES_M 2, g8 raster, same grid) with a BK 32 LDS double
+// buffer: As[2][128][40] + Bs[2][256][40] f16 = 61440 B, ONE barrier per 32-column step. Step k0 (buffer cur = (k0 / 32) & 1):
+//   decode + store step k0 + 32 into buffer cur ^ 1 -> issue the global loads of step k0 + 64 -> fragment reads + 32 WMMA on
+//   buffer cur -> pin every accumulator (hipfire qwen4_gemm_mqv2_wmma_gfx11_bt.hip:962-965: without it the scheduler sinks the
+//   WMMAs past the barrier and the operands spill - the 2026-11-10 t2lsp failure) -> __syncthreads().
+// Buffer cur ^ 1 was last read in step k0 - 32, before that step's barrier; buffer cur was written in step k0 - 32 (or the
+// prologue), before the same barrier: one barrier per step is enough.
+// Weights: 128 rows x one 32-value sub-block per step for 256 lanes: lane s decodes HALF a sub-block (row s / 2, values
+// (s & 1) * 16 .. + 16) with fq_decode_half below (mxi_hib_hi(q) == mxi_hib_lo(q >> 4), and the LUT path takes (q >> 4) & 0x0F
+// exactly as fq_decode_sb does) -> every f16 value in LDS is the one t2g8 stores, each value decoded once.
+// Bitwise == gemmfq_t2g8_mxfp4: the same LDS values, the same WMMA operands and chain per output (k ascending in 16-steps).
+// Compiled ONLY with -DWHIRL_FQ_DB_PROTO=1 (kt-only object; an extra kernel moves the product object layout).
+#ifdef WHIRL_FQ_DB_PROTO
+// values [sh / 4 * 16, + 16) of one 32-value sub-block (sh = 0: low nibbles = fq_decode_sb's o[0], o[1]; sh = 4: high nibbles =
+// its o[2], o[3]); same operations on the same bits as fq_decode_sb
+__device__ __forceinline__ void fq_decode_half(uint2 qa, uint2 qb, uint32_t e, uint32_t sh, half8 *o) {
+    qa.x >>= sh;
+    qa.y >>= sh;
+    qb.x >>= sh;
+    qb.y >>= sh;
+    if (mxi_fast_ok(e)) {
+        const uint32_t sb = mxi_scale_bits(e);
+        const half2_t s2 = __builtin_bit_cast(half2_t, sb | (sb << 16));
+        o[0] = fq_inj8(mxi_hib_lo(qa.x), mxi_hib_lo(qa.y), s2);
+        o[1] = fq_inj8(mxi_hib_lo(qb.x), mxi_hib_lo(qb.y), s2);
+    } else {
+        const _Float16 dl = (_Float16)e8m0_half(e);
+        o[0] = fq_lut8(qa.x & 0x0F0F0F0Fu, qa.y & 0x0F0F0F0Fu, dl);
+        o[1] = fq_lut8(qb.x & 0x0F0F0F0Fu, qb.y & 0x0F0F0F0Fu, dl);
+    }
+}
+
+template <int BM, int BN, int WAVES_M, int GRP>
+__device__ void gemmfq_db_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
+                               float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {
+    constexpr int NTH = 256, BK = 32;
+    constexpr int WAVES_N = NTH / 32 / WAVES_M;
+    constexpr int TM = BM / 16 / WAVES_M, TN = BN / 16 / WAVES_N;
+    constexpr int LD = BK + 8;
+    constexpr int GPR = BK / 8;            // half8 per row per step (4)
+    constexpr int B_PER = BN * GPR / NTH;  // half8 of X per lane per step (4)
+    static_assert(BM * 2 == NTH && BN * GPR % NTH == 0 && TM == 4 && TN == 4, "tile/threads");
+    __shared__ _Float16 As[2][BM][LD];
+    __shared__ _Float16 Bs[2][BN][LD];
+
+    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
+    const int wm = wid % WAVES_M, wn = wid / WAVES_M;
+    unsigned rt, tt;
+    fq_group_tile(blockIdx.x, blockIdx.y, gridDim.x, gridDim.y, GRP, &rt, &tt);
+    const int m0 = static_cast<int>(rt) * BM, t0 = static_cast<int>(tt) * BN;
+
+    float8 acc[TM][TN];
+#pragma unroll
+    for (int i = 0; i < TM; ++i)
+#pragma unroll
+        for (int j = 0; j < TN; ++j) acc[i][j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
+
+    const int arow_i = threadIdx.x / 2;           // this lane's weight row in the tile
+    const uint32_t sh = (threadIdx.x & 1) * 4u;   // its half of the sub-block (0: values 0-15, 4: values 16-31)
+    const uint8_t *arow = W + (size_t)min(m0 + arow_i, nrows - 1) * row_bytes;
+    const _Float16 *brow[B_PER];
+#pragma unroll
+    for (int e = 0; e < B_PER; ++e) {
+        const int i = threadIdx.x + e * NTH;
+        brow[e] = X + (size_t)min(t0 + i / GPR, n_tok - 1) * ncols + (i % GPR) * 8;
+    }
+    uint2 qa, qb;
+    uint32_t qe;
+    half8 rb[B_PER];
+#define GEMMFQ_DB_FETCH(k0_)                                                                        \
+    do {                                                                                            \
+        const uint8_t *blk = arow + (size_t)((k0_) >> 8) * 136;                                     \
+        const int ib = ((k0_) & 255) >> 5;                                                          \
+        const uint8_t *q = blk + 8 + 16 * ib;                                                       \
+        qa = *(const uint2 *)q;                                                                     \
+        qb = *(const uint2 *)(q + 8);                                                               \
+        qe = blk[ib];                                                                               \
+        _Pragma("unroll") for (int e = 0; e < B_PER; ++e) rb[e] = *(const half8 *)(brow[e] + (k0_)); \
+    } while (0)
+#define GEMMFQ_DB_STAGE(buf_)                                                                       \
+    do {                                                                                            \
+        half8 ra[2];                                                                                \
+        fq_decode_half(qa, qb, qe, sh, ra);                                                         \
+        *(half8 *)&As[buf_][arow_i][sh * 4] = ra[0];                                                \
+        *(half8 *)&As[buf_][arow_i][sh * 4 + 8] = ra[1];                                            \
+        _Pragma("unroll") for (int e = 0; e < B_PER; ++e) {                                         \
+            const int i = threadIdx.x + e * NTH;                                                    \
+            *(half8 *)&Bs[buf_][i / GPR][(i % GPR) * 8] = rb[e];                                    \
+        }                                                                                           \
+    } while (0)
+
+    GEMMFQ_DB_FETCH(0);
+    GEMMFQ_DB_STAGE(0);
+    __syncthreads();
+    if (BK < ncols) GEMMFQ_DB_FETCH(BK);
+    for (int k0 = 0; k0 < ncols; k0 += BK) {
+        const int cur = (k0 / BK) & 1;
+        if (k0 + BK < ncols) {
+            GEMMFQ_DB_STAGE(cur ^ 1);
+            if (k0 + 2 * BK < ncols) GEMMFQ_DB_FETCH(k0 + 2 * BK);
+        }
+        asm volatile("" ::: "memory");  // this step's fragment reads stay after the stores into the other buffer
+#pragma unroll
+        for (int kk = 0; kk < BK; kk += 16) {
+            half16 a[TM], b[TN];
+#pragma unroll
+            for (int i = 0; i < TM; ++i) a[i] = ld_frag16(&As[cur][(wm * TM + i) * 16 + lane % 16][kk]);
+#pragma unroll
+            for (int j = 0; j < TN; ++j) b[j] = ld_frag16(&Bs[cur][(wn * TN + j) * 16 + lane % 16][kk]);
+#pragma unroll
+            for (int i = 0; i < TM; ++i)
+#pragma unroll
+                for (int j = 0; j < TN; ++j) acc[i][j] = WMMA16(a[i], b[j], acc[i][j]);
+        }
+#pragma unroll
+        for (int i = 0; i < TM; ++i)
+#pragma unroll
+            for (int j = 0; j < TN; ++j) asm volatile("" : "+v"(acc[i][j]));  // the WMMAs of this step issue before the barrier
+        __syncthreads();
+    }
+#undef GEMMFQ_DB_STAGE
+#undef GEMMFQ_DB_FETCH
+#pragma unroll
+    for (int i = 0; i < TM; ++i) {
+#pragma unroll
+        for (int j = 0; j < TN; ++j) {
+            const int t = t0 + (wn * TN + j) * 16 + lane % 16;
+            if (t >= n_tok) continue;
+#pragma unroll
+            for (int v = 0; v < 8; ++v) {
+                const int row = m0 + (wm * TM + i) * 16 + CROW(lane, v);
+                if (row < nrows) {
+                    float *dst = Y + (size_t)t * nrows + row;
+                    *dst = accumulate ? *dst + acc[i][j][v] : acc[i][j][v];
+                }
+            }
+        }
+    }
+}
+extern "C" __global__ void __launch_bounds__(256) gemmfq_t2g8db_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemmfq_db_impl<128, 256, 2, 8>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
+#endif
+
