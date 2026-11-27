@@ -301,6 +301,9 @@ public:
         // device position outside pos - pos_n + 1 .. pos, and the widest interval given; segments whose device position was
         // the interval's lowest / highest value (the interval is tight: both ends occur)
         std::uint64_t no_interval = 0, interval_out = 0, interval_max = 0, interval_lo_hits = 0, interval_hi_hits = 0;
+        // v0252-e1split: segments whose rows reach past the key bound the attention split takes (ops::ws4SplitForStep:
+        // min(slot ctx, pos0_hi + rows), pos0_hi = VSeg::pos with an interval) - must stay 0; and the segments that met it
+        std::uint64_t keys_over = 0, keys_tight = 0;
     };
     E1Counts e1Counts() const;
     std::uint64_t verifyCalls() const { return verify_calls_.load(); }
@@ -309,6 +312,7 @@ private:
     std::atomic<std::uint64_t> e1_vsegs_{0}, e1_msegs_{0}, e1_padded_{0}, e1_npend_{0}, e1_pos_{0}, e1_disagree_{0}, verify_calls_{0};
     std::atomic<std::uint64_t> e1_ahead_{0}, spec_shorted_{0};  // v0252-e1p1c
     std::atomic<std::uint64_t> e1_no_iv_{0}, e1_iv_out_{0}, e1_iv_max_{0}, e1_iv_lo_{0}, e1_iv_hi_{0};  // v0252-e1grp
+    std::atomic<std::uint64_t> e1_keys_over_{0}, e1_keys_tight_{0};  // v0252-e1split
     SpecNextTab spec_tab_{};  // the next-cycle rows of the last specAccept (engine thread)
     // v0252-e1fast: the one-shot relaxed arguments (setSpecRelax) and the counters (engine thread writes, tests read after)
     bool rx_on_ = false;

@@ -444,6 +444,8 @@ void testE1AheadDrain() {
                 CHECK(e.verify_segs > 0);
                 CHECK_EQ(e.no_interval, 0u);
                 CHECK_EQ(e.interval_out, 0u);
+                CHECK_EQ(e.keys_over, 0u);  // v0252-e1split: the split bound never below a row's n_pos
+                CHECK(e.keys_tight > 0);
                 CHECK(e.interval_max >= 2 && e.interval_max <= 5);
                 CHECK(e.interval_hi_hits > 0);
             }

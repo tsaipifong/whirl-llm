@@ -2299,11 +2299,18 @@ void testAttnDecodeE1Group() {
         ops::AttnDecodeFlags fd = fa;
         fd.dbg_flags = 4;
         CHECK(oneRow(e1(40000, 40001, 2, 16, 2, 0, true), fd));
-        // the split count of an E1 step stays the step's (max_ctx against the rows-2 limit: over it 64)
+        // the split count of an E1 step stays the step's. v0252-e1split: the step's keys are bounded by row 0's interval
+        // (pos0_hi + n), no longer by max_ctx: row 0 at 40000..40001 in a 262208 slot = 40003 keys <= the rows-2 limit 262144 ->
+        // S 16, the count the synchronous verify of the same rows takes (before e1split this pinned 64 from max_ctx 262208)
         ops::AttnDecodeProblem qo = e1(40000, 40001, 2, 16, 2, 0, true);
         qo.max_ctx = 262208;
         const auto po = ops::chooseAttnDecode(qo, fa, ks, ks.caps, p8s);
-        CHECK(po.grid.y == 64 && po.grid.z == 1 && nameOf(po.f) == "attn_ws4g1");
+        CHECK(po.grid.y == 16 && po.grid.z == 1 && nameOf(po.f) == kn::ws4SplitName(1, 16));
+        // rows whose own keys are over the limit (row 0 at 262200..262201: 262203 keys > 262144) -> 64, grouped as before
+        ops::AttnDecodeProblem qh = e1(262200, 262201, 2, 16, 2, 0, true);
+        qh.max_ctx = 262208;
+        const auto ph = ops::chooseAttnDecode(qh, fa, ks, ks.caps, p8s);
+        CHECK(ph.grid.y == 64 && ph.grid.z == 1 && nameOf(ph.f) == "attn_ws4g1");
     }
     // (6) the R9700 (wsplit / ws4r path, rows_known only): the interval changes nothing there
     {
@@ -2440,4 +2447,146 @@ void testAttnDq4E1() {
     CHECK(one > 0 && two_same > 0 && two_diff > 0);
     std::printf("  testAttnDq4E1: %lld one-position intervals, %lld two-position (%lld agree, %lld at a breakpoint), %lld bad\n", one,
                 two_same + two_diff, two_same, two_diff, bad);
+}
+
+// v0252-e1split (PLAN V1-93): the split count of an E1 verify of ONE slot (rows the host does not know, rows_one_seq, row 0's
+// interval [pos0_lo, pos0_hi]) comes from the bound pos0_hi + n of the step's keys (row r sits at row 0 + r, so its n_pos is
+// at most pos0_hi + r + 1), never from the slot capacity max_ctx; without an interval (pos0_hi -1) max_ctx stays the bound.
+// Before this item the lookahead verify of a 266240 slot at position 249700 ran 64 splits while the synchronous verify of the
+// same rows ran 16, and a 135168 slot at 2100 keys gave Ornith rows 7..9 / Swift rows 3+ 64 where the measured table says
+// S. Checks: (1) the det262k case; (2) the general case (a slot larger than the conversation); (3) for every shape, row class
+// 1..9, key count around every limit and interval width 1..5: unknown rows == the known rows at row 0 = pos0_hi (the largest
+// keys of the interval), and a count the bound gives is allowed at every true position of the interval; (4) no interval /
+// bound above max_ctx: max_ctx (never a larger bound than before); (5) precise (flag 0) and f16 KV: 64 whatever the bound;
+// (6) the device covers every key at any split count (ws4::block_range from the row's own n_pos): a host bound only picks S.
+void testWs4SplitE1Bound() {
+    namespace dv = whirl::device;
+    const auto& p8s = dv::k_profile_gfx1151;
+    static const kn::KernelTable ks = [] {
+        kn::KernelTable k = attnTable(true, true, false, false);
+        for (int i = 0; i < 2; ++i) {
+            const std::uint32_t s = kn::kWs4SplitCounts[i];
+            k.attn_ws4_sp[i] = tag(kn::ws4SplitName(0, s));
+            for (int cg = 1; cg <= 3; ++cg) k.attn_ws4g_sp[i][cg - 1] = tag(kn::ws4SplitName(cg, s));
+        }
+        return k;
+    }();
+    struct Shape {
+        std::uint32_t heads, nkv, pick;
+    };
+    const Shape shapes[] = {{16, 2, 16}, {24, 4, 8}};
+    std::vector<std::int32_t> pos, base;
+    auto known = [&](const Shape& sh, std::int32_t row0, std::uint32_t n, std::uint32_t max_ctx) {
+        pos.clear();
+        base.clear();
+        for (std::uint32_t r = 0; r < n; ++r) {
+            pos.push_back(row0 + static_cast<std::int32_t>(r));
+            base.push_back(0);
+        }
+        ops::AttnDecodeProblem q;
+        q.n = n;
+        q.head_dim = 256;
+        q.n_head = sh.heads;
+        q.n_head_kv = sh.nkv;
+        q.max_ctx = max_ctx;
+        q.kv_q8 = true;
+        q.o_on_gemv = true;
+        q.rows_known = true;
+        q.row_pos = std::span<const std::int32_t>(pos);
+        q.row_base = std::span<const std::int32_t>(base);
+        return q;
+    };
+    auto e1 = [&](const Shape& sh, std::int32_t lo, std::int32_t hi, std::uint32_t n, std::uint32_t max_ctx) {
+        ops::AttnDecodeProblem q = known(sh, 0, n, max_ctx);
+        q.rows_known = false;
+        q.row_pos = {};
+        q.row_base = {};
+        q.rows_one_seq = true;
+        q.pos0_lo = lo;
+        q.pos0_hi = hi;
+        return q;
+    };
+    ops::AttnDecodeFlags f0, fa;
+    fa.attn_lsplit = ops::kAttnLsplitAuto;
+    const auto& lim = p8s.ws4_split_limits;
+    const Shape& orn = shapes[0];
+    const Shape& swf = shapes[1];
+    // (1) det262k: Ornith, 2 rows (one MTP draft in flight: interval width 2), slot 266240, row 0 at 249699..249700
+    CHECK(ops::ws4SplitForStep(e1(orn, 249699, 249700, 2, 266240), 16, lim) == 16);
+    CHECK(ops::ws4SplitForStep(known(orn, 249700, 2, 266240), 16, lim) == 16);
+    CHECK(ops::chooseAttnDecode(e1(orn, 249699, 249700, 2, 266240), fa, ks, ks.caps, p8s).grid.y == 16);
+    // (2) a 135168 slot with a 2100-token conversation: Ornith 7 rows (limit 16384) -> 16, Swift 3 rows (limit 98304) -> 8
+    CHECK(ops::ws4SplitForStep(e1(orn, 2094, 2100, 7, 135168), 16, lim) == 16);
+    CHECK(ops::ws4SplitForStep(e1(swf, 2098, 2100, 3, 135168), 8, lim) == 8);
+    CHECK(ops::chooseAttnDecode(e1(swf, 2098, 2100, 3, 135168), fa, ks, ks.caps, p8s).grid.y == 8);
+    // still 64 where the real keys are above the limit
+    CHECK(ops::ws4SplitForStep(e1(orn, 20000, 20001, 7, 135168), 16, lim) == 64);
+    // (3) the sweep
+    long long cases = 0, bad_eq = 0, bad_bound = 0;
+    for (const Shape& sh : shapes) {
+        const int si = sh.pick == 8 ? 0 : 1;
+        for (std::uint32_t n = 1; n <= 9; ++n)
+            for (int c = 1; c <= 9; ++c)
+                for (const long long d : {-3LL, -2LL, -1LL, 0LL, 1LL, 2LL, 3LL, 100LL}) {
+                    const long long keys = static_cast<long long>(lim.max_keys[si][c]) + d;  // around every limit
+                    for (std::int32_t w = 1; w <= 5; ++w) {
+                        const long long hi64 = keys - static_cast<long long>(n);  // pos0_hi + n = keys
+                        if (hi64 - (w - 1) < 0) continue;
+                        const std::int32_t hi = static_cast<std::int32_t>(hi64), lo = hi - (w - 1);
+                        for (const std::uint32_t mc : {270336u, 524288u}) {
+                            const std::uint32_t u = ops::ws4SplitForStep(e1(sh, lo, hi, n, mc), sh.pick, lim);
+                            const std::uint32_t k = ops::ws4SplitForStep(known(sh, hi, n, mc), sh.pick, lim);
+                            bad_eq += u != k;
+                            for (std::int32_t p0 = lo; p0 <= hi; ++p0) {
+                                const std::uint32_t kp = ops::ws4SplitForStep(known(sh, p0, n, mc), sh.pick, lim);
+                                bad_bound += u == sh.pick && kp != sh.pick;
+                            }
+                            ++cases;
+                        }
+                    }
+                }
+    }
+    CHECK_EQ(bad_eq, 0LL);
+    CHECK_EQ(bad_bound, 0LL);
+    // (4) no interval: max_ctx (today's rule); a bound above max_ctx: max_ctx
+    CHECK(ops::ws4SplitForStep(e1(orn, -1, -1, 7, 135168), 16, lim) == 64);
+    CHECK(ops::ws4SplitForStep(e1(orn, -1, -1, 2, 262144), 16, lim) == 16);
+    CHECK(ops::ws4SplitForStep(e1(orn, 16300, 16380, 7, 16384), 16, lim) == 16);  // bound 16387 > max_ctx 16384: max_ctx
+    CHECK(ops::ws4SplitForStep(e1(orn, 249699, 249700, 10, 266240), 16, lim) == 64);  // 10+ rows: no class
+    // (5) precise / f16: 64 at every bound (the split selection never runs there)
+    for (const std::int32_t hi : {100, 2100, 249700}) {
+        CHECK(ops::chooseAttnDecode(e1(orn, hi - 1, hi, 2, 266240), f0, ks, ks.caps, p8s).grid.y == 64);
+        CHECK(ops::chooseAttnDecode(known(orn, hi, 2, 266240), f0, ks, ks.caps, p8s).grid.y == 64);
+        ops::AttnDecodeProblem q16 = e1(swf, hi - 1, hi, 3, 135168);
+        q16.kv_q8 = false;
+        CHECK(ops::chooseAttnDecode(q16, fa, ks, ks.caps, p8s).grid.y == 64);
+    }
+    // (5b) WHIRL_DBG&8 (the temporary screen arm): the pre-e1split bound (max_ctx) for unknown rows only; known rows and the
+    // grouping unchanged
+    {
+        ops::AttnDecodeFlags f8 = fa;
+        f8.dbg_flags = 8;
+        const auto o = ops::chooseAttnDecode(e1(orn, 249699, 249700, 2, 266240), f8, ks, ks.caps, p8s);
+        const auto nw = ops::chooseAttnDecode(e1(orn, 249699, 249700, 2, 266240), fa, ks, ks.caps, p8s);
+        CHECK(o.grid.y == 64 && nw.grid.y == 16 && o.grid.z == nw.grid.z && o.kind == nw.kind);
+        CHECK(ops::chooseAttnDecode(e1(orn, 2094, 2100, 7, 135168), f8, ks, ks.caps, p8s).grid.y == 64);
+        CHECK(samePlan(ops::chooseAttnDecode(known(orn, 249700, 2, 266240), f8, ks, ks.caps, p8s),
+                       ops::chooseAttnDecode(known(orn, 249700, 2, 266240), fa, ks, ks.caps, p8s)));
+        CHECK(ops::chooseAttnDecode(e1(orn, 249699, 249700, 2, 266240), [&] { ops::AttnDecodeFlags g = f0; g.dbg_flags = 8; return g; }(), ks, ks.caps, p8s).grid.y == 64);
+    }
+    // (6) device coverage: the split ranges of n_pos keys cover [0, n_pos) in order at S 8 / 16 / 64, no window
+    long long gaps = 0;
+    for (const int s : {8, 16, 64})
+        for (const int np : {1, 63, 64, 65, 2101, 16385, 98305, 249702, 262145}) {
+            int next = 0;
+            for (int sp = 0; sp < s; ++sp) {
+                const ws4::Range r = ws4::block_range(np, sp, s, 0);
+                if (r.b0 >= r.b1) continue;
+                gaps += r.b0 != next;
+                next = r.b1;
+            }
+            gaps += next != np;
+        }
+    CHECK_EQ(gaps, 0LL);
+    std::printf("  testWs4SplitE1Bound: %lld sweep cases\n", cases);
 }

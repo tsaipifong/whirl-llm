@@ -399,6 +399,8 @@ MockModel::E1Counts MockModel::e1Counts() const {
     c.interval_max = e1_iv_max_.load();
     c.interval_lo_hits = e1_iv_lo_.load();
     c.interval_hi_hits = e1_iv_hi_.load();
+    c.keys_over = e1_keys_over_.load();  // v0252-e1split
+    c.keys_tight = e1_keys_tight_.load();
     return c;
 }
 
@@ -777,6 +779,15 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
                 if (pos > sg.pos || static_cast<std::uint64_t>(pos) + sg.pos_n <= sg.pos) e1_iv_out_ += 1;
                 if (static_cast<std::uint64_t>(pos) + sg.pos_n == static_cast<std::uint64_t>(sg.pos) + 1) e1_iv_lo_ += 1;
                 if (pos == sg.pos) e1_iv_hi_ += 1;
+                // v0252-e1split: the attention's key bound of this verify (ops::ws4SplitForStep with Context's row0_hi = sg.pos)
+                // against the true largest n_pos of its rows (device position + nd + 1)
+                if (sg.pos + 1 >= sg.pos_n) {
+                    const std::uint64_t rows = static_cast<std::uint64_t>(sg.nd) + 1;
+                    const std::uint64_t bound = std::min<std::uint64_t>(mc_.slot_ctx, static_cast<std::uint64_t>(sg.pos) + rows);
+                    const std::uint64_t truth = static_cast<std::uint64_t>(pos) + rows;
+                    if (truth > bound) e1_keys_over_ += 1;
+                    if (truth == bound) e1_keys_tight_ += 1;
+                }
             }
             for (std::uint64_t cur = e1_iv_max_.load(); sg.pos_n > cur && !e1_iv_max_.compare_exchange_weak(cur, sg.pos_n);) {}
         }

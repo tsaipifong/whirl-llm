@@ -183,6 +183,8 @@ void testE1SnapGate() {
                 CHECK(e.verify_segs > 0 && e.ahead_segs > 0);
                 CHECK_EQ(e.no_interval, 0u);
                 CHECK_EQ(e.interval_out, 0u);
+                CHECK_EQ(e.keys_over, 0u);  // v0252-e1split
+                CHECK(e.keys_tight > 0);
                 CHECK_EQ(e.interval_max, 2u);
             } else if (!arm.fast) {
                 // v0252-swe1 round 2 (screen swe1-bal 20261127-0323 KEEP): dense precise / balance run the default lookahead below 33025
