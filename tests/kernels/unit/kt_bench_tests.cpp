@@ -780,7 +780,8 @@ static void test_fq_kt_only_entries() {
                    {"GEMMFQ_ABL_PROTO(t2g8a3,", "WHIRL_FQ_ABL_PROTOS"},
                    {"GEMMFQ_ABL_PROTO(t2g8a4,", "WHIRL_FQ_ABL_PROTOS"},
                    {"GEMMFQ_ABL_PROTO(t2g8a5,", "WHIRL_FQ_ABL_PROTOS"},
-                   {"void __launch_bounds__(128) gemmfq_t2w4g8_mxfp4(", "WHIRL_FQ_W4_PROTO"}};
+                   {"void __launch_bounds__(128) gemmfq_t2w4g8_mxfp4(", "WHIRL_FQ_W4_PROTO"},
+                   {"void __launch_bounds__(256) gemmfq_t2g8db_mxfp4(", "WHIRL_FQ_DB_PROTO"}};
     for (const auto& k : kt_only) {
         const std::size_t p = src.find(k.needle);
         const std::string g = p == std::string::npos ? std::string("(not found)") : guard(p);
@@ -798,6 +799,12 @@ static void test_fq_kt_only_entries() {
     const std::size_t nl = e == std::string::npos ? e : src.find('\n', e);
     check("gemm_fq.hip: t2w4g8 = gemmfq_k16_impl<128, 128, ...> with __launch_bounds__(128) (kt.h kFqGeomProto bm 128 bn 128 nth 128)",
           i != std::string::npos && i < nl);
+    // t2g8db geometry == kt.h kFqGeomProto {"t2g8db", {128, 256, 256}}: gemmfq_db_impl<128, 256, 2, 8> on the same line
+    const std::size_t e2 = src.find("gemmfq_t2g8db_mxfp4(");
+    const std::size_t i2 = e2 == std::string::npos ? e2 : src.find("gemmfq_db_impl<128, 256, 2, 8>", e2);
+    const std::size_t nl2 = e2 == std::string::npos ? e2 : src.find('\n', e2);
+    check("gemm_fq.hip: t2g8db = gemmfq_db_impl<128, 256, 2, 8> with __launch_bounds__(256) (kt.h kFqGeomProto bm 128 bn 256 nth 256)",
+          i2 != std::string::npos && i2 < nl2);
 #else
     check("gemm_fq.hip kt-only entries (WHIRL_KT_SRC_DIR not set: not checked)", false);
 #endif

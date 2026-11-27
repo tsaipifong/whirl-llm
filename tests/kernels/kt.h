@@ -303,7 +303,8 @@ struct FqGeomProto {
     const char* name;
     wk::GemmCfg g;
 };
-inline constexpr FqGeomProto kFqGeomProto[] = {{"t2w4g8", {128, 128, 128}}};
+// t2g8db (round 5, -DWHIRL_FQ_DB_PROTO=1): t2g8 with a BK 32 LDS double buffer (one barrier per 32-column step), same grid.
+inline constexpr FqGeomProto kFqGeomProto[] = {{"t2w4g8", {128, 128, 128}}, {"t2g8db", {128, 256, 256}}};
 // v0252-valuout (PLAN V1-53): the seven v0252-8sbvalu VALU-lever prototypes (d185546; all REVERT on the 8060S, q7 951b-955,
 // KB v0252-8sbvalu:gemmfq-valu-levers) are NOT in the shipped gfx1151 object: unused kernels move the object layout
 // (KB v0252-8sbal:e2e-raster-g8). Their source stays in git history (d185546) and research\b8s. kt gemm checks absence.
