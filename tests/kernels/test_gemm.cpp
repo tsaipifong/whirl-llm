@@ -607,6 +607,47 @@ void testGemm(Ctx& c) {
                             r.mismatches = r.pass ? 0 : 1;
                             c.rep.add(r);
                         }
+                    // v0252-gemmlat round 2: the bench-only geometry prototypes (kt.h kFqGeomProto) - bitwise == the
+                    // dequant + gemm_c2_f16 reference (= gemmfq_t2g8's bits) on their own grid when the object has them; the
+                    // shipped object (no WHIRL_KT_CODE_OBJECT) must not have them (an extra kernel moves the layout)
+                    for (const FqGeomProto& gp : kFqGeomProto) {
+                        const std::string kn = std::string("gemmfq_") + gp.name + "_mxfp4";
+                        const hip::Function f = c.fnOpt(kn);
+                        const char* ext = std::getenv("WHIRL_KT_CODE_OBJECT");
+                        if (!f) {
+                            if ((ext == nullptr || *ext == 0) && variant == 0 && nt == ns.front()) {
+                                Result r;
+                                r.kind = Kind::invariant;
+                                r.n = 1;
+                                r.name = kn + " (v0252-gemmlat bench-only prototype) absent from the shipped gfx1151 code object";
+                                r.pass = true;
+                                r.mismatches = 0;
+                                c.rep.add(r);
+                            }
+                            continue;
+                        }
+                        if ((ext == nullptr || *ext == 0) && variant == 0 && nt == ns.front()) {
+                            Result r;
+                            r.kind = Kind::invariant;
+                            r.n = 1;
+                            r.name = kn + " (v0252-gemmlat bench-only prototype) absent from the shipped gfx1151 code object";
+                            r.pass = false;
+                            r.mismatches = 1;
+                            r.note = "in the shipped object (built with WHIRL_FQ_W4_PROTO?)";
+                            c.rep.add(r);
+                        }
+                        const wk::GemmCfg& g = gp.g;
+                        for (int accumulate = 0; accumulate < 2; ++accumulate) {
+                            Buf y(static_cast<std::size_t>(nt) * nr * 4);
+                            if (accumulate) y.up(y0); else y.fill(0xff);
+                            hip::launch(f, {cdiv(nt, g.bn), cdiv(nr, g.bm), 1}, {static_cast<unsigned>(g.nth), 1, 1}, 0, c.s, w.p(), hm.row_bytes,
+                                        x16.p(), y.p(), nc, nr, nt, accumulate);
+                            c.sync();
+                            const std::string name = kn + " == dequant + gemm_c2_f16 (" + (variant ? "e 96..135" : "random") +
+                                                     ", 1000 rows, n=" + std::to_string(nt) + (accumulate ? ", accumulate)" : ")");
+                            c.rep.add(cmpExact(name, y.down<float>(static_cast<std::size_t>(nt) * nr), accumulate ? ref1 : ref0, Kind::invariant));
+                        }
+                    }
                     // v0252-gemmlat: the measurement-only ablations (kt.h kFqAblation) exist only in the kt-only object
                     // (-DWHIRL_FQ_ABL_PROTOS=1); the shipped object must not carry them (an extra kernel moves the layout)
                     if (variant == 0 && nt == ns.front())

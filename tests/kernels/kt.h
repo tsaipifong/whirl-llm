@@ -290,6 +290,16 @@ inline constexpr FqProto kFqProto[] = {{"t2g4", 1}, {"t2g8", 1}, {"t2g16", 1}, {
 // bitwise; these outputs are wrong by design): bench fdq times them only (rows marked kt_bench.h markAblationRow), and
 // kt gemm checks they are absent from the product object.
 inline constexpr FqProto kFqAblation[] = {{"t2g8a1", 1}, {"t2g8a2", 1}};
+// v0252-gemmlat round 2 (PLAN V1-53, kernel SOP step 4): bench-only prototypes with their OWN geometry (not a kGemmFqCfgs
+// slot), only in a kt-only object (t2w4g8: -DWHIRL_FQ_W4_PROTO=1, kernels/gfx1151/gemm_fq.hip). Same ABI and grid rule as
+// the slots (x = token blocks of g.bn, y = row blocks of g.bm, g.nth threads). Same bits as gemmfq_t2g8_mxfp4: kt gemm
+// checks every one present bitwise (and, on the shipped object, that it is absent); bench fdq gates its timing on the
+// full-output bitwise row like any slot.
+struct FqGeomProto {
+    const char* name;
+    wk::GemmCfg g;
+};
+inline constexpr FqGeomProto kFqGeomProto[] = {{"t2w4g8", {128, 128, 128}}};
 // v0252-valuout (PLAN V1-53): the seven v0252-8sbvalu VALU-lever prototypes (d185546; all REVERT on the 8060S, q7 951b-955,
 // KB v0252-8sbvalu:gemmfq-valu-levers) are NOT in the shipped gfx1151 object: unused kernels move the object layout
 // (KB v0252-8sbal:e2e-raster-g8). Their source stays in git history (d185546) and research\b8s. kt gemm checks absence.

@@ -1325,6 +1325,8 @@ void benchFdq(Env& e) {
     if (!e.o.fdq_v.empty()) {
         for (const FqProto& pv : kFqProto) cand.push_back({pv.name, wk::kGemmFqCfgs[static_cast<std::size_t>(pv.base)]});
         for (const FqProto& pv : kFqAblation) cand.push_back({pv.name, wk::kGemmFqCfgs[static_cast<std::size_t>(pv.base)], true});
+        // v0252-gemmlat round 2: the bench-only geometry prototypes (kt.h kFqGeomProto; own grid, bitwise-gated like a slot)
+        for (const FqGeomProto& gp : kFqGeomProto) cand.push_back({gp.name, gp.g});
     }
     std::vector<FqB> slots;
     for (const FqB& cb : cand) {
@@ -1345,7 +1347,7 @@ void benchFdq(Env& e) {
         for (const FqB& cb : cand) known = known || cb.name == v;
         if (!known) {
             Result r;
-            r.name = "bench fdq: --fdq-v " + v + " is neither a gemmfq slot nor a kt.h kFqProto prototype nor a kFqAblation ablation";
+            r.name = "bench fdq: --fdq-v " + v + " is neither a gemmfq slot nor a kt.h kFqProto / kFqGeomProto prototype nor a kFqAblation ablation";
             r.pass = false;
             c.rep.add(r);
             std::printf("   fdq: unknown --fdq-v %s (FAIL)\n", v.c_str());

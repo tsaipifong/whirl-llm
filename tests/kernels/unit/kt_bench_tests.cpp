@@ -749,6 +749,57 @@ static void test_ablation_rows() {
     check("plain row: no ablation keys", jp.find("ablation") == std::string::npos && jp.find("verdict_use") == std::string::npos, jp);
 }
 
+// v0252-gemmlat round 2: every kt-only entry of kernels/gfx1151/gemm_fq.hip sits inside its own #ifdef (an extra kernel in
+// the shipped object moves the layout, KB v0252-8sbal:e2e-raster-g8), and the geometry prototype's launch bounds / impl tile
+// match the kt.h kFqGeomProto row the bench and kt gemm launch it with (t2w4g8: 128 x 128 tile, 128 threads).
+static void test_fq_kt_only_entries() {
+#ifdef WHIRL_KT_SRC_DIR
+    std::ifstream in(std::string(WHIRL_KT_SRC_DIR) + "/kernels/gfx1151/gemm_fq.hip", std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    const std::string src = ss.str();
+    check("gemm_fq.hip read", !src.empty());
+    // the innermost open #if... block at position p (scan the directive lines before it)
+    auto guard = [&src](std::size_t p) {
+        std::vector<std::string> open;
+        std::istringstream ls(src.substr(0, p));
+        for (std::string l; std::getline(ls, l);) {
+            const std::size_t a = l.find_first_not_of(" \t");
+            if (a == std::string::npos || l[a] != '#') continue;
+            const std::string d = l.substr(a);
+            if (d.rfind("#if", 0) == 0) open.push_back(d);
+            else if (d.rfind("#endif", 0) == 0 && !open.empty()) open.pop_back();
+        }
+        return open.empty() ? std::string() : open.back();
+    };
+    const struct {
+        const char* needle;
+        const char* macro;
+    } kt_only[] = {{"GEMMFQ_ABL_PROTO(t2g8a1,", "WHIRL_FQ_ABL_PROTOS"},
+                   {"GEMMFQ_ABL_PROTO(t2g8a2,", "WHIRL_FQ_ABL_PROTOS"},
+                   {"void __launch_bounds__(128) gemmfq_t2w4g8_mxfp4(", "WHIRL_FQ_W4_PROTO"}};
+    for (const auto& k : kt_only) {
+        const std::size_t p = src.find(k.needle);
+        const std::string g = p == std::string::npos ? std::string("(not found)") : guard(p);
+        check(std::string("gemm_fq.hip: ") + k.needle + " only under #ifdef " + k.macro, g == std::string("#ifdef ") + k.macro, g);
+    }
+    // the product entries are NOT under any #if (they are in every object)
+    for (const char* prod : {"void __launch_bounds__(256) gemmfq_c2_mxfp4(", "void __launch_bounds__(256) gemmfq_t2_mxfp4(", "GEMMFQ_PROTO(t2g8,"}) {
+        const std::size_t p = src.find(prod);
+        check(std::string("gemm_fq.hip: ") + prod + " in every object (no #if around it)", p != std::string::npos && guard(p).empty(),
+              p == std::string::npos ? "not found" : guard(p));
+    }
+    // t2w4g8 geometry == kt.h kFqGeomProto {"t2w4g8", {128, 128, 128}} (bm, bn, nth)
+    const std::size_t e = src.find("gemmfq_t2w4g8_mxfp4(");
+    const std::size_t i = e == std::string::npos ? e : src.find("gemmfq_k16_impl<128, 128, ", e);
+    const std::size_t nl = e == std::string::npos ? e : src.find('\n', e);
+    check("gemm_fq.hip: t2w4g8 = gemmfq_k16_impl<128, 128, ...> with __launch_bounds__(128) (kt.h kFqGeomProto bm 128 bn 128 nth 128)",
+          i != std::string::npos && i < nl);
+#else
+    check("gemm_fq.hip kt-only entries (WHIRL_KT_SRC_DIR not set: not checked)", false);
+#endif
+}
+
 static void test_jsonl_file(const std::string& emit) {
     namespace fs = std::filesystem;
     const fs::path p = emit.empty() ? fs::temp_directory_path() / "kt_bench_tests.jsonl" : fs::path(emit);
@@ -1295,6 +1346,7 @@ int main(int argc, char** argv) {
         test_roof();
         test_rows();
         test_ablation_rows();
+        test_fq_kt_only_entries();
         test_jsonl_file(emit);
         test_dq4s_mirror_is_ops_rule();
         test_dq4s_grid_ok();
