@@ -14,6 +14,7 @@
 #include <numeric>
 
 #include "kt.h"
+#include "kt_sx_arm.h"
 
 namespace kt {
 
@@ -522,6 +523,9 @@ static void benchPrefill1151(Ctx& c) {
 // WHIRL_KT_BENCH_ROUNDS (6). Lines: "SXAB <heads>/<kv> n <n> L <L> round <r> A <us> B <us> ratio <x>" per round,
 // "SXNUM ... rel_rms <x> maxabs <y> finite <0|1>" per cell (B vs A over the whole output; also a check row: rel_rms <= 4e-3,
 // finite - the v0252-b8s-c2 pair limit). The judge (scratch/v0252_strixc2/strixc2_kt_judge.py) applies the KEEP rule.
+// v0252-attnlat (PLAN V1-148): WHIRL_KT_BENCH_SX_B=<kernel> (kt_sx_arm.h) replaces arm B by that kernel launched with arm A's
+// geometry and arguments ({cdiv(n, 128), heads per launch, 1} x 256): fa_probe_* (a phase removed; SXNUM is an info row, Kind
+// skip, never a failure) or a same-bits candidate (attn_pfx_f16r; attn_prefill_wmma = A/A control: SXNUM is a bitwise row).
 static std::vector<int> envInts(const char* name, std::vector<int> def) {
     const char* e = std::getenv(name);
     if (!e) return def;
@@ -541,7 +545,16 @@ static void benchSx1151(Ctx& c) {
     const float scale = 1.0f / 16.0f;
     const auto fA = c.fnOpt("attn_prefill_wmma");
     const hip::Function fsx[3] = {c.fnOpt("attn_sx2"), c.fnOpt("attn_sx4"), c.fnOpt("attn_sx8")};
-    if (!fA || (!fsx[0] && !fsx[1] && !fsx[2])) {
+    const sxarm::Arm arm = sxarm::armFromEnv(std::getenv("WHIRL_KT_BENCH_SX_B"));
+    const hip::Function fX = arm.kind == sxarm::Kind::sx || arm.kind == sxarm::Kind::invalid ? hip::Function{} : c.fnOpt(arm.kernel);
+    if (arm.kind != sxarm::Kind::sx) {
+        std::printf("   SXARM B %s kind %s\n", arm.kernel.c_str(), sxarm::kindName(arm.kind));
+        if (arm.kind == sxarm::Kind::invalid || !fA || !fX) {
+            c.rep.skip("attnbench", "kernel A/B attn_prefill_wmma vs " + arm.kernel,
+                       arm.kind == sxarm::Kind::invalid ? "WHIRL_KT_BENCH_SX_B: not a probe / same-bits kernel (kt_sx_arm.h)" : "kernel not in this code object");
+            return;
+        }
+    } else if (!fA || (!fsx[0] && !fsx[1] && !fsx[2])) {
         std::printf("   SX: attn_prefill_wmma / attn_sx* not in this code object\n");
         c.rep.skip("attnbench", "attn_sx kernel A/B", "kernel not in this code object");
         return;
@@ -594,21 +607,24 @@ static void benchSx1151(Ctx& c) {
                         np = hp % x == 0 ? x : 0;
                         break;
                     }
-                const hip::Function fB = np == 8 ? fsx[2] : np == 4 ? fsx[1] : np == 2 ? fsx[0] : hip::Function{};
+                const bool armx = arm.kind != sxarm::Kind::sx;
+                const hip::Function fB = armx ? fX : np == 8 ? fsx[2] : np == 4 ? fsx[1] : np == 2 ? fsx[0] : hip::Function{};
                 if (!fB) {
                     std::printf("   SXSKIP %d/%d n %d L %d: no attn_sx for group %d / %d heads per launch\n", heads, nkv, n, L, grp, hp);
                     continue;
                 }
-                const unsigned cols = 64u / static_cast<unsigned>(np);
+                const unsigned cols = armx ? 0u : 64u / static_cast<unsigned>(np);
                 auto goA = [&] {
                     for (int p = 0; p < P; ++p)
                         hip::launch(fA, {cdiv(n, 128), static_cast<unsigned>(hp), 1}, {256, 1, 1}, 0, c.s, dq.p(), a, outA.p(), heads, nkv, qstride,
                                     dpos.p(), n, scale, p * hp);
                 };
                 auto goB = [&] {
-                    for (int p = 0; p < P; ++p)
-                        hip::launch(fB, {cdiv(n, cols) * static_cast<unsigned>(hp / np), 1, 1}, {256, 1, 1}, 0, c.s, dq.p(), a, outB.p(), heads, nkv,
-                                    qstride, dpos.p(), n, scale, p * hp);
+                    for (int p = 0; p < P; ++p) {
+                        const hip::Dim3 grid = armx ? hip::Dim3{cdiv(n, 128), static_cast<unsigned>(hp), 1}
+                                                    : hip::Dim3{cdiv(n, cols) * static_cast<unsigned>(hp / np), 1, 1};
+                        hip::launch(fB, grid, {256, 1, 1}, 0, c.s, dq.p(), a, outB.p(), heads, nkv, qstride, dpos.p(), n, scale, p * hp);
+                    }
                 };
                 auto timed = [&](const std::function<void()>& go) {
                     hip::Event e0 = hip::eventCreate(true), e1 = hip::eventCreate(true);
@@ -625,7 +641,24 @@ static void benchSx1151(Ctx& c) {
                 goB();
                 c.sync();
                 // numerics: B vs A over the whole output
-                {
+                if (armx) {
+                    const std::size_t on = static_cast<std::size_t>(n) * heads * hd;
+                    const auto oa = outA.down<float>(on), ob = outB.down<float>(on);
+                    const std::string what = arm.kernel + " vs attn_prefill_wmma (heads " + std::to_string(heads) + " / kv " + std::to_string(nkv) +
+                                             ", n " + std::to_string(n) + ", L " + std::to_string(L) + ")";
+                    if (arm.kind == sxarm::Kind::same_bits) {
+                        std::size_t bad = 0;
+                        for (std::size_t i = 0; i < on; ++i) bad += std::memcmp(&oa[i], &ob[i], 4) != 0;
+                        std::printf("   SXNUM %d/%d n %d L %d B %s parts %d bitwise_mismatches %zu of %zu\n", heads, nkv, n, L, arm.kernel.c_str(), P, bad, on);
+                        benchBitRow(c, arm.kernel + " == attn_prefill_wmma, n " + std::to_string(n), heads, nkv, L, 0, bad, on);
+                    } else {
+                        double ma = 0;
+                        for (std::size_t i = 0; i < on; ++i) ma = std::max(ma, std::fabs(static_cast<double>(ob[i]) - oa[i]));
+                        std::printf("   SXNUM %d/%d n %d L %d B %s parts %d probe maxabs %.4g (info: output wrong by design)\n", heads, nkv, n, L,
+                                    arm.kernel.c_str(), P, ma);
+                        c.rep.skip("attnbench", what, "probe kernel: a phase is removed, output wrong by design (info row, not a check)");
+                    }
+                } else {
                     const std::size_t on = static_cast<std::size_t>(n) * heads * hd;
                     const auto oa = outA.down<float>(on), ob = outB.down<float>(on);
                     double se = 0, sr = 0, ma = 0;

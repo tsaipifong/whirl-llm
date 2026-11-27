@@ -561,8 +561,78 @@ void dq4Long(Ctx& c) {
 
 }  // namespace
 
+// v0252-attnlat (PLAN V1-148, bench-only; spec progress\v0252-attnlim.HANDOFF.md sec. 4 E2): attn_pfx_f16r (gfx1151) issues the
+// K / V loads of a key tile as raw loads in one clause (key index clamped for the address only), zeroes the keys >= n_keys of
+// the block-uniform last tile in registers before the LDS store and reads the page delta one step ahead; LDS layout,
+// __syncthreads, WMMA order and softmax are attn_prefill_wmma's, so it stores the same values and is bitwise == attn_prefill_wmma
+// (a kernel-test invariant of this same-bits pair). Its own f16 paged cache (shuffled pages, N(0, 1) values) of L = 4111 keys
+// so n = 2048 fits at pos L - n; shapes (24, 4) Swift and (16, 2) Ornith; pos L - n and 0; n 1 / 333 / 2048 (L and 333 are
+// not multiples of 32: every block ends in a partial key tile; n 1 and 333 end in a partial query block). A gfx1151 code
+// object without attn_pfx_f16r is the build before this item: FAIL, not skip; other objects must not carry it.
+static void testPfxF16r(Ctx& c) {
+    const bool g1151 = c.mod.arch() == hip::Arch::gfx1151;
+    const hip::Function fA = c.fnOpt("attn_prefill_wmma"), fR = c.fnOpt("attn_pfx_f16r");
+    if (!g1151 || !fR) {
+        Result r;
+        r.kind = Kind::invariant;
+        r.n = 1;
+        r.name = g1151 ? "attn_pfx_f16r (v0252-attnlat bench entry) in the gfx1151 code object"
+                       : "attn_pfx_f16r absent from this non-gfx1151 code object";
+        r.pass = g1151 ? false : fR == nullptr;
+        r.mismatches = r.pass ? 0 : 1;
+        if (!r.pass) r.note = g1151 ? "missing from the code object" : "present outside gfx1151";
+        c.rep.add(r);
+        return;
+    }
+    const int L = 4111, hd = 256, qstride = 2 * hd;
+    const float scale = 1.0f / 16.0f;
+    const int max_kv = 4;
+    const int pages = (L + wk::kKvPage - 1) / wk::kKvPage;
+    const std::size_t nel = static_cast<std::size_t>(pages) * wk::kKvPage * max_kv * hd;
+    std::vector<int> pt(static_cast<std::size_t>(pages));
+    std::iota(pt.begin(), pt.end(), 0);
+    std::shuffle(pt.begin(), pt.end(), c.rng);
+    const std::vector<float> kf = c.randn(nel), vf = c.randn(nel);
+    std::vector<std::uint16_t> kh(nel), vh(nel);
+    for (std::size_t i = 0; i < nel; ++i) {
+        kh[i] = f2h(kf[i]);
+        vh[i] = f2h(vf[i]);
+    }
+    Buf dk(kh), dv(vh), dpt(pt);
+    wk::KvArgs a{};
+    a.k = dk.p();
+    a.v = dv.p();
+    a.ptab = dpt.p();
+    for (const auto& [nh, nkv] : {std::pair{24, 4}, std::pair{16, 2}}) {
+        for (const int n : {1, 333, 2048}) {
+            const std::vector<float> qp = c.randn(static_cast<std::size_t>(n) * nh * qstride);
+            Buf dq(qp);
+            const std::size_t cnt = static_cast<std::size_t>(n) * nh * hd;
+            for (const int p0 : {L - n, 0}) {
+                Buf dpos(std::vector<int>{p0});
+                Buf oa(cnt * 4), orr(cnt * 4);
+                oa.fill(0x7f);
+                orr.fill(0x7f);
+                for (const auto& [f, o] : {std::pair<hip::Function, Buf*>{fA, &oa}, std::pair<hip::Function, Buf*>{fR, &orr}})
+                    hip::launch(f, {cdiv(n, 128), static_cast<unsigned>(nh), 1}, {256, 1, 1}, 0, c.s, dq.p(), a, o->p(), nh, nkv, qstride,
+                                dpos.p(), n, scale, 0);
+                c.sync();
+                c.rep.add(cmpExact("attn_pfx_f16r == attn_prefill_wmma (" + std::to_string(nh) + " / " + std::to_string(nkv) + " heads, n " +
+                                       std::to_string(n) + ", pos " + std::to_string(p0) + ", L " + std::to_string(L) + ") [kv f16]",
+                                   orr.down<float>(cnt), oa.down<float>(cnt), Kind::invariant));
+            }
+        }
+    }
+}
+
 void testAttn(Ctx& c) {
     c.rep.family = "attn";
+    {  // v0252-attnlat: first, so the queue job's invariant step fails fast; the family's random stream is restored, so every
+       // other attn row sees the same data as before this item
+        const std::mt19937_64 saved = c.rng;
+        testPfxF16r(c);
+        c.rng = saved;
+    }
     // v0252-c1port (C1, feat026-attnkg97 / -97k): the f16 attn_kg variants attn_kgv6/4/2 (var 1) and attn_kgk6/4/2
     // (var 3) are in the gfx1201 code object and loaded into the host table (kernels_abi.cpp loadAttn), and absent from
     // the gfx1151 object and table (0.2.5.2 leaves the 8060S untouched). Fails before the port (no kernel). Their bitwise

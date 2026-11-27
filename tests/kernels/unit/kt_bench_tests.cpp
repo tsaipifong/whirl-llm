@@ -8,6 +8,7 @@
 #include "../kt_bench.h"
 #include "../kt_dq4s.h"  // v0252-8sq5: the dq4s split-count bench table
 #include "../kt_ws4s.h"  // v0252-8sws: the ws4s split-count bench table
+#include "../kt_sx_arm.h"  // v0252-attnlat: attnbench SX arm B (WHIRL_KT_BENCH_SX_B)
 #include "../../../kernels/gfx1151/attn_ws4_index.h"  // ws4::block_range / block_range_ns (host-includable)
 #include "whirl/device_profile.h"
 #include "whirl/kernels_abi.h"
@@ -1218,6 +1219,47 @@ static void test_ws4s_table_cells() {
           std::any_of(cs.begin(), cs.end(), [](const ws4s::Cell& c) { return c.name == "ornith.q8hkv.L32768.rows2.s16_vs_s64.table"; }));
 }
 
+// v0252-attnlat (PLAN V1-148): WHIRL_KT_BENCH_SX_B parsing (kt_sx_arm.h) and the named kernels exist as FA_ENTRY-signature
+// entries of kernels\gfx1151\attn.hip (arm B is launched with attn_prefill_wmma's geometry and arguments)
+static bool attn1151SourceHas(const std::string& pattern) {
+#ifdef WHIRL_KT_SRC_DIR
+    static std::string src;
+    if (src.empty()) {
+        std::ifstream in(std::string(WHIRL_KT_SRC_DIR) + "/kernels/gfx1151/attn.hip", std::ios::binary);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        src = ss.str();
+    }
+    return src.find(pattern) != std::string::npos;
+#else
+    (void)pattern;
+    return false;
+#endif
+}
+
+static void test_sx_arm_env() {
+    using sxarm::Kind;
+    check("sxarm: unset -> attn_sx arm (unchanged A/B)", sxarm::armFromEnv(nullptr).kind == Kind::sx && sxarm::armFromEnv(nullptr).kernel.empty());
+    check("sxarm: empty -> attn_sx arm", sxarm::armFromEnv("").kind == Kind::sx);
+    for (const char* p : {"fa_probe_noload", "fa_probe_nopv", "fa_probe_norescale"}) {
+        const sxarm::Arm a = sxarm::armFromEnv(p);
+        check(std::string("sxarm: ") + p + " -> probe (numerics info only)", a.kind == Kind::probe && a.kernel == p, sxarm::kindName(a.kind));
+    }
+    check("sxarm: attn_pfx_f16r -> same_bits (bitwise row)", sxarm::armFromEnv("attn_pfx_f16r").kind == Kind::same_bits);
+    check("sxarm: attn_prefill_wmma -> same_bits (A/A control)", sxarm::armFromEnv("attn_prefill_wmma").kind == Kind::same_bits);
+    for (const char* p : {"attn_sx2", "fa_probe_", "attn_pfx_f16r ", "ATTN_PFX_F16R", "attn_prefill_wmma_i4"}) {
+        const sxarm::Arm a = sxarm::armFromEnv(p);
+        check(std::string("sxarm: '") + p + "' -> invalid (refused, nothing timed)", a.kind == Kind::invalid && a.kernel == p, sxarm::kindName(a.kind));
+    }
+    // every accepted name is an entry of the gfx1151 attention source with attn_prefill_wmma's signature
+    for (const char* k : sxarm::kProbes)
+        check(std::string("sxarm: ") + k + " is an FA_ENTRY of kernels/gfx1151/attn.hip", attn1151SourceHas(std::string("FA_ENTRY(") + k + ","));
+    check("sxarm: attn_prefill_wmma is an FA_ENTRY of kernels/gfx1151/attn.hip", attn1151SourceHas("FA_ENTRY(attn_prefill_wmma, 0, false)"));
+    check("sxarm: attn_pfx_f16r is a bench entry of kernels/gfx1151/attn.hip with attn_prefill_wmma's arguments",
+          attn1151SourceHas("attn_pfx_f16r(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos, int n_tok,"
+                            " float scale, int h0)"));
+}
+
 int main(int argc, char** argv) {
     std::string emit;
     for (int i = 1; i < argc; ++i)
@@ -1259,6 +1301,7 @@ int main(int argc, char** argv) {
         test_ws4s_default_table();
         test_ws4s_env_filters();
         test_ws4s_table_cells();
+        test_sx_arm_env();
     } catch (const std::exception& e) {
         check(std::string("exception: ") + e.what(), false);
     }
