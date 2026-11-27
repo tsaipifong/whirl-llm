@@ -563,7 +563,7 @@ void testE1AheadEnv() {
             bool moe;
             std::uint32_t want;
         };
-        const Row rows[] = {{hip::Arch::gfx1201, true, 2}, {hip::Arch::gfx1201, false, 0}, {hip::Arch::gfx1151, true, 2}, {hip::Arch::gfx1151, false, 0}};  // (v0252-e1s8 round 3: 8060S MoE 2)
+        const Row rows[] = {{hip::Arch::gfx1201, true, 2}, {hip::Arch::gfx1201, false, 0}, {hip::Arch::gfx1151, true, 2}, {hip::Arch::gfx1151, false, 2}};  // (v0252-e1s8 round 3: 8060S MoE 2; v0252-swe1 round 2: dense 2, swe1-bal KEEP)
         const E1Site exact{.mtp = true, .dflash = false, .relax = false, .fast = false, .model_ok = true};
         E1Site fast = exact;  // fast mode with its relaxed-acceptance arm
         fast.relax = true;

@@ -308,3 +308,46 @@ void testE1SwiftLog() {
         if (e1 == 0) CHECK(clamped == 0 && grown == 0);
     }
 }
+
+// v0252-swe1 round 2: WHIRL_E1_GROW (EngineOptions::e1_grow, the fraction of a cycle one growth drain costs; 0 = every growth
+// behind a cycle in flight drains, the rule before v0252-swe1 - a second fast screen runs it as an arm on one exe): the parser,
+// the env table / docs / server_main lines, and the two ends of the knob on the server path
+void testE1SwiftGrowEnv() {
+#ifdef WHIRL_SOURCE_DIR
+    auto slurp = [](const char* rel) {
+        std::ifstream in(std::string(WHIRL_SOURCE_DIR) + rel, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string rel = slurp("/src/release/release.cpp");
+    const std::string doc = slurp("/docs/usage.md");
+    const std::string sm = slurp("/src/server/server_main.cpp");
+    CHECK(rel.find("\"E1_GROW=<fraction>\"") != std::string::npos);
+    CHECK(doc.find("`WHIRL_E1_GROW=<fraction>`") != std::string::npos);
+    CHECK(sm.find("settings::e1Grow()") != std::string::npos);
+    CHECK(sm.find("WHIRL_E1_GROW={} is not a number >= 0; using {}") != std::string::npos);
+    CHECK(sm.find("decode: WHIRL_E1_GROW={}") != std::string::npos);
+#else
+    CHECK(false);
+#endif
+    const std::pair<const char*, float> good[] = {{"0", 0.0f}, {"0.02", 0.02f}, {" 0.5 ", 0.5f}, {"1e9", 1e9f}, {"\t0.25", 0.25f}, {"1", 1.0f}};
+    for (const auto& [s, v] : good) {
+        const auto r = parseE1Grow(s);
+        CHECK(r.has_value() && *r == v);
+    }
+    for (const char* s : {"", "-1", "-0.01", "abc", "nan", "inf", "0.02x", "1e99", "0x10", " "}) {
+        if (parseE1Grow(s).has_value()) std::printf("  parseE1Grow(\"%s\") accepted\n", s);
+        CHECK(!parseE1Grow(s).has_value());
+    }
+    // the knob's two ends on the server path (snapshot + select, automatic count): 0 -> no clamp, every growth drains;
+    // a value past any debt -> clamps, no growth drain (e1_swift_ahead covers the arms in detail)
+    for (const float g : {0.0f, 1e9f}) {
+        ServerSetup su = e1swift::setup(2, 4, true);
+        su.eo.e1_grow = g;
+        TestServer srv(su);
+        const std::vector<std::uint32_t> p = makePrompt(320, 2301);
+        CHECK_EQ(completionText(srv.post("/v1/completions", e1test::greedyBody(p, 300, true))), decode(srv.model().greedyReference(p, 300, true)));
+        const Engine::Stats es = srv.engine().stats();
+        if (g == 0.0f) CHECK(es.acc_clamp == 0 && es.acc_grow > 0);
+        else CHECK(es.acc_clamp > 0 && es.acc_grow == 0);
+    }
+}

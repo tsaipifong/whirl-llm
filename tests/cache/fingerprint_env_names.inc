@@ -42,6 +42,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_DRAFT_WINDOW",  // src/common/numerics.cpp
     "WHIRL_DRAFT_WINDOW_MIN",  // src/common/numerics.cpp
     "WHIRL_E1",  // src/config/run_settings.h (v0252-e1p1b, E1 device inputs: hashed like WHIRL_SPEC_ACC - conservative; the reply does not depend on it)
+    "WHIRL_E1_GROW",  // src/config/run_settings.h (v0252-swe1 round 2: how the E1 lookahead's draft count grows - hashed like WHIRL_E1, conservative; greedy precise / balance replies do not depend on it, fast ones may)
     "WHIRL_FAST_KVQ8H",  // src/config/env_snapshot.cpp (v0252-8sq4 fallback: fast MoE KV format q8h instead of q4)
     "WHIRL_FDQ8S",  // src/config/env_snapshot.cpp (v0251-a3port: gemmfq slot; bitwise-equal, hashed like ACT_FUSE / GEMMH)
     "WHIRL_FDQ8S_MIN",  // src/config/env_snapshot.cpp (v0251-a3port: gemmfq row threshold)

@@ -9977,6 +9977,7 @@ int main(int argc, char** argv) {
         {"e1_swift_rule", testE1SwiftRule},  // v0252-swe1 (PLAN V1-93 / V1-136)
         {"e1_swift_ahead", testE1SwiftAhead},
         {"e1_swift_log", testE1SwiftLog},
+        {"e1_swift_grow_env", testE1SwiftGrowEnv},  // v0252-swe1 round 2 (WHIRL_E1_GROW)
         {"fr_tool_truncated", testFrToolTruncated},
         {"fr_nonstream_disconnect", testFrNonStreamDisconnect},
         {"fr_pool_prefill", testFrPoolPrefill},

@@ -339,6 +339,15 @@ class ArmEnv(unittest.TestCase):
         self.assertEqual(seen.get("WHIRL_MOEP_COMB"), "0")
         self.assertNotIn("WHIRL_STRAY", seen)
 
+    def test_dropped_env_names_the_callers_whirl_switches(self):
+        # v0252-tools7 (PLAN V1-84 D2): the report records which WHIRL_* variables of the caller's shell clean_env() dropped, so a
+        # runner that switched an arm by the environment without --env is visible in the report (q7 9525m: arm A == arm B)
+        environ = {"PATH": "x", "WHIRL_MOEP_COMB": "0", "whirl_kv": "q8", "WHIRL_GDN_SEQ": "1", "OTHER": "y"}
+        self.assertEqual(klgate.dropped_env(environ, {}), {"WHIRL_GDN_SEQ": "1", "WHIRL_MOEP_COMB": "0", "whirl_kv": "q8"})
+        # a name passed again with --env is not dropped (it reaches every run)
+        self.assertEqual(klgate.dropped_env(environ, {"WHIRL_MOEP_COMB": "0"}), {"WHIRL_GDN_SEQ": "1", "whirl_kv": "q8"})
+        self.assertEqual(klgate.dropped_env({"PATH": "x"}, {}), {})
+
     def test_report_with_env_never_passes(self):
         self.assertTrue(klgate.report_passes(0, {}, {}))
         self.assertFalse(klgate.report_passes(0, {}, {"WHIRL_MOEP_COMB": "0"}))
