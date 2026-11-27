@@ -756,13 +756,20 @@ __device__ __forceinline__ void fa_lds_barrier() {
 // QP (v0252-8sattn3, PLAN V1-148; FAST opt-in, WHIRL_ATTN_I4PF): the I4 form with the int4 query codes in LDS and the next
 // key tile's K / V loaded during the current step (register prefetch). Same codes, same integer sums, same epilogue,
 // softmax and P.V in the same order: bitwise == the I4 form (kt attn: attn_prefill_wmma_i4p == attn_prefill_wmma_i4).
-template <int MODE, int Q8, bool SEG = false, bool I4 = false, bool QP = false>
+// RL (v0252-attnlat, PLAN V1-148, bench-only entry attn_pfx_f16r; spec progress\v0252-attnlim.HANDOFF.md sec. 4 E2): the f16
+// form with the K / V loads of a key tile issued as raw loads in one clause (key index clamped for the address only, no select
+// on the loaded value in the issuing step), the keys >= n_keys of the block-uniform last tile zeroed in registers before the LDS
+// store, and the page delta of tile k0 read at step k0 - FA_K. Same values stored in LDS, same barriers, LDS layout, WMMA order
+// and softmax: bitwise == attn_prefill_wmma (kt attn). ONE change: the shipping loads wait four times per step (page word, K
+// rows 0-1, K rows 2-3, V), because loadK / loadV select x or 0 right after the load.
+template <int MODE, int Q8, bool SEG = false, bool I4 = false, bool QP = false, bool RL = false>
 __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
                       int q_stride, const int *pos, int n_tok, float scale, int h0,
                       int kb0 = 0, int kb1 = 0, float *st_ml = nullptr) {
     static_assert(!SEG || Q8 == 0, "attn_prefill_wmma SEG: f16 K / V only");
     static_assert(!I4 || (Q8 == 0 && MODE == 0), "attn_prefill_wmma I4: f16 K / V, no probe mode");
     static_assert(!QP || I4, "attn_prefill_wmma QP: the int4 form only");
+    static_assert(!RL || (MODE == 0 && Q8 == 0 && !SEG && !I4), "attn_pfx_f16r RL: the f16 one-launch form only");
     if constexpr (Q8) {
         attn_prefill_impl_q8kv<MODE, Q8>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);
         return;
@@ -1006,11 +1013,37 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
             }
         }
     } else {
+    int dlr = 0;  // RL: the page delta of tile k0, read during step k0 - FA_K
+    if constexpr (RL) dlr = kv_delta(kv, tb, k_beg);
     for (int k0 = k_beg; k0 < k_end; k0 += FA_K) {
         __syncthreads();
         if (MODE != 1 || k0 == 0) {
-            loadK(k0);
-            loadV(k0);
+            if constexpr (RL) {
+#pragma unroll
+                for (int e = 0; e < 4; ++e) {
+                    const int kc = min(k0 + tid / 32 + 8 * e, n_keys - 1);
+                    kr8[e] = kv_ld8<kv_kf(Q8)>(kv.k, kv.ks, (size_t)(unsigned)(kc + dlr) * rstep + kro);
+                }
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    const int kc = min(k0 + vkb * 8 + r, n_keys - 1);
+                    vr[r] = kv_ld4<kv_vf(Q8)>(kv.v, kv.vs, (size_t)(unsigned)(kc + dlr) * rstep + vro);
+                }
+                if (k0 + FA_K < k_end) dlr = kv_delta(kv, tb, k0 + FA_K);
+                if (k0 + FA_K > n_keys) {  // block-uniform: the last tile holds keys >= n_keys, zero them
+                    const half8 z8 = {0, 0, 0, 0, 0, 0, 0, 0};
+                    const fa_h4 z4 = {0, 0, 0, 0};
+#pragma unroll
+                    for (int e = 0; e < 4; ++e)
+                        if (k0 + tid / 32 + 8 * e >= n_keys) kr8[e] = z8;
+#pragma unroll
+                    for (int r = 0; r < 8; ++r)
+                        if (k0 + vkb * 8 + r >= n_keys) vr[r] = z4;
+                }
+            } else {
+                loadK(k0);
+                loadV(k0);
+            }
             if constexpr (I4) {
                 // the 32 lanes of a wave hold the 256 dims of one key (key wid + 8 e, dims 8 lane .. +7): wave absmax,
                 // then each lane packs its 8 dims into word `lane` of the key's int4 row
@@ -1158,6 +1191,11 @@ FA_ENTRY(attn_prefill_wmma_q4, 0, 3)
 FA_ENTRY(fa_probe_noload, 1, false)
 FA_ENTRY(fa_probe_norescale, 2, false)
 FA_ENTRY(fa_probe_nopv, 3, false)
+// v0252-attnlat (PLAN V1-148): bench-only (kt attnbench WHIRL_KT_BENCH_SX_B, kt attn invariant); no host table, no product path
+extern "C" __global__ void __launch_bounds__(256)
+    attn_pfx_f16r(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos, int n_tok, float scale, int h0) {
+    attn_prefill_impl<0, 0, false, false, false, true>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);
+}
 // KG-3: key range [kb0, kb1) of the f16 kernel with the softmax state carried in st_ml / out
 // (see attn_prefill_impl); same grid and block as attn_prefill_wmma
 extern "C" __global__ void __launch_bounds__(256)
