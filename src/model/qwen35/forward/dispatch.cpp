@@ -102,6 +102,10 @@ void Context::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u
 void Context::matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n) {
     const bool ok = nf().gv_group && k.gv_grp && n <= gvMax() && !nf().float_gemv && ops::preciseAllows(ops::BitClass::q8_row, nf().prec_dec, n, gvMax());
     if (!ok && nf().gemvh_grp && matmulGroupGemvh(ws, xin, ys, n)) return;
+    // v0252-w4a4p round 2: the matrices below share one input (WHIRL_W4A4=3 packs it once for the LUT form); no input packed
+    // before the group counts, and the window closes with the group
+    w4q_grp = true;
+    w4q_xm_src = 0;
     bool done[3] = {false, false, false};
     for (std::size_t i = 0; i < ws.size(); ++i) {
         if (done[i]) continue;
@@ -130,6 +134,8 @@ void Context::matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const D
             for (std::size_t j = 0; j < cnt; ++j) prof->matmul_bytes += gw[j].row_bytes * gw[j].nrows;
         mark(head_phase ? OpClass::head : OpClass::matmul);
     }
+    w4q_grp = false;
+    w4q_xm_src = 0;
 }
 
 // v0252-8sdec (PLAN V1-142; rule ops::chooseGemvhGroup, kernel kernels/gfx1151/gemv_hg.hip): precise decode / verify rows
@@ -246,7 +252,12 @@ void Context::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate)
         // v0252-w4a4p (PLAN V1-144 round 1): WHIRL_W4A4=1 sets the iu4 bit next to its reference arm wga: the PRODUCT W4A4 iu4
         // GEMM where ops::w4a4Takes accepts the matrix; any other matrix keeps the sim path of wga below (the same numbers)
         if ((sim & whirl::numerics::w4a4_iu4) != 0 && ops::w4a4Takes(matShape(w), true, k)) {
-            w4qGemm(w, x16, y, n, acc);
+            // round 2: WHIRL_W4A4=2 / 3 take the LUT form (no weight copy) where ops::w4a4LutTakes accepts it; else round 1
+            if (ops::w4a4LutTakes(matShape(w), (sim & whirl::numerics::w4a4_iu4_lut) != 0, k))
+                w4qGemmLut(w, x16, y, n, acc, (sim & whirl::numerics::w4a4_iu4_xreuse) != 0,
+                           ops::w4a4WideTakes(matShape(w), (sim & whirl::numerics::w4a4_iu4_wide) != 0, k));
+            else
+                w4qGemm(w, x16, y, n, acc);
             finish();
             return;
         }
@@ -366,8 +377,47 @@ void Context::w4qGemm(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
     }
     const DevPtr xq = w4q_x, xs = w4q_x + count / 2;  // count / 2 is a multiple of 128 (ncols % 256 == 0)
     hip::launch(k.w4q_qx, D(static_cast<u32>(std::min<u64>((nblk + 255) / 256, 65535))), D(256), 0, stream, x16in, xq, xs, nblk);
+    w4q_xm_src = 0;  // round 2: w4q_x no longer holds an MXFP4-order input
     hip::launch(k.w4q_gemm, D((n + 127) / 128, w.nrows / 128), D(256), 0, stream, m.wq, m.ws, xq, xs, y, I(w.ncols), I(w.nrows), I(n), acc,
                 I(out_h16 ? 1 : 0));
+}
+
+// v0252-w4a4p round 2 (WHIRL_W4A4=2 / 3): the LUT form of the product GEMM - w4q_gemm_m reads the MXFP4 matrix itself (codes
+// remapped to int4 levels in the kernel, scale = E8M0 x 12/7 x the reference arm's gain, computed in the kernel): no weight copy,
+// only the nrows f32 gains of w4sGainsOf (also kept by round 1). The input is packed in the MXFP4 nibble order (w4q_quant_xm);
+// with reuse (=3), inside one matmulGroup (q / k / v, gate / up, qkv / z: one input, unchanged between the calls) the packing
+// of the first matrix serves the others. Codes, scales and fold order are round 1's: the outputs are bitwise WHIRL_W4A4=1's.
+void Context::w4qGemmLut(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc, bool reuse, bool wide) {
+    const std::size_t g0 = w4s_gains.size();
+    const DevPtr gains = w4sGainsOf(w, 0, 1);  // the reference arm's tensor gain (grid w, mode g): the bits round 1 folds in
+    if (w4s_gains.size() != g0) {
+        w4q_lut_n += 1;
+        // one line per matrix at its first use (only reachable with WHIRL_W4A4=2 / 3, a fast-only opt-in)
+        std::fprintf(stderr, "w4a4 iu4 lut: matrix 0x%llx %ux%u reads the MXFP4 bytes (no weight copy; extra bytes %llu = gains; matrices %u)\n",
+                     static_cast<unsigned long long>(w.ptr), static_cast<unsigned>(w.nrows), static_cast<unsigned>(w.ncols),
+                     static_cast<unsigned long long>(w.nrows) * 4, w4q_lut_n);
+    }
+    const u64 count = static_cast<u64>(n) * w.ncols, nblk = count / 32;
+    const u64 need = count / 2 + nblk * 4;
+    if (need > w4q_x_bytes) {
+        if (w4q_x != 0) freeAlloc(w4q_x);
+        w4q_x_bytes = std::max<u64>(need, x16_bytes);
+        w4q_x = alloc(w4q_x_bytes);
+        w4q_xm_src = 0;
+    }
+    const DevPtr xq = w4q_x, xs = w4q_x + count / 2;
+    if (!(reuse && w4q_grp && w4q_xm_src == x16in && w4q_xm_count == count)) {
+        hip::launch(k.w4q_qxm, D(static_cast<u32>(std::min<u64>((nblk + 255) / 256, 65535))), D(256), 0, stream, x16in, xq, xs, nblk);
+        w4q_xm_src = x16in;
+        w4q_xm_count = count;
+    }
+    // round 2b (=4): the 256-token tile, 512 threads (the caller checked ops::w4a4WideTakes)
+    if (wide)
+        hip::launch(k.w4q_gemm_m2, D((n + 255) / 256, w.nrows / 128), D(512), 0, stream, w.ptr, w.row_bytes, gains, xq, xs, y, I(w.ncols), I(w.nrows),
+                    I(n), acc, I(out_h16 ? 1 : 0));
+    else
+        hip::launch(k.w4q_gemm_m, D((n + 127) / 128, w.nrows / 128), D(256), 0, stream, w.ptr, w.row_bytes, gains, xq, xs, y, I(w.ncols), I(w.nrows),
+                    I(n), acc, I(out_h16 ? 1 : 0));
 }
 
 // one launch of an f16 GEMM plan over n rows (the body of gemmF16 before v0252-pp2k2, unchanged)

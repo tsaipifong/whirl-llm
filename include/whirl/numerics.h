@@ -479,8 +479,17 @@ std::optional<std::uint32_t> parseW4a4Sim(std::string_view s);
 // math kernels/shared/gemm_w4a4_prod.h) wherever ops::w4a4Takes accepts the matrix; every other matrix of the arm keeps the
 // sim path of the same value. Set only by WHIRL_W4A4=1, always together with its reference arm wga (w4a4_sim_wga).
 inline constexpr std::uint32_t w4a4_iu4 = 0x10000;
+// round 2 (v0252-w4a4p r2): variants of the product GEMM, each with its own WHIRL_W4A4 value (screen arms on one exe):
+// w4a4_iu4_lut = the LUT form (MatmulKernels::w4q_qxm / w4q_gemm_m read the MXFP4 matrix in the loop: no converted weight
+// copy; ops::w4a4LutTakes), w4a4_iu4_xreuse = the packed activations of the LUT form reused inside one matmulGroup. Both
+// keep round 1's codes, scales and fold order: the outputs are bitwise WHIRL_W4A4=1's (kt rows, unit test_w4q_m_fold).
+inline constexpr std::uint32_t w4a4_iu4_lut = 0x20000, w4a4_iu4_xreuse = 0x40000;
+// round 2b: w4a4_iu4_wide = the LUT GEMM on the 256-token tile (MatmulKernels::w4q_gemm_m2: 512 threads; each remapped weight
+// stage serves twice the tokens); the same bits as w4q_gemm_m (kt rows)
+inline constexpr std::uint32_t w4a4_iu4_wide = 0x80000;
 inline constexpr std::uint32_t w4a4_sim_wga = w4a4_sim_w | w4a4_sim_g | w4a4_sim_a;  // grid w (0), tensor gain, absmax activations
-// WHIRL_W4A4 values: "1" -> w4a4_sim_wga | w4a4_iu4; "0" / "" -> 0 (off); anything else -> nullopt (invalid)
+// WHIRL_W4A4 values: "1" -> w4a4_sim_wga | w4a4_iu4; "2" -> + w4a4_iu4_lut; "3" -> + w4a4_iu4_lut | w4a4_iu4_xreuse (round 2); "4" -> "3" + w4a4_iu4_wide (round 2b);
+// "0" / "" -> 0 (off); anything else -> nullopt (invalid)
 std::optional<std::uint32_t> parseW4a4(std::string_view s);
 
 struct Flags {

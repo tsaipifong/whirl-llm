@@ -343,6 +343,9 @@ std::optional<std::uint32_t> parseW4a4Sim(std::string_view s) {
 std::optional<std::uint32_t> parseW4a4(std::string_view s) {
     if (s.empty() || s == "0") return 0u;
     if (s == "1") return w4a4_sim_wga | w4a4_iu4;
+    if (s == "2") return w4a4_sim_wga | w4a4_iu4 | w4a4_iu4_lut;  // round 2: the LUT form
+    if (s == "3") return w4a4_sim_wga | w4a4_iu4 | w4a4_iu4_lut | w4a4_iu4_xreuse;  // round 2: + activation reuse per group
+    if (s == "4") return w4a4_sim_wga | w4a4_iu4 | w4a4_iu4_lut | w4a4_iu4_xreuse | w4a4_iu4_wide;  // round 2b: + 256-token tile
     return std::nullopt;
 }
 
@@ -785,12 +788,12 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     if (items)
         if (const Raw& v = e.w4a4; v && !v->empty() && *v != "0") {
             if (!parseW4a4(*v))
-                p.ignored.push_back(std::format("WHIRL_W4A4={} ignored: not 1 or 0 (the W4A4 iu4 GEMM stays off)", *v));
+                p.ignored.push_back(std::format("WHIRL_W4A4={} ignored: not 1, 2, 3, 4 or 0 (the W4A4 iu4 GEMM stays off)", *v));
             else if (!w4a4SimTaken(r, t))
                 p.ignored.push_back(std::format("WHIRL_W4A4={} ignored: the W4A4 iu4 GEMM is fast-only, 8060S dense MXFP4 models ({} never takes it here)",
                                                 *v, modeName(p.mode)));
             else if (const Raw& s = e.w4a4_sim; s && !s->empty() && *s != "0")
-                p.ignored.push_back(std::format("WHIRL_W4A4_SIM={} ignored: WHIRL_W4A4=1 runs the product kernel with its reference arm wga", *s));
+                p.ignored.push_back(std::format("WHIRL_W4A4_SIM={} ignored: WHIRL_W4A4={} runs the product kernel with its reference arm wga", *s, *v));
         }
     // v0252-8sattn3: WHIRL_ATTN_I4PF other than "0" in precise / balance is noted once (it rides on the fast-only int4 form)
     if (items)

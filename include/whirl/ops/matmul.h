@@ -180,6 +180,13 @@ void w4sGains(const double* num, const double* den, std::uint32_t nrows, int mod
 // w4a4_iu4 bit (WHIRL_W4A4=1; fast, gfx1151, dense MXFP4), an MXFP4 trunk matrix (not the head) with ncols % 256 == 0 and
 // nrows % 128 == 0, and all of w4q_wc / w4q_qx / w4q_gemm / w4s_gterms present. false: the sim path of the same value runs
 bool w4a4Takes(const MatShape& w, bool iu4, const kernels::MatmulKernels& k);
+// v0252-w4a4p round 2: whether the LUT form (MatmulKernels::w4q_qxm / w4q_gemm_m: reads the MXFP4 matrix in the loop, no
+// converted copy; WHIRL_W4A4=2 / 3 -> lut) runs matrix w: w4a4Takes(w, true, k), both round-2 kernels present and row_bytes % 8 == 0
+// (the kernel's 8-byte sub-block loads). false: the round-1 product path runs it (bitwise the same numbers)
+bool w4a4LutTakes(const MatShape& w, bool lut, const kernels::MatmulKernels& k);
+// round 2b: whether the LUT GEMM runs matrix w on the 256-token tile (MatmulKernels::w4q_gemm_m2; WHIRL_W4A4=4 -> wide):
+// w4a4LutTakes(w, true, k) and w4q_gemm_m2 present. false: w4q_gemm_m (bitwise the same numbers)
+bool w4a4WideTakes(const MatShape& w, bool wide, const kernels::MatmulKernels& k);
 // the tuned choice code for n rows: [0, G) fused gemm_c on the quantized bytes, [G, 2G) dequant + f16 gemm_c,
 // [2G, 2G + S) gemms slot (G = kGemmCfgs.size(), S = kGemmsCfgs.size())
 std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k);

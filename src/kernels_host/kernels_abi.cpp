@@ -285,6 +285,9 @@ void loadMatmul(MatmulKernels& k, const Loader& L) {
         k.w4q_wc = L.opt("w4q_wconv_mxfp4");
         k.w4q_qx = L.opt("w4q_quant_x");
         k.w4q_gemm = L.opt("w4q_gemm");
+        k.w4q_qxm = L.opt("w4q_quant_xm");  // round 2: the LUT form
+        k.w4q_gemm_m = L.opt("w4q_gemm_m");
+        k.w4q_gemm_m2 = L.opt("w4q_gemm_m2");  // round 2b: the 256-token tile
         k.gemvq[i] = L.opt("gemvq_mxfp4");
         for (int nt = 2; nt <= kMaxSmallBatch; ++nt) {
             k.gemvq_nt[nt - 2][i] = L.opt(gemvqNtName(t, nt, false));

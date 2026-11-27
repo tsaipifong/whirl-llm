@@ -551,6 +551,15 @@ protected:
     std::uint64_t w4q_x_bytes = 0, w4q_bytes = 0;
     W4qMat w4qMatOf(const Mat& w);
     void w4qGemm(const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);
+    // round 2 (WHIRL_W4A4=2 / 3, dispatch.cpp w4qGemmLut): the LUT form - no weight copy (the kernel reads the MXFP4 matrix and
+    // the reference arm's gains); w4q_x holds the input packed in the MXFP4 order. w4q_grp: inside matmulGroup (the matrices of
+    // one input); with reuse (=3) a call there skips the packing when w4q_xm_src / w4q_xm_count name the input already packed.
+    // w4q_lut_n: matrices that took the LUT form (one stderr line each at the first use)
+    DevPtr w4q_xm_src = 0;
+    std::uint64_t w4q_xm_count = 0;
+    bool w4q_grp = false;
+    std::uint32_t w4q_lut_n = 0;
+    void w4qGemmLut(const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc, bool reuse, bool wide);  // wide: w4q_gemm_m2 (round 2b)
     void gemmPlanLaunch(const ops::GemmPlan& p, const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);
     bool gdnIn2(const GdnW& g, std::uint32_t n) const;
     // x16b: f16 sub-buffer of x16 past the fp8 rows (tiled fp8 pads to 16 rows), 256-aligned

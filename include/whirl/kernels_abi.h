@@ -749,6 +749,11 @@ struct MatmulKernels {
     // (numerics flag w4a4_sim bit w4a4_iu4, WHIRL_W4A4=1, fast only): w4q_wconv_mxfp4(W, rb, Wq, Ws, ncols, nrows, gain) (once per
     // matrix), w4q_quant_x(X, Xq, Xs, u64 nblk), w4q_gemm(Wq, Ws, Xq, Xs, Y, ncols, nrows, n_tok, acc, h16); null elsewhere
     F w4q_wc{}, w4q_qx{}, w4q_gemm{};
+    // round 2 (WHIRL_W4A4=2 / 3, the LUT form, no weight copy): w4q_quant_xm(X, Xq, Xs, u64 nblk) (MXFP4 nibble order),
+    // w4q_gemm_m(W, u64 rb, gain, Xq, Xs, Y, ncols, nrows, n_tok, acc, h16) (reads the MXFP4 matrix); null outside gfx1151
+    F w4q_qxm{}, w4q_gemm_m{};
+    // round 2b (WHIRL_W4A4=4): w4q_gemm_m2 = w4q_gemm_m's arguments, 512 threads x 256 tokens; grid (ceil(n / 256), nrows / 128)
+    F w4q_gemm_m2{};
     // activation converters of the GEMV / GEMM inputs
     F f32_to_f16{}, quantize_q8{}, qact_fp8{}, qact_fp8t{};
 

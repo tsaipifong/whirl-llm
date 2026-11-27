@@ -290,6 +290,16 @@ bool w4a4Takes(const MatShape& w, bool iu4, const kernels::MatmulKernels& k) {
            k.w4q_qx != nullptr && k.w4q_gemm != nullptr && k.w4s_gterms != nullptr;
 }
 
+// v0252-w4a4p round 2 (ops/matmul.h)
+bool w4a4LutTakes(const MatShape& w, bool lut, const kernels::MatmulKernels& k) {
+    return lut && w4a4Takes(w, true, k) && k.w4q_qxm != nullptr && k.w4q_gemm_m != nullptr && w.row_bytes % 8 == 0;
+}
+
+// round 2b (ops/matmul.h)
+bool w4a4WideTakes(const MatShape& w, bool wide, const kernels::MatmulKernels& k) {
+    return wide && w4a4LutTakes(w, true, k) && k.w4q_gemm_m2 != nullptr;
+}
+
 // v0252-w4a4k2 round 3 (matmul.h): the least-squares gains of the W4A4 fake-quant weight grids
 void w4sGains(const double* num, const double* den, std::uint32_t nrows, int mode, float* out) {
     auto gain = [](double n, double d) {

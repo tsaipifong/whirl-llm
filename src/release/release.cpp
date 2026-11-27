@@ -327,10 +327,11 @@ constexpr EnvDoc k_env[] = {
      "T = 1: exactly the top M), kept weights renormalized; 0 = off (default in fast: 1:6 = the top 6 experts; lossy; ignored in "
      "precise / balance)",
      GPU},
-    {"GPU and loading", "W4A4=1",
+    {"GPU and loading", "W4A4=1|2|3|4",
      "W4A4 prefill GEMM (fast, Radeon 8060S, dense MXFP4 models; default off): int4 weights x int4 activations on the iu4 matrix "
-     "unit, one scale per 32 values (each weight matrix converted once at its first prefill: about 0.63 bytes per weight of extra "
-     "VRAM; lossy; ignored in precise / balance, on the R9700 and for MoE models)",
+     "unit, one scale per 32 values; 1 = each weight matrix converted once at its first prefill (about 0.63 bytes per weight of "
+     "extra VRAM), 2 = the MXFP4 weights read directly (no extra VRAM), 3 = 2 + the int4 input shared by the matrices of one "
+     "input, 4 = 3 on a 256-token tile; 1 / 2 / 3 / 4 give the same output (lossy; ignored in precise / balance, on the R9700 and for MoE models)",
      GPU},
     {"GPU and loading", "EMBD_HOST=0", "keep the token embedding table in VRAM (default: pinned host memory, declared as Shared Usage)", S},
     {"GPU and loading", "TUNE_COLD=1", "autotune: evict the cache before each timing", C | B | T},

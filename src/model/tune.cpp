@@ -1003,8 +1003,15 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     // bug-fastonly: WHIRL_RELAX / WHIRL_KV=q4 refused by precise / balance (fast-only items; the plan is untouched)
     for (const std::string& ign : p.ignored) log += "  " + ign + "\n";
     // v0252-w4a4p (PLAN V1-144 round 1): one load-log line where WHIRL_W4A4=1 is taken (fast, gfx1151, dense MXFP4)
-    if ((f.w4a4_sim & nu::w4a4_iu4) != 0)
+    // round 2: WHIRL_W4A4=2 / 3 (the LUT form; 3 also reuses the packed activations per matmul group) have their own lines
+    if ((f.w4a4_sim & nu::w4a4_iu4) != 0 && (f.w4a4_sim & nu::w4a4_iu4_lut) == 0)
         log += "  w4a4 iu4: WHIRL_W4A4=1 runs the product W4A4 iu4 prefill GEMM (reference arm WHIRL_W4A4_SIM=wga; weights converted once per matrix at its first use)\n";
+    else if ((f.w4a4_sim & nu::w4a4_iu4) != 0 && (f.w4a4_sim & nu::w4a4_iu4_xreuse) == 0)
+        log += "  w4a4 iu4: WHIRL_W4A4=2 runs the product W4A4 iu4 prefill GEMM, LUT form (reference arm WHIRL_W4A4_SIM=wga; MXFP4 weights read in the loop, no weight copy)\n";
+    else if ((f.w4a4_sim & nu::w4a4_iu4) != 0 && (f.w4a4_sim & nu::w4a4_iu4_wide) != 0)
+        log += "  w4a4 iu4: WHIRL_W4A4=4 runs the product W4A4 iu4 prefill GEMM, LUT form + activation reuse per matmul group, 256-token tile (reference arm WHIRL_W4A4_SIM=wga; no weight copy)\n";
+    else if ((f.w4a4_sim & nu::w4a4_iu4) != 0)
+        log += "  w4a4 iu4: WHIRL_W4A4=3 runs the product W4A4 iu4 prefill GEMM, LUT form + activation reuse per matmul group (reference arm WHIRL_W4A4_SIM=wga; no weight copy)\n";
     if (!m.load_note.empty()) log += "  " + m.load_note;
 
     // PATH-256 (v0.2.5.1 PLAN V1-22, pathlen256.DISCOVERY.md v3.1 2b-1): the tune5 file (at most 61 characters, keyed by
