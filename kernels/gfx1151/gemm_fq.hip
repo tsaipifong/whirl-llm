@@ -80,7 +80,9 @@ __device__ __forceinline__ void fq_decode_sb(uint2 qa, uint2 qb, uint32_t e, hal
 //   1 = for k0 >= 64 skip the decode, both __syncthreads and the LDS stores (GEMMFQ_FETCH still issues every load; an
 //       empty asm consumes its registers so the loads stay; a memory clobber at the head of each K chunk keeps the
 //       fragment ds_loads inside the loop; the WMMAs read chunk 0's tile, which stays in LDS);
-//   2 = everything as ABL 0, but each WMMA replaced by an empty asm that reads its operands and "writes" acc.
+//   2 = everything as ABL 0, but each WMMA replaced by an empty asm that reads its operands and "writes" acc;
+//   3 = everything as ABL 0, but only the first A fragment of each kk is read from LDS; the WMMAs of row tiles 1-3 reuse it
+//       (round 3: prices the A-side LDS round trips - 24 of 64 ds_load_b128 per K chunk - and their lgkmcnt waits).
 // Only the kt-only object compiled with -DWHIRL_FQ_ABL_PROTOS=1 instantiates ABL 1 / 2 (entries at the end of this file).
 template <int BM, int BN, int WAVES_M, int GRP = 0, int ABL = 0>
 __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
@@ -197,7 +199,11 @@ __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, c
             half16 a[TM], b[TN];
 #pragma unroll
             for (int i = 0; i < TM; ++i)
-                a[i] = ld_frag16(&As[(wm * TM + i) * 16 + lane % 16][kk]);
+                if constexpr (ABL == 3) {  // one A fragment read per kk; rows i > 0 reuse it (measurement only)
+                    a[i] = i == 0 ? ld_frag16(&As[(wm * TM) * 16 + lane % 16][kk]) : a[0];
+                } else {
+                    a[i] = ld_frag16(&As[(wm * TM + i) * 16 + lane % 16][kk]);
+                }
 #pragma unroll
             for (int j = 0; j < TN; ++j)
                 b[j] = ld_frag16(&Bs[(wn * TN + j) * 16 + lane % 16][kk]);
@@ -263,6 +269,7 @@ GEMMFQ_PROTO(c2g8, 256, 128, 4, 8)
     }
 GEMMFQ_ABL_PROTO(t2g8a1, 128, 256, 2, 8, 1)
 GEMMFQ_ABL_PROTO(t2g8a2, 128, 256, 2, 8, 2)
+GEMMFQ_ABL_PROTO(t2g8a3, 128, 256, 2, 8, 3)
 #undef GEMMFQ_ABL_PROTO
 #endif
 
