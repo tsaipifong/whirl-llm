@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -46,6 +47,23 @@ inline std::optional<std::uint32_t> parseE1(std::string_view v) {
     while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
     if (v == "0" || v == "1" || v == "2") return static_cast<std::uint32_t>(v[0] - '0');
     return std::nullopt;
+}
+
+// v0252-swe1 round 2: WHIRL_E1_GROW - a plain decimal number >= 0 (digits, one '.', an exponent; spaces / tabs around it),
+// finite as a float; anything else (empty, sign '-', hex, nan / inf, trailing text) is nullopt (server_main warns, the
+// default EngineOptions::e1_grow runs)
+inline std::optional<float> parseE1Grow(std::string_view v) {
+    while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
+    if (v.empty() || v.size() > 32) return std::nullopt;
+    for (const char ch : v)
+        if (!((ch >= '0' && ch <= '9') || ch == '.' || ch == 'e' || ch == 'E' || ch == '+' || ch == '-')) return std::nullopt;
+    if (v.front() == '-' || v.front() == '+') return std::nullopt;
+    const std::string s(v);
+    char* end = nullptr;
+    const double d = std::strtod(s.c_str(), &end);
+    if (end != s.c_str() + s.size() || !(d >= 0.0) || d > 3.0e38) return std::nullopt;
+    return static_cast<float>(d);
 }
 
 // v0252-e1def (PLAN V1-93): the WHIRL_E1 value whirl-server starts with. Set: that value, on every card, model and mode
@@ -176,6 +194,13 @@ struct EngineOptions {
     // default. whirl-server fills it with e1DefaultCtxMax(chooseE1(...), qwen35::e1_default_ctx_max), where the
     // measurements behind the value are written down.
     std::uint32_t e1_ctx_max = 0;
+    // v0252-swe1 (PLAN V1-93 / V1-136): DeltaNet snapshot mode (gfx1151) with an automatic draft count (Swift) - a cycle behind a
+    // cycle in flight takes at most that cycle's draft count (the select verify, kernels/gdn_select.h). When the policy wants more,
+    // the cycle is clamped to it; the growth drains (the next cycle starts a new pipeline at the policy's count) once the clamps
+    // have given away this fraction of a cycle (spec::rules::aheadDrafts / aheadClampLoss): the cost of one drain = the host window
+    // the lookahead hides, 1.3-2.3 ms of a ~91 ms Swift cycle on the 8060S (progress/v0252-e1study.HANDOFF.md section 5).
+    // 0 = every growth drains (the rule before v0252-swe1); a fixed draft count (Ornith) never asks for growth.
+    float e1_grow = 0.02f;
     // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)
     std::uint32_t slot_drafts = 0;
     bool trace_nd = false;

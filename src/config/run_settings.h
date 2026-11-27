@@ -135,6 +135,9 @@ inline std::optional<std::string> specAcc() { return envGet("SPEC_ACC"); }
 // v0252-e1p1b (E1, PLAN V1-93 P1b): WHIRL_E1 as text; whirl-server parses it with server::parseE1 (0 / 1 / 2, v0252-e1p1c:
 // 2 = the one-cycle lookahead; a bad value warns there and runs 0)
 inline std::optional<std::string> e1() { return envGet("E1"); }
+// v0252-swe1 round 2: WHIRL_E1_GROW as text; whirl-server parses it with server::parseE1Grow (a number >= 0, the fraction of a
+// cycle one growth drain of the snapshot-mode lookahead costs: EngineOptions::e1_grow; a bad value warns there, the default runs)
+inline std::optional<std::string> e1Grow() { return envGet("E1_GROW"); }
 // WHIRL_GATHER_MS: std::stod (a leading number counts); unset or unreadable nullopt (the engine's default stays).
 std::optional<double> parseGatherMs(const std::optional<std::string>& v);
 inline std::optional<double> gatherMs() { return parseGatherMs(envGet("GATHER_MS")); }

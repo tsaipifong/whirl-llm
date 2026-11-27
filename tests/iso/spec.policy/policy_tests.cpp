@@ -172,7 +172,7 @@ void testE1Default() {
     ISO_CHECK(e1Default(true, hip::Arch::gfx1201) == 2u);
     ISO_CHECK(e1Default(false, hip::Arch::gfx1201) == 0u);
     ISO_CHECK(e1Default(true, hip::Arch::gfx1151) == 2u);  // v0252-e1s8 round 3 (screens e1s8-orn / -r2 / -prec)
-    ISO_CHECK(e1Default(false, hip::Arch::gfx1151) == 0u);
+    ISO_CHECK(e1Default(false, hip::Arch::gfx1151) == 2u);  // v0252-swe1 round 2: screen swe1-bal 20261127-0323 KEEP (Swift balance)
     ISO_CHECK(e1Default(true) == e1Default(true, device::k_default_arch) && e1Default(false) == 0u);
     // v0252-e1fast: fast mode's own default - 0 on both cards until screen e1fast-orn (the gfx1201 object has no
     // spec_accept_relax_rows), dense always 0; each value is its profile row's
@@ -184,6 +184,16 @@ void testE1Default() {
     ISO_CHECK(e1DefaultFast(true, hip::Arch::gfx1201) == 0u && e1DefaultFast(true, hip::Arch::gfx1151) == 2u);
     ISO_CHECK(e1CtxMaxFast(hip::Arch::gfx1201) == 0u && e1CtxMaxFast(hip::Arch::gfx1151) == 131329u);
     ISO_CHECK(e1DefaultFast(false, hip::Arch::gfx1151) == 0u);  // dense (Swift) fast stays 0
+    // v0252-swe1 (PLAN V1-93 / V1-136): the dense default's own fields (device::Profile::e1_dense_fast, e1_ctx_max_dense), 0 in
+    // both rows until a dense screen (Swift, clamp instead of drain) keeps; each value is its row's
+    for (const hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151}) {
+        ISO_CHECK(e1DefaultFast(false, a) == device::profile(a).e1_dense_fast);
+        ISO_CHECK(e1CtxMaxDense(a) == device::profile(a).e1_ctx_max_dense);
+        ISO_CHECK(device::profile(a).e1_dense_fast == 0u);  // fast: swe1-fast 20261127-0354 OPEN, nothing flipped
+    }
+    // swe1-bal KEEP (cycd2048 +0.94 % +-0.59, cycd32768 +1.00 % +-0.78): the 8060S dense limit 32768 + 256 + 1; the R9700 none
+    ISO_CHECK(e1CtxMaxDense(hip::Arch::gfx1151) == 33025u && e1CtxMaxDense(hip::Arch::gfx1201) == 0u);
+    ISO_CHECK(e1CtxMaxDense() == e1CtxMaxDense(device::k_default_arch));
     for (const hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151})
         ISO_CHECK(e1Default(true, a) == device::profile(a).e1_moe && e1Default(false, a) == device::profile(a).e1_dense);
     // v0252-e1len (PLAN V1-93): the length boundary of that default - the smallest MEASURED length at which keeping it

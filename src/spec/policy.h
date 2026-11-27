@@ -65,6 +65,9 @@ std::uint32_t e1CtxMax(hip::Arch arch = device::k_default_arch);
 // v0252-e1fast (PLAN V1-93 P3): the same two for FAST mode (device::Profile::e1_moe_fast / e1_ctx_max_fast; MoE only, dense 0)
 std::uint32_t e1DefaultFast(bool moe, hip::Arch arch = device::k_default_arch);
 std::uint32_t e1CtxMaxFast(hip::Arch arch = device::k_default_arch);
+// v0252-swe1: the context limit of a DENSE model's default in every mode (device::Profile::e1_ctx_max_dense; whirl-server gives it
+// to e1DefaultCtxMax for a dense model). e1DefaultFast(false, arch) is device::Profile::e1_dense_fast.
+std::uint32_t e1CtxMaxDense(hip::Arch arch = device::k_default_arch);
 
 // ---- draft-head vocabulary subset (T5-1b): WHIRL_DRAFT_VOCAB = 48k | 64k | <file> | off | N
 // File for a WHIRL_DRAFT_VOCAB value: "48k" / "64k" / ... -> <dir>/subset_48k.bin, anything else

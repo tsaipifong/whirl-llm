@@ -715,7 +715,11 @@ std::uint32_t e1Default(bool moe, hip::Arch arch) {
 std::uint32_t e1CtxMax(hip::Arch arch) { return device::profile(arch).e1_ctx_max; }
 
 // v0252-e1fast (policy.h)
-std::uint32_t e1DefaultFast(bool moe, hip::Arch arch) { return moe ? device::profile(arch).e1_moe_fast : 0u; }
+std::uint32_t e1DefaultFast(bool moe, hip::Arch arch) {
+    const device::Profile& p = device::profile(arch);
+    return moe ? p.e1_moe_fast : p.e1_dense_fast;  // v0252-swe1: dense fast from its own field
+}
 std::uint32_t e1CtxMaxFast(hip::Arch arch) { return device::profile(arch).e1_ctx_max_fast; }
+std::uint32_t e1CtxMaxDense(hip::Arch arch) { return device::profile(arch).e1_ctx_max_dense; }  // v0252-swe1
 
 }  // namespace whirl::qwen35

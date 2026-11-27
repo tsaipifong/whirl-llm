@@ -80,6 +80,13 @@ struct SlotData : SlotPrefix, SlotTier {
     // transition to one line per request instead of one per cycle; cleared by the prefill of a request, so the next
     // request on this slot says it again.
     bool e1_len_off = false;
+    // v0252-swe1 (PLAN V1-93 / V1-136, V1-150): this request's decode cycles and their summed wall ms by draft count (the
+    // per-request "spec: cycles by drafts" line: spec::rules::cyclesByDrafts), its lookahead cycles clamped to the in-flight
+    // cycle's draft count and its growth drains, and the clamp debt of spec::rules::aheadDrafts (a fraction of a cycle)
+    std::array<std::uint32_t, qwen35::max_ng_drafts + 1> cyc_nd{};
+    std::array<double, qwen35::max_ng_drafts + 1> ms_nd{};
+    std::uint32_t e1_clamped = 0, e1_grown = 0;
+    float e1_debt = 0;
     // v0252-e1p1c (E1 lookahead): != 0 = the slot's last decode cycle was read through the lookahead ring. Its hidden rows
     // are kept at this address (SampleBuffers::aheadHid; row r at + r * n_embd * 4) while the model's MTP-input and logits
     // rows may already hold a later cycle: the gen-end checkpoint takes its hidden row from here and saves no logits row

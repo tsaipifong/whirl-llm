@@ -139,6 +139,8 @@ void testE1SnapGate() {
         const std::string doc((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         CHECK(doc.find("On the Radeon 8060S (DeltaNet snapshot sets instead of replay) a value set here runs too") != std::string::npos);
         CHECK(doc.find("`decode: E1 in DeltaNet snapshot mode`") != std::string::npos);
+        // v0252-swe1 round 2: the dense default on the 8060S and its own boundary
+        CHECK(doc.find("for dense models (Swift) on the Radeon 8060S in precise and balance mode below `33025`") != std::string::npos);
         CHECK_EQ(doc.find("DeltaNet replay mode only (the Radeon 8060S verifies with snapshot sets and keeps `0`"), std::string::npos);
     }
 #endif
@@ -161,7 +163,8 @@ void testE1SnapGate() {
             su.mc.replay = false;
             su.mc.snap_select = true;
             su.mc.snap_sets = 1;
-            su.eo.e1_ctx_max = e1DefaultCtxMax(c, lim);
+            // v0252-swe1 round 2: a dense model's default has its own limit (server_main: e1CtxMaxDense)
+            su.eo.e1_ctx_max = e1DefaultCtxMax(c, arm.moe ? lim : qwen35::e1CtxMaxDense(hip::Arch::gfx1151));
             g_log.clear();
             TestServer srv(su);
             const std::vector<std::uint32_t> p = makePrompt(300, 1997);
@@ -181,6 +184,13 @@ void testE1SnapGate() {
                 CHECK_EQ(e.no_interval, 0u);
                 CHECK_EQ(e.interval_out, 0u);
                 CHECK_EQ(e.interval_max, 2u);
+            } else if (!arm.fast) {
+                // v0252-swe1 round 2 (screen swe1-bal 20261127-0323 KEEP): dense precise / balance run the default lookahead below 33025
+                CHECK(c.e1 == 2u && c.by_default);
+                CHECK_EQ(su.eo.e1_ctx_max, 33025u);
+                CHECK_EQ(g_log.count("decode: WHIRL_E1=2 by default below 33025 tokens of context"), 1u);
+                CHECK_EQ(g_log.count("decode: E1 in DeltaNet snapshot mode"), 1u);
+                CHECK(srv.engine().stats().acc_ring > 0);
             } else {
                 CHECK_EQ(c.e1, 0u);
                 CHECK_EQ(g_log.count("decode: WHIRL_E1="), 0u);

@@ -30,7 +30,10 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <format>
+#include <limits>
 #include <span>
+#include <string>
 
 namespace whirl::spec::rules {
 
@@ -136,6 +139,51 @@ inline bool aheadWordsAgree(std::int32_t acc_w, std::int32_t chosen_w, std::int3
                             std::uint32_t acc, std::uint32_t chosen) {
     return acc_w >= 0 && static_cast<std::uint32_t>(acc_w) == acc && static_cast<std::uint32_t>(chosen_w) == chosen &&
            static_cast<std::uint32_t>(npos_w) == pos + acc + 1 && static_cast<std::uint32_t>(npend_w) == acc + 1;
+}
+
+// v0252-swe1 (PLAN V1-93 / V1-136): the draft count of a cycle submitted behind a cycle in flight in DeltaNet SNAPSHOT mode
+// (gfx1151: the select verify of kernels/gdn_select.h takes at most the in-flight cycle's draft count m). "Clamp instead of
+// drain": when the policy wants more than m, the cycle is submitted with m drafts and the clamp's cost is added to the
+// request's debt; once the debt reaches what one drain costs (`grow`, a fraction of a cycle: the host window the lookahead
+// hides, EngineOptions::e1_grow) the cycle is NOT submitted (drain) and the next one starts a new pipeline at the policy's
+// count. want <= m clears the debt. grow 0 = the rule before v0252-swe1 (every growth drains). A NaN / infinite loss (no
+// timing estimate) drains. progress/v0252-swe1.PRIOR_ART.md section 4.
+struct AheadDrafts {
+    std::uint32_t nd = 0;  // the cycle's draft count (when not drained)
+    bool drain = false;    // true: do not submit it; the next cycle starts a pipeline with `nd` (= want)
+    float debt = 0;        // the request's clamp debt after this decision
+};
+inline AheadDrafts aheadDrafts(std::uint32_t want, std::uint32_t m, float debt, float loss, float grow) {
+    if (want <= m) return {want, false, 0.0f};
+    if (m == 0) return {want, true, 0.0f};
+    const float d = debt + (loss > 0.0f || loss != loss ? loss : 0.0f);
+    if (!(d < grow)) return {want, true, 0.0f};
+    return {m, false, d};
+}
+
+// The clamp's cost for aheadDrafts: the fraction of a cycle given away by m drafts instead of `want`, in the draft-count
+// policy's own terms (score = mtpScore = E(nd) / t(nd), what qwen35::pickDrafts maximizes): 1 - score(m) / score(want), 0
+// when the policy scores `want` no higher (its exploration step up costs nothing), +inf without a timing estimate.
+inline float aheadClampLoss(const qwen35::DraftAccept& acc, const qwen35::DraftTiming& tm, std::uint32_t m, std::uint32_t want) {
+    const auto t_m = tm.estimate(m), t_w = tm.estimate(want);
+    if (!t_m || !t_w || !(*t_m > 0.0f) || !(*t_w > 0.0f)) return std::numeric_limits<float>::infinity();
+    const float s_m = acc.expected(m) / *t_m, s_w = acc.expected(want) / *t_w;
+    if (!(s_w > s_m)) return 0.0f;
+    return 1.0f - s_m / s_w;
+}
+
+// The per-request decode line's middle part (whirl-server "req N | slot S | spec: <this>; lookahead clamped C, growth drains G"):
+// "cycles by drafts d:n ...; verify ms by drafts d:mean ..." over the draft counts with at least one cycle (n[d] cycles of d
+// drafts, ms[d] their summed wall time: a ring cycle from the read of the cycle before it, a synchronous one from its layout to
+// its accept), "-" for none.
+inline std::string cyclesByDrafts(std::span<const std::uint32_t> n, std::span<const double> ms) {
+    std::string c, t;
+    for (std::size_t d = 0; d < n.size() && d < ms.size(); ++d) {
+        if (n[d] == 0) continue;
+        c += std::format("{}{}:{}", c.empty() ? "" : " ", d, n[d]);
+        t += std::format("{}{}:{:.2f}", t.empty() ? "" : " ", d, ms[d] / static_cast<double>(n[d]));
+    }
+    return std::format("cycles by drafts {}; verify ms by drafts {}", c.empty() ? "-" : c, t.empty() ? "-" : t);
 }
 
 }  // namespace whirl::spec::rules

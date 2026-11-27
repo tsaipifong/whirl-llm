@@ -105,6 +105,9 @@ public:
         // v0252-e1p1c (WHIRL_E1=2): cycles read through the lookahead ring, cycles submitted before the cycle before them
         // was read, submitted cycles dropped at the end of a request
         std::uint64_t acc_ring = 0, acc_ahead = 0, acc_discard = 0;
+        // v0252-swe1: cycles submitted behind a cycle in flight with fewer drafts than the policy asked for (the snapshot-mode
+        // clamp), and the growth drains (EngineOptions::e1_grow)
+        std::uint64_t acc_clamp = 0, acc_grow = 0;
     };
 
     virtual ~EngineApi() = default;

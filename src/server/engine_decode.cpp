@@ -650,6 +650,12 @@ void SpecCycle::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& a
         dr[r] = is_ng ? cy.ng_d[k][r] : static_cast<std::uint32_t>(ctl[qwen35::ctl_drafts + r]);
     if (cy.dsrc[k] == 1) sl.ng_cycles += 1;
     sl.cycles += 1;
+    {
+        // v0252-swe1: the request's cycles and wall ms by draft count (a ring cycle from the read of the cycle before it)
+        const std::size_t di = std::min<std::size_t>(nd_k, sl.cyc_nd.size() - 1);
+        sl.cyc_nd[di] += 1;
+        sl.ms_nd[di] += cy.ring_ms >= 0.0f ? static_cast<double>(cy.ring_ms) : static_cast<double>(msSince(cy.tc0));
+    }
     sl.drafted += nd_dev;
     if (dev_use) {
         // a device result outside the cycle's bounds (never expected: a broken copy) falls back to the host path
@@ -979,6 +985,26 @@ std::shared_ptr<SpecCycle::Cycle> SpecCycle::aheadBuild(Slot& sl, const Cycle* f
     }
     // ---- the cycle: MTP drafts only, the slot's inputs from the control words the cycle before it wrote
     mtpDrafts(cy);
+    // v0252-swe1 (PLAN V1-93 / V1-136): snapshot mode with an automatic draft count (Swift) - clamp instead of drain. The select
+    // verify takes at most the in-flight cycle's draft count (kernels/gdn_select.h); when the policy wants more, this cycle gets
+    // that count, and the growth drains only once the clamps have cost one drain (spec::rules::aheadDrafts, EngineOptions::e1_grow)
+    if (fly != nullptr && !m_.gdnReplay() && opt_.mtp_auto && cy.n_mtp == 1) {
+        const std::uint32_t want = cy.nd_m[0];
+        const float loss = want > fly_nd ? sr::aheadClampLoss(sl.dacc, spec_.timing[1], fly_nd, want) : 0.0f;
+        const sr::AheadDrafts ad = sr::aheadDrafts(want, fly_nd, sl.e1_debt, loss, opt_.e1_grow);
+        sl.e1_debt = ad.debt;
+        if (ad.drain) {
+            sb_.accStats().grow += 1;
+            sl.e1_grown += 1;
+            return nullptr;
+        }
+        if (ad.nd < want) {
+            cy.nd_m[0] = cy.nd = cy.nd_max = ad.nd;
+            sl.d_prev = ad.nd;
+            sb_.accStats().clamp += 1;
+            sl.e1_clamped += 1;
+        }
+    }
     layoutBatch(cy);
     if (!cy.e1 || (fly == nullptr && sl.e1_rows == 0)) return nullptr;  // (layoutBatch's rule = the checks above)
     // v0252-e1s8 (snapshot mode): a select verify takes at most as many drafts as the cycle in flight it selects from
@@ -1179,6 +1205,8 @@ void SpecCycle::specAccReport(EngineApi::Stats& s) const {
     s.acc_ring = as.ring;  // v0252-e1p1c
     s.acc_ahead = as.ahead;
     s.acc_discard = as.discard;
+    s.acc_clamp = as.clamp;  // v0252-swe1
+    s.acc_grow = as.grow;
 }
 
 void SpecCycle::splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m) {
