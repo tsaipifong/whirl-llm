@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -46,6 +47,23 @@ inline std::optional<std::uint32_t> parseE1(std::string_view v) {
     while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
     if (v == "0" || v == "1" || v == "2") return static_cast<std::uint32_t>(v[0] - '0');
     return std::nullopt;
+}
+
+// v0252-swe1 round 2: WHIRL_E1_GROW - a plain decimal number >= 0 (digits, one '.', an exponent; spaces / tabs around it),
+// finite as a float; anything else (empty, sign '-', hex, nan / inf, trailing text) is nullopt (server_main warns, the
+// default EngineOptions::e1_grow runs)
+inline std::optional<float> parseE1Grow(std::string_view v) {
+    while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
+    if (v.empty() || v.size() > 32) return std::nullopt;
+    for (const char ch : v)
+        if (!((ch >= '0' && ch <= '9') || ch == '.' || ch == 'e' || ch == 'E' || ch == '+' || ch == '-')) return std::nullopt;
+    if (v.front() == '-' || v.front() == '+') return std::nullopt;
+    const std::string s(v);
+    char* end = nullptr;
+    const double d = std::strtod(s.c_str(), &end);
+    if (end != s.c_str() + s.size() || !(d >= 0.0) || d > 3.0e38) return std::nullopt;
+    return static_cast<float>(d);
 }
 
 // v0252-e1def (PLAN V1-93): the WHIRL_E1 value whirl-server starts with. Set: that value, on every card, model and mode

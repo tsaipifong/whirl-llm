@@ -1069,9 +1069,18 @@ void ServerRun::makeEngine() {
     // v0252-e1fast: fast mode's own boundary (device::Profile::e1_ctx_max_fast) for fast's own default
     if (nreq.mode == numerics::Mode::fast) eo.e1_ctx_max = e1DefaultCtxMax(e1c, qwen35::e1CtxMaxFast(model.arch));
     // v0252-swe1: a dense model's default has its own boundary in every mode (device::Profile::e1_ctx_max_dense, 0 = none; the
-    // MoE boundaries above were measured on Ornith). No default runs for dense today (e1_dense / e1_dense_fast 0)
+    // MoE boundaries above were measured on Ornith). Round 2: gfx1151 dense precise / balance below 33025 (swe1-bal KEEP)
     if (!model.cfg.moe) eo.e1_ctx_max = e1DefaultCtxMax(e1c, qwen35::e1CtxMaxDense(model.arch));
     if (e1c.bad) logW("WHIRL_E1={} is not 0, 1 or 2; using 0", *e1_env);
+    // v0252-swe1 round 2: WHIRL_E1_GROW (EngineOptions::e1_grow: 0 = every growth of the draft count behind a cycle in flight drains)
+    if (const std::optional<std::string> g = settings::e1Grow()) {
+        if (const std::optional<float> v = parseE1Grow(*g)) {
+            eo.e1_grow = *v;
+            logI("decode: WHIRL_E1_GROW={} (a growth of the automatic draft count behind a cycle in flight drains once the clamps cost {} of a cycle)", *g, *v);
+        } else {
+            logW("WHIRL_E1_GROW={} is not a number >= 0; using {}", *g, eo.e1_grow);
+        }
+    }
     // v0252-b5 round 3 (C2): the explicit accept mode wins over the default lookahead (which would raise it to gpu-zc)
     if (e1c.yielded)
         logI("the default E1 lookahead is off: WHIRL_SPEC_ACC={} ({}) is set and stays as set (WHIRL_E1=2 turns the lookahead on)", eo.spec_acc,

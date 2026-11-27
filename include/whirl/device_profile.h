@@ -433,7 +433,9 @@ inline constexpr Profile k_profile_gfx1151{
     // balance server cycles/s: screen e1grp-orn 20261125-1048 8192 +5.01 % +-1.33, 32768 +6.64 % +-2.80, 65536 +4.89 % +-2.90
     // GAIN; e1grp-orn-long 20261125-1106 131072 +4.66 % +-4.65 GAIN; e1grp-orn-xl 20261125-1138 262144 -0.49 % +-3.70 OPEN ->
     // 131329 = 131072 + 256 generated + 1 (the largest length with a gain stays inside); 196608 / 262144 synchronous (re-test)
-    .e1_dense = 0,
+    // v0252-swe1 round 2: Swift precise / balance with the lookahead (clamp instead of drain) - screen swe1-bal 20261127-0323 KEEP:
+    // cycd2048 +0.94 % +-0.59, cycd32768 +1.00 % +-0.78 (GAIN); tg2048 +0.88 % +-3.65, tg32768 +1.11 % +-5.82 (OPEN, guards)
+    .e1_dense = 2,
     .e1_moe = 2,  // v0252-e1s8 round 3: screens e1s8-orn 20261125-0619, e1s8-orn-r2 20261125-0721, e1s8-orn-prec 20261125-0757
     .e1_ctx_max = 131329,  // v0252-e1grp: 131072 + 256 + 1 (e1grp-orn-long 131072 +4.66 % +-4.65 GAIN; e1grp-orn-xl 262144 -0.49 % +-3.70 OPEN)
     // v0252-e1fast: Ornith fast with the lookahead (relaxacc decided on the GPU, spec_accept_relax_rows). Screen e1fast-orn
@@ -441,8 +443,8 @@ inline constexpr Profile k_profile_gfx1151{
     // scratch/v0252_e1fast/gpu/proof_20261125-1540 (kt specaccx ok, precise golden rc 0, fast check mode 910 compared / 0 disagree)
     .e1_moe_fast = 2,  // v0252-e1fast: screen e1fast-orn 20261125-1545 KEEP: 8192 +8.79 % +-2.51, 32768 +6.72 % +-1.35, 131072 +5.16 % +-1.72 (GAIN)
     .e1_ctx_max_fast = 131329,  // v0252-e1fast: 131072 + 256 + 1, the largest measured length with a gain (e1fast-orn 20261125-1545: 131072 +5.16 % +-1.72)
-    .e1_dense_fast = 0,     // v0252-swe1: until screens swe1-bal / swe1-fast (Swift, clamp instead of drain) keep
-    .e1_ctx_max_dense = 0,
+    .e1_dense_fast = 0,     // v0252-swe1: swe1-fast 20261127-0354 OPEN (cycd confounded, tg2048 -6.34 % +-7.23): nothing flipped
+    .e1_ctx_max_dense = 33025,  // v0252-swe1 round 2: 32768 + 256 + 1, the largest measured length with a gain (swe1-bal cycd32768 +1.00 % +-0.78)
     .gemm_tail = false,  // v0252-pp2k2: the 8060S keeps the 0.2.5.1 GEMM plans (object compare only)
     // v0252-8smoe (A): COMB 5 for Ornith fast (moeskip on). Shipped exe ef5652c, WHIRL_MOEP_COMB=5 against the shipped fast
     // default (KB v0252-retest:comb5-8s-ship, 4 rounds): pp 8192 +1.08 % +-1.07, pp 32768 +1.31 % +-0.83; the long band

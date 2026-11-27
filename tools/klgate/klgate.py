@@ -121,6 +121,14 @@ def clean_env():
     return {k: v for k, v in os.environ.items() if not k.upper().startswith("WHIRL_")}
 
 
+def dropped_env(environ, arm_env):
+    """the WHIRL_* variables of the caller's environment that clean_env() drops from every run, less the names passed again with
+    --env -> {NAME: VALUE}. Recorded in the report as dropped_env (v0252-tools7, PLAN V1-84): a runner that switched an A/B arm
+    in its shell and called klgate without --env measured the product default (q7 9525m); the report now shows it."""
+    given = {k.upper() for k in (arm_env or {})}
+    return {k: v for k, v in sorted(environ.items()) if k.upper().startswith("WHIRL_") and k.upper() not in given}
+
+
 def ntokens(exe, model, prompt):
     env = clean_env()
     env["WHIRL_TOKENIZE_ONLY"] = "1"
@@ -462,10 +470,14 @@ def run(a):
     corpus = load_corpus(a.corpus)
     only = set(x for x in a.only.split(",") if x)
     wrap = shlex.split(a.wrap, posix=False) if a.wrap else []
+    dropped = dropped_env(os.environ, arm_env)
+    if dropped:
+        print("klgate: dropped from every run (clean_env; pass an A/B switch with --env NAME=VALUE): "
+              + " ".join(f"{k}={v}" for k, v in dropped.items()))
     work = os.path.abspath(a.work or os.path.join(os.path.dirname(exe), "klgate_work"))
     os.makedirs(work, exist_ok=True)
     rep = {"exe": exe, "exe_sha256": sha256(exe), "device": a.device or "default", "limits": LIMITS, "moe_limits": MOE_LIMITS,
-           "rows": ROWS, "positions": POSITIONS, "offsets": list(offsets), "mode_args": mode_args, "env": arm_env, "lengths": lengths, "modes": modes, "models": {k: os.path.basename(v) for k, v in models.items()},
+           "rows": ROWS, "positions": POSITIONS, "offsets": list(offsets), "mode_args": mode_args, "env": arm_env, "dropped_env": dropped_env(os.environ, arm_env), "lengths": lengths, "modes": modes, "models": {k: os.path.basename(v) for k, v in models.items()},
            "corpus": {k: sha256(v) for k, v in corpus.items()}, "started": time.strftime("%Y-%m-%d %H:%M:%S"), "cases": [],
            "judge": "length-average", "noise": [], "numerics": {}, "errors": []}
     log(f"klgate: exe {exe} sha256 {rep['exe_sha256'][:16]} device {rep['device']} rows {ROWS} positions {POSITIONS} (offsets {list(offsets)})")
