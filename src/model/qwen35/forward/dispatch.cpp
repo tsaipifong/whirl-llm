@@ -243,6 +243,13 @@ void Context::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate)
         // activations round-trip per 32 through int4 into x16w (w4s_quant_x16; the x16 cache keeps the unquantized values for
         // every other consumer), the weights take the re-quantized grid (GemmFlags::w4s_w -> w4s_dequant_f16_mxfp4)
         const std::uint32_t sim = w.ty == GgmlType::mxfp4 && !head_phase && w.ncols % 256 == 0 ? nf().w4a4_sim : 0u;
+        // v0252-w4a4p (PLAN V1-144 round 1): WHIRL_W4A4=1 sets the iu4 bit next to its reference arm wga: the PRODUCT W4A4 iu4
+        // GEMM where ops::w4a4Takes accepts the matrix; any other matrix keeps the sim path of wga below (the same numbers)
+        if ((sim & whirl::numerics::w4a4_iu4) != 0 && ops::w4a4Takes(matShape(w), true, k)) {
+            w4qGemm(w, x16, y, n, acc);
+            finish();
+            return;
+        }
         DevPtr xg = x16;
         if ((sim & (whirl::numerics::w4a4_sim_a | whirl::numerics::w4a4_sim_am)) != 0 && k.w4s_qx != nullptr) {
             if (x16w == 0) x16w = alloc(x16_bytes);
@@ -320,6 +327,47 @@ DevPtr Context::w4sGainsOf(const Mat& w, int grid, std::uint8_t mode) {
     hip::upload(buf, g.data(), rows * 4);
     w4s_gains.push_back(W4sGain{w.ptr, grid, mode, buf});
     return buf;
+}
+
+// v0252-w4a4p (PLAN V1-144 round 1): the PRODUCT W4A4 iu4 GEMM of matrix w (kernels/gfx1151/gemm_w4a4q.hip, math
+// kernels/shared/gemm_w4a4_prod.h): y[t][:] (+)= W4A4(w, x16in[t][:]) for n tokens, y f32 or f16 (out_h16, as the f16 GEMM it
+// replaces). The weights are converted once per matrix, at its first use (w4qMatOf: packed int4 + f32 scale per 32 with the
+// tensor gain of the reference arm wga folded in); the activations are quantized per call into w4q_x (a separate pass in
+// round 1: packed int4 + step per 32).
+Context::W4qMat Context::w4qMatOf(const Mat& w) {
+    for (const W4qMat& e : w4q_mats)
+        if (e.w == w.ptr) return e;
+    const DevPtr gains = w4sGainsOf(w, 0, 1);  // the reference arm's tensor gain (grid w, mode g): the same bits as the sim
+    W4qMat m;
+    m.w = w.ptr;
+    const u64 qbytes = static_cast<u64>(w.nrows) * w.ncols / 2, sbytes = static_cast<u64>(w.nrows) * (w.ncols / 32) * 4;
+    m.wq = alloc(qbytes);
+    m.ws = alloc(sbytes);
+    const u64 total = static_cast<u64>(w.nrows) * (w.ncols / 32);
+    hip::launch(k.w4q_wc, D(static_cast<u32>(std::min<u64>((total + 255) / 256, 65535))), D(256), 0, stream, w.ptr, w.row_bytes, m.wq, m.ws, I(w.ncols),
+                I(w.nrows), gains);
+    w4q_bytes += qbytes + sbytes;
+    // one line per matrix at its conversion (only reachable with WHIRL_W4A4=1, a fast-only opt-in)
+    std::fprintf(stderr, "w4a4 iu4: converted matrix 0x%llx %ux%u (%llu bytes, total %llu)\n", static_cast<unsigned long long>(w.ptr),
+                 static_cast<unsigned>(w.nrows), static_cast<unsigned>(w.ncols), static_cast<unsigned long long>(qbytes + sbytes),
+                 static_cast<unsigned long long>(w4q_bytes));
+    w4q_mats.push_back(m);
+    return m;
+}
+
+void Context::w4qGemm(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
+    const W4qMat m = w4qMatOf(w);
+    const u64 count = static_cast<u64>(n) * w.ncols, nblk = count / 32;
+    const u64 need = count / 2 + nblk * 4;
+    if (need > w4q_x_bytes) {
+        if (w4q_x != 0) freeAlloc(w4q_x);
+        w4q_x_bytes = std::max<u64>(need, x16_bytes);
+        w4q_x = alloc(w4q_x_bytes);
+    }
+    const DevPtr xq = w4q_x, xs = w4q_x + count / 2;  // count / 2 is a multiple of 128 (ncols % 256 == 0)
+    hip::launch(k.w4q_qx, D(static_cast<u32>(std::min<u64>((nblk + 255) / 256, 65535))), D(256), 0, stream, x16in, xq, xs, nblk);
+    hip::launch(k.w4q_gemm, D((n + 127) / 128, w.nrows / 128), D(256), 0, stream, m.wq, m.ws, xq, xs, y, I(w.ncols), I(w.nrows), I(n), acc,
+                I(out_h16 ? 1 : 0));
 }
 
 // one launch of an f16 GEMM plan over n rows (the body of gemmF16 before v0252-pp2k2, unchanged)

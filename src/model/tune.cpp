@@ -1002,6 +1002,9 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     log += "  " + nu::logLine(p) + "\n";
     // bug-fastonly: WHIRL_RELAX / WHIRL_KV=q4 refused by precise / balance (fast-only items; the plan is untouched)
     for (const std::string& ign : p.ignored) log += "  " + ign + "\n";
+    // v0252-w4a4p (PLAN V1-144 round 1): one load-log line where WHIRL_W4A4=1 is taken (fast, gfx1151, dense MXFP4)
+    if ((f.w4a4_sim & nu::w4a4_iu4) != 0)
+        log += "  w4a4 iu4: WHIRL_W4A4=1 runs the product W4A4 iu4 prefill GEMM (reference arm WHIRL_W4A4_SIM=wga; weights converted once per matrix at its first use)\n";
     if (!m.load_note.empty()) log += "  " + m.load_note;
 
     // PATH-256 (v0.2.5.1 PLAN V1-22, pathlen256.DISCOVERY.md v3.1 2b-1): the tune5 file (at most 61 characters, keyed by

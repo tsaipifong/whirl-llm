@@ -745,6 +745,10 @@ struct MatmulKernels {
     std::array<F, 5> w4s_dqg{};  // round 3: kW4sDqgNames (gain per row)
     F w4s_gterms{};               // round 3: w4s_gain_terms
     F w4s_qx{};
+    // v0252-w4a4p (PLAN V1-144 round 1; gfx1151 code object only, kernels/gfx1151/gemm_w4a4q.hip): the PRODUCT W4A4 iu4 GEMM
+    // (numerics flag w4a4_sim bit w4a4_iu4, WHIRL_W4A4=1, fast only): w4q_wconv_mxfp4(W, rb, Wq, Ws, ncols, nrows, gain) (once per
+    // matrix), w4q_quant_x(X, Xq, Xs, u64 nblk), w4q_gemm(Wq, Ws, Xq, Xs, Y, ncols, nrows, n_tok, acc, h16); null elsewhere
+    F w4q_wc{}, w4q_qx{}, w4q_gemm{};
     // activation converters of the GEMV / GEMM inputs
     F f32_to_f16{}, quantize_q8{}, qact_fp8{}, qact_fp8t{};
 

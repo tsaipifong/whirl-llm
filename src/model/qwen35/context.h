@@ -540,6 +540,17 @@ protected:
     DevPtr w4s_gain_cur = 0, w4s_terms = 0;
     std::uint64_t w4s_terms_rows = 0;
     DevPtr w4sGainsOf(const Mat& w, int grid, std::uint8_t mode);
+    // v0252-w4a4p (PLAN V1-144 round 1): the product W4A4 iu4 GEMM (dispatch.cpp w4qGemm): per matrix its int4 copy (wq: nrows x
+    // ncols / 2 bytes, ws: nrows x ncols / 32 f32 scales with the tensor gain folded in), converted at the first use and kept for
+    // the Context's life (~0.63 bytes per weight; WHIRL_W4A4=1 only); w4q_x = the packed activations of one call
+    struct W4qMat {
+        DevPtr w = 0, wq = 0, ws = 0;
+    };
+    std::vector<W4qMat> w4q_mats;
+    DevPtr w4q_x = 0;
+    std::uint64_t w4q_x_bytes = 0, w4q_bytes = 0;
+    W4qMat w4qMatOf(const Mat& w);
+    void w4qGemm(const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);
     void gemmPlanLaunch(const ops::GemmPlan& p, const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);
     bool gdnIn2(const GdnW& g, std::uint32_t n) const;
     // x16b: f16 sub-buffer of x16 past the fp8 rows (tiled fp8 pads to 16 rows), 256-aligned

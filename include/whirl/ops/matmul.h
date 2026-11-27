@@ -176,6 +176,10 @@ struct GemmPlan {
 // den_r = <w_hat_r, w_hat_r> (the w4s_gain_terms kernel): mode 1 (tensor) = every row gets sum num / sum den (rows in order),
 // mode 2 (row) = num_r / den_r; den 0 or a non-finite ratio -> 1. out: nrows f32 gains.
 void w4sGains(const double* num, const double* den, std::uint32_t nrows, int mode, float* out);
+// v0252-w4a4p (PLAN V1-144 round 1): whether the PRODUCT W4A4 iu4 GEMM (MatmulKernels::w4q_*) runs matrix w: iu4 = the plan's
+// w4a4_iu4 bit (WHIRL_W4A4=1; fast, gfx1151, dense MXFP4), an MXFP4 trunk matrix (not the head) with ncols % 256 == 0 and
+// nrows % 128 == 0, and all of w4q_wc / w4q_qx / w4q_gemm / w4s_gterms present. false: the sim path of the same value runs
+bool w4a4Takes(const MatShape& w, bool iu4, const kernels::MatmulKernels& k);
 // the tuned choice code for n rows: [0, G) fused gemm_c on the quantized bytes, [G, 2G) dequant + f16 gemm_c,
 // [2G, 2G + S) gemms slot (G = kGemmCfgs.size(), S = kGemmsCfgs.size())
 std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k);

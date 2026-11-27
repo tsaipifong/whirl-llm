@@ -284,6 +284,12 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
     return p;
 }
 
+// v0252-w4a4p (matmul.h): the product W4A4 iu4 GEMM selection
+bool w4a4Takes(const MatShape& w, bool iu4, const kernels::MatmulKernels& k) {
+    return iu4 && w.ty == GgmlType::mxfp4 && !w.head && w.ncols % 256 == 0 && w.nrows % 128 == 0 && w.nrows > 0 && k.w4q_wc != nullptr &&
+           k.w4q_qx != nullptr && k.w4q_gemm != nullptr && k.w4s_gterms != nullptr;
+}
+
 // v0252-w4a4k2 round 3 (matmul.h): the least-squares gains of the W4A4 fake-quant weight grids
 void w4sGains(const double* num, const double* den, std::uint32_t nrows, int mode, float* out) {
     auto gain = [](double n, double d) {

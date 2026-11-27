@@ -281,6 +281,10 @@ void loadMatmul(MatmulKernels& k, const Loader& L) {
         for (std::size_t g = 0; g < k.w4s_dqg.size(); ++g) k.w4s_dqg[g] = L.opt(kW4sDqgNames[g]);  // round 3
         k.w4s_gterms = L.opt("w4s_gain_terms");
         k.w4s_qx = L.opt("w4s_quant_x16");
+        // v0252-w4a4p: the product W4A4 iu4 GEMM (gfx1151 object only)
+        k.w4q_wc = L.opt("w4q_wconv_mxfp4");
+        k.w4q_qx = L.opt("w4q_quant_x");
+        k.w4q_gemm = L.opt("w4q_gemm");
         k.gemvq[i] = L.opt("gemvq_mxfp4");
         for (int nt = 2; nt <= kMaxSmallBatch; ++nt) {
             k.gemvq_nt[nt - 2][i] = L.opt(gemvqNtName(t, nt, false));

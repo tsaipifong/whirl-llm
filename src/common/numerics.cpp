@@ -240,6 +240,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"DQ4_MINKEYS", &S::dq4_min_keys},  // v0252-8sq4 (F8 split)
         {"DQ4_SPLITS", &S::dq4_splits},  // v0252-8sq5 (measured split table)
         {"W4A4_SIM", &S::w4a4_sim},  // v0252-w4a4k2 (W4A4 fake-quant research arm)
+        {"W4A4", &S::w4a4},          // v0252-w4a4p (product W4A4 iu4 GEMM, fast opt-in)
     }};
     return t;
 }
@@ -335,6 +336,13 @@ std::optional<std::uint32_t> parseW4a4Sim(std::string_view s) {
     if (s.empty()) return v != 0 ? std::optional<std::uint32_t>(v) : std::nullopt;
     if (s == "a") return v | w4a4_sim_a;
     if (s == "am") return v | w4a4_sim_am;
+    return std::nullopt;
+}
+
+// v0252-w4a4p: WHIRL_W4A4 values (numerics.h)
+std::optional<std::uint32_t> parseW4a4(std::string_view s) {
+    if (s.empty() || s == "0") return 0u;
+    if (s == "1") return w4a4_sim_wga | w4a4_iu4;
     return std::nullopt;
 }
 
@@ -596,6 +604,10 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     // (loadOverrides notes it). Default off everywhere.
     if (w4a4SimTaken(r, t) && e.w4a4_sim)
         if (const std::optional<std::uint32_t> v = parseW4a4Sim(*e.w4a4_sim)) F.w4a4_sim = *v;
+    // v0252-w4a4p (PLAN V1-144 round 1): WHIRL_W4A4=1, the PRODUCT W4A4 iu4 GEMM, where the arm may run (same rule: fast,
+    // gfx1151, dense MXFP4); it replaces any WHIRL_W4A4_SIM value by its reference arm wga + the iu4 bit (loadOverrides notes it)
+    if (w4a4SimTaken(r, t) && e.w4a4)
+        if (const std::optional<std::uint32_t> v = parseW4a4(*e.w4a4); v && *v != 0) F.w4a4_sim = *v;
 }
 
 // tune.cpp:939-982 on the item table (the per-item overrides, WHIRL_Q8DEC, relaxacc, noteSwitches) and the flags
@@ -767,6 +779,18 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
             else if (!w4a4SimTaken(r, t))
                 p.ignored.push_back(std::format("WHIRL_W4A4_SIM={} ignored: the W4A4 fake-quant arm is fast-only, 8060S dense MXFP4 models ({} never takes it here)",
                                                 *v, modeName(p.mode)));
+        }
+    // v0252-w4a4p: WHIRL_W4A4 other than "0" / "" where it is not taken or with an invalid value is noted once; a
+    // WHIRL_W4A4_SIM value that WHIRL_W4A4=1 replaces is noted too
+    if (items)
+        if (const Raw& v = e.w4a4; v && !v->empty() && *v != "0") {
+            if (!parseW4a4(*v))
+                p.ignored.push_back(std::format("WHIRL_W4A4={} ignored: not 1 or 0 (the W4A4 iu4 GEMM stays off)", *v));
+            else if (!w4a4SimTaken(r, t))
+                p.ignored.push_back(std::format("WHIRL_W4A4={} ignored: the W4A4 iu4 GEMM is fast-only, 8060S dense MXFP4 models ({} never takes it here)",
+                                                *v, modeName(p.mode)));
+            else if (const Raw& s = e.w4a4_sim; s && !s->empty() && *s != "0")
+                p.ignored.push_back(std::format("WHIRL_W4A4_SIM={} ignored: WHIRL_W4A4=1 runs the product kernel with its reference arm wga", *s));
         }
     // v0252-8sattn3: WHIRL_ATTN_I4PF other than "0" in precise / balance is noted once (it rides on the fast-only int4 form)
     if (items)

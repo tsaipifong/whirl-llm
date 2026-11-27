@@ -159,6 +159,9 @@ struct EnvValues {
     // v0252-w4a4k2 (PLAN V1-144 K2): w4a4_sim (WHIRL_W4A4_SIM, the W4A4 fake-quant research arm of the fast gfx1151 dense prefill
     // GEMM; parseW4a4Sim; fast only, gfx1151, dense MXFP4 models; default off; Plan::ignored notes it where it is not taken)
     Raw w4a4_sim;
+    // v0252-w4a4p (PLAN V1-144 round 1): w4a4 (WHIRL_W4A4=1: the PRODUCT W4A4 iu4 GEMM of the fast gfx1151 dense prefill =
+    // Flags::w4a4_sim = wga | w4a4_iu4; parseW4a4; fast only, gfx1151, dense MXFP4 models; default off)
+    Raw w4a4;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -166,7 +169,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 51;  // v0252-w4a4k2: + w4a4_sim (50 -> 51)  // v0252-8sq5: + dq4_splits (49 -> 50)  // v0252-8sattn3: + attn_i4pf (48 -> 49)  // v0252-8sq4: + dq4_order, dq4_min_keys (46 -> 48)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
+    static constexpr std::size_t n_fields = 52;  // v0252-w4a4p: + w4a4 (51 -> 52)  // v0252-w4a4k2: + w4a4_sim (50 -> 51)  // v0252-8sq5: + dq4_splits (49 -> 50)  // v0252-8sattn3: + attn_i4pf (48 -> 49)  // v0252-8sq4: + dq4_order, dq4_min_keys (46 -> 48)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -472,6 +475,13 @@ inline constexpr std::uint32_t w4a4_sim_g = 0x800, w4a4_sim_r = 0x1000;
 // value = [weight token][activation token] or "1" (= "wa"); weight token w | w1 | w1e | w1d | wb (with w set and the grid
 // above), activation token a | am; e.g. "w1", "w1ea", "wbam", "a", "am"; "0" / "" -> 0 (off); anything else -> nullopt (invalid)
 std::optional<std::uint32_t> parseW4a4Sim(std::string_view s);
+// v0252-w4a4p (PLAN V1-144 round 1): bit w4a4_iu4 of Flags::w4a4_sim = run the PRODUCT W4A4 iu4 GEMM (kernels/gfx1151/gemm_w4a4q.hip,
+// math kernels/shared/gemm_w4a4_prod.h) wherever ops::w4a4Takes accepts the matrix; every other matrix of the arm keeps the
+// sim path of the same value. Set only by WHIRL_W4A4=1, always together with its reference arm wga (w4a4_sim_wga).
+inline constexpr std::uint32_t w4a4_iu4 = 0x10000;
+inline constexpr std::uint32_t w4a4_sim_wga = w4a4_sim_w | w4a4_sim_g | w4a4_sim_a;  // grid w (0), tensor gain, absmax activations
+// WHIRL_W4A4 values: "1" -> w4a4_sim_wga | w4a4_iu4; "0" / "" -> 0 (off); anything else -> nullopt (invalid)
+std::optional<std::uint32_t> parseW4a4(std::string_view s);
 
 struct Flags {
 #define WHIRL_NF_B bool
