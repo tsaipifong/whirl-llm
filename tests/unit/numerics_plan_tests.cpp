@@ -2063,7 +2063,7 @@ static void testW4a4Flag() {
     NCHECK(nu::parseW4a4Sim("wga") == std::optional<std::uint32_t>(nu::w4a4_sim_wga), "w4a4_sim_wga == parseW4a4Sim(wga)");
     NCHECK(nu::parseW4a4("1") == std::optional<std::uint32_t>(nu::w4a4_sim_wga | nu::w4a4_iu4), "parseW4a4(1) = wga | iu4");
     for (const char* v : {"0", ""}) NCHECK(nu::parseW4a4(v) == std::optional<std::uint32_t>(0u), "parseW4a4('{}') = 0", v);
-    for (const char* v : {"2", "on", "wga", " 1", "1 ", "true", "a"}) NCHECK(!nu::parseW4a4(v), "parseW4a4('{}') = invalid", v);
+    for (const char* v : {"5", "on", "wga", " 1", "1 ", "true", "a", "12"}) NCHECK(!nu::parseW4a4(v), "parseW4a4('{}') = invalid", v);  // round 2: "2" / "3" / "4" are variants
     const std::uint32_t want_on = nu::w4a4_sim_wga | nu::w4a4_iu4;
     std::size_t on_cells = 0;
     for (const char* mode : {"precise", "balance", "fast"})
@@ -2106,6 +2106,50 @@ static void testW4a4Flag() {
     nu::Target tq = target(card("8060s"), "swift", false);
     tq.has_mxfp4 = false;
     NCHECK(pl(tq, "fast", {{"W4A4", "1"}}).flags.w4a4_sim == 0u, "w4a4: a model without MXFP4 tensors -> off");
+}
+
+// v0252-w4a4p round 2: WHIRL_W4A4=2 / 3 = the round-2 variants of the product W4A4 iu4 GEMM on the same exe: "2" = round 1's
+// bits + w4a4_iu4_lut (0x20000: the LUT form, no weight copy), "3" = "2" + w4a4_iu4_xreuse (0x40000: the packed activations
+// reused inside one matmulGroup). Same rule as "1" (fast, 8060S, dense MXFP4; elsewhere off with one note naming the value);
+// each variant has its own bitsKey (they are separate screen arms); "1" stays exactly round 1's value. Fails to build before
+// the change (no w4a4_iu4_lut / w4a4_iu4_xreuse).
+static void testW4a4Variants() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    NCHECK(nu::w4a4_iu4_lut == 0x20000u && nu::w4a4_iu4_xreuse == 0x40000u && nu::w4a4_iu4_wide == 0x80000u,
+           "w4a4_iu4_lut 0x20000, w4a4_iu4_xreuse 0x40000, w4a4_iu4_wide 0x80000");
+    const std::uint32_t v1 = nu::w4a4_sim_wga | nu::w4a4_iu4, v2 = v1 | nu::w4a4_iu4_lut, v3 = v2 | nu::w4a4_iu4_xreuse, v4 = v3 | nu::w4a4_iu4_wide;
+    NCHECK(nu::parseW4a4("1") == std::optional<std::uint32_t>(v1), "parseW4a4(1) unchanged (round 1)");
+    NCHECK(nu::parseW4a4("2") == std::optional<std::uint32_t>(v2), "parseW4a4(2) = wga | iu4 | lut");
+    NCHECK(nu::parseW4a4("3") == std::optional<std::uint32_t>(v3), "parseW4a4(3) = wga | iu4 | lut | xreuse");
+    NCHECK(nu::parseW4a4("4") == std::optional<std::uint32_t>(v4), "parseW4a4(4) = wga | iu4 | lut | xreuse | wide (round 2b)");
+    for (const CardFake& c : k_cards)
+        for (const char* model : {"swift", "moe"})
+            for (const char* mode : {"precise", "balance", "fast"}) {
+                const nu::Target t = target(c, model, false);
+                const bool can = std::string_view(mode) == "fast" && c.prof.numerics_8060s && std::string_view(model) == "swift";
+                const nu::Plan d = pl(t, mode, {}), p1 = pl(t, mode, {{"W4A4", "1"}});
+                for (const auto& [v, want] : {std::pair<const char*, std::uint32_t>{"2", v2}, {"3", v3}, {"4", v4}}) {
+                    const nu::Plan o = pl(t, mode, {{"W4A4", v}});
+                    nu::Flags a = o.flags;
+                    a.w4a4_sim = 0;
+                    NCHECK(o.flags.w4a4_sim == (can ? want : 0u) && a == d.flags, "w4a4 {} {} {}: '{}' -> {} (want {}), nothing else moves", c.name, model, mode, v,
+                           o.flags.w4a4_sim, can ? want : 0u);
+                    NCHECK((o.bitsKey() != p1.bitsKey()) == can && (o.bitsKey() != d.bitsKey()) == can, "w4a4 {} {} {}: '{}' has its own bitsKey where taken",
+                           c.name, model, mode, v);
+                    std::size_t notes = 0;
+                    for (const std::string& n : o.ignored) notes += n.rfind(std::string("WHIRL_W4A4=") + v + " ignored", 0) == 0;
+                    NCHECK(notes == (can ? 0u : 1u), "w4a4 {} {} {}: '{}' {} notes (want {})", c.name, model, mode, v, notes, can ? 0 : 1);
+                    const nu::Plan both = pl(t, mode, {{"W4A4", v}, {"W4A4_SIM", "w1dram"}});
+                    std::size_t sn = 0;
+                    for (const std::string& n : both.ignored) sn += n.rfind("WHIRL_W4A4_SIM=w1dram ignored", 0) == 0;
+                    NCHECK(both.flags.w4a4_sim == (can ? want : 0u) && sn == 1, "w4a4 {} {} {}: '{}' replaces a sim value with one note", c.name, model, mode, v);
+                }
+            }
 }
 
 // v0252-8sattn3 (PLAN V1-148): the plan flag attn_i4pf picks the second int4 form of the fast gfx1151 prefill attention
@@ -2720,6 +2764,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testAttnI4qkFlag();  // v0252-8sfp (fails before the port: loadFlags never sets attn_i4qk)
     testW4a4SimFlag();  // v0252-w4a4k2 (fails to build before the change: no Flags::w4a4_sim / parseW4a4Sim)
     testW4a4Flag();  // v0252-w4a4p (fails to build before the change: no parseW4a4 / w4a4_iu4 / EnvValues::w4a4)
+    testW4a4Variants();  // v0252-w4a4p round 2 (fails to build before the change: no w4a4_iu4_lut / w4a4_iu4_xreuse)
     testAttnI4pfFlag();  // v0252-8sattn3 (port: fails without the flag; round 3: fails while the gfx1151 row is off)
     testMoepGuwFlag();  // v0252-8smoe (B; fails to build before the change: no Flags::moep_guw / EnvValues::moep_guw)
     testDq4F8Flags();  // v0252-8sq4 (fails to build before the change: no Flags::dq4_order / dq4_min_keys, parseDq4MinKeys)

@@ -210,7 +210,7 @@ struct BenchOpts {
     std::vector<std::string> fdq_v;
     std::string tool_ver, code_hash, code_hash_b, gpu_arch, gpu_pci;
 };
-extern const char* const kBenchFamilies[16];  // v0252-8sdet: + moepc; v0252-8sq5: + dq4s; v0252-8sws: + ws4s; v0252-w4a4: + w4a4p
+extern const char* const kBenchFamilies[17];  // v0252-8sdet: + moepc; v0252-8sq5: + dq4s; v0252-8sws: + ws4s; v0252-w4a4: + w4a4p; v0252-w4a4p r2: + w4q
 bool benchFamilyKnown(const std::string& f);
 struct Ctx;
 void runBench(Ctx& c, const BenchOpts& o);

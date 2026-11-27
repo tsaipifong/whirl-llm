@@ -2901,9 +2901,145 @@ void benchW4a4p(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- w4q (v0252-w4a4p round 2, gfx1151)
+// In-object A/B of the two WEIGHT FORMS of the product W4A4 iu4 GEMM on the same matrix and input: A = w4q_gemm on round 1's
+// converted copy (w4q_wconv_mxfp4: packed int4 + f32 scale per 32, made once outside the timing; WHIRL_W4A4=1), B = w4q_gemm_m
+// on the MXFP4 bytes (the LUT form, no copy; WHIRL_W4A4=2 / 3). Each side's own activation packing (w4q_quant_x / _xm) is
+// made once outside the timing. Check before timing: the f16 outputs of B == A BITWISE (the claim WHIRL_W4A4=2 / 3 rest on);
+// a mismatch writes no timing row and is a FAIL. Synthetic MXFP4 (E8M0 118..125, random codes), gain 0.9375, f16 output.
+// A kernel-level probe for the main session's screen arm choice; the screen (w4a4p-pp2) is the speed verdict.
+// Env: WHIRL_KT_W4Q_SHAPES (gate, down, q; default gate,down), WHIRL_KT_W4Q_N (tokens, default 2048).
+void benchW4q(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "w4q";
+    const hip::Function fwc = c.fnOpt("w4q_wconv_mxfp4"), fqx = c.fnOpt("w4q_quant_x"), fga = c.fnOpt("w4q_gemm");
+    const hip::Function fxm = c.fnOpt("w4q_quant_xm"), fgb = c.fnOpt("w4q_gemm_m");
+    if (!fwc || !fqx || !fga || !fxm || !fgb) {
+        c.rep.skip("w4q", "bench w4q", "the w4q_* kernels exist only in the gfx1151 code object");
+        return;
+    }
+    struct Sh {
+        const char* name;
+        int nr, nc;
+    };
+    const Sh all[] = {{"gate", 17408, 5120}, {"down", 5120, 17408}, {"q", 12288, 5120}};
+    const char* es = std::getenv("WHIRL_KT_W4Q_SHAPES");
+    const std::string want = es && *es ? es : "gate,down";
+    const char* en = std::getenv("WHIRL_KT_W4Q_N");
+    const int n = en && *en ? std::atoi(en) : 2048;
+    for (const Sh& sh : all) {
+        if (("," + want + ",").find(std::string(",") + sh.name + ",") == std::string::npos) continue;
+        const int nr = sh.nr, nc = sh.nc;
+        const std::uint64_t rb = static_cast<std::uint64_t>(nc) / 256 * 136;
+        std::vector<std::uint8_t> mx(static_cast<std::size_t>(rb) * nr);
+        std::uniform_int_distribution<int> ub(0, 255), ue(118, 125);
+        for (std::size_t b = 0; b < mx.size(); b += 136) {
+            for (int i = 0; i < 8; ++i) mx[b + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(ue(c.rng));
+            for (int i = 8; i < 136; ++i) mx[b + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(ub(c.rng));
+        }
+        auto w = std::make_shared<Buf>(mx);
+        auto gain = std::make_shared<Buf>(std::vector<float>(static_cast<std::size_t>(nr), 0.9375f));
+        auto wq = std::make_shared<Buf>(static_cast<std::size_t>(nr) * nc / 2), ws = std::make_shared<Buf>(static_cast<std::size_t>(nr) * nc / 32 * 4);
+        const std::uint64_t total = static_cast<std::uint64_t>(nr) * (nc / 32);
+        hip::launch(fwc, {static_cast<unsigned>(std::min<std::uint64_t>(cdiv(total, 256), 65535)), 1, 1}, {256, 1, 1}, 0, c.s, w->p(), rb, wq->p(), ws->p(), nc, nr,
+                    gain->p());
+        const std::vector<float> xf = c.randn(static_cast<std::size_t>(n) * nc);
+        std::vector<std::uint16_t> xh(xf.size());
+        for (std::size_t i = 0; i < xf.size(); ++i) xh[i] = f2h(xf[i]);
+        const std::uint64_t nblk = xh.size() / 32;
+        auto x = std::make_shared<Buf>(xh);
+        auto xq = std::make_shared<Buf>(xh.size() / 2), xs = std::make_shared<Buf>(nblk * 4), xqm = std::make_shared<Buf>(xh.size() / 2),
+             xsm = std::make_shared<Buf>(nblk * 4);
+        const unsigned qg = static_cast<unsigned>(std::min<std::uint64_t>(cdiv(nblk, 256), 65535));
+        hip::launch(fqx, {qg, 1, 1}, {256, 1, 1}, 0, c.s, x->p(), xq->p(), xs->p(), nblk);
+        hip::launch(fxm, {qg, 1, 1}, {256, 1, 1}, 0, c.s, x->p(), xqm->p(), xsm->p(), nblk);
+        c.sync();
+        auto ya = std::make_shared<Buf>(static_cast<std::size_t>(n) * nr * 2), yb = std::make_shared<Buf>(static_cast<std::size_t>(n) * nr * 2);
+        const hip::Dim3 grid{cdiv(n, 128), static_cast<unsigned>(nr / 128), 1};
+        Cell k;
+        const std::string cell = std::string("swift.") + sh.name + ".n" + std::to_string(n);
+        k.ci = e.info("w4q", "w4q_gemm", cell, std::to_string(nr) + "x" + std::to_string(nc) + "_n" + std::to_string(n));
+        k.ci.settings = e.settings(wq->bytes() + ws->bytes(), 1) + ";a=converted_copy;b=mxfp4_lut;gain=0.9375;out=f16";
+        k.ci.bytes = static_cast<double>(wq->bytes() + ws->bytes()) + static_cast<double>(xq->bytes() + xs->bytes()) + static_cast<double>(ya->bytes());
+        k.kernel = "w4q_gemm";
+        k.fa = fga;
+        k.call = [&c, wq, ws, xq, xs, ya, grid, nc, nr, n](hip::Function f, std::uint64_t) {
+            hip::launch(f, grid, {256, 1, 1}, 0, c.s, wq->p(), ws->p(), xq->p(), xs->p(), ya->p(), nc, nr, n, 0, 1);
+        };
+        k.run = [&c, &k, ya, n, nr](hip::Function f) {
+            k.call(f, 0);
+            c.sync();
+            const auto h = ya->down<std::uint16_t>(static_cast<std::size_t>(n) * nr);
+            std::vector<float> o;
+            for (std::size_t i = 0; i < h.size(); i += 997) o.push_back(static_cast<float>(h[i]));
+            return o;
+        };
+        k.verify = [](const std::vector<float>& got) {
+            Result r;  // A's values are pinned by kt w4s (w4q_gemm == host fold BITWISE); here: the run produced output
+            r.kind = Kind::invariant;
+            r.n = got.size();
+            r.mismatches = got.empty() ? 1 : 0;
+            r.pass = !got.empty();
+            r.name = "A w4q_gemm ran (values pinned by kt --only w4s)";
+            return r;
+        };
+        k.kernel_b = "w4q_gemm_m";
+        k.call_b = [&c, fgb, w, rb, gain, xqm, xsm, yb, grid, nc, nr, n](std::uint64_t) {
+            hip::launch(fgb, grid, {256, 1, 1}, 0, c.s, w->p(), rb, gain->p(), xqm->p(), xsm->p(), yb->p(), nc, nr, n, 0, 1);
+        };
+        k.bitwise_b = [&c, &k, ya, yb, n, nr]() -> std::pair<std::size_t, std::size_t> {
+            ya->fill(0x5a);
+            yb->fill(0xa5);
+            k.call(k.fa, 0);
+            k.call_b(0);
+            c.sync();
+            const std::size_t cnt = static_cast<std::size_t>(n) * nr;
+            const auto a = ya->down<std::uint16_t>(cnt), b = yb->down<std::uint16_t>(cnt);
+            std::size_t bad = 0;
+            for (std::size_t i = 0; i < cnt; ++i) bad += a[i] != b[i];
+            return {cnt, bad};
+        };
+        k.geo = true;
+        runCell(e, k);
+        // round 2b: B = w4q_gemm_m2 (512 threads x 256 tokens, WHIRL_W4A4=4) against the same A
+        const hip::Function fg2 = c.fnOpt("w4q_gemm_m2");
+        if (!fg2) continue;
+        Cell k2 = k;
+        k2.ci = e.info("w4q", "w4q_gemm", cell + ".m2", std::to_string(nr) + "x" + std::to_string(nc) + "_n" + std::to_string(n));
+        k2.ci.settings = e.settings(wq->bytes() + ws->bytes(), 1) + ";a=converted_copy;b=mxfp4_lut_bn256;gain=0.9375;out=f16";
+        k2.ci.bytes = k.ci.bytes;
+        k2.kernel_b = "w4q_gemm_m2";
+        const hip::Dim3 grid2{cdiv(n, 256), static_cast<unsigned>(nr / 128), 1};
+        k2.call_b = [&c, fg2, w, rb, gain, xqm, xsm, yb, grid2, nc, nr, n](std::uint64_t) {
+            hip::launch(fg2, grid2, {512, 1, 1}, 0, c.s, w->p(), rb, gain->p(), xqm->p(), xsm->p(), yb->p(), nc, nr, n, 0, 1);
+        };
+        k2.bitwise_b = [&c, &k2, ya, yb, n, nr]() -> std::pair<std::size_t, std::size_t> {
+            ya->fill(0x5a);
+            yb->fill(0xa5);
+            k2.call(k2.fa, 0);
+            k2.call_b(0);
+            c.sync();
+            const std::size_t cnt = static_cast<std::size_t>(n) * nr;
+            const auto a = ya->down<std::uint16_t>(cnt), b = yb->down<std::uint16_t>(cnt);
+            std::size_t bad = 0;
+            for (std::size_t i = 0; i < cnt; ++i) bad += a[i] != b[i];
+            return {cnt, bad};
+        };
+        k2.run = [&c, &k2, ya, n, nr](hip::Function f) {
+            k2.call(f, 0);
+            c.sync();
+            const auto h = ya->down<std::uint16_t>(static_cast<std::size_t>(n) * nr);
+            std::vector<float> o;
+            for (std::size_t i = 0; i < h.size(); i += 997) o.push_back(static_cast<float>(h[i]));
+            return o;
+        };
+        runCell(e, k2);
+    }
+}
+
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax", "moepc", "dq4s", "ws4s", "w4a4p"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax", "moepc", "dq4s", "ws4s", "w4a4p", "w4q"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -2955,7 +3091,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
     };
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
                       {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"ws4r", benchWs4r}, {"silu", benchSilu}, {"lsplit", benchLsplit},
-                      {"argmax", benchArgmax}, {"moepc", benchMoepc}, {"dq4s", benchDq4s}, {"ws4s", benchWs4s}, {"w4a4p", benchW4a4p}};
+                      {"argmax", benchArgmax}, {"moepc", benchMoepc}, {"dq4s", benchDq4s}, {"ws4s", benchWs4s}, {"w4a4p", benchW4a4p}, {"w4q", benchW4q}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

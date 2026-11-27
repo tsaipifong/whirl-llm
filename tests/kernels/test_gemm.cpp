@@ -876,8 +876,132 @@ static void testW4q(Ctx& c) {
                      fold, yd, sc, rtol, 1e-6));
 }
 
+// v0252-w4a4p round 2 (WHIRL_W4A4=2 / 3, the LUT form, no converted weight copy): rows of w4q_quant_xm / w4q_gemm_m
+//  - presence: both in the gfx1151 object and loaded into MatmulKernels::w4q_qxm / w4q_gemm_m; absent elsewhere;
+//  - w4q_quant_xm == w4q_quant_row_m_host BITWISE (codes in the MXFP4 order, steps);
+//  - w4q_gemm_m on the MXFP4 bytes + gains (random blocks and the exponent sweep e 96..150) == round 1's host fold
+//    (w4q_wconv_row_host + w4q_quant_row_host + w4q_fold_host) BITWISE, f32 / accumulate / f16 store, n 256 and the tail n 200;
+//  - w4q_gemm_m == w4q_gemm on the device-converted copy of the same matrix BITWISE (variant 2 == variant 1, the claim the
+//    task-accuracy run relies on).
+static void testW4qM(Ctx& c) {
+    const bool g1151 = c.mod.arch() == hip::Arch::gfx1151;
+    const hip::Function fxm = c.fnOpt("w4q_quant_xm"), fgm = c.fnOpt("w4q_gemm_m"), fg2 = c.fnOpt("w4q_gemm_m2");  // m2: round 2b
+    const hip::Function fwc = c.fnOpt("w4q_wconv_mxfp4"), fqx = c.fnOpt("w4q_quant_x"), fg1 = c.fnOpt("w4q_gemm");
+    {
+        Result r;
+        r.kind = Kind::invariant;
+        r.n = 1;
+        r.name = g1151 ? "w4q_quant_xm / w4q_gemm_m (round 2) in the gfx1151 code object and loaded into the host table"
+                       : "w4q_quant_xm / w4q_gemm_m absent from this non-gfx1151 code object and from the host table";
+        r.pass = g1151 ? (fxm != nullptr && fgm != nullptr && fg2 != nullptr && c.k.w4q_qxm == fxm && c.k.w4q_gemm_m == fgm && c.k.w4q_gemm_m2 == fg2)
+                       : (fxm == nullptr && fgm == nullptr && fg2 == nullptr && c.k.w4q_qxm == nullptr && c.k.w4q_gemm_m == nullptr &&
+                          c.k.w4q_gemm_m2 == nullptr);
+        r.mismatches = r.pass ? 0 : 1;
+        c.rep.add(r);
+    }
+    if (fxm == nullptr || fgm == nullptr || fg2 == nullptr || fwc == nullptr || fqx == nullptr || fg1 == nullptr) return;
+    const int nr = 256, nc = 1024, ntmax = 256;
+    const float gain = 0.9375f;
+    std::vector<float> gv(static_cast<std::size_t>(nr), gain);
+    Buf dgain(gv);
+    std::vector<float> x = c.randn(static_cast<std::size_t>(ntmax) * nc);
+    for (int t = 0; t < ntmax; ++t) {
+        for (int i = 64; i < 96; ++i) x[static_cast<std::size_t>(t) * nc + static_cast<std::size_t>(i)] = 0.f;
+        x[static_cast<std::size_t>(t) * nc + 200 + static_cast<std::size_t>(t % 32)] = 30.f;
+    }
+    const std::vector<std::uint16_t> xh = toHalf(x);
+    const std::uint64_t nblk = xh.size() / 32;
+    Buf dx(xh), dxm(xh.size() / 2), dxsm(nblk * 4), dxq(xh.size() / 2), dxs(nblk * 4);
+    const unsigned qgrid = static_cast<unsigned>(std::min<std::uint64_t>(cdiv(nblk, 256), 65535));
+    hip::launch(fxm, {qgrid, 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), dxm.p(), dxsm.p(), nblk);
+    hip::launch(fqx, {qgrid, 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), dxq.p(), dxs.p(), nblk);
+    c.sync();
+    std::vector<std::uint8_t> xq_h(xh.size() / 2), xqm_h(xh.size() / 2);
+    std::vector<float> xs_h(nblk), xsm_h(nblk);
+    for (int t = 0; t < ntmax; ++t) {
+        const std::size_t o = static_cast<std::size_t>(t) * nc;
+        w4q_quant_row_host(xh.data() + o, nc, xq_h.data() + o / 2, xs_h.data() + o / 32);
+        w4q_quant_row_m_host(xh.data() + o, nc, xqm_h.data() + o / 2, xsm_h.data() + o / 32);
+    }
+    c.rep.add(cmpExact("w4q_quant_xm codes (MXFP4 order) == host reference (absmax / 7, 256 x 1024)", dxm.down<std::uint8_t>(xqm_h.size()), xqm_h));
+    c.rep.add(cmpExact("w4q_quant_xm steps == host reference (absmax / 7, 256 x 1024)", dxsm.down<float>(xsm_h.size()), xsm_h));
+    Buf hxm(xqm_h), hxsm(xsm_h);
+    for (int variant = 0; variant < 2; ++variant) {
+        HostMat hm = randomMat(c, QType::mxfp4, nr, nc);
+        if (variant == 1)
+            for (std::size_t b = 0; b < hm.data.size(); b += 136)
+                for (int i = 0; i < 8; ++i) hm.data[b + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(96 + (b / 136 * 8 + static_cast<std::size_t>(i)) % 55);
+        const char* vn = variant ? "e 96..150" : "random";
+        std::vector<std::uint8_t> wq_h(static_cast<std::size_t>(nr) * nc / 2);
+        std::vector<float> ws_h(static_cast<std::size_t>(nr) * nc / 32);
+        for (int r = 0; r < nr; ++r)
+            w4q_wconv_row_host(hm.data.data() + static_cast<std::size_t>(r) * hm.row_bytes, nc, gain, wq_h.data() + static_cast<std::size_t>(r) * nc / 2,
+                               ws_h.data() + static_cast<std::size_t>(r) * nc / 32);
+        std::vector<float> fold(static_cast<std::size_t>(ntmax) * nr);
+        for (int t = 0; t < ntmax; ++t)
+            for (int r = 0; r < nr; ++r)
+                fold[static_cast<std::size_t>(t) * nr + static_cast<std::size_t>(r)] =
+                    w4q_fold_host(wq_h.data() + static_cast<std::size_t>(r) * nc / 2, ws_h.data() + static_cast<std::size_t>(r) * nc / 32,
+                                  xq_h.data() + static_cast<std::size_t>(t) * nc / 2, xs_h.data() + static_cast<std::size_t>(t) * nc / 32, nc);
+        Buf w(hm.data);
+        const std::vector<float> y0 = c.randn(fold.size());
+        for (const int nt : {256, 200}) {
+            const std::string tag = std::string(" (") + vn + ", gain 0.9375), n " + std::to_string(nt);
+            Buf y(fold.size() * 4);
+            y.fill(0xff);
+            hip::launch(fgm, {cdiv(nt, 128), static_cast<unsigned>(nr / 128), 1}, {256, 1, 1}, 0, c.s, w.p(), hm.row_bytes, dgain.p(), hxm.p(), hxsm.p(), y.p(), nc,
+                        nr, nt, 0, 0);
+            c.sync();
+            std::vector<std::uint32_t> got = y.down<std::uint32_t>(fold.size()), want(fold.size(), 0xffffffffu);
+            std::memcpy(want.data(), fold.data(), static_cast<std::size_t>(nt) * nr * 4);
+            c.rep.add(cmpExact("w4q_gemm_m f32 == round 1 host fold BITWISE" + tag + " (rows past n untouched)", got, want));
+            Buf ya(y0);
+            hip::launch(fgm, {cdiv(nt, 128), static_cast<unsigned>(nr / 128), 1}, {256, 1, 1}, 0, c.s, w.p(), hm.row_bytes, dgain.p(), hxm.p(), hxsm.p(), ya.p(), nc,
+                        nr, nt, 1, 0);
+            c.sync();
+            std::vector<float> wa(y0);
+            for (std::size_t i = 0; i < static_cast<std::size_t>(nt) * nr; ++i) wa[i] = y0[i] + fold[i];
+            c.rep.add(cmpExact("w4q_gemm_m f32 accumulate == y + round 1 host fold BITWISE" + tag, ya.down<float>(wa.size()), wa));
+            Buf yh(fold.size() * 2);
+            yh.fill(0xff);
+            hip::launch(fgm, {cdiv(nt, 128), static_cast<unsigned>(nr / 128), 1}, {256, 1, 1}, 0, c.s, w.p(), hm.row_bytes, dgain.p(), hxm.p(), hxsm.p(), yh.p(), nc,
+                        nr, nt, 0, 1);
+            c.sync();
+            std::vector<std::uint16_t> wh(fold.size(), 0xffff);
+            for (std::size_t i = 0; i < static_cast<std::size_t>(nt) * nr; ++i) wh[i] = w4s_f2h(fold[i]);
+            c.rep.add(cmpExact("w4q_gemm_m f16 store == f16(round 1 host fold) BITWISE" + tag, yh.down<std::uint16_t>(wh.size()), wh));
+            // round 2b: the 256-token tile w4q_gemm_m2 (WHIRL_W4A4=4), 512 threads: the same bits
+            Buf y2(fold.size() * 4), y2a(y0), y2h(fold.size() * 2);
+            y2.fill(0xff);
+            y2h.fill(0xff);
+            const hip::Dim3 g2{cdiv(nt, 256), static_cast<unsigned>(nr / 128), 1};
+            hip::launch(fg2, g2, {512, 1, 1}, 0, c.s, w.p(), hm.row_bytes, dgain.p(), hxm.p(), hxsm.p(), y2.p(), nc, nr, nt, 0, 0);
+            hip::launch(fg2, g2, {512, 1, 1}, 0, c.s, w.p(), hm.row_bytes, dgain.p(), hxm.p(), hxsm.p(), y2a.p(), nc, nr, nt, 1, 0);
+            hip::launch(fg2, g2, {512, 1, 1}, 0, c.s, w.p(), hm.row_bytes, dgain.p(), hxm.p(), hxsm.p(), y2h.p(), nc, nr, nt, 0, 1);
+            c.sync();
+            c.rep.add(cmpExact("w4q_gemm_m2 f32 == round 1 host fold BITWISE" + tag + " (rows past n untouched)", y2.down<std::uint32_t>(fold.size()), want));
+            c.rep.add(cmpExact("w4q_gemm_m2 f32 accumulate == y + round 1 host fold BITWISE" + tag, y2a.down<float>(wa.size()), wa));
+            c.rep.add(cmpExact("w4q_gemm_m2 f16 store == f16(round 1 host fold) BITWISE" + tag, y2h.down<std::uint16_t>(wh.size()), wh));
+        }
+        // device round 1 (w4q_wconv_mxfp4 + w4q_quant_x + w4q_gemm) vs device round 2 (w4q_quant_xm + w4q_gemm_m), f16 store, n 200
+        Buf dwq(wq_h.size()), dws(ws_h.size() * 4), y1(fold.size() * 2), y2(fold.size() * 2);
+        const std::uint64_t total = static_cast<std::uint64_t>(nr) * (nc / 32);
+        hip::launch(fwc, {static_cast<unsigned>(std::min<std::uint64_t>(cdiv(total, 256), 65535)), 1, 1}, {256, 1, 1}, 0, c.s, w.p(), hm.row_bytes, dwq.p(),
+                    dws.p(), nc, nr, dgain.p());
+        y1.fill(0xff);
+        y2.fill(0xff);
+        hip::launch(fg1, {cdiv(200, 128), static_cast<unsigned>(nr / 128), 1}, {256, 1, 1}, 0, c.s, dwq.p(), dws.p(), dxq.p(), dxs.p(), y1.p(), nc, nr, 200, 0, 1);
+        hip::launch(fgm, {cdiv(200, 128), static_cast<unsigned>(nr / 128), 1}, {256, 1, 1}, 0, c.s, w.p(), hm.row_bytes, dgain.p(), dxm.p(), dxsm.p(), y2.p(), nc,
+                    nr, 200, 0, 1);
+        c.sync();
+        c.rep.add(cmpExact(std::string("w4q_gemm_m (LUT form) == w4q_gemm (round 1 converted copy) BITWISE on the device, f16 store, n 200 (") + vn + ")",
+                           y2.down<std::uint16_t>(fold.size()), y1.down<std::uint16_t>(fold.size())));
+    }
+}
+
 void testW4s(Ctx& c) {
     testW4q(c);  // v0252-w4a4p: the product kernel rows first
+    testW4qM(c);  // v0252-w4a4p round 2: the LUT form
     const bool g1151 = c.mod.arch() == hip::Arch::gfx1151;
     const hip::Function fdq = c.fnOpt("w4s_dequant_f16_mxfp4"), fqx = c.fnOpt("w4s_quant_x16");
     // round 2: one dequant entry per weight grid (kW4sDqNames: w, w1, w1e, w1d, wb), all loaded into MatmulKernels::w4s_dq

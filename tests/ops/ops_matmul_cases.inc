@@ -969,3 +969,57 @@ void testOpsW4a4Takes() {
     CHECK(!ops::w4a4Takes(odd_k, true, k));
     for (const GgmlType ty : {GgmlType::f16, GgmlType::q4_k, GgmlType::q8_0, GgmlType::f32}) CHECK(!ops::w4a4Takes(mat(ty, 17408, 5120), true, k));
 }
+
+// v0252-w4a4p round 2: ops::w4a4LutTakes - the LUT form (WHIRL_W4A4=2 / 3: w4q_quant_xm + w4q_gemm_m on the MXFP4 bytes, no
+// converted copy) runs a matrix only where round 1 would (ops::w4a4Takes), the plan's lut bit is set, the code object has
+// both round-2 kernels, and the MXFP4 rows keep the 8-byte alignment of the kernel's sub-block loads. false: the round-1
+// product path runs the matrix (WHIRL_W4A4=1's numbers, bitwise the same). Fails to build before the change.
+void testOpsW4a4LutTakes() {
+    static const kn::KernelTable kb = gemmTable(true, true, false);
+    const auto kp = std::make_unique<kn::KernelTable>(kb);
+    kn::KernelTable& k = *kp;
+    CHECK(k.w4q_qxm == nullptr && k.w4q_gemm_m == nullptr);
+    auto gate = mat(GgmlType::mxfp4, 17408, 5120);
+    gate.row_bytes = 5120 / 256 * 136;
+    k.w4q_wc = tag("w4q_wconv_mxfp4");
+    k.w4q_qx = tag("w4q_quant_x");
+    k.w4q_gemm = tag("w4q_gemm");
+    k.w4s_gterms = tag("w4s_gain_terms");
+    CHECK(ops::w4a4Takes(gate, true, k));
+    CHECK(!ops::w4a4LutTakes(gate, true, k));  // no round-2 kernels in the table
+    k.w4q_qxm = tag("w4q_quant_xm");
+    CHECK(!ops::w4a4LutTakes(gate, true, k));  // one of two
+    k.w4q_gemm_m = tag("w4q_gemm_m");
+    CHECK(ops::w4a4LutTakes(gate, true, k));
+    CHECK(!ops::w4a4LutTakes(gate, false, k));  // WHIRL_W4A4=1: the round-1 path
+    const std::uint32_t shapes[][2] = {{12288, 5120}, {1024, 5120}, {6144, 5120}, {5120, 6144}, {10240, 5120}, {5120, 17408}, {17408, 5120}};
+    for (const auto& s : shapes) {
+        auto m = mat(GgmlType::mxfp4, s[0], s[1]);
+        m.row_bytes = s[1] / 256 * 136;
+        CHECK(ops::w4a4LutTakes(m, true, k));
+    }
+    auto head = gate;
+    head.head = true;
+    CHECK(!ops::w4a4LutTakes(head, true, k));  // round 1 refuses it: so does round 2
+    auto odd_rows = mat(GgmlType::mxfp4, 17408 + 64, 5120);
+    odd_rows.row_bytes = gate.row_bytes;
+    CHECK(!ops::w4a4LutTakes(odd_rows, true, k));
+    auto unaligned = gate;
+    unaligned.row_bytes = gate.row_bytes + 4;  // a padded row stride that breaks the 8-byte sub-block loads
+    CHECK(!ops::w4a4LutTakes(unaligned, true, k));
+    k.w4s_gterms = nullptr;  // the gains of the reference arm are needed by both forms
+    CHECK(!ops::w4a4LutTakes(gate, true, k));
+    // round 2b: ops::w4a4WideTakes - the 256-token tile w4q_gemm_m2 (WHIRL_W4A4=4) only where the LUT form runs, the wide bit
+    // is set and the code object has w4q_gemm_m2; false: w4q_gemm_m (bitwise the same numbers)
+    k.w4s_gterms = tag("w4s_gain_terms");
+    CHECK(k.w4q_gemm_m2 == nullptr || k.w4q_gemm_m2 == tag("w4q_gemm_m2"));
+    k.w4q_gemm_m2 = nullptr;
+    CHECK(!ops::w4a4WideTakes(gate, true, k));  // no w4q_gemm_m2
+    k.w4q_gemm_m2 = tag("w4q_gemm_m2");
+    CHECK(ops::w4a4WideTakes(gate, true, k));
+    CHECK(!ops::w4a4WideTakes(gate, false, k));  // WHIRL_W4A4=2 / 3: w4q_gemm_m
+    CHECK(!ops::w4a4WideTakes(unaligned, true, k));  // the LUT form refuses it: so does the wide tile
+    CHECK(!ops::w4a4WideTakes(head, true, k));
+    k.w4q_gemm_m = nullptr;  // the wide tile rides on the LUT form
+    CHECK(!ops::w4a4WideTakes(gate, true, k));
+}

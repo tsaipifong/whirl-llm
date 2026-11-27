@@ -62,6 +62,9 @@ struct DispatchProbe : q::Context {
     using q::Context::w4s_gains;  // v0252-w4a4k2 round 4
     using q::Context::w4qGemm;  // v0252-w4a4p
     using q::Context::w4q_mats;
+    using q::Context::w4qGemmLut;  // v0252-w4a4p round 2
+    using q::Context::w4q_grp;
+    using q::Context::w4q_xm_src;
 };
 
 whirl::hip::Function fn(std::uintptr_t i) { return reinterpret_cast<whirl::hip::Function>(i); }
@@ -329,6 +332,86 @@ void testW4qLaunch() {
     ISO_CHECK(!ctx.empty() && ctx[0].word == gains + 0x1000);
     fake::recordAllocs(false);
 }
+
+// v0252-w4a4p round 2: Context::w4qGemmLut, the LUT form (WHIRL_W4A4=2 / 3). No conversion launch and no weight copy:
+// w4q_quant_xm on the f16 input (arg 0 = x16in), then w4q_gemm_m on the MXFP4 matrix itself (arg 0 = w.ptr, arg 2 = the
+// reference arm's gains), grid (ceil(n / 128), rows / 128) x 256. Reuse (=3) skips the packing only inside a matmulGroup
+// (w4q_grp) for the input packed last (same pointer and count); outside a group, without reuse, or for another input / count,
+// every call packs. Fails to build before the change (no w4qGemmLut / MatmulKernels::w4q_gemm_m).
+void testW4qLutLaunch() {
+    auto c = std::make_unique<DispatchProbe>();
+    c->k.w4q_qxm = fn(0xA1);
+    c->k.w4q_gemm_m = fn(0xA2);
+    c->k.w4s_gterms = fn(0x93);
+    q::Mat w;
+    w.ty = GgmlType::mxfp4;
+    w.nrows = 6144;
+    w.ncols = 5120;
+    w.row_bytes = 5120 / 256 * 136;
+    w.ptr = 0x12000000;
+    const whirl::hip::DevPtr gains = 0x52000000;
+    c->w4s_gains.push_back({w.ptr, 0, 1, gains});
+    const whirl::hip::DevPtr x16in = 0x30000000, x16b = 0x31000000, y = 0x40000000;
+    fake::recordAllocs(true);
+    // returns the launched functions of one call
+    auto call = [&](whirl::hip::DevPtr xin, std::uint32_t n, bool reuse) {
+        fake::recordLaunches(true);
+        fake::recordArgWord(fn(0xA1), 0);
+        fake::recordArgWord(fn(0xA2), 0);
+        c->w4qGemmLut(w, xin, y, n, 0, reuse, false);
+        const auto l = fake::recordedLaunches();
+        const auto ctx = fake::recordedLaunchCtx();
+        fake::recordLaunches(false);
+        std::vector<std::uintptr_t> fs;
+        for (std::size_t i = 0; i < l.size(); ++i) {
+            fs.push_back(reinterpret_cast<std::uintptr_t>(l[i].f));
+            if (l[i].f == fn(0xA1)) ISO_CHECK(i < ctx.size() && ctx[i].word == xin);
+            if (l[i].f == fn(0xA2)) {
+                ISO_CHECK(i < ctx.size() && ctx[i].word == w.ptr);  // the MXFP4 matrix, no copy
+                ISO_CHECK(l[i].grid.x == (n + 127) / 128 && l[i].grid.y == 6144 / 128 && l[i].block.x == 256);
+            }
+        }
+        return fs;
+    };
+    const std::vector<std::uintptr_t> both = {0xA1, 0xA2}, gemm_only = {0xA2};
+    // outside a group: always pack, with or without reuse
+    c->w4q_grp = false;
+    ISO_CHECK(call(x16in, 2000, true) == both);
+    ISO_CHECK(call(x16in, 2000, true) == both);
+    ISO_CHECK(c->w4q_mats.empty());  // no converted copy
+    // inside a group with reuse: the second matrix on the same input skips the packing
+    c->w4q_grp = true;
+    c->w4q_xm_src = 0;
+    ISO_CHECK(call(x16in, 2000, true) == both);
+    ISO_CHECK(call(x16in, 2000, true) == gemm_only);
+    ISO_CHECK(call(x16in, 1000, true) == both);  // another count
+    ISO_CHECK(call(x16b, 1000, true) == both);   // another input
+    ISO_CHECK(call(x16b, 1000, false) == both);  // without reuse (=2): always
+    // the gains argument: arg 2 of w4q_gemm_m
+    fake::recordLaunches(true);
+    fake::recordArgWord(fn(0xA2), 2);
+    c->w4qGemmLut(w, x16in, y, 256, 1, false, false);
+    const auto ctx = fake::recordedLaunchCtx();
+    fake::recordLaunches(false);
+    ISO_CHECK(ctx.size() == 2 && ctx[1].word == gains);
+    // round 2b (WHIRL_W4A4=4): wide = w4q_gemm_m2 on the same arguments, grid (ceil(n / 256), rows / 128) x 512
+    c->k.w4q_gemm_m2 = fn(0xA3);
+    fake::recordLaunches(true);
+    fake::recordArgWord(fn(0xA3), 0);
+    c->w4qGemmLut(w, x16b, y, 2000, 0, false, true);
+    {
+        const auto l = fake::recordedLaunches();
+        const auto cw = fake::recordedLaunchCtx();
+        fake::recordLaunches(false);
+        ISO_CHECK(l.size() == 2 && cw.size() == 2);
+        if (l.size() == 2 && cw.size() == 2) {
+            ISO_CHECK(l[0].f == fn(0xA1) && l[1].f == fn(0xA3) && cw[1].word == w.ptr);
+            ISO_CHECK(l[1].grid.x == (2000 + 255) / 256 && l[1].grid.y == 6144 / 128 && l[1].block.x == 512);
+        }
+    }
+    c->w4q_grp = false;
+    fake::recordAllocs(false);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -342,6 +425,7 @@ int main(int argc, char** argv) {
                      {"norm_and_elementwise_launches", testNormAndElementwiseLaunches},
                      {"gemm_tail_launches", testGemmTailLaunches},  // v0252-pp2k2
                      {"w4s_gain_launch", testW4sGainLaunch},  // v0252-w4a4k2 round 4
-                     {"w4q_launch", testW4qLaunch}},  // v0252-w4a4p
+                     {"w4q_launch", testW4qLaunch},  // v0252-w4a4p
+                     {"w4q_lut_launch", testW4qLutLaunch}},  // v0252-w4a4p round 2
                     argc, argv);
 }

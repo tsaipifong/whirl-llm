@@ -21,6 +21,7 @@ int main(int argc, char** argv) {
                      {"gemm_tail", testOpsGemmTail},  // v0252-pp2k2 (F1 GEMM tail split)
                      {"gemm_w4s", testOpsGemmW4s},  // v0252-w4a4k2 (W4A4 fake-quant weight half)
                      {"w4s_gains", testOpsW4sGains},  // v0252-w4a4k2 round 3 (least-squares gains)
-                     {"w4a4_takes", testOpsW4a4Takes}},  // v0252-w4a4p (product W4A4 iu4 GEMM selection)
+                     {"w4a4_takes", testOpsW4a4Takes},  // v0252-w4a4p (product W4A4 iu4 GEMM selection)
+                     {"w4a4_lut_takes", testOpsW4a4LutTakes}},  // v0252-w4a4p round 2 (the LUT form)
                     argc, argv);
 }

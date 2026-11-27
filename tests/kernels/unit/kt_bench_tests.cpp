@@ -1790,6 +1790,101 @@ static void test_w4q_fold() {
     check("w4q: product fold (gain folded) == the sim wga f16 dot within 2^-10 + 2^-12 of sum |terms| (8 rows)", badsim == 0, "worst " + num(worst));
 }
 
+// ---------------------------------------------------------------- w4q round 2 (v0252-w4a4p r2: WHIRL_W4A4=2 / 3, the LUT form)
+// w4q_gemm_m reads the MXFP4 bytes in the loop (no converted copy): each code dword -> int4 levels by w4q_lvl_word (v_perm
+// table of llama.cpp's get_int_from_table_16, nibble positions kept), scale w4q_mscale(e, gain) = round 1's stored scale; the
+// activations are packed in the MXFP4 nibble order (byte j = value j | value j + 16 << 4: w4q_xblock_m). A 32-block dot is
+// order-free and both sides use the same order, so the fold (w4q_fold_mx_host) must be BITWISE round 1's w4q_fold_host.
+// Fails to build before the change (no w4q_lvl_word / w4q_xblock_m / w4q_fold_mx_host).
+static void test_w4q_lut_word() {
+    // the table bytes: level(code) & 15 in both nibbles
+    std::size_t bad = 0;
+    for (int c = 0; c < 16; ++c) {
+        const std::uint32_t t = kW4qLvlTab[c / 4] >> (8 * (c % 4)) & 0xFF;
+        bad += t != static_cast<std::uint32_t>((w4s_wlevel(c) & 15) * 0x11);
+    }
+    check("w4q r2: level table byte c == (w4s_wlevel(c) & 15) x 0x11 for the 16 MXFP4 codes", bad == 0, num(static_cast<double>(bad)));
+    // every nibble of the remapped word == the sim's level of the code at the same nibble position (exhaustive over 16 bits,
+    // in both halves, plus random words)
+    bad = 0;
+    auto one = [&](std::uint32_t q) {
+        const std::uint32_t r = w4q_lvl_word(q);
+        for (int p = 0; p < 8; ++p) bad += (r >> (4 * p) & 15) != static_cast<std::uint32_t>(w4s_wlevel(static_cast<int>(q >> (4 * p) & 15)) & 15);
+    };
+    for (std::uint32_t v = 0; v < 65536; ++v) {
+        one(v);
+        one(v << 16);
+        one(v | (v ^ 0x5A5Au) << 16);
+    }
+    std::uint32_t s = 77;
+    for (int i = 0; i < 100000; ++i) one(s = s * 1664525u + 1013904223u);
+    check("w4q r2: w4q_lvl_word nibble p == w4s_wlevel(code nibble p) & 15 (exhaustive 16-bit x 3 placements + 1e5 random)", bad == 0,
+          num(static_cast<double>(bad)));
+}
+
+static void test_w4q_m_order() {
+    const int k = 1024;
+    const std::vector<std::uint8_t> mx = w4qMx(k, 5151, 100, 40);
+    // weights: value k of the LUT-form row (MXFP4 order) == value k of round 1's converted row (natural order)
+    std::vector<std::uint8_t> q(k / 2), qm(k / 2);
+    std::vector<float> s(k / 32);
+    w4q_wconv_row_host(mx.data(), k, 1.0f, q.data(), s.data());
+    w4q_mrow_host(mx.data(), k, qm.data());
+    std::size_t bad = 0;
+    for (int i = 0; i < k; ++i) bad += w4q_mnib(qm.data(), i) != w4q_nib(q.data(), i);
+    // the in-kernel scale == round 1's stored scale bitwise (4 gains, every E8M0 of the row)
+    for (const float gain : {1.0f, 0.9375f, 0.93712f, 1.0714f}) {
+        w4q_wconv_row_host(mx.data(), k, gain, q.data(), s.data());
+        for (int b = 0; b < k / 32; ++b) {
+            const float m = w4q_mscale(mx[static_cast<std::size_t>(b / 8) * 136 + static_cast<std::size_t>(b % 8)], gain);
+            bad += std::memcmp(&m, &s[static_cast<std::size_t>(b)], 4) != 0;
+        }
+    }
+    check("w4q r2: LUT-form weight value k == round 1 converted value k; in-kernel scale == stored scale bitwise (4 gains)", bad == 0,
+          num(static_cast<double>(bad)));
+    // activations: MXFP4-order packing carries the same codes and the same steps
+    const std::vector<float> x = w4sActRows(k, 37);
+    std::vector<std::uint16_t> xh(k);
+    for (int i = 0; i < k; ++i) xh[static_cast<std::size_t>(i)] = w4s_f2h(x[static_cast<std::size_t>(i)]);
+    std::vector<std::uint8_t> xq(k / 2), xqm(k / 2);
+    std::vector<float> xs(k / 32), xsm(k / 32);
+    w4q_quant_row_host(xh.data(), k, xq.data(), xs.data());
+    w4q_quant_row_m_host(xh.data(), k, xqm.data(), xsm.data());
+    bad = std::memcmp(xs.data(), xsm.data(), xs.size() * 4) != 0;
+    for (int i = 0; i < k; ++i) bad += w4q_mnib(xqm.data(), i) != w4q_nib(xq.data(), i);
+    // and the order is llama.cpp's quantize_mmq_mxfp4 order: byte j of a block = value j (low) | value j + 16 (high)
+    for (int b = 0; b < k / 32; ++b)
+        for (int j = 0; j < 16; ++j) {
+            const std::uint8_t by = xqm[static_cast<std::size_t>(b) * 16 + static_cast<std::size_t>(j)];
+            bad += (by & 15) != (w4q_nib(xq.data(), b * 32 + j) & 15) || (by >> 4) != (w4q_nib(xq.data(), b * 32 + j + 16) & 15);
+        }
+    check("w4q r2: MXFP4-order activations == round 1 codes value by value, steps bitwise, byte j = v_j | v_j+16 << 4", bad == 0,
+          num(static_cast<double>(bad)));
+}
+
+static void test_w4q_m_fold() {
+    // the LUT kernel's bitwise target (MXFP4 bytes + gain + MXFP4-order activations) == round 1's w4q_fold_host
+    const int k = 2048;
+    std::size_t bad = 0;
+    for (std::uint32_t seed = 1; seed <= 8; ++seed) {
+        const std::vector<std::uint8_t> mx = w4qMx(k, 1900 + seed, 112, 20);
+        const std::vector<float> x = w4sActRows(k, 170 + seed);
+        std::vector<std::uint16_t> xh(k);
+        for (int i = 0; i < k; ++i) xh[static_cast<std::size_t>(i)] = w4s_f2h(x[static_cast<std::size_t>(i)]);
+        const float gain = 0.9375f + 0.0013f * static_cast<float>(seed);
+        std::vector<std::uint8_t> wq(k / 2), xq(k / 2), xqm(k / 2);
+        std::vector<float> ws(k / 32), xs(k / 32), xsm(k / 32);
+        w4q_wconv_row_host(mx.data(), k, gain, wq.data(), ws.data());
+        w4q_quant_row_host(xh.data(), k, xq.data(), xs.data());
+        w4q_quant_row_m_host(xh.data(), k, xqm.data(), xsm.data());
+        const float y1 = w4q_fold_host(wq.data(), ws.data(), xq.data(), xs.data(), k);
+        const float y2 = w4q_fold_mx_host(mx.data(), gain, xqm.data(), xsm.data(), k);
+        bad += std::memcmp(&y1, &y2, 4) != 0;
+    }
+    check("w4q r2: LUT-form fold (MXFP4 bytes, in-loop scale, MXFP4-order activations) == round 1 fold BITWISE (8 rows, K 2048)", bad == 0,
+          num(static_cast<double>(bad)));
+}
+
 int main(int argc, char** argv) {
     std::string emit;
     for (int i = 1; i < argc; ++i)
@@ -1846,6 +1941,9 @@ int main(int argc, char** argv) {
         test_w4q_weights();  // v0252-w4a4p
         test_w4q_acts();
         test_w4q_fold();
+        test_w4q_lut_word();  // v0252-w4a4p round 2
+        test_w4q_m_order();
+        test_w4q_m_fold();
     } catch (const std::exception& e) {
         check(std::string("exception: ") + e.what(), false);
     }
