@@ -116,7 +116,8 @@ void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& d
     };
     // v0252-8smoe (PLAN V1-147): + 4096 tokens Zipf = the 8060S MoE forward size where the routing-aware wide gate + up tile
     // (g64n128k64, WHIRL_MOEP_GUW) runs (128 tokens per expert on average: several full 128-token tiles per hot expert)
-    for (const Case cs : {Case{200, false}, Case{1500, false}, Case{2048, true}, Case{4096, true}}) {
+    // v0252-gemmlat round 7: + 32 tokens skewed = 256 pairs over 256 experts: most experts get 0-2 rows (the short-group case)
+    for (const Case cs : {Case{32, false}, Case{200, false}, Case{1500, false}, Case{2048, true}, Case{4096, true}}) {
         const int n = c.quick && cs.n > 256 ? 256 : cs.n, pairs = n * K;
         std::vector<int> ids;
         if (cs.zipf) {
@@ -182,6 +183,33 @@ void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& d
                 c.rep.add(cmpExact(std::string("gemm_moepfqgu_") + vg.name + "_mxfp4 == gemm_moegu_mxfp4" + tag, anew.down<std::uint16_t>(ar.size()), ar,
                                    Kind::invariant));
             }
+        }
+        // v0252-gemmlat round 7: the bench-only gate + up prototypes (kt.h kMoepGuProto): bitwise == gemm_moegu on their own tile
+        // list and grid when the object has them; the shipped object (no WHIRL_KT_CODE_OBJECT) must not have them
+        for (const wk::MoepGuVariant& vg : kMoepGuProto) {
+            const std::string kn = std::string("gemm_moepfqgu_") + vg.name + "_mxfp4";
+            const hip::Function fp = c.fnOpt(kn);
+            const char* ext = std::getenv("WHIRL_KT_CODE_OBJECT");
+            const bool shipped = ext == nullptr || *ext == 0;
+            if (shipped && cs.n == 32) {
+                Result r;
+                r.kind = Kind::invariant;
+                r.n = 1;
+                r.name = kn + " (v0252-gemmlat bench-only prototype) absent from the shipped code object";
+                r.pass = fp == nullptr;
+                r.mismatches = r.pass ? 0 : 1;
+                if (!r.pass) r.note = "in the shipped object (built with WHIRL_FQ_GU128_PROTO?)";
+                c.rep.add(r);
+            }
+            if (!fp || E % 256 != 0 || F % 256 != 0 || E % vg.bk != 0) continue;
+            const int mt = (pairs + vg.bn - 1) / vg.bn + R;
+            Buf tv(static_cast<std::size_t>(mt) * 16), nv(4), anew(static_cast<std::size_t>(pairs) * F * 2);
+            anew.fill(0xff);
+            hip::launch(c.k.moe_tiles, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dids.p(), pairs, R, vg.bn, tv.p(), nv.p());
+            hip::launch(fp, {static_cast<unsigned>(mt) * cdivp(F, static_cast<unsigned>(vg.gr)), 1, 1}, {256, 1, 1}, 0, c.s, dgate.p(), dup.p(),
+                        gate.row_bytes, F, xg.p(), anew.p(), E, tv.p(), nv.p());
+            c.sync();
+            c.rep.add(cmpExact(kn + " == gemm_moegu_mxfp4" + tag, anew.down<std::uint16_t>(ar.size()), ar, Kind::invariant));
         }
         // combine4 (same bits as moe_combine)
         if (c.k.moe_combine4 && E % 4 == 0) {

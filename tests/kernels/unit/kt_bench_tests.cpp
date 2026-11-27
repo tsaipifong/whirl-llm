@@ -836,6 +836,14 @@ static void test_moep_kt_only_entries() {
         const std::string g = p == std::string::npos ? std::string("(not found)") : guard(p);
         check(std::string("moe_prefill_fq.hip: ") + n + " only under #ifdef WHIRL_FQ_ABL_PROTOS", g == "#ifdef WHIRL_FQ_ABL_PROTOS", g);
     }
+    // round 7: the bench-only BK 128 prototype only under its own macro, with kt.h kMoepGuProto's geometry (GR 64, BN 64, BK 128)
+    {
+        const char* n = "MOEPFQGU_ENTRY(g64n64k128, 64, 64, 128)";
+        const std::size_t p = src.find(n);
+        const std::string g = p == std::string::npos ? std::string("(not found)") : guard(p);
+        check(std::string("moe_prefill_fq.hip: ") + n + " only under #ifdef WHIRL_FQ_GU128_PROTO (geometry = kt.h kMoepGuProto)",
+              g == "#ifdef WHIRL_FQ_GU128_PROTO", g);
+    }
     for (const char* n : {"MOEPFQGU_ENTRY(g64n64k64,", "MOEPFQDN_ENTRY(m128w4n128k64,"}) {
         const std::size_t p = src.find(n);
         check(std::string("moe_prefill_fq.hip: ") + n + " in every object (no #if around it)", p != std::string::npos && guard(p).empty(),

@@ -2145,6 +2145,9 @@ void benchMoepc(Env& e) {
 // Ornith layer 0 gate / up experts (--moemx), Zipf(1.0) routing (as bench moepc and kt moemx), n = 2048 tokens (the balance 2k
 // forward), random f16 gathered activations, tiles from moe_tiles with the variant's token tile. B is never compared (output
 // wrong by design): rows marked by markAblationRow; A is checked finite (kt moemx checks A's bits).
+// v0252-gemmlat round 7: + the bench-only gate + up prototypes (kt.h kMoepGuProto; same token tile and row block as the shipped
+// variant, so the same tile list and grid) as same-bits B: timed only after the full-output bitwise row (B == A); + a second
+// routing that stresses short expert groups: uniform top-K at n = 64 (512 pairs over 256 experts: 1-8 rows per expert).
 void benchMoepGu(Env& e) {
     Ctx& c = e.c;
     c.rep.family = "moepgu";
@@ -2154,11 +2157,28 @@ void benchMoepGu(Env& e) {
         c.rep.skip("moepgu", "bench gemm_moepfqgu", "kernel not in this code object");
         return;
     }
-    std::vector<std::pair<std::string, hip::Function>> abl;
+    struct GuB {
+        std::string suffix;
+        hip::Function fb;
+        bool ablation;
+    };
+    std::vector<GuB> bs;
     for (const char* an : kMoepGuAblation)
-        if (const hip::Function fb = c.fnOpt(std::string("gemm_moepfqgu_") + an + "_mxfp4")) abl.push_back({an, fb});
-    if (abl.empty()) {
-        c.rep.skip("moepgu", "bench gemm_moepfqgu ablations", "no kt.h kMoepGuAblation kernel in this code object (kt-only object: -DWHIRL_FQ_ABL_PROTOS=1)");
+        if (const hip::Function fb = c.fnOpt(std::string("gemm_moepfqgu_") + an + "_mxfp4")) bs.push_back({an, fb, true});
+    for (const wk::MoepGuVariant& pv : kMoepGuProto)
+        if (const hip::Function fb = c.fnOpt(std::string("gemm_moepfqgu_") + pv.name + "_mxfp4")) {
+            if (pv.gr != wk::kMoepGu[gv].gr || pv.bn != wk::kMoepGu[gv].bn) {
+                Result r;
+                r.name = std::string("bench moepgu: prototype ") + pv.name + " needs the shipped variant's gr / bn (one tile list and grid)";
+                r.pass = false;
+                c.rep.add(r);
+                continue;
+            }
+            bs.push_back({pv.name, fb, false});
+        }
+    if (bs.empty()) {
+        c.rep.skip("moepgu", "bench gemm_moepfqgu ablations / prototypes",
+                   "no kt.h kMoepGuAblation / kMoepGuProto kernel in this code object (kt-only objects: -DWHIRL_FQ_ABL_PROTOS=1 / -DWHIRL_FQ_GU128_PROTO=1)");
         return;
     }
     const whirl::gguf::File* f = c.open(c.models.moemx);
@@ -2179,9 +2199,24 @@ void benchMoepGu(Env& e) {
     auto dgate = std::make_shared<Buf>(gate.data), dup = std::make_shared<Buf>(up.data);
     const std::uint64_t grb = gate.row_bytes;
     const wk::MoepGuVariant& vg = wk::kMoepGu[gv];
-    for (const int n : {2048}) {
-        const int pairs = n * K;
-        const std::vector<int> ids = moepcZipf(c.rng, n, K, R);
+    struct Routing {
+        const char* name;
+        int n;
+    };
+    for (const Routing rt : {Routing{"zipf", 2048}, Routing{"uniform", 64}}) {
+        const int n = rt.n, pairs = n * K;
+        std::vector<int> ids;
+        if (std::string(rt.name) == "zipf") {
+            ids = moepcZipf(c.rng, n, K, R);
+        } else {  // uniform top-K: K distinct experts per token
+            ids.resize(static_cast<std::size_t>(pairs));
+            std::vector<int> all(static_cast<std::size_t>(R));
+            std::iota(all.begin(), all.end(), 0);
+            for (int t = 0; t < n; ++t) {
+                std::shuffle(all.begin(), all.end(), c.rng);
+                std::copy(all.begin(), all.begin() + K, ids.begin() + static_cast<std::ptrdiff_t>(t) * K);
+            }
+        }
         std::vector<std::uint16_t> xg(static_cast<std::size_t>(pairs) * E);
         {
             const std::vector<float> a = c.randn(xg.size(), 0.5f);
@@ -2198,11 +2233,13 @@ void benchMoepGu(Env& e) {
             hip::launch(fn, {grid, 1, 1}, {256, 1, 1}, 0, c.s, dgate->p(), dup->p(), grb, F, dx->p(), aout->p(), E, tiles->p(), ntl->p());
         };
         const std::string an = std::string("gemm_moepfqgu_") + vg.name + "_mxfp4";
-        for (const auto& [suffix, fb] : abl) {
+        for (const GuB& gb : bs) {
+            const std::string& suffix = gb.suffix;
+            const hip::Function fb = gb.fb;
             Cell k;
-            k.ci = e.info("moepgu", an, "ornith.l" + std::to_string(layer) + ".n" + std::to_string(n) + ".zipf." + suffix,
+            k.ci = e.info("moepgu", an, "ornith.l" + std::to_string(layer) + ".n" + std::to_string(n) + "." + rt.name + "." + suffix,
                           "E" + std::to_string(E) + "_F" + std::to_string(F) + "_R" + std::to_string(R) + "_K" + std::to_string(K));
-            k.ci.settings = e.settings(static_cast<std::uint64_t>(gate.data.size() + up.data.size()), 1) + ";routing=zipf;layer=0;gu=" + vg.name;
+            k.ci.settings = e.settings(static_cast<std::uint64_t>(gate.data.size() + up.data.size()), 1) + ";routing=" + rt.name + ";layer=0;gu=" + vg.name;
             k.ci.flops = 2.0 * pairs * (2.0 * F) * E;
             k.kernel = an;
             k.fa = fa;
@@ -2226,9 +2263,26 @@ void benchMoepGu(Env& e) {
                 return r;
             };
             k.kernel_b = std::string("gemm_moepfqgu_") + suffix + "_mxfp4";
-            k.call_b = [launch, fb = fb](std::uint64_t) { launch(fb); };
-            k.ablation = true;
-            k.b_rule = kAblationRule;
+            k.call_b = [launch, fb](std::uint64_t) { launch(fb); };
+            if (gb.ablation) {
+                k.ablation = true;
+                k.b_rule = kAblationRule;
+            } else {  // a same-bits prototype: B must give A's bits on the full output before it is timed
+                k.bitwise_b = [&c, launch, aout, fa, fb, pairs, F]() -> std::pair<std::size_t, std::size_t> {
+                    const std::size_t cnt = static_cast<std::size_t>(pairs) * F;
+                    aout->fill(0xff);
+                    launch(fa);
+                    c.sync();
+                    const auto ya = aout->down<std::uint16_t>(cnt);
+                    aout->fill(0x7f);  // a different fill: an output B never writes cannot match A by accident
+                    launch(fb);
+                    c.sync();
+                    const auto yb = aout->down<std::uint16_t>(cnt);
+                    std::size_t bad = 0;
+                    for (std::size_t i = 0; i < cnt; ++i) bad += ya[i] != yb[i];
+                    return {cnt, bad};
+                };
+            }
             runCell(e, k);
         }
     }

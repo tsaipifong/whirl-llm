@@ -310,6 +310,10 @@ struct FqGeomProto {
 // fragment read per kk + no global loads for k0 >= 64 (skeleton). Timed only by bench moepgu (outputs wrong by design);
 // kt moemx checks they are absent from the shipped object.
 inline constexpr const char* kMoepGuAblation[] = {"g64n64k64a1", "g64n64k64a5"};
+// v0252-gemmlat round 7 (kernel SOP step 4, bench-only, -DWHIRL_FQ_GU128_PROTO=1): gate + up prototypes with their own
+// geometry; same grid rule as the slots ((maxTiles(pairs, bn) * ceil(F / gr), 256 threads); same bits as gemm_moegu (kt moemx
+// checks every one present; on the shipped object it must be absent); bench moepgu times them against the shipped kernel.
+inline constexpr wk::MoepGuVariant kMoepGuProto[] = {{"g64n64k128", 64, 64, 128}};
 inline constexpr FqGeomProto kFqGeomProto[] = {{"t2w4g8", {128, 128, 128}}, {"t2g8db", {128, 256, 256}}};
 // v0252-valuout (PLAN V1-53): the seven v0252-8sbvalu VALU-lever prototypes (d185546; all REVERT on the 8060S, q7 951b-955,
 // KB v0252-8sbvalu:gemmfq-valu-levers) are NOT in the shipped gfx1151 object: unused kernels move the object layout
