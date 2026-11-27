@@ -214,7 +214,11 @@ __device__ void moepfq_gu_impl(const uint8_t *__restrict__ W1, const uint8_t *__
 // v0252-8sdet: EPI 6 = gemm_moepfqdi_* (COMB 6, fast): the same integer adds and last-arriver tail as gemm_moepdi_*
 // (moe_prefill_mt.hip moep_fix_finalize); the WMMA chains are gemm_moepdn's (this twin's invariance), so the addends, the
 // i32 sums and x are BITWISE those of gemm_moepdi_* (kt moemx row "gemm_moepfqdi_<v> == gemm_moepdi_<v>").
-template <int BK, int BM, int WM, int BNMAX, int EPI>
+// ABL (v0252-gemmlat round 10, measurement only, output wrong by design; 0 = the product code): as moepfq_gu_impl's -
+//   1 = for k0 >= BK no decode / barriers / LDS stores (the loads still issue, an empty asm consumes them): the barrier phase;
+//   5 = 1 + one A fragment (a[i] = a[0]) and one B fragment (f > 0 reuse f = 0) per kk + no global loads: the skeleton.
+// Only the kt-only object compiled with -DWHIRL_FQ_ABL_PROTOS=1 instantiates ABL 1 / 5 (gemm_moepfqdhs_m128w4n128k64a1 / a5).
+template <int BK, int BM, int WM, int BNMAX, int EPI, int ABL = 0>
 __device__ void moepfq_dn_impl(const uint8_t *__restrict__ Wall, uint64_t row_bytes, int rows_e, const _Float16 *__restrict__ Xall,
                                void *__restrict__ Yv, int ncols, const int4 *__restrict__ tiles, const int *__restrict__ n_tiles,
                                const int *__restrict__ perm, const float *__restrict__ w, float *__restrict__ x, int K,
@@ -255,25 +259,58 @@ __device__ void moepfq_dn_impl(const uint8_t *__restrict__ Wall, uint64_t row_by
     for (int i = 0; i < TM; ++i)
 #pragma unroll
         for (int j = 0; j < FPW; ++j) acc[i][j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
+    constexpr bool kNoStage = ABL == 1 || ABL == 5, kReuse = ABL == 5, kNoFetch = ABL == 5;  // all false for ABL 0
     F.fetch(0);
-    for (int k0 = 0; k0 < ncols; k0 += BK) {
+    if constexpr (kNoStage) {  // chunk 0 staged once, as ABL 0 does it
         half8 ra[Fetch::A_SB][4];
         F.decode(ra);
-        __syncthreads();
         F.template store<LD>(ra, As, Bs, live16);
         __syncthreads();
-        if (k0 + BK < ncols) F.fetch(k0 + BK);
+    }
+    for (int k0 = 0; k0 < ncols; k0 += BK) {
+        if constexpr (kNoStage) {
+            asm volatile("" ::: "memory");
+            if constexpr (!kNoFetch) {
+#pragma unroll
+                for (int e = 0; e < Fetch::A_SB; ++e)
+                    asm volatile("" ::"v"(F.qa[e].x), "v"(F.qa[e].y), "v"(F.qb[e].x), "v"(F.qb[e].y), "v"(F.qe[e]));
+#pragma unroll
+                for (int e = 0; e < Fetch::B_PER; ++e) {
+                    const uint4 u = __builtin_bit_cast(uint4, F.rb[e]);
+                    asm volatile("" ::"v"(u.x), "v"(u.y), "v"(u.z), "v"(u.w));
+                }
+            }
+        } else {
+            half8 ra[Fetch::A_SB][4];
+            F.decode(ra);
+            __syncthreads();
+            F.template store<LD>(ra, As, Bs, live16);
+            __syncthreads();
+        }
+        if constexpr (!kNoFetch) {
+            if (k0 + BK < ncols) F.fetch(k0 + BK);
+        }
         if (wn >= live) continue;
 #pragma unroll
         for (int kk = 0; kk < BK; kk += 16) {
             half16 a[TM];
 #pragma unroll
-            for (int i = 0; i < TM; ++i) a[i] = ld_frag16(&As[(wm * TM + i) * 16 + lane % 16][kk]);
+            for (int i = 0; i < TM; ++i) {
+                if constexpr (kReuse) a[i] = i == 0 ? ld_frag16(&As[(wm * TM) * 16 + lane % 16][kk]) : a[0];
+                else a[i] = ld_frag16(&As[(wm * TM + i) * 16 + lane % 16][kk]);
+            }
+            half16 b0 = {};
 #pragma unroll
             for (int f = 0; f < FPW; ++f) {
                 const int j = moep::frag(wn, WN, f);
                 if (j < live) {
-                    const half16 b = ld_frag16(&Bs[j * 16 + lane % 16][kk]);
+                    half16 b;
+                    if constexpr (kReuse) {
+                        if (f == 0) b0 = ld_frag16(&Bs[j * 16 + lane % 16][kk]);
+                        b = b0;
+                    } else {
+                        b = ld_frag16(&Bs[j * 16 + lane % 16][kk]);
+                    }
 #pragma unroll
                     for (int i = 0; i < TM; ++i) acc[i][f] = WMMA16(a[i], b, acc[i][f]);
                 }
@@ -394,6 +431,20 @@ MOEPFQGU_U_ENTRY(g64n64k64u, 64, 64, 64)
 #endif
 #undef MOEPFQGU_ENTRY
 #undef MOEPFQDN_ENTRY
+
+// v0252-gemmlat round 10 (PLAN V1-53): the measurement-only ablations of gemm_moepfqdhs_m128w4n128k64 (the down kernel of the
+// balance / fast plan; moepfq_dn_impl ABL above; kt.h kMoepDhsAblation, timed only by bench moepdhs). kt-only object only.
+#ifdef WHIRL_FQ_ABL_PROTOS
+#define MOEPFQDHS_ABL_ENTRY(NAME, BM, WM, BN, BK, ABL_)                                                                \
+    extern "C" __global__ void __launch_bounds__(256)                                                               \
+        gemm_moepfqdhs_##NAME##_mxfp4(const uint8_t *W, uint64_t row_bytes, int rows_e, const _Float16 *X,          \
+                                      _Float16 *Y, int ncols, const int4 *tiles, const int *n_tiles) {             \
+        moepfq_dn_impl<BK, BM, WM, BN, 5, ABL_>(W, row_bytes, rows_e, X, Y, ncols, tiles, n_tiles, nullptr, nullptr, nullptr, 0); \
+    }
+MOEPFQDHS_ABL_ENTRY(m128w4n128k64a1, 128, 4, 128, 64, 1)
+MOEPFQDHS_ABL_ENTRY(m128w4n128k64a5, 128, 4, 128, 64, 5)
+#undef MOEPFQDHS_ABL_ENTRY
+#endif
 
 // v0252-gemmlat round 6 (PLAN V1-53): the measurement-only ablations of gemm_moepfqgu_g64n64k64 (ABL above; kt.h kMoepGuAblation,
 // timed only by bench moepgu, outputs never compared). Compiled ONLY into the kt-only object built with -DWHIRL_FQ_ABL_PROTOS=1:
