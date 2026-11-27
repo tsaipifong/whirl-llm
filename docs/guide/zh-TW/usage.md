@@ -506,7 +506,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_GV_GROUP=0` | 不合併同輸入的 GEMV launch |
 | `WHIRL_GV_NMAX=N` | 同輸入 GEMV 一組的最大數量 |
 | `WHIRL_MOE_BN=32\|64` | 分組專家 GEMM 的 token tile |
-| `WHIRL_DBG=BITS` | 1 = 不合併 gdn_abconv、2 = 純量 split attention、4 = 每個 attention 群組一個 query |
+| `WHIRL_DBG=BITS` | 1 = 不合併 gdn_abconv、2 = 純量 split attention、4 = 每個 attention 群組一個 query、8 = E1 提前送出的 verify 依 slot 大小（而不是實際 context）選 8060S 平衡／快速的 attention split 數（0.2.5.2 修正前的行為，只供 A/B） |
 | `WHIRL_ATTN_WIDE=0` | 驗證 attention 每群最多 16 欄（`attn_wsplit1`），不用最多 32 欄的 `attn_wsplit2` |
 | `WHIRL_ATTN_DQ4=0` | q4 KV：decode / 驗證 attention 改回 `attn_wsplit1_q4`（較慢，0.2.0 之前），不用 `attn_dq4` |
 

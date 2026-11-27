@@ -132,7 +132,16 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
     // the flag, the profile row and the kernel table all give another); the kernels below are then the _sp entries of that count
     // round 3: under auto the measured limits of the profile decide per step (ws4SplitForStep); a forced WHIRL_ATTN_LSPLIT=N skips them
     u32 ws4_ns = ws4_path ? ws4SplitCount(p.n_head_kv, p.kv_q8, f.attn_lsplit, prof.attn_ws4_split_blocks, k) : static_cast<u32>(ws4::kNs);
-    if (ws4_path && f.attn_lsplit == kAttnLsplitAuto) ws4_ns = ws4SplitForStep(p, ws4_ns, prof.ws4_split_limits);
+    if (ws4_path && f.attn_lsplit == kAttnLsplitAuto) {
+        if ((f.dbg_flags & 8) != 0) {
+            // v0252-e1split screen arm (WHIRL_DBG&8, temporary): the pre-e1split bound of an E1 verify (max_ctx, no interval)
+            AttnDecodeProblem q = p;
+            q.pos0_hi = -1;
+            ws4_ns = ws4SplitForStep(q, ws4_ns, prof.ws4_split_limits);
+        } else {
+            ws4_ns = ws4SplitForStep(p, ws4_ns, prof.ws4_split_limits);
+        }
+    }
     int ws4_si = -1;  // index into kernels::kWs4SplitCounts, -1 = 64 (today's entries)
     for (int i = 0; i < 2; ++i)
         if (ws4_ns != static_cast<u32>(ws4::kNs) && kernels::kWs4SplitCounts[i] == ws4_ns) ws4_si = i;
@@ -335,7 +344,12 @@ std::uint32_t ws4SplitForStep(const AttnDecodeProblem& p, std::uint32_t s, const
     if (known) {
         for (std::uint32_t r = 0; r < n; ++r) keys = std::max<std::uint64_t>(keys, static_cast<std::uint64_t>(std::max<std::int32_t>(p.row_pos[r], 0)) + 1);
     } else {
-        keys = p.max_ctx;  // one row the host does not know: its n_pos <= max_ctx
+        // rows the host does not know: every n_pos <= max_ctx. v0252-e1split (PLAN V1-93): an E1 verify of one slot with row
+        // 0's interval (pos0_hi >= 0, context.h e1Row0Interval) has row r at <= pos0_hi + r, so n_pos <= pos0_hi + n - the
+        // bound the synchronous verify of the same rows at row 0 = pos0_hi takes. The device reads every key of its own n_pos
+        // at any split count (ws4::block_range), so the bound only picks S.
+        keys = p.max_ctx;
+        if (p.rows_one_seq && p.pos0_hi >= 0) keys = std::min<std::uint64_t>(keys, static_cast<std::uint64_t>(p.pos0_hi) + n);
     }
     const std::uint32_t lm = lim.max_keys[si][cls];
     return lm != 0 && keys <= lm ? s : full;

@@ -48,7 +48,8 @@ struct AttnDecodeProblem {
     std::span<const std::int32_t> row_pos, row_base;
     // v0252-e1s8 round 2 (C): rows the host does not know, but ONE sequence at consecutive positions (an E1 verify of one slot:
     // set_rows_dp writes pos = the NPOS word + r, one kv base). Context sets it only there (Context::row_seq1); ws4SplitForStep
-    // then takes the rows class from n and max_ctx as the bound of every n_pos. Ignored when rows_known
+    // then takes the rows class from n and pos0_hi + n (v0252-e1split; max_ctx without an interval) as the bound of every
+    // n_pos. Ignored when rows_known
     bool rows_one_seq = false;
     // v0252-e1grp (PLAN V1-93): with rows_one_seq, the interval [pos0_lo, pos0_hi] of row 0's possible positions (the E1
     // lookahead: the cycle in flight accepts 0..nd drafts, so pos0_hi - pos0_lo = nd; a synchronous E1 cycle: one position).
@@ -116,7 +117,9 @@ std::uint32_t ws4SplitCount(std::uint32_t n_head_kv, bool kv_q8, std::uint32_t f
 // other than 64) when the step's row class has a limit >= its key count, else 64. Row class: 0 = one row with a draft window
 // argument (the MTP draft row), else the row count n when 1 <= n <= 9 and the rows are one sequence at consecutive positions
 // (row_base equal, row_pos[r] = row_pos[0] + r); anything else -> 64. Key count: the largest row_pos + 1 when the host knows
-// the rows (rows_known and row_pos holds n entries), else max_ctx for one row (an upper bound), else (several unknown rows) 64.
+// the rows (rows_known and row_pos holds n entries), else for unknown rows (one row, or rows_one_seq) the upper bound
+// min(max_ctx, pos0_hi + n) when row 0's interval is given (v0252-e1split: the synchronous verify's keys at row 0 = pos0_hi),
+// max_ctx without it; several unknown rows of other steps -> 64.
 // Deterministic: a function of the step's rows only (same input -> same row counts -> same split).
 std::uint32_t ws4SplitForStep(const AttnDecodeProblem& p, std::uint32_t s, const device::Ws4SplitLimits& lim);
 // v0252-e1grp: the ws4 group key of a row at position pp (n_pos = pp + 1) under ns splits and draft window win: the sink

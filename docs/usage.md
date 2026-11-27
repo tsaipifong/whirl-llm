@@ -652,7 +652,7 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 | `WHIRL_GV_GROUP=0` | no grouped same-input GEMV launches |
 | `WHIRL_GV_NMAX=N` | largest group of same-input GEMVs |
 | `WHIRL_MOE_BN=32\|64` | grouped expert GEMM token tile |
-| `WHIRL_DBG=BITS` | 1 = no gdn_abconv merge, 2 = scalar split attention, 4 = one query per attention group |
+| `WHIRL_DBG=BITS` | 1 = no gdn_abconv merge, 2 = scalar split attention, 4 = one query per attention group, 8 = an E1 lookahead verify picks its 8060S balance / fast attention split count from the slot size instead of the context (the behaviour before 0.2.5.2's fix; A/B only) |
 | `WHIRL_ATTN_WIDE=0` | verify attention groups of at most 16 columns (`attn_wsplit1`) instead of up to 32 (`attn_wsplit2`) |
 | `WHIRL_ATTN_WS4=0` | gfx1151 (8060S), f16 / q8h KV: the old one-row-per-group decode / verify attention (`attn_wsplit1`) instead of `attn_ws4` / `attn_ws4g` (same output bits, slower at long context; debug fallback) |
 | `WHIRL_ATTN_DQ4=0` | q4 KV: decode / verify attention through `attn_wsplit1_q4` (slower; before 0.2.0) instead of `attn_dq4` |
