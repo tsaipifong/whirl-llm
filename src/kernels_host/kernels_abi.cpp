@@ -448,6 +448,8 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         k.attn_pws_i4p = L.opt("attn_prefill_wmma_s_i4p");
         if (k.attn_pws_i4p != nullptr) k.attn_pwf_i4p = L.opt("attn_prefill_wmma_i4p");
         if (k.attn_pwf_i4p == nullptr) k.attn_pws_i4p = nullptr;
+        // v0252-attnlat: the one-clause f16 prefill attention (opt-in, ops::attnPfxPick)
+        k.attn_pfx = L.opt("attn_pfx_f16r");
         // v0252-strixc2: f16 entries for every KV format (the f16 cache, or the KG-3 f16 copy of q8 / q8h keys)
         k.attn_sx2 = L.opt("attn_sx2");
         k.attn_sx4 = L.opt("attn_sx4");

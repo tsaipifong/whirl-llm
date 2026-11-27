@@ -161,6 +161,9 @@ struct AttnPrefillProblem {
     bool kv_q8 = false;           // q8 / q8h / q8v / q4 (int8 or 4-bit) KV (not f16)
     std::uint32_t dq_rows = 0;    // rows the dequant scratch (ffn_g / ffn_u) holds
     bool dq_ptab = false, dq_st_ml = false;  // the scratch page table / softmax state buffers exist
+    // v0252-attnlat: bytes of ONE K (= one V) array of the f16 cache the plain path reads (pool pages x page x row bytes);
+    // 0 = unknown (attn_pfx is then not taken on the cache path). The KG-3 copy's size is dq_rows x row bytes.
+    std::uint64_t kv_bytes = 0;
 };
 struct AttnPrefillFlags {
     bool attn_kg_on = true, attn_kx_on = true, attn_dqf_on = true;
@@ -184,7 +187,21 @@ struct AttnPrefillFlags {
     // LDS + K / V register prefetch; bit-identical to attn_pwf_i4 / attn_pws_i4) in their place, same steps and grids
     // (numerics flag attn_i4pf; WHIRL_ATTN_I4PF). Needs both i4p kernels; alone (int4 off) it picks nothing.
     bool attn_i4pf_on = false;
+    // v0252-attnlat (PLAN V1-148): attn_pfx_f16r (attn_prefill_wmma with all 13 K / V loads of a key step in one clause; same
+    // arguments, grid, block and bits) in place of attn_prefill_wmma for every launch of it over f16 rows: the f16 cache read in
+    // place (plain path, no attn_kx / attn_kg / attn_sx) and the one-range KG-3 copy (attn_pwf; not on attn_sx / int4 /
+    // ranged attn_pws). Numerics flag attn_pfx (WHIRL_ATTN_PFX, opt-in). Needs the kernel and attnPfxPick's 4 GiB guard.
+    bool attn_pfx_on = false;
 };
+// v0252-attnlat: attn_pfx_f16r forms 32-bit byte offsets from the K / V base, so a launch over a K / V array of kAttnPfxMaxBytes
+// or more (or of unknown size, 0) keeps attn_prefill_wmma ("guarded": the plan says so once, the caller logs it)
+inline constexpr std::uint64_t kAttnPfxMaxBytes = 1ull << 32;
+enum class PfxPick : std::uint8_t { off, on, guarded };
+// off: the flag is off or the code object has no attn_pfx_f16r; on: take it; guarded: flag + kernel, but kv_bytes is 0 or >= 4 GiB
+constexpr PfxPick attnPfxPick(bool flag_on, bool have_kernel, std::uint64_t kv_bytes) {
+    if (!flag_on || !have_kernel) return PfxPick::off;
+    return kv_bytes > 0 && kv_bytes < kAttnPfxMaxBytes ? PfxPick::on : PfxPick::guarded;
+}
 // v0252-strixc2: the attn_sx kernel for a GQA ratio grp (query heads per KV head) and hp heads per launch at head_dim,
 // with its NP (= strix NCOLS2: the first of 8 / 4 / 2 dividing grp, fattn-rdna35.cu:863-870) in *np; nullptr (and *np 0)
 // when head_dim != 256, no NP divides both grp and hp, or that kernel is not in the code object. Exhaustive in NP: never
@@ -247,6 +264,8 @@ struct AttnStep {
 };
 struct AttnPrefillPlan {
     std::vector<AttnStep> steps;
+    // v0252-attnlat: attn_pfx was asked for (flag + kernel) but a launch kept attn_prefill_wmma by attnPfxPick's 4 GiB guard
+    bool pfx_guarded = false;
 };
 AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefillFlags& f, const kernels::AttnKernels& k);
 

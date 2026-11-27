@@ -498,8 +498,11 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
         const bool i4 = f.attn_i4qk_on && k.attn_pwf_i4 != nullptr && k.attn_pws_i4 != nullptr;
         // v0252-8sattn3: the int4 Q-in-LDS + prefetch pair in place of the int4 pair (same bits, same grids)
         const bool i4p = i4 && f.attn_i4pf_on && k.attn_pwf_i4p != nullptr && k.attn_pws_i4p != nullptr;
-        const Function pwf = i4p ? k.attn_pwf_i4p : i4 ? k.attn_pwf_i4 : k.attn_pwf,
-                       pws = i4p ? k.attn_pws_i4p : i4 ? k.attn_pws_i4 : k.attn_pws;
+        Function pwf = i4p ? k.attn_pwf_i4p : i4 ? k.attn_pwf_i4 : k.attn_pwf;
+        const Function pws = i4p ? k.attn_pws_i4p : i4 ? k.attn_pws_i4 : k.attn_pws;
+        // v0252-attnlat: the one-clause f16 kernel in place of attn_pwf (= attn_prefill_wmma) on the one-range copy; the copy
+        // holds at most dq_rows rows, so its byte offsets stay below dq_rows x row bytes (the guard's size)
+        const PfxPick pfx_copy = i4 ? PfxPick::off : attnPfxPick(f.attn_pfx_on, k.attn_pfx != nullptr, static_cast<u64>(p.dq_rows) * row_el * 2);
         for (u32 r0 = 0; r0 < rows; r0 += seg) {
             const u32 r1 = std::min(rows, r0 + seg), nr = r1 - r0;
             dqRange(r0, nr);
@@ -509,6 +512,8 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
                     for (u32 q = 0; q < parts; ++q) attn(sx.f, sxGrid, D(256), q * hp, true, false, r0, r1);
                     break;
                 }
+                if (pfx_copy == PfxPick::on) pwf = k.attn_pfx;
+                pl.pfx_guarded = pfx_copy == PfxPick::guarded;
                 for (u32 q = 0; q < parts; ++q) attn(pwf, D((n + 127) / 128, hp), D(256), q * hp, true, false, r0, r1);
                 break;
             }
@@ -569,13 +574,21 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
     // from the cache keep attn_kg<np>_q8 / _q8v (the variants are f16 kernels)
     if (kg != nullptr && !p.kv_q8)
         if (const Function v = attnKgVariant(attnKgVarFor(f.attn_kg_var, np, KgPath::f16), k, np)) kg = v;
+    // v0252-attnlat: the f16 cache read in place by attn_prefill_wmma (no attn_kx): the one-clause kernel when the flag, the
+    // kernel and the 4 GiB guard on one K / V array (kv_bytes) allow it
+    Function pw = k.attn_prefill_wmma;
+    if (!kx && !p.kv_q8 && kg == nullptr && !(sx.f != nullptr)) {
+        const PfxPick pc = attnPfxPick(f.attn_pfx_on, k.attn_pfx != nullptr, p.kv_bytes);
+        if (pc == PfxPick::on) pw = k.attn_pfx;
+        pl.pfx_guarded = pc == PfxPick::guarded;
+    }
     for (u32 q = 0; q < parts; ++q) {
         if (kg != nullptr)
             attn(kg, D((n + 15) / 16, hp / np), D(64 * np), q * hp, false, false, 0, 0);
         else if (sx.f != nullptr && !p.kv_q8)  // v0252-strixc2: balance, f16 cache (in place of attn_kx / attn_prefill_wmma)
             attn(sx.f, sxGrid, D(256), q * hp, false, false, 0, 0);
         else
-            attn(kx ? k.attn_kx : k.attn_prefill_wmma, D((n + 127) / 128, hp), D(kx ? 512 : 256), q * hp, false, false, 0, 0);
+            attn(kx ? k.attn_kx : pw, D((n + 127) / 128, hp), D(kx ? 512 : 256), q * hp, false, false, 0, 0);
     }
     return pl;
 }

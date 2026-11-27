@@ -231,6 +231,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"ATTN_SX", &S::attn_sx},      // v0252-strixc2
         {"ATTN_I4QK", &S::attn_i4qk},  // v0252-8sfp
         {"ATTN_I4PF", &S::attn_i4pf},  // v0252-8sattn3
+        {"ATTN_PFX", &S::attn_pfx},    // v0252-attnlat
         {"MOEP_GUW", &S::moep_guw},    // v0252-8smoe
         {"MOEP_DHS", &S::moep_dhs},    // v0252-8smoe2 (C)
         {"MOEP_DNA", &S::moep_dna},    // v0252-8smoe2 (D)
@@ -561,6 +562,12 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     // balance and the R9700 never take it. The card's row (device::Profile::attn_i4_qlds_pf, opt-in), then WHIRL_ATTN_I4PF
     // ("0" / "" off, any other value on: the WHIRL_DQ4_ORDER rule). ops::chooseAttnPrefill still needs both i4p kernels.
     if (F.attn_i4qk) F.attn_i4pf = e.attn_i4pf ? !e.attn_i4pf->empty() && *e.attn_i4pf != "0" : t.attn_i4pf_profile;
+    // v0252-attnlat (PLAN V1-148): the f16 prefill attention with all 13 K / V loads of a 32-key step in one clause
+    // (attn_pfx_f16r, bit-identical to attn_prefill_wmma), in EVERY mode (same bits: precise reads the f16 cache, balance /
+    // fast the one-range KG-3 copy). The card's row (device::Profile::attn_pfx_f16r, opt-in: off on both rows), then
+    // WHIRL_ATTN_PFX ("0" / "" off, any other value on: the WHIRL_DQ4_ORDER rule). ops::chooseAttnPrefill still needs the
+    // kernel (gfx1151 object only) and a K / V buffer below 4 GiB (32-bit byte offsets; ops::attnPfxPick).
+    F.attn_pfx = e.attn_pfx ? !e.attn_pfx->empty() && *e.attn_pfx != "0" : t.attn_pfx_profile;
 }
 
 // tune.cpp:939-982 on the item table (the per-item overrides, WHIRL_Q8DEC, relaxacc, noteSwitches) and the flags

@@ -6,6 +6,9 @@
 
 #include "../forward_internal.h"
 
+#include <atomic>
+#include <cstdio>
+
 namespace whirl::qwen35 {
 
 // Gated full-attention sublayer on h (already attn-normed) for n tokens at
@@ -174,6 +177,8 @@ void Context::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u
     pp.dq_rows = dq_rows;
     pp.dq_ptab = dq_ptab != 0;
     pp.dq_st_ml = dq_st_ml != 0;
+    // v0252-attnlat: one K (= one V) array of the f16 cache, for attn_pfx's 4 GiB guard on the plain path (0 for q8 / q4 KV: not read there)
+    pp.kv_bytes = pp.kv_q8 ? 0 : static_cast<u64>(pool_pages) * kv_page * cfg.n_head_kv * cfg.head_dim * 2;
     ops::AttnPrefillFlags pf;
     pf.attn_kg_on = nf().attn_kg_on;
     pf.attn_kx_on = nf().attn_kx_on;
@@ -185,7 +190,13 @@ void Context::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u
     pf.attn_sx_on = nf().attn_sx;  // v0252-strixc2: balance-only gfx1151 prefill attention (numerics plan)
     pf.attn_i4qk_on = nf().attn_i4qk;  // v0252-8sfp: fast-only gfx1151 int4 Q.K^T prefill attention (numerics plan)
     pf.attn_i4pf_on = nf().attn_i4pf;  // v0252-8sattn3: its Q-in-LDS + prefetch form (numerics plan, opt-in)
+    pf.attn_pfx_on = nf().attn_pfx;    // v0252-attnlat: the one-clause f16 prefill attention attn_pfx_f16r (numerics plan, opt-in)
     const ops::AttnPrefillPlan pl = ops::chooseAttnPrefill(pp, pf, k);
+    // v0252-attnlat: WHIRL_ATTN_PFX asked for attn_pfx_f16r but a K / V array of 4 GiB or more keeps attn_prefill_wmma (32-bit
+    // byte offsets): said once per process
+    static std::atomic<bool> pfx_guard_said{false};
+    if (pl.pfx_guarded && !pfx_guard_said.exchange(true))
+        std::fprintf(stderr, "whirl: WHIRL_ATTN_PFX: K / V array of 4 GiB or more (or of unknown size): attn_prefill_wmma kept for that launch (attn_pfx_f16r uses 32-bit byte offsets)\n");
     const i32 H = I(cfg.n_head), HKV = I(cfg.n_head_kv), QS = I(2 * cfg.head_dim);
     for (const ops::AttnStep& s : pl.steps) {
         switch (s.op) {

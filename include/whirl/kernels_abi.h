@@ -779,6 +779,10 @@ struct AttnKernels {
     // v0252-8sattn3 (PLAN V1-148): their second form attn_prefill_wmma_i4p / _s_i4p (int4 Q codes in LDS + K / V register
     // prefetch; bit-identical to the pair above; numerics flag attn_i4pf, fast opt-in; null unless both are in the object)
     F attn_pwf_i4p{}, attn_pws_i4p{};
+    // v0252-attnlat (PLAN V1-148): attn_pfx_f16r, attn_prefill_wmma with all 13 K / V loads of a key step in one clause (same
+    // arguments / grid / block / bits; 32-bit byte offsets: K / V buffers below 4 GiB, ops::attnPfxPick); gfx1151 object only;
+    // numerics flag attn_pfx (opt-in, every mode)
+    F attn_pfx{};
     // v0252-strixc2 (PLAN V1-09): the balance-mode prefill attention from strix-llama.cpp fattn-rdna35 (gfx1151 only, null
     // elsewhere): NCOLS2 = 2 / 4 / 8 query heads of one KV head per column group, f16 K / V (the cache or the KG-3 copy),
     // the attn_prefill_wmma arguments; not bitwise (ops::attnSxFor, numerics flag attn_sx: balance only)

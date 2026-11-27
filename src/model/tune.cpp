@@ -897,6 +897,7 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     t.moeskip_default = t.gfx1151 ? nu::moeskip_fast_default_8060s : nu::moeskip_fast_default_r9700;
     t.attn_sx_profile = prof.attn_sx_balance;  // v0252-strixc2: the gfx1151 balance prefill attention (numerics flag attn_sx)
     t.attn_i4qk_profile = prof.attn_i4qk_fast;  // v0252-8sfp: the gfx1151 fast int4 Q.K^T prefill attention (flag attn_i4qk)
+    t.attn_pfx_profile = prof.attn_pfx_f16r;  // v0252-attnlat: the one-clause f16 prefill attention (flag attn_pfx, opt-in)
     t.attn_i4pf_profile = prof.attn_i4_qlds_pf;  // v0252-8sattn3: its Q-in-LDS + prefetch form (flag attn_i4pf, opt-in)
     t.moep_comb_fast_skip_profile = prof.moep_comb_fast_skip;  // v0252-8smoe (A): the fast moeskip MoE prefill combine
     t.moep_guw_profile = prof.moep_guw;  // v0252-8smoe (B): the routing-aware wide moep gate + up tile (flag moep_guw)
