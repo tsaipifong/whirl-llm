@@ -75,7 +75,14 @@ __device__ __forceinline__ void fq_decode_sb(uint2 qa, uint2 qb, uint32_t e, hal
     }
 }
 
-template <int BM, int BN, int WAVES_M, int GRP = 0>
+// ABL (v0252-gemmlat, PLAN V1-53, kernel SOP step 5 "profile substitute"; MEASUREMENT ONLY, output wrong by design):
+//   0 = the product code (every product / prototype entry; the source of the ABL 0 path is unchanged);
+//   1 = for k0 >= 64 skip the decode, both __syncthreads and the LDS stores (GEMMFQ_FETCH still issues every load; an
+//       empty asm consumes its registers so the loads stay; a memory clobber at the head of each K chunk keeps the
+//       fragment ds_loads inside the loop; the WMMAs read chunk 0's tile, which stays in LDS);
+//   2 = everything as ABL 0, but each WMMA replaced by an empty asm that reads its operands and "writes" acc.
+// Only the kt-only object compiled with -DWHIRL_FQ_ABL_PROTOS=1 instantiates ABL 1 / 2 (entries at the end of this file).
+template <int BM, int BN, int WAVES_M, int GRP = 0, int ABL = 0>
 __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
                             float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {
     constexpr int NTH = 256, BK = 64;
@@ -139,11 +146,10 @@ __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, c
     } while (0)
 
     GEMMFQ_FETCH(0);
-    for (int k0 = 0; k0 < ncols; k0 += BK) {
+    if constexpr (ABL == 1) {  // chunk 0 staged once, exactly as ABL 0 does it; the loop below never touches LDS again
         half8 ra[A_SB][4];
 #pragma unroll
         for (int e = 0; e < A_SB; ++e) fq_decode_sb(qa[e], qb[e], qe[e], ra[e]);
-        __syncthreads();
 #pragma unroll
         for (int e = 0; e < A_SB; ++e) {
             const int s = threadIdx.x + e * NTH;
@@ -156,6 +162,35 @@ __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, c
             *(half8 *)&Bs[i / GPR][(i % GPR) * 8] = rb[e];
         }
         __syncthreads();
+    }
+    for (int k0 = 0; k0 < ncols; k0 += BK) {
+        if constexpr (ABL == 1) {
+            asm volatile("" ::: "memory");
+#pragma unroll
+            for (int e = 0; e < A_SB; ++e) asm volatile("" ::"v"(qa[e].x), "v"(qa[e].y), "v"(qb[e].x), "v"(qb[e].y), "v"(qe[e]));
+#pragma unroll
+            for (int e = 0; e < B_PER; ++e) {
+                const uint4 u = __builtin_bit_cast(uint4, rb[e]);
+                asm volatile("" ::"v"(u.x), "v"(u.y), "v"(u.z), "v"(u.w));
+            }
+        } else {
+            half8 ra[A_SB][4];
+#pragma unroll
+            for (int e = 0; e < A_SB; ++e) fq_decode_sb(qa[e], qb[e], qe[e], ra[e]);
+            __syncthreads();
+#pragma unroll
+            for (int e = 0; e < A_SB; ++e) {
+                const int s = threadIdx.x + e * NTH;
+#pragma unroll
+                for (int j = 0; j < 4; ++j) *(half8 *)&As[s / 2][(s & 1) * 32 + j * 8] = ra[e][j];
+            }
+#pragma unroll
+            for (int e = 0; e < B_PER; ++e) {
+                const int i = threadIdx.x + e * NTH;
+                *(half8 *)&Bs[i / GPR][(i % GPR) * 8] = rb[e];
+            }
+            __syncthreads();
+        }
         if (k0 + BK < ncols) GEMMFQ_FETCH(k0 + BK);
 #pragma unroll
         for (int kk = 0; kk < BK; kk += 16) {
@@ -169,8 +204,12 @@ __device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, c
 #pragma unroll
             for (int i = 0; i < TM; ++i)
 #pragma unroll
-                for (int j = 0; j < TN; ++j)
-                    acc[i][j] = WMMA16(a[i], b[j], acc[i][j]);
+                for (int j = 0; j < TN; ++j) {
+                    if constexpr (ABL == 2)
+                        asm volatile("" : "+v"(acc[i][j]) : "v"(a[i]), "v"(b[j]));
+                    else
+                        acc[i][j] = WMMA16(a[i], b[j], acc[i][j]);
+                }
         }
     }
 #undef GEMMFQ_FETCH
@@ -212,4 +251,18 @@ GEMMFQ_PROTO(t2g16, 128, 256, 2, 16)
 GEMMFQ_PROTO(c2g4, 256, 128, 4, 4)
 GEMMFQ_PROTO(c2g8, 256, 128, 4, 8)
 #undef GEMMFQ_PROTO
+
+// v0252-gemmlat (PLAN V1-53): the measurement-only ablations of t2g8 (ABL above; kt.h kFqAblation, timed only, output
+// never compared). Compiled ONLY into the kt-only object built with -DWHIRL_FQ_ABL_PROTOS=1: without the macro no new
+// function exists, so the product objects stay byte-for-byte the same code (KB v0252-8sbal:e2e-raster-g8).
+#ifdef WHIRL_FQ_ABL_PROTOS
+#define GEMMFQ_ABL_PROTO(name_, bm_, bn_, wm_, g_, abl_)                                                                \
+    extern "C" __global__ void __launch_bounds__(256) gemmfq_##name_##_mxfp4(const uint8_t *W, uint64_t row_bytes,    \
+        const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) {                               \
+        gemmfq_impl<bm_, bn_, wm_, g_, abl_>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);                    \
+    }
+GEMMFQ_ABL_PROTO(t2g8a1, 128, 256, 2, 8, 1)
+GEMMFQ_ABL_PROTO(t2g8a2, 128, 256, 2, 8, 2)
+#undef GEMMFQ_ABL_PROTO
+#endif
 
