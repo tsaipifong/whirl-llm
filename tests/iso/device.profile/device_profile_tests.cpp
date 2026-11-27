@@ -40,6 +40,7 @@ void testProfiles() {
     // v0252-8sattn3 (PLAN V1-148): the fast int4 prefill attention with Q codes in LDS + K / V prefetch (same bits as the int4
     // kernel) on the 8060S by default since round 3; the gfx1201 object has no such kernel (WHIRL_ATTN_I4PF=0 = the old one)
     CHECK(!a.attn_i4_qlds_pf && b.attn_i4_qlds_pf);
+    CHECK(!a.attn_pfx_f16r && !b.attn_pfx_f16r);  // v0252-attnlat: opt-in on both rows (WHIRL_ATTN_PFX=1)
     CHECK(a.gemm_tail && !b.gemm_tail);  // v0252-pp2k2 (F1): the GEMM token-tail split on the R9700 only (8060S unchanged)
     // v0252-8smoe (A, PLAN V1-95): the 8060S fast moeskip MoE prefill combine = 5 (atomic scatter); the R9700 keeps its rule
     CHECK(a.moep_comb_fast_skip == 0 && b.moep_comb_fast_skip == 5);

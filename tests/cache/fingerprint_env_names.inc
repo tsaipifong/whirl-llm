@@ -18,6 +18,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_ATTN_KGVAR",  // src/common/numerics.cpp (feat026-attnkg97, v0252-c1port)
     "WHIRL_ATTN_KX",  // src/common/numerics.cpp
     "WHIRL_ATTN_LSPLIT",  // src/common/numerics.cpp (v0252-l2split: another split partition in balance / fast, other bits)
+    "WHIRL_ATTN_PFX",  // src/common/numerics.cpp (v0252-attnlat: another kernel, same bits as attn_prefill_wmma; hashed like ATTN_WS4R)
     "WHIRL_ATTN_SEG",  // src/common/numerics.cpp
     "WHIRL_ATTN_SX",  // src/common/numerics.cpp (v0252-strixc2: balance attn_sx off when "0")
     "WHIRL_ATTN_WIDE",  // src/common/numerics.cpp

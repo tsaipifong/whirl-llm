@@ -20,6 +20,7 @@ int main(int argc, char** argv) {
                      {"attn_sx", testAttnSx},  // v0252-strixc2
                      {"attn_i4qk", testAttnI4qk},  // v0252-8sfp
                      {"attn_i4pf", testAttnI4pf},  // v0252-8sattn3
+                     {"attn_pfx", testAttnPfx},  // v0252-attnlat
                      {"attn_prep", testAttnPrepRules}},
                     argc, argv);
 }

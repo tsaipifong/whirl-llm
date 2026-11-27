@@ -90,6 +90,7 @@ nu::Target target(const CardFake& c, std::string_view model, bool kv_explicit) {
     t.attn_sx_profile = c.prof.attn_sx_balance;  // v0252-strixc2 (tune.cpp numericsTarget)
     t.attn_i4qk_profile = c.prof.attn_i4qk_fast;  // v0252-8sfp (tune.cpp numericsTarget)
     t.attn_i4pf_profile = c.prof.attn_i4_qlds_pf;  // v0252-8sattn3 (tune.cpp numericsTarget)
+    t.attn_pfx_profile = c.prof.attn_pfx_f16r;  // v0252-attnlat (tune.cpp numericsTarget)
     t.moep_comb_fast_skip_profile = c.prof.moep_comb_fast_skip;  // v0252-8smoe (A, tune.cpp numericsTarget)
     t.moep_guw_profile = c.prof.moep_guw;  // v0252-8smoe (B, tune.cpp numericsTarget)
     t.moep_dhs_profile = c.prof.moep_dhs;  // v0252-8smoe2 (C, tune.cpp numericsTarget)
@@ -885,6 +886,8 @@ void testFastOnlyOverrides() {
         // v0252-8sattn3: the int4 prefill attention with Q codes in LDS + K / V prefetch, bit-identical to the int4 kernel but
         // only reachable where the fast-only attn_i4qk is on (testAttnI4pfFlag)
         {"ATTN_I4PF", 'F'},
+        // v0252-attnlat: attn_pfx_f16r, bit-identical to attn_prefill_wmma (kt attn PFXINV 12 of 12), every mode (testAttnPfxFlag)
+        {"ATTN_PFX", 'B'},
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -1985,6 +1988,52 @@ static void testAttnI4qkFlag() {
 // models); WHIRL_ATTN_I4PF "0" / "" off (the previous kernel, the reference arm), any other value on, unset = the row.
 // WHIRL_ATTN_I4QK=0 turns both off. A non-"0" WHIRL_ATTN_I4PF in precise / balance is noted once and changes nothing.
 // Fails before the flip: the gfx1151 row is false and the default plan has attn_i4pf off.
+// v0252-attnlat (PLAN V1-148): attn_pfx (WHIRL_ATTN_PFX, device::Profile::attn_pfx_f16r): the one-clause f16 prefill attention,
+// bit-identical to attn_prefill_wmma, so class B in every mode. The shipped rows are OFF on both cards (opt-in candidate): the
+// default plan of every card / model / mode has attn_pfx off and its bitsKey / logLine / overrides are those of the plan without
+// the flag; "1" (any value but "0" / "") turns it on in every cell and moves nothing but this flag, with no ignored note; "0" /
+// "" keep it off; a profile row forced on turns it on everywhere, "0" still turns it off. Fails to build before the change (no
+// Flags::attn_pfx, EnvValues::attn_pfx, Target::attn_pfx_profile, device::Profile::attn_pfx_f16r).
+static void testAttnPfxFlag() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    for (const CardFake& c : k_cards) NCHECK(!c.prof.attn_pfx_f16r, "attn_pfx: device row {} is on (want opt-in: off on every card)", c.name);
+    std::size_t cells = 0, on_env = 0;
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const nu::Plan d = pl(t, mode, {});
+                ++cells;
+                NCHECK(!d.flags.attn_pfx, "attn_pfx default {} {} {}: on (want off: opt-in)", c.name, model, mode);
+                for (const char* v : {"0", ""}) {
+                    const nu::Plan z = pl(t, mode, {{"ATTN_PFX", v}});
+                    NCHECK(!z.flags.attn_pfx && z.bitsKey() == d.bitsKey() && nu::logLine(z) == nu::logLine(d) && z.overrides == d.overrides &&
+                               z.ignored.empty(),
+                           "attn_pfx {} {} {}: WHIRL_ATTN_PFX='{}' = the default plan", c.name, model, mode, v);
+                }
+                for (const char* v : {"1", "x"}) {
+                    const nu::Plan o = pl(t, mode, {{"ATTN_PFX", v}});
+                    NCHECK(o.flags.attn_pfx, "attn_pfx {} {} {}: WHIRL_ATTN_PFX='{}' off", c.name, model, mode, v);
+                    if (std::string_view(v) == "1") on_env += o.flags.attn_pfx;
+                    nu::Plan oa = o;
+                    oa.flags.attn_pfx = false;
+                    NCHECK(oa.bitsKey() == d.bitsKey() && o.overrides == d.overrides && o.lossy_override == d.lossy_override && o.ignored.empty(),
+                           "attn_pfx {} {} {}: WHIRL_ATTN_PFX='{}' moves only the attn_pfx flag", c.name, model, mode, v);
+                    NCHECK(o.bitsKey() != d.bitsKey(), "attn_pfx {} {} {}: the arms default / ='{}' have different keys", c.name, model, mode, v);
+                }
+                nu::Target tp = t;
+                tp.attn_pfx_profile = true;
+                NCHECK(pl(tp, mode, {}).flags.attn_pfx && !pl(tp, mode, {{"ATTN_PFX", "0"}}).flags.attn_pfx,
+                       "attn_pfx {} {} {}: profile row on -> on, WHIRL_ATTN_PFX=0 -> off", c.name, model, mode);
+            }
+    NCHECK(cells > 0 && on_env == cells, "attn_pfx: WHIRL_ATTN_PFX=1 on in {} of {} cells", on_env, cells);
+}
+
 static void testAttnI4pfFlag() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -2588,6 +2637,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testLsplitFlag();  // v0252-l2split (fails to build before the change: no attn_lsplit / parseLsplit)
     testAttnSxFlag();  // v0252-strixc2 (fails before the port: loadFlags never sets attn_sx)
     testAttnI4qkFlag();  // v0252-8sfp (fails before the port: loadFlags never sets attn_i4qk)
+    testAttnPfxFlag();  // v0252-attnlat (fails to build before the change: no Flags::attn_pfx / Target::attn_pfx_profile)
     testAttnI4pfFlag();  // v0252-8sattn3 (port: fails without the flag; round 3: fails while the gfx1151 row is off)
     testMoepGuwFlag();  // v0252-8smoe (B; fails to build before the change: no Flags::moep_guw / EnvValues::moep_guw)
     testDq4F8Flags();  // v0252-8sq4 (fails to build before the change: no Flags::dq4_order / dq4_min_keys, parseDq4MinKeys)

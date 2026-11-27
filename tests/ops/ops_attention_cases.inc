@@ -812,6 +812,144 @@ void testAttnI4pf() {
     }
 }
 
+// v0252-attnlat (PLAN V1-148): attn_pfx_f16r (attn_prefill_wmma with all 13 K / V loads of a key step in one clause; same
+// arguments, grid, block and bits; 32-bit byte offsets). (1) attnPfxPick: off without the flag or the kernel; on only for a
+// known K / V array below 4 GiB; else guarded. (2) chooseAttnPrefill with attn_pfx_on: the one-range KG-3 copy takes it in
+// place of attn_pwf (guard size dq_rows x row bytes) and the f16 cache read in place takes it in place of attn_prefill_wmma
+// (guard size AttnPrefillProblem::kv_bytes), every other step / grid / block / head range unchanged; ranged series (attn_pws),
+// int4 (attn_i4qk), attn_sx, attn_kx, attn_kg and q8 KV read in place never take it; the guard keeps attn_prefill_wmma and
+// sets pfx_guarded. (3) flag off, or no kernel in the object (gfx1201): exactly the plan without the flag, pfx_guarded false.
+// Fails to build before the change (no attnPfxPick / attn_pfx_on / AttnKernels::attn_pfx / kv_bytes / pfx_guarded).
+void testAttnPfx() {
+    static_assert(ops::attnPfxPick(false, true, 1u << 20) == ops::PfxPick::off);
+    static_assert(ops::attnPfxPick(true, false, 1u << 20) == ops::PfxPick::off);
+    static_assert(ops::attnPfxPick(true, true, 1u << 20) == ops::PfxPick::on);
+    static_assert(ops::attnPfxPick(true, true, ops::kAttnPfxMaxBytes - 1) == ops::PfxPick::on);
+    static_assert(ops::attnPfxPick(true, true, ops::kAttnPfxMaxBytes) == ops::PfxPick::guarded);
+    static_assert(ops::attnPfxPick(true, true, 0) == ops::PfxPick::guarded);
+    static_assert(ops::kAttnPfxMaxBytes == 4294967296ull);
+    auto same = [](const ops::AttnPrefillPlan& a, const ops::AttnPrefillPlan& b, const char* fa, const char* fb) {
+        bool ok = a.steps.size() == b.steps.size() && !a.steps.empty();
+        for (std::size_t i = 0; ok && i < a.steps.size(); ++i) {
+            const ops::AttnStep &x = a.steps[i], &y = b.steps[i];
+            ok = x.op == y.op && x.grid.x == y.grid.x && x.grid.y == y.grid.y && x.grid.z == y.grid.z && x.block.x == y.block.x && x.head0 == y.head0 &&
+                 x.from_copy == y.from_copy && x.ranged == y.ranged && x.r0 == y.r0 && x.r1 == y.r1;
+            if (ok && x.op == ops::AttnStep::Op::attn) ok = nameOf(x.f) == fa && nameOf(y.f) == fb;
+            if (ok && x.op != ops::AttnStep::Op::attn) ok = x.f == y.f;
+        }
+        return ok;
+    };
+    // (2) the KG-3 copy (Swift 24 / 4 heads, q8h keys dequantized into the scratch), the 8060S-like table
+    ops::AttnPrefillProblem p;
+    p.n = 512;
+    p.head_dim = 256;
+    p.n_head = 24;
+    p.n_head_kv = 4;
+    p.scale = 1.0f / 16.0f;
+    p.kv_q8 = true;
+    p.dq_rows = 8192;
+    p.dq_ptab = true;
+    p.dq_st_ml = true;
+    ops::AttnPrefillFlags pf;
+    pf.attn_pfx_on = true;
+    kn::KernelTable k = attnTable(true, true, true, false);
+    k.attn_pfx = tag("attn_pfx_f16r");
+    {
+        const auto a = ops::chooseAttnPrefill(p, {}, k), b = ops::chooseAttnPrefill(p, pf, k);
+        CHECK(same(a, b, "attn_pwf", "attn_pfx_f16r") && !a.pfx_guarded && !b.pfx_guarded);
+    }
+    p.pos0 = 129166 - 2048;  // the Swift 129k cell: n 2048 at L 129166, one range
+    p.n = 2048;
+    p.dq_rows = 131072;
+    CHECK(same(ops::chooseAttnPrefill(p, {}, k), ops::chooseAttnPrefill(p, pf, k), "attn_pwf", "attn_pfx_f16r"));
+    p.pos0 = 200000;  // head ranges (n 4096 x 204096 keys > 4096 x 128k: several launches), still one range
+    p.n = 4096;
+    p.dq_rows = 204800;
+    CHECK(same(ops::chooseAttnPrefill(p, {}, k), ops::chooseAttnPrefill(p, pf, k), "attn_pwf", "attn_pfx_f16r"));
+    CHECK(ops::chooseAttnPrefill(p, pf, k).steps.size() >= 3);  // dq + >= 2 head-range launches
+    p.pos0 = 32768;
+    // the guard on the copy: dq_rows x 4 x 256 x 2 bytes; 2097152 rows = exactly 4 GiB -> attn_pwf kept, said
+    p.dq_rows = 2097152;
+    {
+        const auto a = ops::chooseAttnPrefill(p, {}, k), b = ops::chooseAttnPrefill(p, pf, k);
+        CHECK(same(a, b, "attn_pwf", "attn_pwf") && b.pfx_guarded && !a.pfx_guarded);
+    }
+    p.dq_rows = 2097151;  // one row less: below 4 GiB
+    CHECK(same(ops::chooseAttnPrefill(p, {}, k), ops::chooseAttnPrefill(p, pf, k), "attn_pwf", "attn_pfx_f16r"));
+    // the ranged series (keys past the scratch): attn_pws, never the one-launch kernel
+    p.pos0 = 20000;
+    p.n = 512;
+    p.dq_rows = 8192;
+    {
+        const auto a = ops::chooseAttnPrefill(p, {}, k), b = ops::chooseAttnPrefill(p, pf, k);
+        CHECK(same(a, b, "attn_pws", "attn_pws") && !b.pfx_guarded);
+    }
+    p.pos0 = 0;
+    // int4 (fast) on the copy keeps the int4 kernels
+    {
+        kn::KernelTable ki = k;
+        ki.attn_pwf_i4 = tag("attn_pwf_i4");
+        ki.attn_pws_i4 = tag("attn_pws_i4");
+        ops::AttnPrefillFlags i4 = pf, i4o;
+        i4.attn_i4qk_on = true;
+        i4o.attn_i4qk_on = true;
+        CHECK(same(ops::chooseAttnPrefill(p, i4o, ki), ops::chooseAttnPrefill(p, i4, ki), "attn_pwf_i4", "attn_pwf_i4"));
+    }
+    // attn_sx (balance, where the plan turns it on) keeps attn_sx
+    {
+        kn::KernelTable ks = k;
+        ks.attn_sx2 = tag("attn_sx2");
+        ops::AttnPrefillFlags sx = pf, sxo;
+        sx.attn_sx_on = true;
+        sxo.attn_sx_on = true;
+        CHECK(same(ops::chooseAttnPrefill(p, sxo, ks), ops::chooseAttnPrefill(p, sx, ks), "attn_sx2", "attn_sx2"));
+    }
+    // (3) no kernel in the object: the plan without the flag
+    {
+        kn::KernelTable kz = k;
+        kz.attn_pfx = nullptr;
+        const auto b = ops::chooseAttnPrefill(p, pf, kz);
+        CHECK(same(ops::chooseAttnPrefill(p, {}, kz), b, "attn_pwf", "attn_pwf") && !b.pfx_guarded);
+    }
+    // (2) the f16 cache read in place (precise: f16 KV, no scratch), a table without attn_kx
+    p.kv_q8 = false;
+    p.dq_ptab = false;
+    p.dq_st_ml = false;
+    p.dq_rows = 0;
+    kn::KernelTable kc = k;
+    kc.attn_kx = nullptr;
+    p.kv_bytes = 512ull << 20;  // one K array of 512 MiB
+    {
+        const auto a = ops::chooseAttnPrefill(p, {}, kc), b = ops::chooseAttnPrefill(p, pf, kc);
+        CHECK(same(a, b, "attn_prefill_wmma", "attn_pfx_f16r") && !b.pfx_guarded);
+    }
+    for (const std::uint64_t bytes : {0ull, ops::kAttnPfxMaxBytes, ops::kAttnPfxMaxBytes * 3}) {  // unknown / 4 GiB / 12 GiB
+        p.kv_bytes = bytes;
+        const auto b = ops::chooseAttnPrefill(p, pf, kc);
+        CHECK(same(ops::chooseAttnPrefill(p, {}, kc), b, "attn_prefill_wmma", "attn_prefill_wmma") && b.pfx_guarded);
+    }
+    p.kv_bytes = 512ull << 20;
+    // attn_kx in the object (the f16 cache takes attn_kx): unchanged, nothing guarded
+    {
+        const auto b = ops::chooseAttnPrefill(p, pf, k);
+        CHECK(same(ops::chooseAttnPrefill(p, {}, k), b, "attn_kx", "attn_kx") && !b.pfx_guarded);
+    }
+    // attn_kg (the gfx1201 table, no attn_pfx there anyway): unchanged
+    {
+        kn::KernelTable kg = attnTable(false, false, false, true);
+        kg.attn_pfx = tag("attn_pfx_f16r");
+        const auto a = ops::chooseAttnPrefill(p, {}, kg), b = ops::chooseAttnPrefill(p, pf, kg);
+        CHECK(a.steps.size() == b.steps.size() && !b.pfx_guarded);
+        for (std::size_t i = 0; i < a.steps.size() && i < b.steps.size(); ++i) CHECK(a.steps[i].f == b.steps[i].f);
+    }
+    // q8 KV read in place (no scratch: the q8 attn_prefill_wmma variant of the table): never the f16 one-clause kernel
+    p.kv_q8 = true;
+    {
+        const auto b = ops::chooseAttnPrefill(p, pf, kc);
+        CHECK(same(ops::chooseAttnPrefill(p, {}, kc), b, "attn_prefill_wmma", "attn_prefill_wmma") && !b.pfx_guarded);
+    }
+}
+
 // v0252-strixc2 (PLAN V1-09): the balance gfx1151 prefill attention attn_sx<NP> (strix-llama.cpp fattn-rdna35, not bitwise).
 // (1) attnSxFor: NP = the first of 8 / 4 / 2 dividing the GQA ratio (fattn-rdna35.cu:863-870), only when it also divides
 // the heads of the launch, head_dim 256, and the code object has that NP's kernel; exhaustive (never another NP's kernel).
