@@ -94,7 +94,10 @@ struct MoepFqFetch {
 //       them; a memory clobber per chunk keeps the fragment reads in the loop): the barrier phase;
 //   5 = 1 + one A fragment (a1 = a0) and one B fragment (i > 0 reuse i = 0) per kk + no global loads for k0 >= BK: the skeleton.
 // Only the kt-only object compiled with -DWHIRL_FQ_ABL_PROTOS=1 instantiates ABL 1 / 5 (entries at the end of this file).
-template <int BK, int GR, int BNMAX, int ABL = 0>
+// UW (v0252-gemmlat round 9, bench-only prototype g64n64k64u; false = the product): the wave index through readfirstlane, so the
+// compiler knows it is wave-uniform (every lane of a wave has the same threadIdx.x / 32: same value, same bits) and `wn >= live` /
+// `j < live` become scalar branches instead of exec-mask regions around the WMMAs (shipped loop: 8 regions per K chunk).
+template <int BK, int GR, int BNMAX, int ABL = 0, bool UW = false>
 __device__ void moepfq_gu_impl(const uint8_t *__restrict__ W1, const uint8_t *__restrict__ W2, uint64_t row_bytes, int ff,
                                const _Float16 *__restrict__ Xall, _Float16 *__restrict__ Aout, int ncols,
                                const int4 *__restrict__ tiles, const int *__restrict__ n_tiles) {
@@ -114,7 +117,9 @@ __device__ void moepfq_gu_impl(const uint8_t *__restrict__ W1, const uint8_t *__
     const _Float16 *X = Xall + (size_t)tl.y * ncols;
     __shared__ _Float16 As[BM][LD];
     __shared__ _Float16 Bs[BNMAX][LD];
-    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
+    const int lane = threadIdx.x % WARP;
+    int wid = threadIdx.x / WARP;
+    if constexpr (UW) wid = __builtin_amdgcn_readfirstlane(wid);
     const int wm = wid % WM, wn = wid / WM;
     Fetch F;
 #pragma unroll
@@ -373,6 +378,19 @@ MOEPFQDN_ENTRY(m128w8n128k64, 128, 8, 128, 64)
 // Compiled ONLY with -DWHIRL_FQ_GU128_PROTO=1 (kt-only object; an extra kernel moves the product object layout).
 #ifdef WHIRL_FQ_GU128_PROTO
 MOEPFQGU_ENTRY(g64n64k128, 64, 64, 128)
+#endif
+// v0252-gemmlat round 9 (PLAN V1-53; bench-only kt prototype, NOT in kernels::kMoepGu, no product path): gemm_moepfqgu_g64n64k64u =
+// the shipped g64n64k64 with UW (wave index through readfirstlane): the same grid, tiles, LDS, WMMA chain and bits. Compiled ONLY
+// with -DWHIRL_FQ_GUU_PROTO=1 (kt-only object).
+#ifdef WHIRL_FQ_GUU_PROTO
+#define MOEPFQGU_U_ENTRY(NAME, GR, BN, BK)                                                                           \
+    extern "C" __global__ void __launch_bounds__(256)                                                               \
+        gemm_moepfqgu_##NAME##_mxfp4(const uint8_t *W1, const uint8_t *W2, uint64_t row_bytes, int ff,              \
+                                     const _Float16 *X, _Float16 *A, int ncols, const int4 *tiles, const int *n_tiles) { \
+        moepfq_gu_impl<BK, GR, BN, 0, true>(W1, W2, row_bytes, ff, X, A, ncols, tiles, n_tiles);                    \
+    }
+MOEPFQGU_U_ENTRY(g64n64k64u, 64, 64, 64)
+#undef MOEPFQGU_U_ENTRY
 #endif
 #undef MOEPFQGU_ENTRY
 #undef MOEPFQDN_ENTRY
