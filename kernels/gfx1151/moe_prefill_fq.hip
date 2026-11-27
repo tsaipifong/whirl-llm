@@ -44,7 +44,7 @@ template <int BK, int BMA, int BNMAX>
 struct MoepFqFetch {
     static constexpr int NTH = 256, SBR = BK / 32, GPR = BK / 8;
     static constexpr int A_SB = BMA * SBR / NTH, B_PER = BNMAX * GPR / NTH;
-    static_assert(BK == 32 || BK == 64, "BK");
+    static_assert(BK == 32 || BK == 64 || BK == 128, "BK");  // 128: v0252-gemmlat round 7 bench-only gate + up prototype
     static_assert(A_SB >= 1 && BMA * SBR % NTH == 0 && BNMAX * GPR % NTH == 0, "one lane per sub-block / tile threads");
     const uint8_t *arow[A_SB];
     const _Float16 *brow[B_PER];
@@ -366,6 +366,14 @@ MOEPFQDN_ENTRY(m128w4n32k64, 128, 4, 32, 64)
 MOEPFQDN_ENTRY(m128w4n64k64, 128, 4, 64, 64)
 MOEPFQDN_ENTRY(m128w4n128k64, 128, 4, 128, 64)
 MOEPFQDN_ENTRY(m128w8n128k64, 128, 8, 128, 64)
+// v0252-gemmlat round 7 (PLAN V1-53, kernel SOP step 4; bench-only kt prototype, NOT in kernels::kMoepGu, no product path):
+// gemm_moepfqgu_g64n64k128 = the shipped g64n64k64 with BK 128 - one decode -> barrier -> store -> barrier round per 128 columns
+// (32 WMMA per wave per round instead of 16), the same tile (GR 64, BN 64), grid, per-row decode and store work and WMMA chain
+// (bitwise == g64n64k64 == gemm_moegu); LDS As[128][136] + Bs[64][136] = 52224 B (2 resident blocks per WGP instead of 4).
+// Compiled ONLY with -DWHIRL_FQ_GU128_PROTO=1 (kt-only object; an extra kernel moves the product object layout).
+#ifdef WHIRL_FQ_GU128_PROTO
+MOEPFQGU_ENTRY(g64n64k128, 64, 64, 128)
+#endif
 #undef MOEPFQGU_ENTRY
 #undef MOEPFQDN_ENTRY
 
