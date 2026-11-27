@@ -929,3 +929,43 @@ void testOpsW4sGains() {
 }
 
 }  // namespace
+
+// v0252-w4a4p (PLAN V1-144 round 1): ops::w4a4Takes - the PRODUCT W4A4 iu4 GEMM runs a matrix only when the plan's iu4 bit is
+// set (WHIRL_W4A4=1: fast, gfx1151, dense MXFP4), the matrix is an MXFP4 trunk matrix (not the output head) of whole
+// superblocks (ncols % 256: the sim arm's own rule) and whole 128-row tiles (w4q_gemm has no row edge), and the code object
+// has all four kernels (w4q_wconv_mxfp4, w4q_quant_x, w4q_gemm and the gain-terms kernel of the reference arm). Anything
+// else: false (the caller keeps the sim path of the same value, or today's path when the bit is off). Fails to build before
+// the change (no ops::w4a4Takes / MatmulKernels::w4q_*).
+void testOpsW4a4Takes() {
+    static const kn::KernelTable kb = gemmTable(true, true, false);
+    const auto kp = std::make_unique<kn::KernelTable>(kb);
+    kn::KernelTable& k = *kp;
+    CHECK(k.w4q_wc == nullptr && k.w4q_qx == nullptr && k.w4q_gemm == nullptr);
+    auto gate = mat(GgmlType::mxfp4, 17408, 5120);
+    gate.row_bytes = 5120 / 256 * 136;
+    CHECK(!ops::w4a4Takes(gate, true, k));  // no kernels in the table (every non-gfx1151 object)
+    k.w4q_wc = tag("w4q_wconv_mxfp4");
+    k.w4q_qx = tag("w4q_quant_x");
+    k.w4q_gemm = tag("w4q_gemm");
+    CHECK(!ops::w4a4Takes(gate, true, k));  // no gain-terms kernel: the reference arm wga cannot be computed
+    k.w4s_gterms = tag("w4s_gain_terms");
+    CHECK(ops::w4a4Takes(gate, true, k));
+    CHECK(!ops::w4a4Takes(gate, false, k));  // the switch off: never (today's paths)
+    // the Swift-1.5 27B dense trunk shapes (rows x K): attn q / k / v / out, GDN qkv / z / out, ffn gate / up / down
+    const std::uint32_t shapes[][2] = {{12288, 5120}, {1024, 5120}, {6144, 5120}, {5120, 6144}, {10240, 5120}, {5120, 17408}, {17408, 5120}};
+    for (const auto& s : shapes) {
+        auto m = mat(GgmlType::mxfp4, s[0], s[1]);
+        m.row_bytes = s[1] / 256 * 136;
+        CHECK(ops::w4a4Takes(m, true, k));
+    }
+    auto head = gate;
+    head.head = true;
+    CHECK(!ops::w4a4Takes(head, true, k));
+    auto odd_rows = mat(GgmlType::mxfp4, 17408 + 64, 5120);
+    odd_rows.row_bytes = gate.row_bytes;
+    CHECK(!ops::w4a4Takes(odd_rows, true, k));
+    auto odd_k = mat(GgmlType::mxfp4, 1024, 5120 + 128);
+    odd_k.row_bytes = (5120 + 128) / 32 * 17;
+    CHECK(!ops::w4a4Takes(odd_k, true, k));
+    for (const GgmlType ty : {GgmlType::f16, GgmlType::q4_k, GgmlType::q8_0, GgmlType::f32}) CHECK(!ops::w4a4Takes(mat(ty, 17408, 5120), true, k));
+}

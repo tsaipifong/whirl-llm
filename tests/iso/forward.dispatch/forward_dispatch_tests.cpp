@@ -30,6 +30,7 @@ struct Launch {
     Dim3 grid, block;
 };
 void recordLaunches(bool on);
+void recordAllocs(bool on);  // v0252-w4a4p: alloc() hands out fake addresses while on
 std::vector<Launch> recordedLaunches();
 // v0252-f1arg3: the stream and the registered 8-byte argument word of each recorded launch
 struct LaunchCtx {
@@ -59,6 +60,8 @@ struct DispatchProbe : q::Context {
     using q::Context::xq_n;
     using q::Context::xq_src;
     using q::Context::w4s_gains;  // v0252-w4a4k2 round 4
+    using q::Context::w4qGemm;  // v0252-w4a4p
+    using q::Context::w4q_mats;
 };
 
 whirl::hip::Function fn(std::uintptr_t i) { return reinterpret_cast<whirl::hip::Function>(i); }
@@ -269,6 +272,63 @@ void testW4sGainLaunch() {
         }
     }
 }
+
+// v0252-w4a4p (PLAN V1-144 round 1): Context::w4qGemm, the product W4A4 iu4 GEMM. First call of a matrix (reference gains
+// cached): w4q_wconv_mxfp4 on the MXFP4 bytes (arg 0 = w.ptr) with the reference arm's tensor gains (arg 6), then
+// w4q_quant_x on the f16 input (arg 0 = x16in) and w4q_gemm on the converted copy (arg 0 = the cached wq), grid
+// (ceil(n / 128), rows / 128) x 256. Second call: no conversion (the copy is cached), the same two launches.
+void testW4qLaunch() {
+    auto c = std::make_unique<DispatchProbe>();
+    c->k.w4q_wc = fn(0x90);
+    c->k.w4q_qx = fn(0x91);
+    c->k.w4q_gemm = fn(0x92);
+    c->k.w4s_gterms = fn(0x93);
+    q::Mat w;
+    w.ty = GgmlType::mxfp4;
+    w.nrows = 17408;
+    w.ncols = 5120;
+    w.row_bytes = 5120 / 256 * 136;
+    w.ptr = 0x10000000;
+    const whirl::hip::DevPtr gains = 0x50000000;
+    c->w4s_gains.push_back({w.ptr, 0, 1, gains});  // the reference arm's tensor gains, cached: no device call
+    const whirl::hip::DevPtr x16in = 0x30000000, y = 0x40000000;
+    whirl::hip::DevPtr wq = 0;
+    fake::recordAllocs(true);  // the converted copy and the activation buffer come from alloc()
+    for (int call = 0; call < 2; ++call) {
+        fake::recordLaunches(true);
+        fake::recordArgWord(fn(0x90), call == 0 ? 0 : 6);
+        fake::recordArgWord(fn(0x91), 0);
+        fake::recordArgWord(fn(0x92), 0);
+        c->w4qGemm(w, x16in, y, 2000, 0);
+        const auto l = fake::recordedLaunches();
+        const auto ctx = fake::recordedLaunchCtx();
+        fake::recordLaunches(false);
+        const std::size_t want = call == 0 ? 3 : 2;
+        ISO_CHECK(l.size() == want && ctx.size() == want);
+        if (l.size() != want || ctx.size() != want) continue;
+        const std::size_t o = call == 0 ? 1 : 0;
+        if (call == 0) {
+            ISO_CHECK(l[0].f == fn(0x90) && ctx[0].word == w.ptr);
+            ISO_CHECK(c->w4q_mats.size() == 1 && c->w4q_mats[0].w == w.ptr);
+            if (!c->w4q_mats.empty()) wq = c->w4q_mats[0].wq;
+        }
+        ISO_CHECK(l[o].f == fn(0x91) && ctx[o].word == x16in);
+        ISO_CHECK(l[o + 1].f == fn(0x92) && ctx[o + 1].word == wq && wq != 0);
+        ISO_CHECK(l[o + 1].grid.x == (2000 + 127) / 128 && l[o + 1].grid.y == 17408 / 128 && l[o + 1].block.x == 256);
+    }
+    ISO_CHECK(c->w4q_mats.size() == 1);
+    // the conversion takes the gains: arg 6 of w4q_wconv_mxfp4 on a new matrix
+    q::Mat w2 = w;
+    w2.ptr = 0x11000000;
+    c->w4s_gains.push_back({w2.ptr, 0, 1, gains + 0x1000});
+    fake::recordLaunches(true);
+    fake::recordArgWord(fn(0x90), 6);
+    c->w4qGemm(w2, x16in, y, 128, 1);
+    const auto ctx = fake::recordedLaunchCtx();
+    fake::recordLaunches(false);
+    ISO_CHECK(!ctx.empty() && ctx[0].word == gains + 0x1000);
+    fake::recordAllocs(false);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -281,6 +341,7 @@ int main(int argc, char** argv) {
                      {"has_tiled_fp8", testHasTiledFp8},
                      {"norm_and_elementwise_launches", testNormAndElementwiseLaunches},
                      {"gemm_tail_launches", testGemmTailLaunches},  // v0252-pp2k2
-                     {"w4s_gain_launch", testW4sGainLaunch}},  // v0252-w4a4k2 round 4
+                     {"w4s_gain_launch", testW4sGainLaunch},  // v0252-w4a4k2 round 4
+                     {"w4q_launch", testW4qLaunch}},  // v0252-w4a4p
                     argc, argv);
 }

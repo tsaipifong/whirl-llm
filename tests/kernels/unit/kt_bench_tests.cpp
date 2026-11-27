@@ -10,6 +10,7 @@
 #include "../kt_ws4s.h"  // v0252-8sws: the ws4s split-count bench table
 #include "../kt_w4a4p.h"  // v0252-w4a4: the W4A4 speed probe's int4 packing, quantizer, references, shape table, projection
 #include "../../../kernels/shared/gemm_w4a4_sim.h"  // v0252-w4a4k2: the W4A4 fake-quant arm's math (host half)
+#include "../../../kernels/shared/gemm_w4a4_prod.h"  // v0252-w4a4p: the product W4A4 iu4 GEMM's packing / scales / fold (host half)
 #include "../../../kernels/gfx1151/attn_ws4_index.h"  // ws4::block_range / block_range_ns (host-includable)
 #include "whirl/device_profile.h"
 #include "whirl/kernels_abi.h"
@@ -1672,6 +1673,123 @@ static void test_w4s_gain_terms() {
           num(static_cast<double>(bad)));
 }
 
+// ---------------------------------------------------------------- w4q (v0252-w4a4p, PLAN V1-144 round 1: the PRODUCT path)
+// The product W4A4 iu4 GEMM (kernels/shared/gemm_w4a4_prod.h, kernels w4q_wconv_mxfp4 / w4q_quant_x / w4q_gemm, WHIRL_W4A4=1)
+// must use exactly the integer codes and f32 scales of the accepted sim arm WHIRL_W4A4_SIM=wga (gemm_w4a4_sim.h: grid w,
+// tensor gain g, absmax activations a) and the K1 probe's verified packing (kt_w4a4p.h packRow / mxRowToI4 / quantRow /
+// refFoldF32). Fails to build before the change (no gemm_w4a4_prod.h).
+static std::vector<std::uint8_t> w4qMx(int k, std::uint32_t seed, int e0, int espan) {
+    std::vector<std::uint8_t> mx(static_cast<std::size_t>(k / 256 * 136));
+    std::uint32_t s = seed;
+    auto rnd = [&]() { return s = s * 1664525u + 1013904223u, s >> 8; };
+    for (int u = 0; u < k / 256; ++u) {
+        for (int ib = 0; ib < 8; ++ib)
+            mx[static_cast<std::size_t>(u * 136 + ib)] = static_cast<std::uint8_t>(e0 + static_cast<int>(rnd() % static_cast<std::uint32_t>(espan)));
+        for (int j = 0; j < 128; ++j) mx[static_cast<std::size_t>(u * 136 + 8 + j)] = static_cast<std::uint8_t>(rnd());
+    }
+    return mx;
+}
+
+static void test_w4q_weights() {
+    const int k = 1024;
+    const std::vector<std::uint8_t> mx = w4qMx(k, 4242, 100, 40);
+    std::vector<std::uint8_t> q(k / 2), pq(k / 2);
+    std::vector<float> s(k / 32), ps(k / 32);
+    w4a4p::mxRowToI4(mx.data(), k, pq.data(), ps.data());
+    std::size_t bad = 0;
+    for (const float gain : {1.0f, 0.9375f, 0.93712f, 1.0714f}) {
+        w4q_wconv_row_host(mx.data(), k, gain, q.data(), s.data());
+        bad += q != pq;  // the codes do not depend on the gain
+        for (int b = 0; b < k / 32; ++b) {
+            const float want = ps[static_cast<std::size_t>(b)] * gain;
+            bad += std::memcmp(&want, &s[static_cast<std::size_t>(b)], 4) != 0;
+        }
+    }
+    check("w4q: packed weight codes == kt_w4a4p mxRowToI4 byte for byte; scale == mxI4Scale(e) x gain bitwise (4 gains)", bad == 0,
+          num(static_cast<double>(bad)));
+    // every packed nibble is the sim's level of the same MXFP4 value (natural K order: value k of a sub-block at nibble k)
+    bad = 0;
+    w4q_wconv_row_host(mx.data(), k, 1.0f, q.data(), s.data());
+    for (int b = 0; b < k / 32; ++b) {
+        const std::uint8_t* qs = mx.data() + static_cast<std::size_t>(b / 8) * 136 + 8 + 16 * (b % 8);
+        for (int i = 0; i < 32; ++i) bad += w4q_nib(q.data() + static_cast<std::size_t>(b) * 16, i) != w4s_wlevel(w4q_code(qs, i));
+    }
+    check("w4q: nibble k of a block == w4s_wlevel(MXFP4 code k) of the sim (grid w)", bad == 0, num(static_cast<double>(bad)));
+    // the sim's weight (wga: f16(f32(level x s) x g)) vs the product's level x f32(s x g): <= one f16 rounding + one f32 rounding
+    bad = 0;
+    const float gain = 0.93712f;
+    std::vector<std::uint16_t> hs(k);
+    w4s_dequant_row_host(mx.data(), k, hs.data(), 0, gain);
+    w4q_wconv_row_host(mx.data(), k, gain, q.data(), s.data());
+    for (int i = 0; i < k; ++i) {
+        const double p = static_cast<double>(w4q_nib(q.data(), i)) * s[static_cast<std::size_t>(i / 32)];
+        const double h = w4s_h2f(hs[static_cast<std::size_t>(i)]);
+        bad += std::fabs(p - h) > (std::ldexp(1.0, -11) + std::ldexp(1.0, -22)) * std::fabs(p) + std::ldexp(1.0, -25);  // + half an f16 subnormal ulp
+    }
+    check("w4q: product weight level x (s x g) == the sim's wga f16 weight within one f16 (relative, + 2^-25 subnormal) + two f32 roundings", bad == 0,
+          num(static_cast<double>(bad)));
+}
+
+static void test_w4q_acts() {
+    const int k = 1024;
+    const std::vector<float> x = w4sActRows(k, 31);
+    std::vector<std::uint16_t> xh(k);
+    for (int i = 0; i < k; ++i) xh[static_cast<std::size_t>(i)] = w4s_f2h(x[static_cast<std::size_t>(i)]);
+    std::vector<std::uint8_t> q(k / 2), pq(k / 2);
+    std::vector<float> s(k / 32), ps(k / 32);
+    w4q_quant_row_host(xh.data(), k, q.data(), s.data());
+    w4a4p::quantRow(x.data(), k, pq.data(), ps.data());
+    std::size_t bad = q != pq;
+    bad += std::memcmp(s.data(), ps.data(), s.size() * 4) != 0;
+    check("w4q: packed activation codes and steps == kt_w4a4p quantRow bitwise (zero, tie and outlier blocks)", bad == 0);
+    // the sim's activation (a: f16(q x d)) is the product's code x step rounded to f16, value by value
+    std::vector<std::uint16_t> sim(k);
+    w4s_quant_row_host(xh.data(), k, 0, sim.data());
+    bad = 0;
+    for (int i = 0; i < k; ++i)
+        bad += sim[static_cast<std::size_t>(i)] != w4s_f2h(static_cast<float>(w4q_nib(q.data(), i)) * s[static_cast<std::size_t>(i / 32)]);
+    check("w4q: f16(code x step) of the product == the sim's fake-quantized activation (w4s_quant_row_host, absmax) bitwise", bad == 0,
+          num(static_cast<double>(bad)));
+}
+
+static void test_w4q_fold() {
+    // the kernel's bitwise target (w4q_fold_host) == the probe's refFoldF32 (gain 1: the same scales); and vs the sim's f16
+    // dot (exact double sum of the wga f16 values) within 2^-10 + 2^-12 of sum |terms| (two f16 roundings per term + f32 sums)
+    const int k = 2048;
+    std::size_t bad = 0, badsim = 0;
+    double worst = 0;
+    for (std::uint32_t seed = 1; seed <= 8; ++seed) {
+        const std::vector<std::uint8_t> mx = w4qMx(k, 900 + seed, 116, 12);
+        const std::vector<float> x = w4sActRows(k, 70 + seed);
+        std::vector<std::uint16_t> xh(k);
+        for (int i = 0; i < k; ++i) xh[static_cast<std::size_t>(i)] = w4s_f2h(x[static_cast<std::size_t>(i)]);
+        std::vector<std::uint8_t> wq(k / 2), xq(k / 2);
+        std::vector<float> ws(k / 32), xs(k / 32);
+        w4q_wconv_row_host(mx.data(), k, 1.0f, wq.data(), ws.data());
+        w4q_quant_row_host(xh.data(), k, xq.data(), xs.data());
+        const float y = w4q_fold_host(wq.data(), ws.data(), xq.data(), xs.data(), k);
+        const float yp = w4a4p::refFoldF32(wq.data(), ws.data(), xq.data(), xs.data(), k);
+        bad += std::memcmp(&y, &yp, 4) != 0;
+        const float gain = 0.9375f + 0.001f * static_cast<float>(seed);
+        w4q_wconv_row_host(mx.data(), k, gain, wq.data(), ws.data());
+        const float yg = w4q_fold_host(wq.data(), ws.data(), xq.data(), xs.data(), k);
+        std::vector<std::uint16_t> wh(k), xs16(k);
+        w4s_dequant_row_host(mx.data(), k, wh.data(), 0, gain);
+        w4s_quant_row_host(xh.data(), k, 0, xs16.data());
+        double sim = 0, scale = 0;
+        for (int i = 0; i < k; ++i) {
+            const double t = static_cast<double>(w4s_h2f(wh[static_cast<std::size_t>(i)])) * w4s_h2f(xs16[static_cast<std::size_t>(i)]);
+            sim += t;
+            scale += std::fabs(t);
+        }
+        const double err = std::fabs(static_cast<double>(yg) - sim) / (scale > 0 ? scale : 1);
+        worst = std::max(worst, err);
+        badsim += !(scale > 0) || err > std::ldexp(1.0, -10) + std::ldexp(1.0, -12);
+    }
+    check("w4q: fold in the kernel's order == kt_w4a4p refFoldF32 bitwise (8 rows, K 2048)", bad == 0, num(static_cast<double>(bad)));
+    check("w4q: product fold (gain folded) == the sim wga f16 dot within 2^-10 + 2^-12 of sum |terms| (8 rows)", badsim == 0, "worst " + num(worst));
+}
+
 int main(int argc, char** argv) {
     std::string emit;
     for (int i = 1; i < argc; ++i)
@@ -1725,6 +1843,9 @@ int main(int argc, char** argv) {
         test_w4s_dot_vs_fold();
         test_w4s_grids();  // v0252-w4a4k2 round 2
         test_w4s_gain_terms();  // v0252-w4a4k2 round 3
+        test_w4q_weights();  // v0252-w4a4p
+        test_w4q_acts();
+        test_w4q_fold();
     } catch (const std::exception& e) {
         check(std::string("exception: ") + e.what(), false);
     }

@@ -879,6 +879,7 @@ void testFastOnlyOverrides() {
         {"ATTN_SX", 'L'},  // v0252-strixc2: attn_sx<NP> (strix fattn-rdna35), not bitwise: balance only (testAttnSxFlag)
         {"ATTN_I4QK", 'F'},  // v0252-8sfp: int4 Q.K^T prefill attention, not bitwise: fast only (testAttnI4qkFlag)
         {"W4A4_SIM", 'F'},  // v0252-w4a4k2: W4A4 fake-quant prefill GEMM arm (research), output changes: fast only (testW4a4SimFlag)
+        {"W4A4", 'F'},  // v0252-w4a4p: the product W4A4 iu4 prefill GEMM (= arm wga), output changes: fast only (testW4a4Flag)
         // v0252-8sq4 (F8): q4 KV decode attention switches, fast only (q4 KV exists only there; testDq4F8Flags). ORDER keeps the
         // partials (attn_dq4o), MINKEYS changes the partition (another combine order)
         {"DQ4_ORDER", 'F'}, {"DQ4_MINKEYS", 'F'},
@@ -2047,6 +2048,66 @@ static void testW4a4SimFlag() {
     NCHECK(pl(tq, "fast", {{"W4A4_SIM", "1"}}).flags.w4a4_sim == 0u, "w4a4_sim: a model without MXFP4 tensors -> off");
 }
 
+// v0252-w4a4p (PLAN V1-144 round 1): WHIRL_W4A4=1 = the PRODUCT W4A4 iu4 GEMM. Where the sim arm may run (fast, the 8060S,
+// a dense MXFP4 model) it sets Flags::w4a4_sim = w4a4_sim_wga | w4a4_iu4 (its reference arm + the kernel bit) and replaces any
+// WHIRL_W4A4_SIM value (one note); elsewhere off with one note; "0" / "" off without a note; anything else off with one note.
+// Exactly w4a4_sim moves (bitsKey differs where taken). Fails to build before the change (no parseW4a4 / w4a4_iu4 / EnvValues::w4a4).
+static void testW4a4Flag() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    NCHECK(nu::w4a4_iu4 == 0x10000u && nu::w4a4_sim_wga == 0x803u, "w4a4_iu4 bit 0x10000, reference arm wga = 0x803");
+    NCHECK(nu::parseW4a4Sim("wga") == std::optional<std::uint32_t>(nu::w4a4_sim_wga), "w4a4_sim_wga == parseW4a4Sim(wga)");
+    NCHECK(nu::parseW4a4("1") == std::optional<std::uint32_t>(nu::w4a4_sim_wga | nu::w4a4_iu4), "parseW4a4(1) = wga | iu4");
+    for (const char* v : {"0", ""}) NCHECK(nu::parseW4a4(v) == std::optional<std::uint32_t>(0u), "parseW4a4('{}') = 0", v);
+    for (const char* v : {"2", "on", "wga", " 1", "1 ", "true", "a"}) NCHECK(!nu::parseW4a4(v), "parseW4a4('{}') = invalid", v);
+    const std::uint32_t want_on = nu::w4a4_sim_wga | nu::w4a4_iu4;
+    std::size_t on_cells = 0;
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const nu::Plan d = pl(t, mode, {});
+                const bool can = std::string_view(mode) == "fast" && c.prof.numerics_8060s && std::string_view(model) == "swift";
+                const nu::Plan o = pl(t, mode, {{"W4A4", "1"}});
+                nu::Flags a = o.flags;
+                a.w4a4_sim = 0;
+                NCHECK(o.flags.w4a4_sim == (can ? want_on : 0u) && a == d.flags && o.lossy_override == d.lossy_override && o.overrides == d.overrides,
+                       "w4a4 {} {} {}: '1' -> {} (want {}), nothing else moves", c.name, model, mode, o.flags.w4a4_sim, can ? want_on : 0u);
+                NCHECK((o.bitsKey() != d.bitsKey()) == can, "w4a4 {} {} {}: changes bitsKey exactly where it is taken", c.name, model, mode);
+                std::size_t notes = 0;
+                for (const std::string& n : o.ignored) notes += n.rfind("WHIRL_W4A4=1 ignored", 0) == 0;
+                NCHECK(notes == (can ? 0u : 1u) && o.ignored.size() == d.ignored.size() + notes, "w4a4 {} {} {}: {} notes (want {})", c.name, model, mode,
+                       notes, can ? 0 : 1);
+                on_cells += can && o.flags.w4a4_sim == want_on;
+                // the product replaces a sim value (one note), never stacks with it
+                const nu::Plan both = pl(t, mode, {{"W4A4", "1"}, {"W4A4_SIM", "w1dram"}});
+                std::size_t sn = 0;
+                for (const std::string& n : both.ignored) sn += n.rfind("WHIRL_W4A4_SIM=w1dram ignored", 0) == 0;
+                NCHECK(both.flags.w4a4_sim == (can ? want_on : 0u) && sn == 1, "w4a4 {} {} {}: with WHIRL_W4A4_SIM=w1dram -> {} and one sim note ({})", c.name,
+                       model, mode, both.flags.w4a4_sim, sn);
+                for (const char* v : {"0", ""}) {
+                    const nu::Plan z = pl(t, mode, {{"W4A4", v}});
+                    NCHECK(z.flags == d.flags && z.bitsKey() == d.bitsKey() && z.ignored == d.ignored, "w4a4 {} {} {}: '{}' = off, no note", c.name, model,
+                           mode, v);
+                }
+                const nu::Plan bad = pl(t, mode, {{"W4A4", "on"}});
+                std::size_t bn = 0;
+                for (const std::string& n : bad.ignored) bn += n.rfind("WHIRL_W4A4=on ignored", 0) == 0;
+                NCHECK(bad.flags == d.flags && bn == 1, "w4a4 {} {} {}: an invalid value = off + one note", c.name, model, mode);
+                // the switch off keeps today's sim values (WHIRL_W4A4=0 + a sim value == the sim value alone)
+                const nu::Plan so = pl(t, mode, {{"W4A4", "0"}, {"W4A4_SIM", "wga"}}), sa = pl(t, mode, {{"W4A4_SIM", "wga"}});
+                NCHECK(so.flags == sa.flags && so.bitsKey() == sa.bitsKey(), "w4a4 {} {} {}: '0' leaves WHIRL_W4A4_SIM alone", c.name, model, mode);
+            }
+    NCHECK(on_cells == 1, "w4a4 taken in {} cells (want 1: 8060S fast swift)", on_cells);
+    nu::Target tq = target(card("8060s"), "swift", false);
+    tq.has_mxfp4 = false;
+    NCHECK(pl(tq, "fast", {{"W4A4", "1"}}).flags.w4a4_sim == 0u, "w4a4: a model without MXFP4 tensors -> off");
+}
+
 // v0252-8sattn3 (PLAN V1-148): the plan flag attn_i4pf picks the second int4 form of the fast gfx1151 prefill attention
 // (attn_prefill_wmma_i4p / _s_i4p: int4 Q codes in LDS + K / V register prefetch, bit-identical to attn_prefill_wmma_i4 /
 // _s_i4). It can only be on where attn_i4qk is on (fast, 8060S, MXFP4). Round 3 (default flip): device::Profile::
@@ -2658,6 +2719,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testAttnSxFlag();  // v0252-strixc2 (fails before the port: loadFlags never sets attn_sx)
     testAttnI4qkFlag();  // v0252-8sfp (fails before the port: loadFlags never sets attn_i4qk)
     testW4a4SimFlag();  // v0252-w4a4k2 (fails to build before the change: no Flags::w4a4_sim / parseW4a4Sim)
+    testW4a4Flag();  // v0252-w4a4p (fails to build before the change: no parseW4a4 / w4a4_iu4 / EnvValues::w4a4)
     testAttnI4pfFlag();  // v0252-8sattn3 (port: fails without the flag; round 3: fails while the gfx1151 row is off)
     testMoepGuwFlag();  // v0252-8smoe (B; fails to build before the change: no Flags::moep_guw / EnvValues::moep_guw)
     testDq4F8Flags();  // v0252-8sq4 (fails to build before the change: no Flags::dq4_order / dq4_min_keys, parseDq4MinKeys)

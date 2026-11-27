@@ -236,6 +236,7 @@ int main() {
     testOpsGemmTail();  // v0252-pp2k2 (fails to build before F1: no planGemmF16 / GemmFlags::gemm_tail)
     testOpsGemmW4s();  // v0252-w4a4k2 (fails to build before the change: no GemmFlags::w4s_w / MatmulKernels::w4s_dq)
     testOpsW4sGains();  // v0252-w4a4k2 round 3 (fails to build before the change: no ops::w4sGains)
+    testOpsW4a4Takes();  // v0252-w4a4p (fails to build before the change: no ops::w4a4Takes / MatmulKernels::w4q_*)
     testAttnDecode();
     testAttnDecodeWs4r();  // v0252-ws4r97b (fails before phase 2: stub profile rows 0, chooseAttnDecode never swaps)
     testAttnDecodeLsplit();  // v0252-l2split (fails to build before the change: no lsplitCount / attn_lsplit)
