@@ -1013,23 +1013,28 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
             }
         }
     } else {
-    int dlr = 0;  // RL: the page delta of tile k0, read during step k0 - FA_K
-    if constexpr (RL) dlr = kv_delta(kv, tb, k_beg);
+    // RL: the page delta of tile k0, read during step k0 - FA_K; block-uniform, kept in an SGPR (readfirstlane): no VGPR held
+    // across the step (round 2 register budget, progress\v0252-attnlat.HANDOFF.md R2-1)
+    int dlr = 0;
+    if constexpr (RL) dlr = __builtin_amdgcn_readfirstlane(kv_delta(kv, tb, k_beg));
     for (int k0 = k_beg; k0 < k_end; k0 += FA_K) {
         __syncthreads();
         if (MODE != 1 || k0 == 0) {
             if constexpr (RL) {
+                // 32-bit byte offsets from the uniform K / V base (global_load v, v_off, s[base]): one VGPR per address instead
+                // of a 64-bit pair. No clamp of the row: a FA_K-key tile never straddles a KV_PAGE page, so rows k0 .. k0 + 31
+                // are in the tile's own allocated page; keys >= n_keys are zeroed below, so LDS gets the same values as
+                // attn_prefill_wmma. Bench-only limit: the K / V pool must stay below 4 GiB (a product wiring checks it on the host).
+                const char *const kb = (const char *)kv.k, *const vb = (const char *)kv.v;
+                const uint32_t rb = (uint32_t)rstep * 2u;         // bytes per pool row (uniform)
+                const uint32_t r0 = (uint32_t)(k0 + dlr) * rb;     // pool row of key k0 (uniform)
+                const uint32_t ko = r0 + (uint32_t)(tid / 32) * rb + (uint32_t)kro * 2u;
+                const uint32_t vo = r0 + (uint32_t)(vkb * 8) * rb + (uint32_t)vro * 2u;
 #pragma unroll
-                for (int e = 0; e < 4; ++e) {
-                    const int kc = min(k0 + tid / 32 + 8 * e, n_keys - 1);
-                    kr8[e] = kv_ld8<kv_kf(Q8)>(kv.k, kv.ks, (size_t)(unsigned)(kc + dlr) * rstep + kro);
-                }
+                for (int e = 0; e < 4; ++e) kr8[e] = *(const half8 *)(kb + (ko + (uint32_t)(8 * e) * rb));
 #pragma unroll
-                for (int r = 0; r < 8; ++r) {
-                    const int kc = min(k0 + vkb * 8 + r, n_keys - 1);
-                    vr[r] = kv_ld4<kv_vf(Q8)>(kv.v, kv.vs, (size_t)(unsigned)(kc + dlr) * rstep + vro);
-                }
-                if (k0 + FA_K < k_end) dlr = kv_delta(kv, tb, k0 + FA_K);
+                for (int r = 0; r < 8; ++r) vr[r] = *(const fa_h4 *)(vb + (vo + (uint32_t)r * rb));
+                if (k0 + FA_K < k_end) dlr = __builtin_amdgcn_readfirstlane(kv_delta(kv, tb, k0 + FA_K));
                 if (k0 + FA_K > n_keys) {  // block-uniform: the last tile holds keys >= n_keys, zero them
                     const half8 z8 = {0, 0, 0, 0, 0, 0, 0, 0};
                     const fa_h4 z4 = {0, 0, 0, 0};
