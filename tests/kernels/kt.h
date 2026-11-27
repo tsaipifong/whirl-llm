@@ -304,6 +304,12 @@ struct FqGeomProto {
     wk::GemmCfg g;
 };
 // t2g8db (round 5, -DWHIRL_FQ_DB_PROTO=1): t2g8 with a BK 32 LDS double buffer (one barrier per 32-column step), same grid.
+// v0252-gemmlat round 6 (PLAN V1-53, kernel SOP step 5 on the Ornith MoE expert GEMM): measurement-only ablations of the
+// 8060S gate + up expert kernel gemm_moepfqgu_g64n64k64_mxfp4 (kernels/gfx1151/moe_prefill_fq.hip ABL; kt-only object
+// -DWHIRL_FQ_ABL_PROTOS=1): a1 = no decode / barriers / LDS stores for k0 >= 64 (barrier phase), a5 = a1 + one A and one B
+// fragment read per kk + no global loads for k0 >= 64 (skeleton). Timed only by bench moepgu (outputs wrong by design);
+// kt moemx checks they are absent from the shipped object.
+inline constexpr const char* kMoepGuAblation[] = {"g64n64k64a1", "g64n64k64a5"};
 inline constexpr FqGeomProto kFqGeomProto[] = {{"t2w4g8", {128, 128, 128}}, {"t2g8db", {128, 256, 256}}};
 // v0252-valuout (PLAN V1-53): the seven v0252-8sbvalu VALU-lever prototypes (d185546; all REVERT on the 8060S, q7 951b-955,
 // KB v0252-8sbvalu:gemmfq-valu-levers) are NOT in the shipped gfx1151 object: unused kernels move the object layout

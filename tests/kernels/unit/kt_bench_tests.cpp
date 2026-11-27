@@ -810,6 +810,42 @@ static void test_fq_kt_only_entries() {
 #endif
 }
 
+// v0252-gemmlat round 6: the measurement-only gate + up ablations of kernels/gfx1151/moe_prefill_fq.hip sit inside
+// #ifdef WHIRL_FQ_ABL_PROTOS (kt-only object), the shipped expert entries in no #if (KB v0252-8sbal:e2e-raster-g8)
+static void test_moep_kt_only_entries() {
+#ifdef WHIRL_KT_SRC_DIR
+    std::ifstream in(std::string(WHIRL_KT_SRC_DIR) + "/kernels/gfx1151/moe_prefill_fq.hip", std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    const std::string src = ss.str();
+    check("moe_prefill_fq.hip read", !src.empty());
+    auto guard = [&src](std::size_t p) {
+        std::vector<std::string> open;
+        std::istringstream ls(src.substr(0, p));
+        for (std::string l; std::getline(ls, l);) {
+            const std::size_t a = l.find_first_not_of(" \t");
+            if (a == std::string::npos || l[a] != '#') continue;
+            const std::string d = l.substr(a);
+            if (d.rfind("#if", 0) == 0) open.push_back(d);
+            else if (d.rfind("#endif", 0) == 0 && !open.empty()) open.pop_back();
+        }
+        return open.empty() ? std::string() : open.back();
+    };
+    for (const char* n : {"MOEPFQGU_ABL_ENTRY(g64n64k64a1,", "MOEPFQGU_ABL_ENTRY(g64n64k64a5,"}) {
+        const std::size_t p = src.find(n);
+        const std::string g = p == std::string::npos ? std::string("(not found)") : guard(p);
+        check(std::string("moe_prefill_fq.hip: ") + n + " only under #ifdef WHIRL_FQ_ABL_PROTOS", g == "#ifdef WHIRL_FQ_ABL_PROTOS", g);
+    }
+    for (const char* n : {"MOEPFQGU_ENTRY(g64n64k64,", "MOEPFQDN_ENTRY(m128w4n128k64,"}) {
+        const std::size_t p = src.find(n);
+        check(std::string("moe_prefill_fq.hip: ") + n + " in every object (no #if around it)", p != std::string::npos && guard(p).empty(),
+              p == std::string::npos ? "not found" : guard(p));
+    }
+#else
+    check("moe_prefill_fq.hip kt-only entries (WHIRL_KT_SRC_DIR not set: not checked)", false);
+#endif
+}
+
 static void test_jsonl_file(const std::string& emit) {
     namespace fs = std::filesystem;
     const fs::path p = emit.empty() ? fs::temp_directory_path() / "kt_bench_tests.jsonl" : fs::path(emit);
@@ -1357,6 +1393,7 @@ int main(int argc, char** argv) {
         test_rows();
         test_ablation_rows();
         test_fq_kt_only_entries();
+        test_moep_kt_only_entries();
         test_jsonl_file(emit);
         test_dq4s_mirror_is_ops_rule();
         test_dq4s_grid_ok();

@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <numeric>
 
 namespace kt {
@@ -85,6 +86,20 @@ void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& d
             c.rep.add(r);
         }
     }
+    // v0252-gemmlat round 6: the measurement-only gate + up ablations (kt.h kMoepGuAblation) exist only in the kt-only object
+    // (-DWHIRL_FQ_ABL_PROTOS=1); the shipped object (no WHIRL_KT_CODE_OBJECT) must not carry them
+    if (const char* ext = std::getenv("WHIRL_KT_CODE_OBJECT"); ext == nullptr || *ext == 0)
+        for (const char* an : kMoepGuAblation) {
+            const std::string kn = std::string("gemm_moepfqgu_") + an + "_mxfp4";
+            Result r;
+            r.kind = Kind::invariant;
+            r.n = 1;
+            r.name = kn + " (v0252-gemmlat ablation, kt-only object) absent from the shipped code object";
+            r.pass = c.fnOpt(kn) == nullptr;
+            r.mismatches = r.pass ? 0 : 1;
+            if (!r.pass) r.note = "in the shipped object (built with WHIRL_FQ_ABL_PROTOS?)";
+            c.rep.add(r);
+        }
     bool any = false;
     for (int v = 0; v < wk::kMoepGuN; ++v) any = any || c.k.moep_gu[v] != nullptr;
     if (!any || !c.k.moe_tiles || !c.k.gemm_moegu[tm] || !c.k.gemm_moe32r[tm] || gate.type != QType::mxfp4 || up.type != QType::mxfp4 ||

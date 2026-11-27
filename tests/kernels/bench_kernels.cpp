@@ -2138,6 +2138,102 @@ void benchMoepc(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- moepgu (v0252-gemmlat round 6, PLAN V1-53, gfx1151)
+// Measurement-only ablations of the 8060S MoE prefill gate + up expert kernel (kernel SOP step 5): in-object A/B (ABBA) of
+// A = gemm_moepfqgu_g64n64k64_mxfp4 (the shipped kernel, kMoepDefault.gu with WHIRL_MOEP_FQ on) vs B = each kt.h
+// kMoepGuAblation kernel present in the code object (only the kt-only object built with -DWHIRL_FQ_ABL_PROTOS=1 has them):
+// Ornith layer 0 gate / up experts (--moemx), Zipf(1.0) routing (as bench moepc and kt moemx), n = 2048 tokens (the balance 2k
+// forward), random f16 gathered activations, tiles from moe_tiles with the variant's token tile. B is never compared (output
+// wrong by design): rows marked by markAblationRow; A is checked finite (kt moemx checks A's bits).
+void benchMoepGu(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "moepgu";
+    const int gv = wk::kMoepDefault.gu;
+    const hip::Function fa = c.k.moep_fq_gu[gv];
+    if (!fa || !c.k.moe_tiles) {
+        c.rep.skip("moepgu", "bench gemm_moepfqgu", "kernel not in this code object");
+        return;
+    }
+    std::vector<std::pair<std::string, hip::Function>> abl;
+    for (const char* an : kMoepGuAblation)
+        if (const hip::Function fb = c.fnOpt(std::string("gemm_moepfqgu_") + an + "_mxfp4")) abl.push_back({an, fb});
+    if (abl.empty()) {
+        c.rep.skip("moepgu", "bench gemm_moepfqgu ablations", "no kt.h kMoepGuAblation kernel in this code object (kt-only object: -DWHIRL_FQ_ABL_PROTOS=1)");
+        return;
+    }
+    const whirl::gguf::File* f = c.open(c.models.moemx);
+    const int layer = 0;
+    const std::string tg = "blk.0.ffn_gate_exps.weight", tu = "blk.0.ffn_up_exps.weight";
+    if (!f || !f->tensor(tg) || !f->tensor(tu) || f->tensor(tg)->type != whirl::gguf::GgmlType::mxfp4 || f->tensor(tu)->type != whirl::gguf::GgmlType::mxfp4) {
+        c.rep.skip("moepgu", "bench gemm_moepfqgu", "needs --moemx (Ornith MXFP4) with " + tg + " / " + tu);
+        return;
+    }
+    const HostMat gate = loadMat(*f, tg), up = loadMat(*f, tu);
+    const int R = static_cast<int>(f->getUintOr("qwen35moe.expert_count", 256));
+    const int K = static_cast<int>(f->getUintOr("qwen35moe.expert_used_count", 8));
+    const int E = gate.ncols, F = gate.nrows / R;
+    if (E % 256 != 0 || F % 256 != 0) {
+        c.rep.skip("moepgu", "bench gemm_moepfqgu", "shape not fq-able (E / F % 256)");
+        return;
+    }
+    auto dgate = std::make_shared<Buf>(gate.data), dup = std::make_shared<Buf>(up.data);
+    const std::uint64_t grb = gate.row_bytes;
+    const wk::MoepGuVariant& vg = wk::kMoepGu[gv];
+    for (const int n : {2048}) {
+        const int pairs = n * K;
+        const std::vector<int> ids = moepcZipf(c.rng, n, K, R);
+        std::vector<std::uint16_t> xg(static_cast<std::size_t>(pairs) * E);
+        {
+            const std::vector<float> a = c.randn(xg.size(), 0.5f);
+            for (std::size_t i = 0; i < xg.size(); ++i) xg[i] = f2h(a[i]);
+        }
+        auto dids = std::make_shared<Buf>(ids), dx = std::make_shared<Buf>(xg);
+        auto aout = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * F * 2);
+        const int mt = (pairs + vg.bn - 1) / vg.bn + R;
+        auto tiles = std::make_shared<Buf>(static_cast<std::size_t>(mt) * 16), ntl = std::make_shared<Buf>(16);
+        hip::launch(c.k.moe_tiles, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dids->p(), pairs, R, vg.bn, tiles->p(), ntl->p());
+        c.sync();
+        const unsigned grid = static_cast<unsigned>(mt) * cdiv(static_cast<std::uint64_t>(F), static_cast<std::uint64_t>(vg.gr));
+        auto launch = [&c, dgate, dup, dx, aout, tiles, ntl, grb, grid, E, F](hip::Function fn) {
+            hip::launch(fn, {grid, 1, 1}, {256, 1, 1}, 0, c.s, dgate->p(), dup->p(), grb, F, dx->p(), aout->p(), E, tiles->p(), ntl->p());
+        };
+        const std::string an = std::string("gemm_moepfqgu_") + vg.name + "_mxfp4";
+        for (const auto& [suffix, fb] : abl) {
+            Cell k;
+            k.ci = e.info("moepgu", an, "ornith.l" + std::to_string(layer) + ".n" + std::to_string(n) + ".zipf." + suffix,
+                          "E" + std::to_string(E) + "_F" + std::to_string(F) + "_R" + std::to_string(R) + "_K" + std::to_string(K));
+            k.ci.settings = e.settings(static_cast<std::uint64_t>(gate.data.size() + up.data.size()), 1) + ";routing=zipf;layer=0;gu=" + vg.name;
+            k.ci.flops = 2.0 * pairs * (2.0 * F) * E;
+            k.kernel = an;
+            k.fa = fa;
+            k.call = [launch](hip::Function fn, std::uint64_t) { launch(fn); };
+            k.run = [&c, launch, aout, pairs, F](hip::Function fn) {
+                aout->fill(0x00);
+                launch(fn);
+                c.sync();
+                const auto h = aout->down<std::uint16_t>(static_cast<std::size_t>(pairs) * F);
+                std::vector<float> got(h.size());
+                for (std::size_t i = 0; i < h.size(); ++i) got[i] = h2f(h[i]);
+                return got;
+            };
+            k.verify = [](const std::vector<float>& got) {
+                Result r;
+                r.kind = Kind::invariant;
+                r.n = got.size();
+                r.mismatches = static_cast<std::size_t>(std::count_if(got.begin(), got.end(), [](float v) { return !std::isfinite(v); }));
+                r.pass = r.mismatches == 0;
+                r.name = "A output finite (kt moemx checks A's bits)";
+                return r;
+            };
+            k.kernel_b = std::string("gemm_moepfqgu_") + suffix + "_mxfp4";
+            k.call_b = [launch, fb = fb](std::uint64_t) { launch(fb); };
+            k.ablation = true;
+            k.b_rule = kAblationRule;
+            runCell(e, k);
+        }
+    }
+}
+
 // ---------------------------------------------------------------- dq4s (v0252-8sq5, PLAN V1-109, gfx1151 fast)
 // In-object A/B of the q4-KV decode / verify attention SPLIT COUNT: the shipped kernel (attn_dq4o on gfx1151 - the profile
 // row attn_dq4_row_order; attn_dq4 where the object has no attn_dq4o) + attn_combine, A = the grid the fast plan launches
@@ -2492,7 +2588,7 @@ void benchWs4s(Env& e) {
 
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax", "moepc", "dq4s", "ws4s"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "fdq", "ggemv", "ws4r", "silu", "lsplit", "argmax", "moepc", "dq4s", "ws4s", "moepgu"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -2544,7 +2640,8 @@ void runBench(Ctx& c, const BenchOpts& o) {
     };
     const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
                       {"fdq", benchFdq}, {"ggemv", benchGGemv}, {"ws4r", benchWs4r}, {"silu", benchSilu}, {"lsplit", benchLsplit},
-                      {"argmax", benchArgmax}, {"moepc", benchMoepc}, {"dq4s", benchDq4s}, {"ws4s", benchWs4s}};
+                      {"argmax", benchArgmax}, {"moepc", benchMoepc}, {"dq4s", benchDq4s}, {"ws4s", benchWs4s},
+                      {"moepgu", benchMoepGu}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);
