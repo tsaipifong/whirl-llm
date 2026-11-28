@@ -317,7 +317,9 @@ inline constexpr const char* kMoepDhsAblation[] = {"m128w4n128k64a1", "m128w4n12
 // geometry; same grid rule as the slots ((maxTiles(pairs, bn) * ceil(F / gr), 256 threads); same bits as gemm_moegu (kt moemx
 // checks every one present; on the shipped object it must be absent); bench moepgu times them against the shipped kernel.
 // g64n64k64u (round 9, -DWHIRL_FQ_GUU_PROTO=1): the shipped g64n64k64 with a wave-uniform (readfirstlane) wave index.
-inline constexpr wk::MoepGuVariant kMoepGuProto[] = {{"g64n64k128", 64, 64, 128}, {"g64n64k64u", 64, 64, 64}};
+// g64n64k128u (round 11, -DWHIRL_FQ_GU128U_PROTO=1): BK 128 (one barrier round per 128 columns) on the wave-uniform UW form.
+inline constexpr wk::MoepGuVariant kMoepGuProto[] = {{"g64n64k128", 64, 64, 128}, {"g64n64k64u", 64, 64, 64}, {"g64n64k128u", 64, 64, 128},
+                                                     {"g64n64k128v", 64, 64, 128}};  // round 12: k128u with 32-bit offsets, X not held across the WMMAs
 inline constexpr FqGeomProto kFqGeomProto[] = {{"t2w4g8", {128, 128, 128}}, {"t2g8db", {128, 256, 256}}};
 // v0252-valuout (PLAN V1-53): the seven v0252-8sbvalu VALU-lever prototypes (d185546; all REVERT on the 8060S, q7 951b-955,
 // KB v0252-8sbvalu:gemmfq-valu-levers) are NOT in the shipped gfx1151 object: unused kernels move the object layout

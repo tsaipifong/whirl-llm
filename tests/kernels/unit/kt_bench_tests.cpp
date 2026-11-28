@@ -848,6 +848,20 @@ static void test_moep_kt_only_entries() {
     // round 9: the wave-uniform-index prototype only under its own macro, kt.h kMoepGuProto geometry (GR 64, BN 64, BK 64)
     {
         const char* n = "MOEPFQGU_U_ENTRY(g64n64k64u, 64, 64, 64)";
+        const char* n128 = "MOEPFQGU_U_ENTRY(g64n64k128u, 64, 64, 128)";  // round 11: BK 128 on UW, under its own macro
+        const std::size_t p128 = src.find(n128);
+        const std::string g128 = p128 == std::string::npos ? std::string("(not found)") : guard(p128);
+        check(std::string("moe_prefill_fq.hip: ") + n128 + " only under #ifdef WHIRL_FQ_GU128U_PROTO (geometry = kt.h kMoepGuProto)",
+              g128 == "#ifdef WHIRL_FQ_GU128U_PROTO", g128);
+        // round 12: the k128v entry and its impl only under WHIRL_FQ_GU128V_PROTO, the entry calling the impl with BK 128 / GR 64 / BN 64
+        for (const char* nv : {"gemm_moepfqgu_g64n64k128v_mxfp4(", "__device__ void moepfq_gu_v_impl("}) {
+            const std::size_t pv = src.find(nv);
+            const std::string gv = pv == std::string::npos ? std::string("(not found)") : guard(pv);
+            check(std::string("moe_prefill_fq.hip: ") + nv + " only under #ifdef WHIRL_FQ_GU128V_PROTO", gv == "#ifdef WHIRL_FQ_GU128V_PROTO", gv);
+        }
+        const std::size_t ev = src.find("gemm_moepfqgu_g64n64k128v_mxfp4(");
+        check("moe_prefill_fq.hip: g64n64k128v = moepfq_gu_v_impl<128, 64, 64> (kt.h kMoepGuProto BK 128, GR 64, BN 64)",
+              ev != std::string::npos && src.find("moepfq_gu_v_impl<128, 64, 64>(", ev) < src.find('\n', ev));
         const std::size_t p = src.find(n);
         const std::string g = p == std::string::npos ? std::string("(not found)") : guard(p);
         check(std::string("moe_prefill_fq.hip: ") + n + " only under #ifdef WHIRL_FQ_GUU_PROTO (geometry = kt.h kMoepGuProto)",
