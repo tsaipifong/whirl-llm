@@ -177,7 +177,8 @@ static __device__ __forceinline__ u32x4_t dequant_seg_q8(const u32x4_t r, const 
 // K tile: KPT x 16 B per thread; the lanes of a wave read 512 contiguous bytes of a key row.
 // WHIRL: K / V point at the step's page (row k of the step = K + k*nb11, see kv_page_base), keys >= kv_end read
 // the clamped row kv_end - 1 (same page) and are staged as zero
-template <int D, bool Q8>
+// v0252-attnsx: SEL = false only in the kt probe attn_sxp_nosel8 (WHIRL_ATTNSX_PROBES): the clamped row is kept as loaded
+template <int D, bool Q8, bool SEL = true>
 static __device__ __forceinline__ void load_K(u32x4_t * regs, const char * K, const uint32_t nb11, const int k0, const int kv_end) {
     using C = cfg<D>;
 #pragma unroll
@@ -188,7 +189,7 @@ static __device__ __forceinline__ void load_K(u32x4_t * regs, const char * K, co
             regs[p] = load_seg_q8(K + uint32_t(key)*nb11, idx % C::SEGS);
         } else {
             const u32x4_t x = *(const u32x4_t *) (K + (uint32_t(min(key, kv_end - 1))*nb11 + uint32_t(idx % C::SEGS)*16u));
-            regs[p] = key < kv_end ? x : u32x4_t{0u, 0u, 0u, 0u};
+            regs[p] = !SEL || key < kv_end ? x : u32x4_t{0u, 0u, 0u, 0u};
         }
     }
 }
@@ -212,7 +213,7 @@ static __device__ __forceinline__ void v_thread_coords(int & kg, int & seg) {
     seg = lane % 8 + 8*(w % WPR);
     kg  = lane / 8 + 4*(w / WPR);
 }
-template <int D, bool Q8>
+template <int D, bool Q8, bool SEL = true>
 static __device__ __forceinline__ void load_V(u32x4_t * regs, const char * V, const uint32_t nb21, const int k0, const int kv_end) {
     using C = cfg<D>;
     int kg, seg;
@@ -224,7 +225,7 @@ static __device__ __forceinline__ void load_V(u32x4_t * regs, const char * V, co
             regs[kk] = load_seg_q8(V + uint32_t(key)*nb21, seg);
         } else {
             const u32x4_t x = *(const u32x4_t *) (V + (uint32_t(min(key, kv_end - 1))*nb21 + uint32_t(seg)*16u));
-            regs[kk] = key < kv_end ? x : u32x4_t{0u, 0u, 0u, 0u};
+            regs[kk] = !SEL || key < kv_end ? x : u32x4_t{0u, 0u, 0u, 0u};
         }
     }
 }
@@ -283,7 +284,19 @@ static __device__ __forceinline__ half16_t load_Vt_operand(const _Float16 * sVt,
 // Grid: x = ceil(n_tok / NCOLS1) query tiles x (heads of this launch / NCOLS2) head groups (head group fastest),
 // block cfg<D>::NTHR. h0 = the first head of this launch.
 // pool row of key p minus p for p's page (KV_PAGE = 256 rows, a multiple of every step's NKEYS): attn_kv_page.h kv_delta
-template <int D, int NCOLS2, bool Q8>
+// v0252-attnsx (PLAN V1-148, kernel SOP step 2): PRB != 0 only in the kt probe entries below (WHIRL_ATTNSX_PROBES, never in
+// the product code objects; PRB = 0 is the shipped kernel). A probe removes one phase of the key loop to measure its share of
+// the kernel time (kt attnbench SX); its output is wrong by design except nosel:
+//   1 noload:    no global K / V loads (and no page-table words) in the key loop; the LDS stores stage zeros (build 1 of
+//                this probe re-staged step 0's registers instead: keeping them live across the whole loop spilled 11 VGPRs
+//                with 7 scratch ops per step, a memory cost the shipped loop does not have)
+//   2 norescale: no O *= alpha (the redo branch and the lazy rescale); the maxima, P and the row sums as shipped
+//   3 skel:      the kernel's skeleton: the K / P / V^T LDS operand reads, the 32 WMMAs and the two LDS barriers per step only
+//                (no global loads, no LDS staging, no score exchange, no mask / softmax / P, no rescale); S is carried across
+//                steps (no extra instruction) and folded into O after the loop so that the Q.K^T WMMAs stay live
+//   4 nosel:     the clamped K / V rows kept as loaded (no key < kv_end select at the load): keys >= kv_end are masked
+//                (-inf -> P = 0) and the clamped row is a valid row, so the output is expected bitwise equal (kt row)
+template <int D, int NCOLS2, bool Q8, int PRB = 0>
 static __device__ __forceinline__ void attn_sx_impl(const float * __restrict__ q, const KvArgs & kv, float * __restrict__ out,
         const int n_head, const int n_kv, const int q_stride, const int * __restrict__ pos, const int n_tok, const float scale,
         const int h0) {
@@ -300,6 +313,10 @@ static __device__ __forceinline__ void attn_sx_impl(const float * __restrict__ q
     constexpr int SVT    = C::SVT;
     static_assert(!Q8, "WHIRL attn_sx: f16 K / V only");
     static_assert(KV_PAGE % NKEYS == 0, "a key step never straddles a KV page");
+    static_assert(PRB >= 0 && PRB <= 4 && (PRB == 0 || (C::OWN && !C::TIGHT)), "v0252-attnsx probes: D = 256 only");
+    constexpr bool P_LOAD = PRB != 1 && PRB != 3;  // global K / V loads in the key loop
+    constexpr bool P_SEL  = PRB != 4;              // key < kv_end select at the load
+    constexpr bool P_SKEL = PRB == 3;
 
     __shared__ __attribute__((aligned(16))) char smem[C::SZ_SMEM];
     __shared__ int sRescaleStep; // last step in which some column max moved
@@ -392,8 +409,21 @@ static __device__ __forceinline__ void attn_sx_impl(const float * __restrict__ q
     u32x4_t vregs[C::KPT];
     int cur = next_active(st_begin);
     if (cur < st_end) {
-        load_K<D, Q8>(kregs, page_k(cur*NKEYS), nb11u, cur*NKEYS, kv_end);
+        load_K<D, Q8, P_SEL>(kregs, page_k(cur*NKEYS), nb11u, cur*NKEYS, kv_end);
         store_K<D, Q8>(kregs, sK);
+        if constexpr (PRB == 1) {
+#pragma unroll
+            for (int p = 0; p < C::KPT; ++p) { // noload: zeros are staged at every step (no register stays live across the loop)
+                kregs[p] = u32x4_t{0u, 0u, 0u, 0u};
+                vregs[p] = u32x4_t{0u, 0u, 0u, 0u};
+            }
+        }
+    }
+    if constexpr (P_SKEL) {
+        // skel: V^T and P are never staged; zero them once so that the WMMAs read finite operands
+        for (int i = threadIdx.x; i < (C::SZ_VT + C::SZ_P)/16; i += C::NTHR) {
+            ((u32x4_t *) (smem + C::OFF_VT))[i] = u32x4_t{0u, 0u, 0u, 0u};
+        }
     }
     __syncthreads();
 
@@ -412,6 +442,11 @@ static __device__ __forceinline__ void attn_sx_impl(const float * __restrict__ q
 #pragma unroll
     for (int t = 0; t < NCT; ++t) {
         mref[t] = m_init;
+    }
+    float8_t Scarry[KT]; // skel: S carried across steps (unused otherwise)
+#pragma unroll
+    for (int kt = 0; kt < KT; ++kt) {
+        Scarry[kt] = float8_t{};
     }
 
     // OWN: P = exp2(S - mr) of key tile dq -> B operand layout in sP; returns the column sum of P.
@@ -455,18 +490,20 @@ static __device__ __forceinline__ void attn_sx_impl(const float * __restrict__ q
         const bool mixed    = step_class(cur) == 2;
 
         // V of this step (not at D = 512) and K of the next one: in flight while the scores are computed.
-        if constexpr (!C::TIGHT) {
-            load_V<D, Q8>(vregs, page_v(k0), nb21u, k0, kv_end);
-        }
-        if (has_next) {
-            load_K<D, Q8>(kregs, page_k(nxt*NKEYS), nb11u, nxt*NKEYS, kv_end);
+        if constexpr (P_LOAD) {
+            if constexpr (!C::TIGHT) {
+                load_V<D, Q8, P_SEL>(vregs, page_v(k0), nb21u, k0, kv_end);
+            }
+            if (has_next) {
+                load_K<D, Q8, P_SEL>(kregs, page_k(nxt*NKEYS), nb11u, nxt*NKEYS, kv_end);
+            }
         }
 
         // ---- partial S^T = K Q^T over dims [128dq, 128dq+128), all key tiles of the step ----
         float8_t S[KT];
 #pragma unroll
         for (int kt = 0; kt < KT; ++kt) {
-            S[kt] = float8_t{};
+            S[kt] = P_SKEL ? Scarry[kt] : float8_t{};
         }
         if constexpr (!C::TIGHT) {
             // K operands double-buffered: the loads of chunk k + 1 are in flight during the WMMAs of chunk k
@@ -509,14 +546,22 @@ static __device__ __forceinline__ void attn_sx_impl(const float * __restrict__ q
         }
         // S[kt][r]: key k0 + 16kt + 2r + hh, column c_s (OWN: S[0] is key tile dq, S[1] key tile dq ^ 1)
 #pragma unroll
-        for (int kt = C::OWN ? 1 : 0; kt < KT && DQ > 1; ++kt) {
+        for (int kt = C::OWN ? 1 : 0; kt < KT && DQ > 1 && !P_SKEL; ++kt) {
             float4 * px = (float4 *) (sSx + ((C::OWN ? w : KT*w + kt)*32 + lane)*8);
             px[0] = make_float4(S[kt][0], S[kt][1], S[kt][2], S[kt][3]);
             px[1] = make_float4(S[kt][4], S[kt][5], S[kt][6], S[kt][7]);
         }
+        if constexpr (P_SKEL) {
+#pragma unroll
+            for (int kt = 0; kt < KT; ++kt) {
+                Scarry[kt] = S[kt];
+            }
+        }
         lds_barrier(); // B1: partial scores visible, all warps are done reading K
 
-        if constexpr (C::OWN) {
+        if constexpr (P_SKEL) {
+            // skel: no score exchange, mask, softmax or P
+        } else if constexpr (C::OWN) {
             // Own key tile: add the share of the partner warp. The reference max m moves lazily (as in FlashAttention-4),
             // after V^T P and only when a step max is more than T_LAZY above it; P up to 2^T_HI is exact in f16.
             {
@@ -641,9 +686,11 @@ static __device__ __forceinline__ void attn_sx_impl(const float * __restrict__ q
         if constexpr (C::TIGHT) {
             load_V<D, Q8>(vregs, page_v(k0), nb21u, k0, kv_end);
         }
-        store_Vt<D, Q8>(vregs, sVt);
-        if (has_next) {
-            store_K<D, Q8>(kregs, sK);
+        if constexpr (!P_SKEL) {
+            store_Vt<D, Q8>(vregs, sVt);
+            if (has_next) {
+                store_K<D, Q8>(kregs, sK);
+            }
         }
         lds_barrier(); // B2: P, V^T, rescale factors and the next K visible
 
@@ -651,7 +698,9 @@ static __device__ __forceinline__ void attn_sx_impl(const float * __restrict__ q
         float alpha[NCT];
         bool  redo  = false;
         bool  moved = false;
-        if constexpr (C::OWN) {
+        if constexpr (P_SKEL) {
+            // skel: no rescale
+        } else if constexpr (C::OWN) {
             redo = sRedo == cur;
 #pragma unroll
             for (int t = 0; t < NCT; ++t) {
@@ -674,7 +723,7 @@ static __device__ __forceinline__ void attn_sx_impl(const float * __restrict__ q
             if (redo) {
                 // P of this step left the f16 range against the old max: rescale first and redo P (first steps only, in practice)
 #pragma unroll
-                for (int t = 0; t < NCT; ++t) {
+                for (int t = 0; t < NCT && PRB != 2; ++t) {
 #pragma unroll
                     for (int i = 0; i < OT; ++i) {
 #pragma unroll
@@ -733,7 +782,7 @@ static __device__ __forceinline__ void attn_sx_impl(const float * __restrict__ q
                 }
             }
         }
-        if (C::OWN && !redo && __any(moved)) {
+        if (C::OWN && PRB != 2 && !P_SKEL && !redo && __any(moved)) {
 #pragma unroll
             for (int t = 0; t < NCT; ++t) {
 #pragma unroll
@@ -746,6 +795,12 @@ static __device__ __forceinline__ void attn_sx_impl(const float * __restrict__ q
             }
         }
         cur = nxt;
+    }
+    if constexpr (P_SKEL) {
+#pragma unroll
+        for (int kt = 0; kt < KT; ++kt) {
+            O[0][0] += Scarry[kt]; // skel: keep the Q.K^T WMMAs live
+        }
     }
 
     // ---- normalize by the row sums, gate and write (WHIRL: no split-KV, no sinks) ----
@@ -796,4 +851,21 @@ WHIRL_ATTN_SX_ENTRY(attn_sx2, 2)
 WHIRL_ATTN_SX_ENTRY(attn_sx4, 4)
 WHIRL_ATTN_SX_ENTRY(attn_sx8, 8)
 #undef WHIRL_ATTN_SX_ENTRY
+
+// v0252-attnsx (PLAN V1-148): kt-only probes of attn_sx8 (see attn_sx_impl's PRB). Compiled only into a code object built with
+// -DWHIRL_ATTNSX_PROBES (scratch/v0252_attnsx/build_probe_co.sh) and loaded by whirl-kernel-test through WHIRL_KT_CODE_OBJECT;
+// the product code objects never define it (they stay byte-identical). Same arguments and grid as attn_sx8.
+#ifdef WHIRL_ATTNSX_PROBES
+#define WHIRL_ATTN_SXP_ENTRY(NAME, PRB)                                                                                \
+    extern "C" __global__ void __launch_bounds__(fattn_rdna35::cfg<256>::NTHR, 1)                                      \
+        NAME(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos, int n_tok,   \
+             float scale, int h0) {                                                                                  \
+        fattn_rdna35::attn_sx_impl<256, 8, false, PRB>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);    \
+    }
+WHIRL_ATTN_SXP_ENTRY(attn_sxp_noload8, 1)
+WHIRL_ATTN_SXP_ENTRY(attn_sxp_norescale8, 2)
+WHIRL_ATTN_SXP_ENTRY(attn_sxp_skel8, 3)
+WHIRL_ATTN_SXP_ENTRY(attn_sxp_nosel8, 4)
+#undef WHIRL_ATTN_SXP_ENTRY
+#endif // WHIRL_ATTNSX_PROBES
 
