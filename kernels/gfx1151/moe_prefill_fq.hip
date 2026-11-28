@@ -589,5 +589,14 @@ MOEPFQDHS_ABL_ENTRY(m128w4n128k64a5, 128, 4, 128, 64, 5)
 #define MOEPFQGU_ABL_ENTRY(NAME, GR, BN, BK, ABL_)                                                                      extern "C" __global__ void __launch_bounds__(256)                                                                       gemm_moepfqgu_##NAME##_mxfp4(const uint8_t *W1, const uint8_t *W2, uint64_t row_bytes, int ff,                                                   const _Float16 *X, _Float16 *A, int ncols, const int4 *tiles, const int *n_tiles) {         moepfq_gu_impl<BK, GR, BN, ABL_>(W1, W2, row_bytes, ff, X, A, ncols, tiles, n_tiles);                           }
 MOEPFQGU_ABL_ENTRY(g64n64k64a1, 64, 64, 64, 1)
 MOEPFQGU_ABL_ENTRY(g64n64k64a5, 64, 64, 64, 5)
+// round 13 (kt.h kMoepGuProto / kMoepGuDynLds g64n64k64o): the shipped g64n64k64 code path under its own name, so kt can launch
+// it with dynamic LDS (kMoepGuDynLds: 24576 B on top of the static 27648 = k128u's 52224, 2 instead of 4 blocks per WGP) while
+// the compiler sees exactly the shipped kernel. ABL 7 is an inert copy: no ABL switch names it (kNoStage / kReuse / kNoFetch are
+// ABL 1 / 5 only), so it runs the product path; it exists because a second kernel calling the SAME instantiation <64, 64, 64, 0>
+// stops the inlining of both (measured: 248 VGPR + 132 B stack in the shipped kernel too), and a static LDS pad made the compiler
+// reschedule for the lower occupancy (248 VGPR, 1244 vs 1181 insns). Occupancy is the only difference; bitwise == gemm_moegu.
+#ifdef WHIRL_FQ_GUO_PROTO
+MOEPFQGU_ABL_ENTRY(g64n64k64o, 64, 64, 64, 7)
+#endif
 #undef MOEPFQGU_ABL_ENTRY
 #endif
