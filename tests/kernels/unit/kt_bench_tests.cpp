@@ -866,6 +866,26 @@ static void test_moep_kt_only_entries() {
         const std::string g = p == std::string::npos ? std::string("(not found)") : guard(p);
         check(std::string("moe_prefill_fq.hip: ") + n + " only under #ifdef WHIRL_FQ_GUU_PROTO (geometry = kt.h kMoepGuProto)",
               g == "#ifdef WHIRL_FQ_GUU_PROTO", g);
+        // round 13: the occupancy-only ablation = the shipped code path under its own name (ABL 7, an inert copy: its own
+        // instantiation so neither kernel loses its inlining), only under WHIRL_FQ_GUO_PROTO
+        const char* no = "MOEPFQGU_ABL_ENTRY(g64n64k64o, 64, 64, 64, 7)";
+        const std::size_t po = src.find(no);
+        const std::string go = po == std::string::npos ? std::string("(not found)") : guard(po);
+        check(std::string("moe_prefill_fq.hip: ") + no + " only under #ifdef WHIRL_FQ_GUO_PROTO (shipped code, geometry = kt.h kMoepGuProto)",
+              go == "#ifdef WHIRL_FQ_GUO_PROTO", go);
+        // ABL 7 is inert: the only ABL switches in the gate + up impl name ABL 1 and 5, and no "ABL == 7" test exists
+        check("moe_prefill_fq.hip: ABL 7 names no switch (kNoStage / kReuse / kNoFetch are ABL 1 / 5 only)",
+              src.find("constexpr bool kNoStage = ABL == 1 || ABL == 5, kReuse = ABL == 5, kNoFetch = ABL == 5;") != std::string::npos &&
+                  src.find("ABL == 7") == std::string::npos && src.find("ABL != 7") == std::string::npos);
+        // its dynamic LDS makes the block's LDS exactly k128u's: static (2 GR + BN) x (BK + 8) x 2 + dynamic == (2 GR + BN) x (128 + 8) x 2
+        const unsigned st = (2 * 64 + 64) * (64 + 8) * 2, k128 = (2 * 64 + 64) * (128 + 8) * 2;
+        std::ifstream kin(std::string(WHIRL_KT_SRC_DIR) + "/tests/kernels/kt.h", std::ios::binary);
+        std::stringstream ks;
+        ks << kin.rdbuf();
+        const std::string kh = ks.str();
+        const std::string row = "kMoepGuDynLds[] = {{\"g64n64k64o\", " + std::to_string(k128 - st) + "}};";
+        check("kt.h kMoepGuDynLds: g64n64k64o static 27648 + dynamic 24576 = 52224 (k128u's LDS), the only row",
+              st == 27648 && k128 == 52224 && kh.find(row) != std::string::npos, row);
     }
     for (const char* n : {"MOEPFQGU_ENTRY(g64n64k64,", "MOEPFQDN_ENTRY(m128w4n128k64,"}) {
         const std::size_t p = src.find(n);

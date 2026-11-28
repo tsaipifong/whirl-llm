@@ -206,8 +206,9 @@ void moepChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& d
             Buf tv(static_cast<std::size_t>(mt) * 16), nv(4), anew(static_cast<std::size_t>(pairs) * F * 2);
             anew.fill(0xff);
             hip::launch(c.k.moe_tiles, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dids.p(), pairs, R, vg.bn, tv.p(), nv.p());
-            hip::launch(fp, {static_cast<unsigned>(mt) * cdivp(F, static_cast<unsigned>(vg.gr)), 1, 1}, {256, 1, 1}, 0, c.s, dgate.p(), dup.p(),
-                        gate.row_bytes, F, xg.p(), anew.p(), E, tv.p(), nv.p());
+            // round 13: launched as bench moepgu times it (kt.h kMoepGuDynLds dynamic LDS; 0 for every prototype but g64n64k64o)
+            hip::launch(fp, {static_cast<unsigned>(mt) * cdivp(F, static_cast<unsigned>(vg.gr)), 1, 1}, {256, 1, 1}, moepGuDynLds(vg.name), c.s,
+                        dgate.p(), dup.p(), gate.row_bytes, F, xg.p(), anew.p(), E, tv.p(), nv.p());
             c.sync();
             c.rep.add(cmpExact(kn + " == gemm_moegu_mxfp4" + tag, anew.down<std::uint16_t>(ar.size()), ar, Kind::invariant));
         }

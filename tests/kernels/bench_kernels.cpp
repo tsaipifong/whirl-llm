@@ -2283,8 +2283,16 @@ void benchMoepGu(Env& e) {
         hip::launch(c.k.moe_tiles, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dids->p(), pairs, R, vg.bn, tiles->p(), ntl->p());
         c.sync();
         const unsigned grid = static_cast<unsigned>(mt) * cdiv(static_cast<std::uint64_t>(F), static_cast<std::uint64_t>(vg.gr));
-        auto launch = [&c, dgate, dup, dx, aout, tiles, ntl, grb, grid, E, F](hip::Function fn) {
-            hip::launch(fn, {grid, 1, 1}, {256, 1, 1}, 0, c.s, dgate->p(), dup->p(), grb, F, dx->p(), aout->p(), E, tiles->p(), ntl->p());
+        // v0252-gemmlat round 13: a prototype listed in kt.h kMoepGuDynLds is launched with that much dynamic LDS (g64n64k64o:
+        // the shipped code at k128u's LDS = occupancy only); every other kernel, A included, with 0 as before
+        std::vector<std::pair<hip::Function, unsigned>> dyn;
+        for (const GuB& gb : bs)
+            if (const unsigned d = moepGuDynLds(gb.suffix.c_str())) dyn.push_back({gb.fb, d});
+        auto launch = [&c, dgate, dup, dx, aout, tiles, ntl, grb, grid, E, F, dyn](hip::Function fn) {
+            unsigned sh = 0;
+            for (const auto& d : dyn)
+                if (d.first == fn) sh = d.second;
+            hip::launch(fn, {grid, 1, 1}, {256, 1, 1}, sh, c.s, dgate->p(), dup->p(), grb, F, dx->p(), aout->p(), E, tiles->p(), ntl->p());
         };
         const std::string an = std::string("gemm_moepfqgu_") + vg.name + "_mxfp4";
         for (const GuB& gb : bs) {
