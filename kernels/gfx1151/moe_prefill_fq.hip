@@ -210,6 +210,130 @@ __device__ void moepfq_gu_impl(const uint8_t *__restrict__ W1, const uint8_t *__
     }
 }
 
+// v0252-gemmlat round 12 (bench-only kt prototype g64n64k128v; compiled ONLY with -DWHIRL_FQ_GU128V_PROTO=1): the BK 128 / UW gate + up
+// kernel with the two pressures of g64n64k128u removed (its spill: the next chunk's X prefetch, 4 x 16 B, and the 64-bit row pointers):
+//   * addresses: the weight / activation bases are block-uniform (tile tl, row block rb) and kept as scalars through readfirstlane;
+//     every lane holds only 32-bit byte offsets (weights: < ff x row_bytes per expert, activations: < 64 tokens x ncols x 2 B);
+//   * X is not prefetched across the WMMA phase: each round loads its own 64-token x 128-column X slab right before staging it
+//     (the weights' raw MXFP4 bytes are still prefetched across the WMMAs, as in every gemmfq kernel).
+// The same LDS values, WMMA chain and epilogue as g64n64k64 (bitwise == gemm_moegu).
+#ifdef WHIRL_FQ_GU128V_PROTO
+template <int BK, int GR, int BNMAX>
+__device__ void moepfq_gu_v_impl(const uint8_t *__restrict__ W1, const uint8_t *__restrict__ W2, uint64_t row_bytes, int ff,
+                                 const _Float16 *__restrict__ Xall, _Float16 *__restrict__ Aout, int ncols,
+                                 const int4 *__restrict__ tiles, const int *__restrict__ n_tiles) {
+    constexpr int NTH = 256, NW = NTH / 32;
+    constexpr int WM = GR / 16, WN = NW / WM;
+    constexpr int NF = BNMAX / 16, FPW = NF / WN;
+    constexpr int BM = 2 * GR, LD = BK + 8;
+    constexpr int SBR = BK / 32, GPR = BK / 8;
+    constexpr int A_SB = BM * SBR / NTH, B_PER = BNMAX * GPR / NTH;
+    static_assert(GR % 16 == 0 && NW % WM == 0 && NF % WN == 0 && FPW >= 1, "wave layout");
+    static_assert(A_SB >= 1 && BM * SBR % NTH == 0 && BNMAX * GPR % NTH == 0, "one lane per sub-block / tile threads");
+    const int nrb = moep::nrb(ff, GR);
+    const int ti = moep::blockTile((int)blockIdx.x, nrb), rb = moep::blockRb((int)blockIdx.x, nrb);
+    if (ti >= *n_tiles) return;
+    const int4 tl = tiles[ti];
+    const int n_tok = tl.z, m0 = rb * GR;
+    const int live = moep::liveFrags(n_tok), live16 = live * 16;
+    // block-uniform bases (scalars), per-lane 32-bit byte offsets
+    const uint8_t *Wg = W1 + (size_t)tl.x * ff * row_bytes, *Wu = W2 + (size_t)tl.x * ff * row_bytes;
+    const uint8_t *Xb = (const uint8_t *)(Xall + (size_t)tl.y * ncols);
+    __shared__ _Float16 As[BM][LD];
+    __shared__ _Float16 Bs[BNMAX][LD];
+    const int lane = threadIdx.x % WARP;
+    const int wid = __builtin_amdgcn_readfirstlane(threadIdx.x / WARP);
+    const int wm = wid % WM, wn = wid / WM;
+    uint32_t aoff[A_SB], xoff[B_PER];
+#pragma unroll
+    for (int e = 0; e < A_SB; ++e) {  // slot s = threadIdx.x + e * NTH: row s / SBR of the 2 GR rows (rows < GR: gate, else up)
+        const int r = moep::fqRow(threadIdx.x + e * NTH, BK);
+        aoff[e] = (uint32_t)((size_t)min(m0 + (r % GR), ff - 1) * row_bytes);
+    }
+#pragma unroll
+    for (int e = 0; e < B_PER; ++e) {
+        const int i = threadIdx.x + e * NTH;
+        xoff[e] = (uint32_t)(((size_t)min(i / GPR, n_tok - 1) * ncols + (i % GPR) * 8) * 2);
+    }
+    uint2 qa[A_SB], qb[A_SB];
+    uint32_t qe[A_SB];
+    half8 rb8[B_PER];
+    auto fetchA = [&](int k0) {
+#pragma unroll
+        for (int e = 0; e < A_SB; ++e) {
+            const int s = threadIdx.x + e * NTH;
+            const int r = moep::fqRow(s, BK);
+            const uint8_t *blk = (r < GR ? Wg : Wu) + aoff[e] + (size_t)(k0 >> 8) * 136;
+            const int ib = moep::fqIb(k0, moep::fqSb(s, BK));
+            const uint8_t *q = blk + 8 + 16 * ib;
+            qa[e] = *(const uint2 *)q;
+            qb[e] = *(const uint2 *)(q + 8);
+            qe[e] = blk[ib];
+        }
+    };
+    auto fetchX = [&](int k0) {
+#pragma unroll
+        for (int e = 0; e < B_PER; ++e) rb8[e] = *(const half8 *)(Xb + xoff[e] + (size_t)k0 * 2);
+    };
+    float8 acc[2][FPW];
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+#pragma unroll
+        for (int j = 0; j < FPW; ++j) acc[i][j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
+    fetchA(0);
+    for (int k0 = 0; k0 < ncols; k0 += BK) {
+        fetchX(k0);  // this round's X, loaded just before it is staged (not held across the WMMA phase)
+        half8 ra[A_SB][4];
+#pragma unroll
+        for (int e = 0; e < A_SB; ++e) fq_decode_sb(qa[e], qb[e], qe[e], ra[e]);
+        __syncthreads();
+#pragma unroll
+        for (int e = 0; e < A_SB; ++e) {
+            const int s = threadIdx.x + e * NTH, r = moep::fqRow(s, BK), sb = moep::fqSb(s, BK);
+#pragma unroll
+            for (int j = 0; j < 4; ++j) *(half8 *)&As[r][sb * 32 + j * 8] = ra[e][j];
+        }
+#pragma unroll
+        for (int e = 0; e < B_PER; ++e) {
+            const int i = threadIdx.x + e * NTH;
+            if (i / GPR < live16) *(half8 *)&Bs[i / GPR][(i % GPR) * 8] = rb8[e];
+        }
+        __syncthreads();
+        if (k0 + BK < ncols) fetchA(k0 + BK);
+        if (wn >= live) continue;
+#pragma unroll
+        for (int kk = 0; kk < BK; kk += 16) {
+            const half16 a0 = ld_frag16(&As[wm * 16 + lane % 16][kk]);
+            const half16 a1 = ld_frag16(&As[GR + wm * 16 + lane % 16][kk]);
+#pragma unroll
+            for (int i = 0; i < FPW; ++i) {
+                const int j = moep::frag(wn, WN, i);
+                if (j < live) {
+                    const half16 b = ld_frag16(&Bs[j * 16 + lane % 16][kk]);
+                    acc[0][i] = WMMA16(a0, b, acc[0][i]);
+                    acc[1][i] = WMMA16(a1, b, acc[1][i]);
+                }
+            }
+        }
+    }
+    // the moepgu_impl epilogue, verbatim
+#pragma unroll
+    for (int i = 0; i < FPW; ++i) {
+        const int j = moep::frag(wn, WN, i);
+        const int t = j * 16 + lane % 16;
+        if (j >= live || t >= n_tok) continue;
+#pragma unroll
+        for (int v = 0; v < 8; ++v) {
+            const int row = m0 + wm * 16 + CROW(lane, v);
+            if (row < ff) {
+                const float g = acc[0][i][v], u = acc[1][i][v];
+                Aout[(size_t)(tl.y + t) * ff + row] = (_Float16)(g / (1.f + __expf(-g)) * u);
+            }
+        }
+    }
+}
+#endif
+
 // ---------------------------------------------------------------- E: down (twin of moepdn_impl, EPI 0 / 2 / 4 / 5 / 6)
 // v0252-8sdet: EPI 6 = gemm_moepfqdi_* (COMB 6, fast): the same integer adds and last-arriver tail as gemm_moepdi_*
 // (moe_prefill_mt.hip moep_fix_finalize); the WMMA chains are gemm_moepdn's (this twin's invariance), so the addends, the
@@ -419,15 +543,27 @@ MOEPFQGU_ENTRY(g64n64k128, 64, 64, 128)
 // v0252-gemmlat round 9 (PLAN V1-53; bench-only kt prototype, NOT in kernels::kMoepGu, no product path): gemm_moepfqgu_g64n64k64u =
 // the shipped g64n64k64 with UW (wave index through readfirstlane): the same grid, tiles, LDS, WMMA chain and bits. Compiled ONLY
 // with -DWHIRL_FQ_GUU_PROTO=1 (kt-only object).
-#ifdef WHIRL_FQ_GUU_PROTO
+#if defined(WHIRL_FQ_GUU_PROTO) || defined(WHIRL_FQ_GU128U_PROTO)
 #define MOEPFQGU_U_ENTRY(NAME, GR, BN, BK)                                                                           \
     extern "C" __global__ void __launch_bounds__(256)                                                               \
         gemm_moepfqgu_##NAME##_mxfp4(const uint8_t *W1, const uint8_t *W2, uint64_t row_bytes, int ff,              \
                                      const _Float16 *X, _Float16 *A, int ncols, const int4 *tiles, const int *n_tiles) { \
         moepfq_gu_impl<BK, GR, BN, 0, true>(W1, W2, row_bytes, ff, X, A, ncols, tiles, n_tiles);                    \
     }
+#endif
+#ifdef WHIRL_FQ_GUU_PROTO
 MOEPFQGU_U_ENTRY(g64n64k64u, 64, 64, 64)
+#endif
+// v0252-gemmlat round 11 (bench-only kt prototype): gemm_moepfqgu_g64n64k128u = BK 128 (round 7's one barrier round per 128 columns)
+// on the UW form (round 9: no exec-mask region around the WMMAs; round 8 saw the BK 128 accumulators spilled between those regions).
+// Same grid, tiles, WMMA chain and bits as g64n64k64. Compiled ONLY with -DWHIRL_FQ_GU128U_PROTO=1 (kt-only object).
+#ifdef WHIRL_FQ_GU128U_PROTO
+MOEPFQGU_U_ENTRY(g64n64k128u, 64, 64, 128)
+#endif
 #undef MOEPFQGU_U_ENTRY
+// v0252-gemmlat round 12: gemm_moepfqgu_g64n64k128v (moepfq_gu_v_impl above). kt-only object only.
+#ifdef WHIRL_FQ_GU128V_PROTO
+extern "C" __global__ void __launch_bounds__(256) gemm_moepfqgu_g64n64k128v_mxfp4(const uint8_t *W1, const uint8_t *W2, uint64_t row_bytes, int ff, const _Float16 *X, _Float16 *A, int ncols, const int4 *tiles, const int *n_tiles) { moepfq_gu_v_impl<128, 64, 64>(W1, W2, row_bytes, ff, X, A, ncols, tiles, n_tiles); }
 #endif
 #undef MOEPFQGU_ENTRY
 #undef MOEPFQDN_ENTRY
