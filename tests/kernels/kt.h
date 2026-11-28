@@ -320,7 +320,9 @@ inline constexpr const char* kMoepDhsAblation[] = {"m128w4n128k64a1", "m128w4n12
 // g64n64k128u (round 11, -DWHIRL_FQ_GU128U_PROTO=1): BK 128 (one barrier round per 128 columns) on the wave-uniform UW form.
 inline constexpr wk::MoepGuVariant kMoepGuProto[] = {{"g64n64k128", 64, 64, 128}, {"g64n64k64u", 64, 64, 64}, {"g64n64k128u", 64, 64, 128},
                                                      {"g64n64k128v", 64, 64, 128},   // round 12: k128u with 32-bit offsets, X not held across the WMMAs
-                                                     {"g64n64k64o", 64, 64, 64}};    // round 13: the shipped code under its own name
+                                                     {"g64n64k64o", 64, 64, 64},     // round 13: the shipped code under its own name
+                                                     {"g64n64k128w", 64, 64, 128}};  // round 15: k128v + a scheduling barrier between the
+                                                                                     // two 64-column halves (-DWHIRL_FQ_GU128W_PROTO=1)
                                                                                      // (-DWHIRL_FQ_GUO_PROTO=1), launched with kMoepGuDynLds
 // v0252-gemmlat round 13: dynamic LDS bytes kt adds at launch for a gate + up prototype (bench moepgu and kt moemx): g64n64k64o =
 // the shipped g64n64k64 code (static LDS (2 x 64 + 64) x 72 x 2 = 27648 B) + (2 x 64 + 64) x 64 x 2 = 24576 B = 52224 B, k128u's

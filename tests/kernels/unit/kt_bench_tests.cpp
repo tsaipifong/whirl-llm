@@ -853,11 +853,22 @@ static void test_moep_kt_only_entries() {
         const std::string g128 = p128 == std::string::npos ? std::string("(not found)") : guard(p128);
         check(std::string("moe_prefill_fq.hip: ") + n128 + " only under #ifdef WHIRL_FQ_GU128U_PROTO (geometry = kt.h kMoepGuProto)",
               g128 == "#ifdef WHIRL_FQ_GU128U_PROTO", g128);
-        // round 12: the k128v entry and its impl only under WHIRL_FQ_GU128V_PROTO, the entry calling the impl with BK 128 / GR 64 / BN 64
-        for (const char* nv : {"gemm_moepfqgu_g64n64k128v_mxfp4(", "__device__ void moepfq_gu_v_impl("}) {
-            const std::size_t pv = src.find(nv);
+        // round 12: the k128v entry only under WHIRL_FQ_GU128V_PROTO, the entry calling the impl with BK 128 / GR 64 / BN 64
+        // round 15: the impl under either k128v's or k128w's macro; the k128w entry only under WHIRL_FQ_GU128W_PROTO, calling the
+        // impl with the scheduling-barrier flag (SB = true); k128v keeps SB = false (the default: its code unchanged)
+        {
+            const std::size_t pv = src.find("gemm_moepfqgu_g64n64k128v_mxfp4(");
             const std::string gv = pv == std::string::npos ? std::string("(not found)") : guard(pv);
-            check(std::string("moe_prefill_fq.hip: ") + nv + " only under #ifdef WHIRL_FQ_GU128V_PROTO", gv == "#ifdef WHIRL_FQ_GU128V_PROTO", gv);
+            check("moe_prefill_fq.hip: gemm_moepfqgu_g64n64k128v_mxfp4( only under #ifdef WHIRL_FQ_GU128V_PROTO", gv == "#ifdef WHIRL_FQ_GU128V_PROTO", gv);
+            const std::size_t pw = src.find("gemm_moepfqgu_g64n64k128w_mxfp4(");
+            const std::string gw = pw == std::string::npos ? std::string("(not found)") : guard(pw);
+            check("moe_prefill_fq.hip: gemm_moepfqgu_g64n64k128w_mxfp4( only under #ifdef WHIRL_FQ_GU128W_PROTO", gw == "#ifdef WHIRL_FQ_GU128W_PROTO", gw);
+            const std::size_t pi = src.find("__device__ void moepfq_gu_v_impl(");
+            const std::string gi = pi == std::string::npos ? std::string("(not found)") : guard(pi);
+            check("moe_prefill_fq.hip: moepfq_gu_v_impl only under #if defined(WHIRL_FQ_GU128V_PROTO) || defined(WHIRL_FQ_GU128W_PROTO)",
+                  gi == "#if defined(WHIRL_FQ_GU128V_PROTO) || defined(WHIRL_FQ_GU128W_PROTO)", gi);
+            check("moe_prefill_fq.hip: g64n64k128w = moepfq_gu_v_impl<128, 64, 64, true> (kt.h kMoepGuProto BK 128, GR 64, BN 64)",
+                  pw != std::string::npos && src.find("moepfq_gu_v_impl<128, 64, 64, true>(", pw) < src.find('\n', pw));
         }
         const std::size_t ev = src.find("gemm_moepfqgu_g64n64k128v_mxfp4(");
         check("moe_prefill_fq.hip: g64n64k128v = moepfq_gu_v_impl<128, 64, 64> (kt.h kMoepGuProto BK 128, GR 64, BN 64)",
