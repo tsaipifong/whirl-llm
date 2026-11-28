@@ -1302,6 +1302,21 @@ static void test_sx_arm_env() {
     check("sxarm: the probe entries instantiate attn_sx_impl<256, 8, false, PRB> (attn_sx8's NCOLS2)",
           sx.find("fattn_rdna35::attn_sx_impl<256, 8, false, PRB>", b0) < b1);
     check("sxarm: attn_sx8 is a product entry outside the probe block", sx.find("WHIRL_ATTN_SX_ENTRY(attn_sx8, 8)") < b0);
+    // v0252-attnsx round 2: the product forms attn_sxn<NP> (A = attn_sx<NP>)
+    for (const char* p : {"attn_sxn2", "attn_sxn4", "attn_sxn8"}) {
+        const sxarm::Arm a = sxarm::armFromEnv(p);
+        check(std::string("sxarm: ") + p + " -> sx_same_bits (bitwise row vs attn_sx of its NP)", a.kind == Kind::sx_same_bits, sxarm::kindName(a.kind));
+        const std::size_t at = sx.find(std::string("WHIRL_ATTN_SXN_ENTRY(") + p + ", " + p[8] + ")");
+        check(std::string("sxarm: ") + p + " is a PRODUCT entry (outside the WHIRL_ATTNSX_PROBES block) with its NCOLS2", at != std::string::npos && at < b0);
+    }
+    check("sxarm: the product entries instantiate attn_sx_impl<256, NC2, false, 4> (PRB 4 = the select-free form)",
+          sx.find("fattn_rdna35::attn_sx_impl<256, NC2, false, 4>") < b0);
+    check("sxarm: sxArmNp = the name's last digit", sxarm::sxArmNp("attn_sxn2") == 2 && sxarm::sxArmNp("attn_sxn4") == 4 && sxarm::sxArmNp("attn_sx8") == 8 &&
+                                                       sxarm::sxArmNp("attn_sxp_skel8") == 8 && sxarm::sxArmNp("attn_prefill_wmma") == 0 && sxarm::sxArmNp("") == 0);
+    for (const char* p : {"attn_sxn", "attn_sxn6", "ATTN_SXN8"}) {
+        const sxarm::Arm a = sxarm::armFromEnv(p);
+        check(std::string("sxarm: '") + p + "' -> invalid", a.kind == Kind::invalid, sxarm::kindName(a.kind));
+    }
 }
 
 int main(int argc, char** argv) {

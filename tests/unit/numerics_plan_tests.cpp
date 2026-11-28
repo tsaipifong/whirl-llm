@@ -888,6 +888,8 @@ void testFastOnlyOverrides() {
         {"ATTN_I4PF", 'F'},
         // v0252-attnlat: attn_pfx_f16r, bit-identical to attn_prefill_wmma (kt attn PFXINV 12 of 12), every mode (testAttnPfxFlag)
         {"ATTN_PFX", 'B'},
+        // v0252-attnsx: attn_sxn<NP>, bit-identical to attn_sx<NP> (kt SXNINV rows), rides on the balance-only attn_sx (testAttnSxnFlag)
+        {"ATTN_SXN", 'B'},
     };
     for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
     // v0251-a6port: WHIRL_GEMV_K (EnvSnapshot, config.cpp) is class B (every gemvk variant bitwise == gemvq). FO-3
@@ -1994,6 +1996,55 @@ static void testAttnI4qkFlag() {
 // the flag; "1" (any value but "0" / "") turns it on in every cell and moves nothing but this flag, with no ignored note; "0" /
 // "" keep it off; a profile row forced on turns it on everywhere, "0" still turns it off. Fails to build before the change (no
 // Flags::attn_pfx, EnvValues::attn_pfx, Target::attn_pfx_profile, device::Profile::attn_pfx_f16r).
+// v0252-attnsx (PLAN V1-148): WHIRL_ATTN_SXN / device::Profile::attn_sx_nosel. Both rows off; default off everywhere;
+// "0" / "" = the default plan (bitsKey, log line, overrides; a "" outside balance is noted once like every set value);
+// "1" / "x" turn it on exactly where attn_sx is on (balance, the plan's own attn_sx) and move only that flag; outside balance
+// one ignored note and nothing else; a profile row forced on -> on where attn_sx is, "0" still off. Fails to build before the
+// change (no Flags::attn_sxn, EnvValues::attn_sxn, Target::attn_sxn_profile, device::Profile::attn_sx_nosel).
+static void testAttnSxnFlag() {
+    auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    for (const CardFake& c : k_cards) NCHECK(!c.prof.attn_sx_nosel, "attn_sxn: device row {} is on (want opt-in: off on every card)", c.name);
+    std::size_t cells_sx = 0, on_env = 0;
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const CardFake& c : k_cards)
+            for (const char* model : {"swift", "moe"}) {
+                const nu::Target t = target(c, model, false);
+                const nu::Plan d = pl(t, mode, {});
+                const bool sx = d.flags.attn_sx;
+                const bool bal = std::string_view(mode) == "balance";
+                cells_sx += sx;
+                NCHECK(!d.flags.attn_sxn, "attn_sxn default {} {} {}: on (want off: opt-in)", c.name, model, mode);
+                for (const char* v : {"0", ""}) {
+                    const nu::Plan z = pl(t, mode, {{"ATTN_SXN", v}});
+                    const std::size_t notes = std::string_view(v) == "0" || bal ? 0 : 1;
+                    NCHECK(!z.flags.attn_sxn && z.bitsKey() == d.bitsKey() && nu::logLine(z) == nu::logLine(d) && z.overrides == d.overrides &&
+                               z.ignored.size() == notes,
+                           "attn_sxn {} {} {}: WHIRL_ATTN_SXN='{}' = the default plan", c.name, model, mode, v);
+                }
+                for (const char* v : {"1", "x"}) {
+                    const nu::Plan o = pl(t, mode, {{"ATTN_SXN", v}});
+                    NCHECK(o.flags.attn_sxn == sx, "attn_sxn {} {} {}: WHIRL_ATTN_SXN='{}' -> {} (want {}: where attn_sx is on)", c.name, model, mode, v,
+                           o.flags.attn_sxn, sx);
+                    if (std::string_view(v) == "1") on_env += o.flags.attn_sxn;
+                    nu::Plan oa = o;
+                    oa.flags.attn_sxn = false;
+                    NCHECK(oa.bitsKey() == d.bitsKey() && o.overrides == d.overrides && o.lossy_override == d.lossy_override && o.ignored.size() == (bal ? 0u : 1u),
+                           "attn_sxn {} {} {}: WHIRL_ATTN_SXN='{}' moves only the attn_sxn flag", c.name, model, mode, v);
+                    NCHECK((o.bitsKey() != d.bitsKey()) == sx, "attn_sxn {} {} {}: the arms default / ='{}' differ exactly where it runs", c.name, model, mode, v);
+                }
+                nu::Target tp = t;
+                tp.attn_sxn_profile = true;
+                NCHECK(pl(tp, mode, {}).flags.attn_sxn == sx && !pl(tp, mode, {{"ATTN_SXN", "0"}}).flags.attn_sxn,
+                       "attn_sxn {} {} {}: profile row on -> on where attn_sx is, WHIRL_ATTN_SXN=0 -> off", c.name, model, mode);
+            }
+    NCHECK(cells_sx > 0 && on_env == cells_sx, "attn_sxn: WHIRL_ATTN_SXN=1 on in {} of the {} attn_sx cells", on_env, cells_sx);
+}
+
 static void testAttnPfxFlag() {
     auto pl = [&](const nu::Target& t, const char* mode, std::vector<std::pair<const char*, const char*>> vals) {
         nu::Request r = nu::parseMode(mode, "t");
@@ -2637,6 +2688,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testLsplitFlag();  // v0252-l2split (fails to build before the change: no attn_lsplit / parseLsplit)
     testAttnSxFlag();  // v0252-strixc2 (fails before the port: loadFlags never sets attn_sx)
     testAttnI4qkFlag();  // v0252-8sfp (fails before the port: loadFlags never sets attn_i4qk)
+    testAttnSxnFlag();  // v0252-attnsx (fails to build before the change: no Flags::attn_sxn / Target::attn_sxn_profile)
     testAttnPfxFlag();  // v0252-attnlat (fails to build before the change: no Flags::attn_pfx / Target::attn_pfx_profile)
     testAttnI4pfFlag();  // v0252-8sattn3 (port: fails without the flag; round 3: fails while the gfx1151 row is off)
     testMoepGuwFlag();  // v0252-8smoe (B; fails to build before the change: no Flags::moep_guw / EnvValues::moep_guw)

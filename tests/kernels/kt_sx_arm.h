@@ -33,11 +33,18 @@ struct Arm {
 
 inline constexpr const char* kSameBits[] = {"attn_prefill_wmma", "attn_pfx_f16r"};
 inline constexpr const char* kProbes[] = {"fa_probe_noload", "fa_probe_nopv", "fa_probe_norescale"};
-inline constexpr const char* kSxSameBits[] = {"attn_sx8", "attn_sxp_nosel8"};
+// v0252-attnsx round 2: + the product forms attn_sxn2 / 4 / 8 (A = attn_sx of the same NP)
+inline constexpr const char* kSxSameBits[] = {"attn_sx8", "attn_sxp_nosel8", "attn_sxn2", "attn_sxn4", "attn_sxn8"};
 inline constexpr const char* kSxProbes[] = {"attn_sxp_noload8", "attn_sxp_norescale8", "attn_sxp_skel8"};
 
-// arm A is attn_sx8 and arm B runs at attn_sx8's geometry
+// arm A is attn_sx<NP> and arm B runs at attn_sx<NP>'s geometry
 inline bool sxGeometry(Kind k) { return k == Kind::sx_same_bits || k == Kind::sx_probe; }
+// the NP of an attn_sx-geometry arm = the kernel name's last digit (2, 4 or 8); 0 for any other name
+inline int sxArmNp(const std::string& k) {
+    if (k.empty()) return 0;
+    const char d = k.back();
+    return d == '2' ? 2 : d == '4' ? 4 : d == '8' ? 8 : 0;
+}
 
 inline Arm armFromEnv(const char* v) {
     Arm a;

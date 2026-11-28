@@ -21,6 +21,7 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_ATTN_PFX",  // src/common/numerics.cpp (v0252-attnlat: another kernel, same bits as attn_prefill_wmma; hashed like ATTN_WS4R)
     "WHIRL_ATTN_SEG",  // src/common/numerics.cpp
     "WHIRL_ATTN_SX",  // src/common/numerics.cpp (v0252-strixc2: balance attn_sx off when "0")
+    "WHIRL_ATTN_SXN",  // src/common/numerics.cpp (v0252-attnsx: another kernel, same bits as attn_sx<NP>; hashed like ATTN_PFX)
     "WHIRL_ATTN_WIDE",  // src/common/numerics.cpp
     "WHIRL_ATTN_WS4",  // src/common/numerics.cpp
     "WHIRL_ATTN_WS4R",  // src/common/numerics.cpp (v0252-ws4r97b: other kernels, same bits; hashed like ATTN_KGVAR)

@@ -2579,3 +2579,100 @@ void testAttnDq4E1() {
     std::printf("  testAttnDq4E1: %lld one-position intervals, %lld two-position (%lld agree, %lld at a breakpoint), %lld bad\n", one,
                 two_same + two_diff, two_same, two_diff, bad);
 }
+
+// v0252-attnsx (PLAN V1-148): attn_sxn<NP> (attn_sx<NP> without the key < kv_end select at the K / V load; same arguments,
+// grid, block and bits) in place of attn_sx<NP> when AttnPrefillFlags::attn_sxn_on rides on attn_sx_on. (1) attnSxFor: nosel
+// picks the same NP's attn_sxn, falls back to attn_sx<NP> without it, never another NP; (2) every plan with both flags is the
+// attn_sx plan with only the kernel names swapped (f16 cache in place, the one-range q8 copy, two head parts); attn_sxn_on alone
+// = the plan without flags. Fails to build before the change (no attn_sxn_on / attn_sxn2..8 / attnSxFor's nosel).
+void testAttnSxn() {
+    static const kn::KernelTable ks = [] {
+        kn::KernelTable k = attnTable(true, true, true, false);
+        k.attn_sx2 = tag("attn_sx2");
+        k.attn_sx4 = tag("attn_sx4");
+        k.attn_sx8 = tag("attn_sx8");
+        return k;
+    }();
+    static const kn::KernelTable kn2 = [] {
+        kn::KernelTable k = ks;
+        k.attn_sxn2 = tag("attn_sxn2");
+        k.attn_sxn4 = tag("attn_sxn4");
+        k.attn_sxn8 = tag("attn_sxn8");
+        return k;
+    }();
+    // (1) the selector
+    struct Pick {
+        std::uint32_t grp, hp, hd, np;
+    };
+    const Pick picks[] = {{6, 24, 256, 2}, {8, 16, 256, 8}, {4, 16, 256, 4}, {12, 24, 256, 4}, {8, 12, 256, 0}, {6, 24, 128, 0}, {3, 24, 256, 0}};
+    for (const Pick& c : picks) {
+        const ops::AttnSxPick a = ops::attnSxFor(kn2, c.grp, c.hp, c.hd), b = ops::attnSxFor(kn2, c.grp, c.hp, c.hd, true);
+        const ops::AttnSxPick z = ops::attnSxFor(ks, c.grp, c.hp, c.hd, true);  // no attn_sxn in the object: attn_sx<NP>
+        const std::string sx = c.np ? "attn_sx" + std::to_string(c.np) : "null", sxn = c.np ? "attn_sxn" + std::to_string(c.np) : "null";
+        CHECK(nameOf(a.f) == sx && a.np == c.np);
+        CHECK(nameOf(b.f) == sxn && b.np == c.np);
+        CHECK(nameOf(z.f) == sx && z.np == c.np);
+    }
+    {
+        kn::KernelTable k = kn2;  // only another NP's attn_sxn: never taken
+        k.attn_sxn8 = nullptr;
+        CHECK(nameOf(ops::attnSxFor(k, 8, 16, 256, true).f) == "attn_sx8");
+    }
+    // (2) the plans: identical steps, only attn_sx<NP> -> attn_sxn<NP>
+    auto swapped = [](const ops::AttnPrefillPlan& a, const ops::AttnPrefillPlan& b) {
+        bool eq = a.steps.size() == b.steps.size() && !a.steps.empty();
+        std::size_t n_sx = 0;
+        for (std::size_t i = 0; eq && i < a.steps.size(); ++i) {
+            const auto &x = a.steps[i], &y = b.steps[i];
+            eq = x.op == y.op && x.grid.x == y.grid.x && x.grid.y == y.grid.y && x.grid.z == y.grid.z && x.block.x == y.block.x && x.head0 == y.head0 &&
+                 x.from_copy == y.from_copy && x.ranged == y.ranged && x.r0 == y.r0 && x.r1 == y.r1 && x.nrows == y.nrows;
+            const std::string nx = nameOf(x.f), ny = nameOf(y.f);
+            if (eq && nx.rfind("attn_sx", 0) == 0) {
+                eq = ny == "attn_sxn" + nx.substr(7);
+                ++n_sx;
+            } else if (eq) {
+                eq = nx == ny;
+            }
+        }
+        return eq && n_sx > 0;
+    };
+    ops::AttnPrefillFlags off, sx, sxn, only;
+    sx.attn_sx_on = true;
+    sxn.attn_sx_on = true;
+    sxn.attn_sxn_on = true;
+    only.attn_sxn_on = true;
+    struct Shape {
+        std::uint32_t heads, kv;
+    };
+    for (const Shape sh : {Shape{16, 2}, Shape{24, 4}, Shape{4, 2}}) {
+        ops::AttnPrefillProblem p;
+        p.head_dim = 256;
+        p.n_head = sh.heads;
+        p.n_head_kv = sh.kv;
+        p.scale = 1.0f / 16.0f;
+        p.n = 512;
+        p.pos0 = 1536;
+        CHECK(swapped(ops::chooseAttnPrefill(p, sx, kn2), ops::chooseAttnPrefill(p, sxn, kn2)));  // f16 cache in place
+        CHECK(nameOf(ops::chooseAttnPrefill(p, only, kn2).steps.back().f) == nameOf(ops::chooseAttnPrefill(p, off, kn2).steps.back().f));
+        p.kv_q8 = true;  // one dequantized range
+        p.dq_rows = 8192;
+        p.dq_ptab = true;
+        p.dq_st_ml = true;
+        CHECK(swapped(ops::chooseAttnPrefill(p, sx, kn2), ops::chooseAttnPrefill(p, sxn, kn2)));
+        CHECK(ops::chooseAttnPrefill(p, only, kn2).steps.size() == ops::chooseAttnPrefill(p, off, kn2).steps.size() &&
+              nameOf(ops::chooseAttnPrefill(p, only, kn2).steps.back().f) == nameOf(ops::chooseAttnPrefill(p, off, kn2).steps.back().f));
+        // without attn_sxn in the object: exactly the attn_sx plan
+        const auto a = ops::chooseAttnPrefill(p, sx, ks), b = ops::chooseAttnPrefill(p, sxn, ks);
+        CHECK(a.steps.size() == b.steps.size() && nameOf(a.steps.back().f) == nameOf(b.steps.back().f));
+    }
+    // two head parts (Ornith 16 / 2, 4096 queries at 131072): both launches swapped, head0 0 / 8
+    ops::AttnPrefillProblem p;
+    p.head_dim = 256;
+    p.n_head = 16;
+    p.n_head_kv = 2;
+    p.scale = 1.0f / 16.0f;
+    p.n = 4096;
+    p.pos0 = 131072;
+    const auto a = ops::chooseAttnPrefill(p, sx, kn2), b = ops::chooseAttnPrefill(p, sxn, kn2);
+    CHECK(swapped(a, b) && b.steps.size() == 2 && nameOf(b.steps[0].f) == "attn_sxn8" && nameOf(b.steps[1].f) == "attn_sxn8" && b.steps[1].head0 == 8);
+}

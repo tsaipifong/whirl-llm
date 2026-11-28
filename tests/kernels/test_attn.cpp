@@ -635,8 +635,104 @@ static void testPfxF16r(Ctx& c) {
     std::fflush(stdout);
 }
 
+// v0252-attnsx round 2 (PLAN V1-148): attn_sxn<NP> (gfx1151 product entries, WHIRL_ATTN_SXN) is attn_sx<NP> without the
+// key < kv_end select at the K / V load (the address clamp stays): keys >= kv_end of the tile's last step are masked to -inf
+// (P = +0) and their V rows are copies of row kv_end - 1, so the output is bitwise == attn_sx<NP> (a kernel-test invariant of
+// this same-bits pair). Own f16 paged cache (shuffled pages, N(0, 1)) of 4111 keys; shapes 16 / 2 (Ornith, NP 8), 24 / 4
+// (Swift, NP 2), 16 / 4 (NP 4); per shape: L 4096 (a multiple of the 32-key step) and 4111 (not) with n 1 / 37 / 333 / 2048
+// at pos L - n (kv_end in mid-step for every tile whose last token is not at a step end), a small L (n 37 at pos 0) and n 2048
+// at pos 0, and n 2048 at L 4111 in two head parts (h0 = 0 / half: the head-range partition of ops::chooseAttnPrefill).
+// A gfx1151 object without an attn_sxn entry is the build before this item: FAIL; other objects must not carry them.
+static void testSxnBits(Ctx& c) {
+    const bool g1151 = c.mod.arch() == hip::Arch::gfx1151;
+    const hip::Function fx[3] = {c.fnOpt("attn_sx2"), c.fnOpt("attn_sx4"), c.fnOpt("attn_sx8")};
+    const hip::Function fn[3] = {c.fnOpt("attn_sxn2"), c.fnOpt("attn_sxn4"), c.fnOpt("attn_sxn8")};
+    const bool have = fn[0] && fn[1] && fn[2] && fx[0] && fx[1] && fx[2];
+    const bool none = !fn[0] && !fn[1] && !fn[2];
+    if (!g1151 || !have) {
+        Result r;
+        r.kind = Kind::invariant;
+        r.n = 1;
+        r.name = g1151 ? "attn_sxn2 / 4 / 8 and attn_sx2 / 4 / 8 (v0252-attnsx) in the gfx1151 code object"
+                       : "attn_sxn* absent from this non-gfx1151 code object";
+        r.pass = g1151 ? false : none;
+        r.mismatches = r.pass ? 0 : 1;
+        if (!r.pass) r.note = g1151 ? "missing from the code object" : "present outside gfx1151";
+        c.rep.add(r);
+        std::printf("   SXNINV attn_sxn == attn_sx: 0 of 0 rows run (%s)\n",
+                    g1151 ? "FAIL: attn_sxn / attn_sx missing from the gfx1151 code object" : "not gfx1151: the entries must be absent");
+        return;
+    }
+    std::size_t rows_run = 0, rows_ok = 0;
+    const int Lcap = 4111, hd = 256, qstride = 2 * hd;
+    const float scale = 1.0f / 16.0f;
+    const int max_kv = 4;
+    const int pages = (Lcap + wk::kKvPage - 1) / wk::kKvPage;
+    const std::size_t nel = static_cast<std::size_t>(pages) * wk::kKvPage * max_kv * hd;
+    std::vector<int> pt(static_cast<std::size_t>(pages));
+    std::iota(pt.begin(), pt.end(), 0);
+    std::shuffle(pt.begin(), pt.end(), c.rng);
+    const std::vector<float> kf = c.randn(nel), vf = c.randn(nel);
+    std::vector<std::uint16_t> kh(nel), vh(nel);
+    for (std::size_t i = 0; i < nel; ++i) {
+        kh[i] = f2h(kf[i]);
+        vh[i] = f2h(vf[i]);
+    }
+    Buf dk(kh), dv(vh), dpt(pt);
+    wk::KvArgs a{};
+    a.k = dk.p();
+    a.v = dv.p();
+    a.ptab = dpt.p();
+    struct Case {
+        int n, p0, parts;
+    };
+    std::vector<Case> cases;
+    for (const int L : {4096, Lcap})
+        for (const int n : {1, 37, 333, 2048}) cases.push_back({n, L - n, 1});
+    cases.push_back({37, 0, 1});
+    cases.push_back({2048, 0, 1});
+    cases.push_back({2048, Lcap - 2048, 2});
+    for (const auto& [nh, nkv] : {std::pair{16, 2}, std::pair{24, 4}, std::pair{16, 4}}) {
+        const int grp = nh / nkv;
+        const int np = grp % 8 == 0 ? 8 : grp % 4 == 0 ? 4 : 2;  // ops::attnSxFor's NP
+        const int ix = np == 8 ? 2 : np == 4 ? 1 : 0;
+        const unsigned cols = 64u / static_cast<unsigned>(np);
+        for (const Case& cs : cases) {
+            const int hp = nh / cs.parts;
+            if (hp % np != 0) continue;
+            const std::vector<float> qp = c.randn(static_cast<std::size_t>(cs.n) * nh * qstride);
+            Buf dq(qp);
+            const std::size_t cnt = static_cast<std::size_t>(cs.n) * nh * hd;
+            Buf dpos(std::vector<int>{cs.p0});
+            Buf oa(cnt * 4), ob(cnt * 4);
+            oa.fill(0x7f);
+            ob.fill(0x7f);
+            for (const auto& [f, o] : {std::pair<hip::Function, Buf*>{fx[ix], &oa}, std::pair<hip::Function, Buf*>{fn[ix], &ob}})
+                for (int p = 0; p < cs.parts; ++p)
+                    hip::launch(f, hip::Dim3{cdiv(cs.n, cols) * static_cast<unsigned>(hp / np), 1, 1}, {256, 1, 1}, 0, c.s, dq.p(), a, o->p(), nh, nkv,
+                                qstride, dpos.p(), cs.n, scale, p * hp);
+            c.sync();
+            const std::string sn = std::to_string(np);
+            Result r = cmpExact("attn_sxn" + sn + " == attn_sx" + sn + " (" + std::to_string(nh) + " / " + std::to_string(nkv) + " heads, n " +
+                                    std::to_string(cs.n) + ", pos " + std::to_string(cs.p0) + ", L " + std::to_string(cs.p0 + cs.n) + ", parts " +
+                                    std::to_string(cs.parts) + ") [kv f16]",
+                                ob.down<float>(cnt), oa.down<float>(cnt), Kind::invariant);
+            ++rows_run;
+            rows_ok += r.pass ? 1 : 0;
+            c.rep.add(r);
+        }
+    }
+    std::printf("   SXNINV attn_sxn == attn_sx: %zu of %zu rows bitwise equal\n", rows_ok, rows_run);
+    std::fflush(stdout);
+}
+
 void testAttn(Ctx& c) {
     c.rep.family = "attn";
+    {  // v0252-attnsx: first (before testPfxF16r), the family's random stream restored, so every other row sees the same data
+        const std::mt19937_64 saved = c.rng;
+        testSxnBits(c);
+        c.rng = saved;
+    }
     {  // v0252-attnlat: first, so the queue job's invariant step fails fast; the family's random stream is restored, so every
        // other attn row sees the same data as before this item
         const std::mt19937_64 saved = c.rng;

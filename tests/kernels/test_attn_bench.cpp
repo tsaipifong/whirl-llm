@@ -526,8 +526,9 @@ static void benchPrefill1151(Ctx& c) {
 // v0252-attnlat (PLAN V1-148): WHIRL_KT_BENCH_SX_B=<kernel> (kt_sx_arm.h) replaces arm B by that kernel launched with arm A's
 // geometry and arguments ({cdiv(n, 128), heads per launch, 1} x 256): fa_probe_* (a phase removed; SXNUM is an info row, Kind
 // skip, never a failure) or a same-bits candidate (attn_pfx_f16r; attn_prefill_wmma = A/A control: SXNUM is a bitwise row).
-// v0252-attnsx: an sx_same_bits / sx_probe arm (attn_sx8, attn_sxp_*8; the probes only in a -DWHIRL_ATTNSX_PROBES code object)
-// makes arm A attn_sx8 and runs both arms at attn_sx8's grid; cells whose attn_sx pick is not NP 8 are skipped (SXSKIP).
+// v0252-attnsx: an sx_same_bits / sx_probe arm (attn_sx8, attn_sxp_*8 - the probes only in a -DWHIRL_ATTNSX_PROBES code object -
+// and round 2's product forms attn_sxn2 / 4 / 8) makes arm A attn_sx<NP> (NP = the arm name's last digit) and runs both arms at
+// attn_sx<NP>'s grid; cells whose attn_sx pick is another NP are skipped (SXSKIP).
 static std::vector<int> envInts(const char* name, std::vector<int> def) {
     const char* e = std::getenv(name);
     if (!e) return def;
@@ -549,12 +550,16 @@ static void benchSx1151(Ctx& c) {
     const hip::Function fsx[3] = {c.fnOpt("attn_sx2"), c.fnOpt("attn_sx4"), c.fnOpt("attn_sx8")};
     const sxarm::Arm arm = sxarm::armFromEnv(std::getenv("WHIRL_KT_BENCH_SX_B"));
     const hip::Function fX = arm.kind == sxarm::Kind::sx || arm.kind == sxarm::Kind::invalid ? hip::Function{} : c.fnOpt(arm.kernel);
-    // v0252-attnsx: sx_same_bits / sx_probe arms run at attn_sx8's geometry against attn_sx8 (kt_sx_arm.h)
+    // v0252-attnsx: sx_same_bits / sx_probe arms run at attn_sx<NP>'s geometry against attn_sx<NP> (kt_sx_arm.h); round 2: NP =
+    // the arm name's last digit (attn_sxn2 -> attn_sx2, the probes and attn_sxn8 -> attn_sx8)
     const bool sxg = sxarm::sxGeometry(arm.kind);
+    const int armNp = sxg ? sxarm::sxArmNp(arm.kernel) : 0;
+    const hip::Function fSxA = armNp == 8 ? fsx[2] : armNp == 4 ? fsx[1] : armNp == 2 ? fsx[0] : hip::Function{};
+    const std::string nameA = sxg ? "attn_sx" + std::to_string(armNp) : "attn_prefill_wmma";
     if (arm.kind != sxarm::Kind::sx) {
         std::printf("   SXARM B %s kind %s\n", arm.kernel.c_str(), sxarm::kindName(arm.kind));
-        if (arm.kind == sxarm::Kind::invalid || (sxg ? !fsx[2] : !fA) || !fX) {
-            c.rep.skip("attnbench", std::string("kernel A/B ") + (sxg ? "attn_sx8" : "attn_prefill_wmma") + " vs " + arm.kernel,
+        if (arm.kind == sxarm::Kind::invalid || (sxg ? !fSxA : !fA) || !fX) {
+            c.rep.skip("attnbench", "kernel A/B " + nameA + " vs " + arm.kernel,
                        arm.kind == sxarm::Kind::invalid ? "WHIRL_KT_BENCH_SX_B: not a probe / same-bits kernel (kt_sx_arm.h)" : "kernel not in this code object");
             return;
         }
@@ -612,8 +617,8 @@ static void benchSx1151(Ctx& c) {
                         break;
                     }
                 const bool armx = arm.kind != sxarm::Kind::sx && !sxg;  // arm B at attn_prefill_wmma's geometry
-                if (sxg && np != 8) {
-                    std::printf("   SXSKIP %d/%d n %d L %d: attn_sx pick is NP %d, the attn_sx8 arms need NP 8\n", heads, nkv, n, L, np);
+                if (sxg && np != armNp) {
+                    std::printf("   SXSKIP %d/%d n %d L %d: attn_sx pick is NP %d, arm %s needs NP %d\n", heads, nkv, n, L, np, arm.kernel.c_str(), armNp);
                     continue;
                 }
                 const hip::Function fB = armx || sxg ? fX : np == 8 ? fsx[2] : np == 4 ? fsx[1] : np == 2 ? fsx[0] : hip::Function{};
@@ -624,8 +629,8 @@ static void benchSx1151(Ctx& c) {
                 const unsigned cols = armx ? 0u : 64u / static_cast<unsigned>(np);
                 auto goA = [&] {
                     for (int p = 0; p < P; ++p) {
-                        if (sxg)  // arm A = attn_sx8 at its production geometry
-                            hip::launch(fsx[2], hip::Dim3{cdiv(n, cols) * static_cast<unsigned>(hp / np), 1, 1}, {256, 1, 1}, 0, c.s, dq.p(), a,
+                        if (sxg)  // arm A = attn_sx<NP> at its production geometry
+                            hip::launch(fSxA, hip::Dim3{cdiv(n, cols) * static_cast<unsigned>(hp / np), 1, 1}, {256, 1, 1}, 0, c.s, dq.p(), a,
                                         outA.p(), heads, nkv, qstride, dpos.p(), n, scale, p * hp);
                         else
                             hip::launch(fA, {cdiv(n, 128), static_cast<unsigned>(hp), 1}, {256, 1, 1}, 0, c.s, dq.p(), a, outA.p(), heads, nkv, qstride,
@@ -671,7 +676,7 @@ static void benchSx1151(Ctx& c) {
                                     arm.kernel.c_str(), P, ma);
                         c.rep.skip("attnbench", what, "probe kernel: a phase is removed, output wrong by design (info row, not a check)");
                     }
-                } else if (sxg) {  // v0252-attnsx: B vs attn_sx8 over the whole output
+                } else if (sxg) {  // v0252-attnsx: B vs attn_sx<NP> over the whole output
                     const std::size_t on = static_cast<std::size_t>(n) * heads * hd;
                     const auto oa = outA.down<float>(on), ob = outB.down<float>(on);
                     std::size_t bad = 0;
@@ -681,13 +686,13 @@ static void benchSx1151(Ctx& c) {
                         ma = std::max(ma, std::fabs(static_cast<double>(ob[i]) - oa[i]));
                     }
                     if (arm.kind == sxarm::Kind::sx_same_bits) {
-                        std::printf("   SXNUM %d/%d n %d L %d B %s parts %d bitwise_mismatches %zu of %zu (vs attn_sx8)\n", heads, nkv, n, L, arm.kernel.c_str(),
-                                    P, bad, on);
-                        benchBitRow(c, arm.kernel + " == attn_sx8, n " + std::to_string(n), heads, nkv, L, 0, bad, on);
+                        std::printf("   SXNUM %d/%d n %d L %d B %s parts %d bitwise_mismatches %zu of %zu (vs %s)\n", heads, nkv, n, L, arm.kernel.c_str(),
+                                    P, bad, on, nameA.c_str());
+                        benchBitRow(c, arm.kernel + " == " + nameA + ", n " + std::to_string(n), heads, nkv, L, 0, bad, on);
                     } else {
-                        std::printf("   SXNUM %d/%d n %d L %d B %s parts %d probe maxabs %.4g bitwise_mismatches %zu of %zu (vs attn_sx8; info: a phase removed)\n",
-                                    heads, nkv, n, L, arm.kernel.c_str(), P, ma, bad, on);
-                        c.rep.skip("attnbench", arm.kernel + " vs attn_sx8 (heads " + std::to_string(heads) + " / kv " + std::to_string(nkv) + ", n " +
+                        std::printf("   SXNUM %d/%d n %d L %d B %s parts %d probe maxabs %.4g bitwise_mismatches %zu of %zu (vs %s; info: a phase removed)\n",
+                                    heads, nkv, n, L, arm.kernel.c_str(), P, ma, bad, on, nameA.c_str());
+                        c.rep.skip("attnbench", arm.kernel + " vs " + nameA + " (heads " + std::to_string(heads) + " / kv " + std::to_string(nkv) + ", n " +
                                                     std::to_string(n) + ", L " + std::to_string(L) + ")",
                                    "probe kernel: a phase is removed, output wrong by design (info row, not a check)");
                     }
