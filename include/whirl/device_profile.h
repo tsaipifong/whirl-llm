@@ -184,6 +184,11 @@ struct Profile {
     // copy (numerics::Target::attn_pfx_profile, flag attn_pfx); every mode (same bits). WHIRL_ATTN_PFX: "0" / "" off, other
     // on. Opt-in candidate: off in both rows (kernel test 16/2 +5..+7 %, 24/4 open; no end-to-end screen yet)
     bool attn_pfx_f16r;
+    // v0252-attnsx (PLAN V1-148): attn_sxn<NP> in place of attn_sx<NP> (balance prefill attention without the key < kv_end
+    // select at the K / V load: the address clamp stays, masked keys give P = 0, same bits; gfx1151 object only;
+    // numerics::Target::attn_sxn_profile, flag attn_sxn). WHIRL_ATTN_SXN: "0" / "" off, other on. Opt-in candidate: off in
+    // both rows (kernel test 16/2 -6.45 % / -5.81 % kernel time at 32k / 129k, bitwise; no end-to-end screen yet)
+    bool attn_sx_nosel;
     std::size_t prefill_exec_moe;  // default forward rows of a MoE solo prefill (prefillExecDefault)
     bool prefill_fill_batch;       // forwards fill whole chunks up to the batch (prefillExecFor fill, SRV-PP)
     // v0252-n10: whirl-server writes the TAIL-CK checkpoint inside the solo prefill forward that contains the tail point
@@ -301,6 +306,7 @@ inline constexpr Profile k_profile_gfx1201{
     .attn_i4qk_fast = false,   // v0252-8sfp: no attn_prefill_wmma_i4 in the gfx1201 code object (fp8 there, iu4 not used)
     .attn_i4_qlds_pf = false,  // v0252-8sattn3: no attn_prefill_wmma_i4p in the gfx1201 code object
     .attn_pfx_f16r = false,    // v0252-attnlat: no attn_pfx_f16r in the gfx1201 code object
+    .attn_sx_nosel = false,    // v0252-attnsx: no attn_sxn in the gfx1201 code object
     // v0252-ch4k (PLAN V1-75): MoE solo prefills run 4096-row forwards in the 8060S fill form (whole chunks up to the
     // batch 4096; no extra memory, the prefill buffers are sized for the batch). Timed e2e A/B on the R9700 (Ornith
     // MXFP4, 4 ABBA rounds, 4096-row forwards vs 2048, scratch/v0252_ch4k/gpu/20261111-0310/summary.md): precise pp 8k
@@ -422,6 +428,8 @@ inline constexpr Profile k_profile_gfx1151{
     .attn_i4_qlds_pf = true,
     // v0252-attnlat: opt-in (WHIRL_ATTN_PFX=1) until an end-to-end screen decides (progress/attnpfx-sw.json)
     .attn_pfx_f16r = false,
+    // v0252-attnsx: opt-in (WHIRL_ATTN_SXN=1) until an end-to-end screen decides
+    .attn_sx_nosel = false,
     .prefill_exec_moe = 4096,
     .prefill_fill_batch = true,
     .tail_ck_in_forward = true,  // v0252-tailck8s (PLAN V1-138, ADR-0022 supplement 4; was false = the 0.2.5.1 forward end)

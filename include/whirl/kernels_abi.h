@@ -787,6 +787,9 @@ struct AttnKernels {
     // elsewhere): NCOLS2 = 2 / 4 / 8 query heads of one KV head per column group, f16 K / V (the cache or the KG-3 copy),
     // the attn_prefill_wmma arguments; not bitwise (ops::attnSxFor, numerics flag attn_sx: balance only)
     F attn_sx2{}, attn_sx4{}, attn_sx8{};
+    // v0252-attnsx (PLAN V1-148): attn_sxn<NP> = attn_sx<NP> without the key < kv_end select at the K / V load (same
+    // arguments, grid, block and bits; gfx1151 object only; ops::attnSxFor with the numerics flag attn_sxn, opt-in)
+    F attn_sxn2{}, attn_sxn4{}, attn_sxn8{};
     // vision: attn_prep with multi-section RoPE positions (image prompts; KV-format
     // variant like attn_prep) and set_rpos(rpos, Rpos16 tab, n). Optional.
     F attn_prep_m{}, set_rpos{};

@@ -87,6 +87,7 @@ constexpr std::array<S::Entry, S::n_names> k_names{{
     {"ATTN_I4QK", &S::attn_i4qk},  // v0252-8sfp
     {"ATTN_I4PF", &S::attn_i4pf},  // v0252-8sattn3
     {"ATTN_PFX", &S::attn_pfx},    // v0252-attnlat
+    {"ATTN_SXN", &S::attn_sxn},    // v0252-attnsx
     {"DQ_FULL", &S::dq_full},  // v0252-kvlong2 (WHIRL_DQ_FULL)
     {"GEMM_TAIL", &S::gemm_tail},  // v0252-pp2k2
     {"MOEP_GUW", &S::moep_guw},  // v0252-8smoe

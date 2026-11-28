@@ -145,6 +145,9 @@ struct EnvValues {
     // v0252-attnlat (PLAN V1-148): attn_pfx (WHIRL_ATTN_PFX: the f16 prefill attention with its K / V loads in one clause,
     // attn_pfx_f16r, bit-identical to attn_prefill_wmma; "0" / "" off, any other value on, unset = the profile; every mode)
     Raw attn_pfx;
+    // v0252-attnsx (PLAN V1-148): attn_sxn (WHIRL_ATTN_SXN: attn_sxn<NP> in place of attn_sx<NP>, same bits; "0" / "" off,
+    // any other value on, unset = the profile; only where attn_sx is on, i.e. balance)
+    Raw attn_sxn;
     // v0252-8smoe (PLAN V1-147): moep_guw (WHIRL_MOEP_GUW: a kernels::kMoepGu variant name = the routing-aware wide gate + up
     // tile; "0", "" or an unknown name = off; class B: every moep gate + up variant stores the same bits)
     Raw moep_guw;
@@ -166,7 +169,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 51;  // v0252-attnlat: + attn_pfx (50 -> 51)  // v0252-8sq5: + dq4_splits (49 -> 50)  // v0252-8sattn3: + attn_i4pf (48 -> 49)  // v0252-8sq4: + dq4_order, dq4_min_keys (46 -> 48)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
+    static constexpr std::size_t n_fields = 52;  // v0252-attnsx: + attn_sxn (51 -> 52)  // v0252-attnlat: + attn_pfx (50 -> 51)  // v0252-8sq5: + dq4_splits (49 -> 50)  // v0252-8sattn3: + attn_i4pf (48 -> 49)  // v0252-8sq4: + dq4_order, dq4_min_keys (46 -> 48)  // v0252-8smoe2: + moep_dhs, moep_dna, moep_fq (43 -> 46)  // v0252-8smoe: + moep_guw (41 -> 42; merge: add other branches' rows); v0252-mrg2: + v0252-8sdec gemvh_grp (42 -> 43)
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -273,6 +276,8 @@ struct Target {
     bool attn_i4pf_profile = false;
     // v0252-attnlat (PLAN V1-148): device::Profile::attn_pfx_f16r (opt-in, off on both rows): the one-clause f16 prefill attention
     bool attn_pfx_profile = false;
+    // v0252-attnsx (PLAN V1-148): device::Profile::attn_sx_nosel (opt-in, off on both rows): attn_sxn<NP> for attn_sx<NP>
+    bool attn_sxn_profile = false;
     // v0252-8smoe (A, PLAN V1-95): device::Profile::moep_comb_fast_skip - the MoE prefill combine of a fast plan that runs
     // moeskip (MXFP4 routed experts, no WHIRL_MOEP_COMB); 0 = the family's non-f16 combine (moepCombMoeSkip)
     std::uint32_t moep_comb_fast_skip_profile = 0;
@@ -457,6 +462,7 @@ struct ItemState {
     X(B, attn_sx, false, "")                                     \
     X(B, attn_i4qk, false, "")                                   \
     X(B, attn_i4pf, false, "")                                       X(B, attn_pfx, false, "")                                    \
+    X(B, attn_sxn, false, "")                                    \
     X(U, moep_guw, 0, "")                                            X(B, moep_dhs, false, "")                                        X(U, moep_dna, 0, "")                                            X(B, moep_fq, false, "")                                         X(B, dq4_order, false, "")                                       X(U, dq4_min_keys, 0, "")                                    \
     X(U, dq4_splits, 0, "")
 

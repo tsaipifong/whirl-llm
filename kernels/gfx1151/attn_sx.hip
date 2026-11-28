@@ -295,7 +295,8 @@ static __device__ __forceinline__ half16_t load_Vt_operand(const _Float16 * sVt,
 //                (no global loads, no LDS staging, no score exchange, no mask / softmax / P, no rescale); S is carried across
 //                steps (no extra instruction) and folded into O after the loop so that the Q.K^T WMMAs stay live
 //   4 nosel:     the clamped K / V rows kept as loaded (no key < kv_end select at the load): keys >= kv_end are masked
-//                (-inf -> P = 0) and the clamped row is a valid row, so the output is expected bitwise equal (kt row)
+//                (-inf -> P = 0) and the clamped row is a valid row, so the output is bitwise equal (round 1: 0 of 8388608
+//                mismatches at L 32768 / 129166). PRB 4 is also the product form attn_sxn<NP> (round 2, below the entries)
 template <int D, int NCOLS2, bool Q8, int PRB = 0>
 static __device__ __forceinline__ void attn_sx_impl(const float * __restrict__ q, const KvArgs & kv, float * __restrict__ out,
         const int n_head, const int n_kv, const int q_stride, const int * __restrict__ pos, const int n_tok, const float scale,
@@ -851,6 +852,22 @@ WHIRL_ATTN_SX_ENTRY(attn_sx2, 2)
 WHIRL_ATTN_SX_ENTRY(attn_sx4, 4)
 WHIRL_ATTN_SX_ENTRY(attn_sx8, 8)
 #undef WHIRL_ATTN_SX_ENTRY
+
+// v0252-attnsx round 2 (PLAN V1-148): attn_sxn<NP> = attn_sx<NP> without the key < kv_end select at the K / V load (PRB 4;
+// the min(key, kv_end - 1) clamp of the address stays, so no row >= kv_end is ever read; keys >= kv_end of the last step are
+// masked to -inf -> P = +0, and their V rows are copies of row kv_end - 1, which attn_sx<NP> already multiplies by P = 0 in the
+// same step: the same output bits). The K loads then stay in flight during the Q.K^T WMMAs. Opt-in: WHIRL_ATTN_SXN
+// (ops::attnSxFor, numerics flag attn_sxn); kt rows attn_sxn<NP> == attn_sx<NP> bitwise (tests/kernels/test_attn.cpp).
+#define WHIRL_ATTN_SXN_ENTRY(NAME, NC2)                                                                                \
+    extern "C" __global__ void __launch_bounds__(fattn_rdna35::cfg<256>::NTHR, 1)                                      \
+        NAME(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos, int n_tok,   \
+             float scale, int h0) {                                                                                  \
+        fattn_rdna35::attn_sx_impl<256, NC2, false, 4>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);    \
+    }
+WHIRL_ATTN_SXN_ENTRY(attn_sxn2, 2)
+WHIRL_ATTN_SXN_ENTRY(attn_sxn4, 4)
+WHIRL_ATTN_SXN_ENTRY(attn_sxn8, 8)
+#undef WHIRL_ATTN_SXN_ENTRY
 
 // v0252-attnsx (PLAN V1-148): kt-only probes of attn_sx8 (see attn_sx_impl's PRB). Compiled only into a code object built with
 // -DWHIRL_ATTNSX_PROBES (scratch/v0252_attnsx/build_probe_co.sh) and loaded by whirl-kernel-test through WHIRL_KT_CODE_OBJECT;

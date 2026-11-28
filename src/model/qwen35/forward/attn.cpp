@@ -188,6 +188,7 @@ void Context::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u
     static_assert(ops::kAttnKgVarAuto == numerics::kAttnKgVarAuto, "attn_kg_var auto: one value in numerics and ops");
     pf.attn_kg_var = nf().attn_kg_var;
     pf.attn_sx_on = nf().attn_sx;  // v0252-strixc2: balance-only gfx1151 prefill attention (numerics plan)
+    pf.attn_sxn_on = nf().attn_sxn;  // v0252-attnsx: attn_sxn<NP> for attn_sx<NP> (same bits, opt-in)
     pf.attn_i4qk_on = nf().attn_i4qk;  // v0252-8sfp: fast-only gfx1151 int4 Q.K^T prefill attention (numerics plan)
     pf.attn_i4pf_on = nf().attn_i4pf;  // v0252-8sattn3: its Q-in-LDS + prefetch form (numerics plan, opt-in)
     pf.attn_pfx_on = nf().attn_pfx;    // v0252-attnlat: the one-clause f16 prefill attention attn_pfx_f16r (numerics plan, opt-in)

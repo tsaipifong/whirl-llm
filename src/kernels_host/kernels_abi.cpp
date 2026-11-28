@@ -454,6 +454,9 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         k.attn_sx2 = L.opt("attn_sx2");
         k.attn_sx4 = L.opt("attn_sx4");
         k.attn_sx8 = L.opt("attn_sx8");
+        k.attn_sxn2 = L.opt("attn_sxn2");  // v0252-attnsx
+        k.attn_sxn4 = L.opt("attn_sxn4");
+        k.attn_sxn8 = L.opt("attn_sxn8");
     }
     // vision: multi-section RoPE attention prep (same KV-format choice as attn_prep)
     k.attn_prep_m = L.opt(kv == KvFormat::q8v ? "attn_prep_m_q8v" : kv == KvFormat::q8h ? "attn_prep_m_q8h" : kv == KvFormat::q8 ? "attn_prep_m_q8" : kv == KvFormat::q4 ? "attn_prep_m_q4" : "attn_prep_m");

@@ -232,6 +232,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"ATTN_I4QK", &S::attn_i4qk},  // v0252-8sfp
         {"ATTN_I4PF", &S::attn_i4pf},  // v0252-8sattn3
         {"ATTN_PFX", &S::attn_pfx},    // v0252-attnlat
+        {"ATTN_SXN", &S::attn_sxn},    // v0252-attnsx
         {"MOEP_GUW", &S::moep_guw},    // v0252-8smoe
         {"MOEP_DHS", &S::moep_dhs},    // v0252-8smoe2 (C)
         {"MOEP_DNA", &S::moep_dna},    // v0252-8smoe2 (D)
@@ -568,6 +569,10 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     // WHIRL_ATTN_PFX ("0" / "" off, any other value on: the WHIRL_DQ4_ORDER rule). ops::chooseAttnPrefill still needs the
     // kernel (gfx1151 object only) and a K / V buffer below 4 GiB (32-bit byte offsets; ops::attnPfxPick).
     F.attn_pfx = e.attn_pfx ? !e.attn_pfx->empty() && *e.attn_pfx != "0" : t.attn_pfx_profile;
+    // v0252-attnsx (PLAN V1-148): attn_sxn<NP> (attn_sx<NP> without the key < kv_end select at the K / V load; same bits) only
+    // where attn_sx is on (balance, gfx1151 row). The card's row (device::Profile::attn_sx_nosel, opt-in: off on both rows),
+    // then WHIRL_ATTN_SXN ("0" / "" off, any other value on). ops::attnSxFor still needs the attn_sxn kernel of that NP.
+    if (F.attn_sx) F.attn_sxn = e.attn_sxn ? !e.attn_sxn->empty() && *e.attn_sxn != "0" : t.attn_sxn_profile;
 }
 
 // tune.cpp:939-982 on the item table (the per-item overrides, WHIRL_Q8DEC, relaxacc, noteSwitches) and the flags
@@ -734,6 +739,11 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     if (items)
         if (const Raw& v = e.attn_i4pf; v && *v != "0" && p.mode != Mode::fast)
             p.ignored.push_back(std::format("WHIRL_ATTN_I4PF={} ignored: the int4 Q.K^T prefill attention is fast-only ({} never takes it)", *v,
+                                            modeName(p.mode)));
+    // v0252-attnsx: WHIRL_ATTN_SXN other than "0" outside balance is noted once (it rides on the balance-only attn_sx)
+    if (items)
+        if (const Raw& v = e.attn_sxn; v && *v != "0" && p.mode != Mode::balance)
+            p.ignored.push_back(std::format("WHIRL_ATTN_SXN={} ignored: the strix prefill attention is balance-only ({} never takes it)", *v,
                                             modeName(p.mode)));
     // v0252-8sq4: WHIRL_DQ4_ORDER / WHIRL_DQ4_MINKEYS other than "0" outside fast are noted once each (q4 KV and its attn_dq4
     // path exist only in fast; the flags stay off there)

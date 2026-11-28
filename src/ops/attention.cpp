@@ -446,7 +446,7 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
     const bool pow2 = std::frexp(p.scale, &sexp) == 0.5f;
     // v0252-strixc2: the balance attn_sx<NP> for this shape (nullptr unless the plan's attn_sx flag is on and the code
     // object has the kernel); grid ceil(n / (64 / NP)) query tiles x (hp / NP) head groups, block 256
-    const AttnSxPick sx = f.attn_sx_on ? attnSxFor(k, grp, hp, p.head_dim) : AttnSxPick{};
+    const AttnSxPick sx = f.attn_sx_on ? attnSxFor(k, grp, hp, p.head_dim, f.attn_sxn_on) : AttnSxPick{};
     const Dim3 sxGrid = sx.f != nullptr ? D((n + kAttnSxCols / sx.np - 1) / (kAttnSxCols / sx.np) * (hp / sx.np)) : D(0);
     if (f.attn_kg_on && p.head_dim == 256 && pow2) {
         for (const auto& [fn, c] : {std::pair{k.attn_kg6, 6u}, std::pair{k.attn_kg4, 4u}, std::pair{k.attn_kg2, 2u}})
@@ -595,13 +595,16 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
 
 // v0252-strixc2: strix fattn_rdna35_ncols2 (fattn-rdna35.cu:863-870) - the first of 8 / 4 / 2 dividing the GQA ratio - also
 // dividing the heads of one launch (the head groups of a block never cross a launch), written out per NP
-AttnSxPick attnSxFor(const kernels::AttnKernels& k, std::uint32_t grp, std::uint32_t hp, std::uint32_t head_dim) {
+AttnSxPick attnSxFor(const kernels::AttnKernels& k, std::uint32_t grp, std::uint32_t hp, std::uint32_t head_dim, bool nosel) {
     AttnSxPick r;
     if (head_dim != 256 || grp == 0 || hp == 0) return r;
     for (const std::uint32_t np : {8u, 4u, 2u})
         if (grp % np == 0) {
             if (hp % np != 0) return r;
             r.f = np == 8 ? k.attn_sx8 : np == 4 ? k.attn_sx4 : k.attn_sx2;
+            // v0252-attnsx: the select-free form of the same NP (same grid) when asked for and present
+            if (nosel && r.f != nullptr)
+                if (const Function n = np == 8 ? k.attn_sxn8 : np == 4 ? k.attn_sxn4 : k.attn_sxn2) r.f = n;
             r.np = r.f != nullptr ? np : 0;
             return r;
         }

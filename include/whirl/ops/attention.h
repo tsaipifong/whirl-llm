@@ -192,6 +192,10 @@ struct AttnPrefillFlags {
     // place (plain path, no attn_kx / attn_kg / attn_sx) and the one-range KG-3 copy (attn_pwf; not on attn_sx / int4 /
     // ranged attn_pws). Numerics flag attn_pfx (WHIRL_ATTN_PFX, opt-in). Needs the kernel and attnPfxPick's 4 GiB guard.
     bool attn_pfx_on = false;
+    // v0252-attnsx (PLAN V1-148): with attn_sx_on, attn_sxn<NP> (attn_sx<NP> without the key < kv_end select at the K / V
+    // load; same arguments, grid, block and bits) in place of attn_sx<NP>; numerics flag attn_sxn (WHIRL_ATTN_SXN, opt-in).
+    // No kernel of that NP -> attn_sx<NP> (attnSxFor).
+    bool attn_sxn_on = false;
 };
 // v0252-attnlat: attn_pfx_f16r forms 32-bit byte offsets from the K / V base, so a launch over a K / V array of kAttnPfxMaxBytes
 // or more (or of unknown size, 0) keeps attn_prefill_wmma ("guarded": the plan says so once, the caller logs it)
@@ -210,7 +214,8 @@ struct AttnSxPick {
     Function f = nullptr;
     std::uint32_t np = 0;
 };
-AttnSxPick attnSxFor(const kernels::AttnKernels& k, std::uint32_t grp, std::uint32_t hp, std::uint32_t head_dim);
+// v0252-attnsx: nosel = take attn_sxn<NP> (same NP, same grid) when the code object has it, else attn_sx<NP>
+AttnSxPick attnSxFor(const kernels::AttnKernels& k, std::uint32_t grp, std::uint32_t hp, std::uint32_t head_dim, bool nosel = false);
 // query columns per block of attn_sx (64 / NP tokens x NP heads); the grid is ceil(n / (64 / np)) x (hp / np)
 inline constexpr std::uint32_t kAttnSxCols = 64;
 // v0252-c1port (C1): the f16 attn_kg variant `var` for NP query heads per block, or nullptr = none (the caller keeps
