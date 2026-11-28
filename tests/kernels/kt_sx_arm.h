@@ -10,13 +10,21 @@
 //     attn_prefill_wmma itself is the A/A control;
 //   * probe: fa_probe_* (a phase removed, output wrong by design): the numerics row is information only (a skip row);
 //   * invalid: any other name - the bench refuses it (a skip row with the reason), nothing is timed.
+// v0252-attnsx (PLAN V1-148, kernel SOP step 2 for attn_sx8): kernels of attn_sx8's signature AND geometry - arm A becomes
+// attn_sx8 itself (cells whose attn_sx pick is not NP 8 are skipped) and arm B is launched with attn_sx8's grid
+// {cdiv(n, 8) x heads per launch / 8} x 256:
+//   * sx_same_bits: must reproduce attn_sx8 bit for bit (a bitwise check row): attn_sx8 itself (the A/A control) and
+//     attn_sxp_nosel8 (the clamped rows kept as loaded; masked keys give P = 0);
+//   * sx_probe: attn_sxp_noload8 / _norescale8 / _skel8 (a phase removed, output wrong by design: info row + the bitwise count).
+// The attn_sxp_* entries exist only in a code object built with -DWHIRL_ATTNSX_PROBES (kernels/gfx1151/attn_sx.hip), loaded
+// through WHIRL_KT_CODE_OBJECT; the product object does not have them (the bench then skips: "kernel not in this code object").
 #pragma once
 
 #include <string>
 
 namespace kt::sxarm {
 
-enum class Kind { sx, same_bits, probe, invalid };
+enum class Kind { sx, same_bits, probe, sx_same_bits, sx_probe, invalid };
 
 struct Arm {
     Kind kind = Kind::sx;
@@ -25,6 +33,11 @@ struct Arm {
 
 inline constexpr const char* kSameBits[] = {"attn_prefill_wmma", "attn_pfx_f16r"};
 inline constexpr const char* kProbes[] = {"fa_probe_noload", "fa_probe_nopv", "fa_probe_norescale"};
+inline constexpr const char* kSxSameBits[] = {"attn_sx8", "attn_sxp_nosel8"};
+inline constexpr const char* kSxProbes[] = {"attn_sxp_noload8", "attn_sxp_norescale8", "attn_sxp_skel8"};
+
+// arm A is attn_sx8 and arm B runs at attn_sx8's geometry
+inline bool sxGeometry(Kind k) { return k == Kind::sx_same_bits || k == Kind::sx_probe; }
 
 inline Arm armFromEnv(const char* v) {
     Arm a;
@@ -35,6 +48,10 @@ inline Arm armFromEnv(const char* v) {
         if (a.kernel == k) a.kind = Kind::same_bits;
     for (const char* k : kProbes)
         if (a.kernel == k) a.kind = Kind::probe;
+    for (const char* k : kSxSameBits)
+        if (a.kernel == k) a.kind = Kind::sx_same_bits;
+    for (const char* k : kSxProbes)
+        if (a.kernel == k) a.kind = Kind::sx_probe;
     return a;
 }
 
@@ -43,6 +60,8 @@ inline const char* kindName(Kind k) {
     case Kind::sx: return "sx";
     case Kind::same_bits: return "same_bits";
     case Kind::probe: return "probe";
+    case Kind::sx_same_bits: return "sx_same_bits";
+    case Kind::sx_probe: return "sx_probe";
     default: return "invalid";
     }
 }

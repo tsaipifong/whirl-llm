@@ -1237,6 +1237,19 @@ static bool attn1151SourceHas(const std::string& pattern) {
 #endif
 }
 
+// v0252-attnsx: the text of one source file of the worktree (empty without WHIRL_KT_SRC_DIR: the checks then fail)
+static std::string sourceText(const std::string& rel) {
+#ifdef WHIRL_KT_SRC_DIR
+    std::ifstream in(std::string(WHIRL_KT_SRC_DIR) + rel, std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+#else
+    (void)rel;
+    return std::string();
+#endif
+}
+
 static void test_sx_arm_env() {
     using sxarm::Kind;
     check("sxarm: unset -> attn_sx arm (unchanged A/B)", sxarm::armFromEnv(nullptr).kind == Kind::sx && sxarm::armFromEnv(nullptr).kernel.empty());
@@ -1258,6 +1271,37 @@ static void test_sx_arm_env() {
     check("sxarm: attn_pfx_f16r is a bench entry of kernels/gfx1151/attn.hip with attn_prefill_wmma's arguments",
           attn1151SourceHas("attn_pfx_f16r(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos, int n_tok,"
                             " float scale, int h0)"));
+    // v0252-attnsx: attn_sx8-geometry arms (A = attn_sx8)
+    check("sxarm: attn_sx8 -> sx_same_bits (A/A control at attn_sx8's geometry)", sxarm::armFromEnv("attn_sx8").kind == Kind::sx_same_bits);
+    check("sxarm: attn_sxp_nosel8 -> sx_same_bits (bitwise row vs attn_sx8)", sxarm::armFromEnv("attn_sxp_nosel8").kind == Kind::sx_same_bits);
+    for (const char* p : {"attn_sxp_noload8", "attn_sxp_norescale8", "attn_sxp_skel8"}) {
+        const sxarm::Arm a = sxarm::armFromEnv(p);
+        check(std::string("sxarm: ") + p + " -> sx_probe (numerics info only)", a.kind == Kind::sx_probe && a.kernel == p, sxarm::kindName(a.kind));
+    }
+    for (const char* p : {"attn_sxp_", "attn_sxp_noload", "attn_sxp_noload4", "attn_sx4", "ATTN_SX8"}) {
+        const sxarm::Arm a = sxarm::armFromEnv(p);
+        check(std::string("sxarm: '") + p + "' -> invalid (refused, nothing timed)", a.kind == Kind::invalid, sxarm::kindName(a.kind));
+    }
+    check("sxarm: sxGeometry only for the attn_sx8 arms", sxarm::sxGeometry(Kind::sx_same_bits) && sxarm::sxGeometry(Kind::sx_probe) &&
+                                                          !sxarm::sxGeometry(Kind::sx) && !sxarm::sxGeometry(Kind::same_bits) &&
+                                                          !sxarm::sxGeometry(Kind::probe) && !sxarm::sxGeometry(Kind::invalid));
+    // every attn_sxp_* name is a probe entry of kernels/gfx1151/attn_sx.hip, inside the WHIRL_ATTNSX_PROBES block (never in the
+    // product object), with attn_sx8's NCOLS2 = 8
+    const std::string sx = sourceText("/kernels/gfx1151/attn_sx.hip");
+    const std::size_t b0 = sx.find("#ifdef WHIRL_ATTNSX_PROBES"), b1 = sx.find("#endif // WHIRL_ATTNSX_PROBES");
+    check("sxarm: attn_sx.hip has one WHIRL_ATTNSX_PROBES block", b0 != std::string::npos && b1 != std::string::npos && b0 < b1 &&
+                                                                  sx.find("#ifdef WHIRL_ATTNSX_PROBES", b0 + 1) == std::string::npos);
+    for (const char* k : sxarm::kSxProbes) {
+        const std::size_t at = sx.find(std::string("WHIRL_ATTN_SXP_ENTRY(") + k + ",");
+        check(std::string("sxarm: ") + k + " is a probe entry inside the WHIRL_ATTNSX_PROBES block", at != std::string::npos && at > b0 && at < b1);
+    }
+    {
+        const std::size_t at = sx.find("WHIRL_ATTN_SXP_ENTRY(attn_sxp_nosel8,");
+        check("sxarm: attn_sxp_nosel8 is a probe entry inside the WHIRL_ATTNSX_PROBES block", at != std::string::npos && at > b0 && at < b1);
+    }
+    check("sxarm: the probe entries instantiate attn_sx_impl<256, 8, false, PRB> (attn_sx8's NCOLS2)",
+          sx.find("fattn_rdna35::attn_sx_impl<256, 8, false, PRB>", b0) < b1);
+    check("sxarm: attn_sx8 is a product entry outside the probe block", sx.find("WHIRL_ATTN_SX_ENTRY(attn_sx8, 8)") < b0);
 }
 
 int main(int argc, char** argv) {
