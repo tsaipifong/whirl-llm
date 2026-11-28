@@ -217,8 +217,14 @@ __device__ void moepfq_gu_impl(const uint8_t *__restrict__ W1, const uint8_t *__
 //   * X is not prefetched across the WMMA phase: each round loads its own 64-token x 128-column X slab right before staging it
 //     (the weights' raw MXFP4 bytes are still prefetched across the WMMAs, as in every gemmfq kernel).
 // The same LDS values, WMMA chain and epilogue as g64n64k64 (bitwise == gemm_moegu).
-#ifdef WHIRL_FQ_GU128V_PROTO
-template <int BK, int GR, int BNMAX>
+// SB (v0252-gemmlat round 15, bench-only prototype g64n64k128w, -DWHIRL_FQ_GU128W_PROTO=1; false = k128v unchanged): a scheduling
+// barrier (__builtin_amdgcn_sched_barrier(0)) between the two 64-column halves of each round's kk loop. k128v's disassembly shows the
+// machine scheduler hoisting the LDS fragment loads of all 8 kk steps ahead of the first WMMA (s_waitcnt lgkmcnt(42): ~128 A + 64 B
+// VGPR in flight) and spilling the second accumulator (scratch 0-31, reloaded / stored every round) plus 4 loop-invariant addresses;
+// the barrier caps the fragments in flight at 4 kk steps, as in the BK 64 kernel. Same loads, same WMMA order: same bits.
+// Prior art: WHIRL attn_kgv.hip / attn_prefill_kp.hip ("two batches of K loads (VGPRs)"), radiance r4d_moe_mxfp4.hip.
+#if defined(WHIRL_FQ_GU128V_PROTO) || defined(WHIRL_FQ_GU128W_PROTO)
+template <int BK, int GR, int BNMAX, bool SB = false>
 __device__ void moepfq_gu_v_impl(const uint8_t *__restrict__ W1, const uint8_t *__restrict__ W2, uint64_t row_bytes, int ff,
                                  const _Float16 *__restrict__ Xall, _Float16 *__restrict__ Aout, int ncols,
                                  const int4 *__restrict__ tiles, const int *__restrict__ n_tiles) {
@@ -303,6 +309,9 @@ __device__ void moepfq_gu_v_impl(const uint8_t *__restrict__ W1, const uint8_t *
         if (wn >= live) continue;
 #pragma unroll
         for (int kk = 0; kk < BK; kk += 16) {
+            if constexpr (SB) {
+                if (kk == 64) __builtin_amdgcn_sched_barrier(0);  // second 64-column half: its fragment loads after the first's WMMAs
+            }
             const half16 a0 = ld_frag16(&As[wm * 16 + lane % 16][kk]);
             const half16 a1 = ld_frag16(&As[GR + wm * 16 + lane % 16][kk]);
 #pragma unroll
@@ -564,6 +573,10 @@ MOEPFQGU_U_ENTRY(g64n64k128u, 64, 64, 128)
 // v0252-gemmlat round 12: gemm_moepfqgu_g64n64k128v (moepfq_gu_v_impl above). kt-only object only.
 #ifdef WHIRL_FQ_GU128V_PROTO
 extern "C" __global__ void __launch_bounds__(256) gemm_moepfqgu_g64n64k128v_mxfp4(const uint8_t *W1, const uint8_t *W2, uint64_t row_bytes, int ff, const _Float16 *X, _Float16 *A, int ncols, const int4 *tiles, const int *n_tiles) { moepfq_gu_v_impl<128, 64, 64>(W1, W2, row_bytes, ff, X, A, ncols, tiles, n_tiles); }
+#endif
+// v0252-gemmlat round 15: gemm_moepfqgu_g64n64k128w = k128v + the scheduling barrier between the 64-column halves (SB). kt-only.
+#ifdef WHIRL_FQ_GU128W_PROTO
+extern "C" __global__ void __launch_bounds__(256) gemm_moepfqgu_g64n64k128w_mxfp4(const uint8_t *W1, const uint8_t *W2, uint64_t row_bytes, int ff, const _Float16 *X, _Float16 *A, int ncols, const int4 *tiles, const int *n_tiles) { moepfq_gu_v_impl<128, 64, 64, true>(W1, W2, row_bytes, ff, X, A, ncols, tiles, n_tiles); }
 #endif
 #undef MOEPFQGU_ENTRY
 #undef MOEPFQDN_ENTRY
